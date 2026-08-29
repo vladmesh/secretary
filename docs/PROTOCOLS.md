@@ -1702,6 +1702,24 @@ Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<proje
 fact is one distilled markdown record. The curator is the writer role; every other agent reads through
 `memory_search`, `memory_get` and `memory_list`.
 
+Curator input is a bounded, two-phase batch protocol. Harvest, precheck and advance enter the same
+cursor-settlement transaction: a curator-local advisory flock serializes watermark.json and pending.json without
+owning the dispatcher lifecycle. It first replays a valid identity-bound pending batch, otherwise selects a deterministic prefix of transcript
+records and changed personal-memory files before rendering. Its configured turn, byte and source limits
+bound the read as well as the prompt. A selected batch with turns or memory is written as a versioned pending
+record bound to the current curator workspace/run/session identity; a retry replays it exactly. A fresh scan
+that classified only complete non-emitting records advances those precise cursors atomically instead, and
+never writes pending.json. Advance accepts only the fact-bearing pending form, verifies its identity and each
+source's starting cursor, then moves only the listed cursors. Legacy line-based watermarks remain readable
+until a selected source advances to a byte cursor; unversioned, stale, foreign, corrupt, or cursor-only pending
+data is not guessed, rewritten or advanced. A row-limited scan records complete non-emitting or oversized
+records it has classified, so noise prefixes cannot stall a source. An incomplete trailing JSONL record is
+source-local: its cursor remains at its last complete record, while safe records from that source and later
+sources still settle. The partial source is reported for observability and is retried from that cursor after its
+writer completes the row. Precheck takes
+the transaction nonblocking; contention returns the dedicated 102 defer result, which the gate answers
+successfully without dispatch or cleanup. flock ownership is released by the OS if its holder exits.
+
 ### Memory read identity
 
 The Memory MCP endpoint requires FastMCP Bearer authentication. Before a head is opened, its launcher

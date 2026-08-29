@@ -5,9 +5,9 @@ which we reuse as reference rather than runtime (it only keeps 5-message preview
 reachable only in-process). We read the raw files ourselves. Claude, Hermes and Codex
 sessions on this host are wired; add a parser + path as new heads produce sessions.
 
-Self-exclusion: the curator must not harvest its own runs, sessions or memory. Sessions
-and memory files whose cwd resolves under a TA_CURATOR_EXCLUDE path (the curator's own
-workspace) are skipped.
+Self-exclusion: the curator excludes only its own exact workspace and, where the
+launcher provides one, its exact session id. It deliberately does not exclude the
+Secretary base checkout, sibling worker worktrees, or observer workspaces.
 """
 
 from __future__ import annotations
@@ -42,19 +42,13 @@ CODEX_SESSIONS = Path(
     )
 )
 
-# cwd prefixes whose sessions we never harvest — the runtime's own runs, so no
-# triggered-agent (curator included) harvests itself or its siblings:
-#   ~/curator                          legacy pre-rename base checkout
-#   ~/secretary                        current base checkout (dev/provision cwd)
-#   ~/orca/workspaces/secretary        per-agent Orca worktrees (curator/, pipeline/, …)
-_DEFAULT_EXCLUDE = ":".join(
-    [
-        str(Path.home() / "curator"),
-        str(Path.home() / "secretary"),
-        str(Path.home() / "orca" / "workspaces" / "secretary"),
-    ]
-)
-EXCLUDE_CWDS = [p for p in os.environ.get("TA_CURATOR_EXCLUDE", _DEFAULT_EXCLUDE).split(":") if p]
+def curator_workspace() -> Path:
+    """The one workspace this curator run must not feed back into itself."""
+    return Path(os.environ.get("TA_CURATOR_WORKSPACE") or Path.cwd()).resolve(strict=False)
+
+
+def curator_session_id() -> str:
+    return os.environ.get("TA_CURATOR_SESSION_ID", "")
 
 
 def _cwd_from_claude_dir(dirname: str) -> str:
@@ -82,22 +76,23 @@ def _cwd_from_file(path: Path, fallback: str) -> str:
     return fallback
 
 
-def _excluded(cwd: str) -> bool:
-    return any(cwd == e or cwd.startswith(e.rstrip("/") + "/") for e in EXCLUDE_CWDS)
+def _excluded(cwd: str, session_id: str = "") -> bool:
+    if session_id and session_id == curator_session_id():
+        return True
+    if not cwd:
+        return False
+    try:
+        return Path(cwd).resolve(strict=False) == curator_workspace()
+    except (OSError, ValueError):
+        return False
 
 
 def _dirname_for_cwd(cwd: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", cwd)
 
 
-# Same lossy '/'->'-' encoding as _cwd_from_claude_dir, applied to the known exclude paths
-# instead of reversed from an unknown dirname — exact, not a guess. Memory-only project dirs
-# (no session jsonl left to read a real cwd from) have nothing else to self-exclude on.
-_EXCLUDE_DIRNAME_PREFIXES = [_dirname_for_cwd(p) for p in EXCLUDE_CWDS]
-
-
 def _excluded_dirname(name: str) -> bool:
-    return any(name == p or name.startswith(p + "-") for p in _EXCLUDE_DIRNAME_PREFIXES)
+    return name == _dirname_for_cwd(str(curator_workspace()))
 
 
 def claude_sessions() -> list[dict]:
@@ -111,7 +106,7 @@ def claude_sessions() -> list[dict]:
         fallback = _cwd_from_claude_dir(proj.name)
         for f in sorted(proj.glob("*.jsonl")):
             cwd = _cwd_from_file(f, fallback)
-            if _excluded(cwd):
+            if _excluded(cwd, f.stem):
                 continue
             out.append({"head": "claude", "path": str(f), "session_id": f.stem, "cwd": cwd})
     return out
@@ -149,7 +144,7 @@ def hermes_sessions() -> list[dict]:
         return out
     for session_id, cwd in rows:
         cwd = cwd or ""
-        if cwd and _excluded(cwd):
+        if _excluded(cwd, session_id):
             continue
         out.append({"head": "hermes", "path": str(HERMES_STATE_DB), "session_id": session_id, "cwd": cwd})
     return out
@@ -187,13 +182,15 @@ def codex_sessions() -> list[dict]:
     for f in sorted(CODEX_SESSIONS.glob("**/*.jsonl")):
         meta = _codex_meta_from_file(f)
         cwd = meta["cwd"]
-        if cwd and _excluded(cwd):
+        if _excluded(cwd, meta["session_id"]):
             continue
         out.append({"head": "codex", "path": str(f), "session_id": meta["session_id"], "cwd": cwd})
     return out
 
 
-def hermes_messages(session_id: str, since_id: int = 0) -> list[dict]:
+def hermes_messages(
+    session_id: str, since_id: int = 0, limit: int = 512, max_content_bytes: int = 65536
+) -> list[dict]:
     """Return {id, role, content, timestamp} rows for one Hermes session, id > since_id.
 
     `active = 1` matches hermes_state.py's own default message-load filter: a /rollback
@@ -203,13 +200,17 @@ def hermes_messages(session_id: str, since_id: int = 0) -> list[dict]:
     if not HERMES_STATE_DB.is_file():
         return []
     rows = _hermes_query(
-        "SELECT id, role, content, timestamp FROM messages "
-        "WHERE session_id = ? AND id > ? AND active = 1 ORDER BY id",
-        (session_id, since_id),
+        "SELECT id, role, CASE WHEN length(CAST(content AS BLOB)) <= ? THEN content ELSE '' END, "
+        "timestamp, length(CAST(content AS BLOB)) FROM messages "
+        "WHERE session_id = ? AND id > ? AND active = 1 ORDER BY id LIMIT ?",
+        (max_content_bytes, session_id, since_id, limit),
     )
     if not rows:
         return []
-    return [{"id": r[0], "role": r[1], "content": r[2], "timestamp": r[3]} for r in rows]
+    return [
+        {"id": r[0], "role": r[1], "content": r[2], "timestamp": r[3], "content_bytes": r[4] or 0}
+        for r in rows
+    ]
 
 
 def all_sessions() -> list[dict]:

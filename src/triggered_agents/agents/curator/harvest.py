@@ -1,71 +1,116 @@
-"""Harvest — turn new session lines and personal-memory files into a redacted batch for the
-curator agent.
+"""Bounded curator batches with identity-bound two-phase advancement.
 
-Two-phase by design: `harvest(st)` reads everything new since the watermark and returns a
-batch WITHOUT advancing the watermark. The agent extracts facts and commits the canon,
-then calls `advance(st, pending)` to move the watermark. A crash between the two re-harvests
-the same turns next run (at worst a duplicate the agent dedups), never a silent drop.
-
-Signal only: user text + assistant text blocks. Dropped as noise — thinking blocks,
-tool_use/tool_result payloads, meta/sidechain lines, Codex context injection, and local-command wrappers (the
-`<local-command-*>` and `<command-*>` scaffolding Claude Code injects, not real turns).
-
-Personal-memory files are a second, independent source: whole-file reads instead of line
-turns, watermarked by (mtime, size) instead of a line count, but sharing the same watermark
-dict and the same two-phase harvest/advance handshake. The curator never edits or deletes
-these files — read-only in, canon out.
+Limits: TA_CURATOR_MAX_TURNS (200), TA_CURATOR_MAX_INPUT_BYTES (262144),
+TA_CURATOR_MAX_SOURCES (32), TA_CURATOR_MAX_ROWS_PER_SOURCE (512),
+TA_CURATOR_MAX_RECORD_BYTES (65536), TA_CURATOR_MAX_MEMORY_BYTES (65536).
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
+import os
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 
 from ...runtime.redact import redact
 from . import discover
 
-# Local-command / harness scaffolding that shows up as user "messages" but isn't a turn.
+PENDING_VERSION = 2
 _SCAFFOLD = re.compile(r"<(local-command|command-name|command-message|command-args)[\s>]")
-_CODEX_CONTEXT_PREFIXES = (
-    "# AGENTS.md instructions for ",
-    "<environment_context>",
-)
+_CODEX_CONTEXT_PREFIXES = ("# AGENTS.md instructions for ", "<environment_context>")
+
+
+class PendingError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Limits:
+    max_turns: int
+    max_input_bytes: int
+    max_sources: int
+    max_rows_per_source: int
+    max_record_bytes: int
+    max_memory_bytes: int
+
+    @classmethod
+    def from_env(cls) -> "Limits":
+        def get(name, default):
+            try:
+                value = int(os.environ.get(name, default))
+            except ValueError as exc:
+                raise ValueError(f"{name} must be a positive integer") from exc
+            if value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+            return value
+
+        return cls(
+            get("TA_CURATOR_MAX_TURNS", 200),
+            get("TA_CURATOR_MAX_INPUT_BYTES", 262144),
+            get("TA_CURATOR_MAX_SOURCES", 32),
+            get("TA_CURATOR_MAX_ROWS_PER_SOURCE", 512),
+            get("TA_CURATOR_MAX_RECORD_BYTES", 65536),
+            get("TA_CURATOR_MAX_MEMORY_BYTES", 65536),
+        )
+
+
+@dataclass
+class _Budget:
+    limits: Limits
+    turns: int = 0
+    bytes: int = 0
+    sources: int = 0
+
+    def accepts(self, turns, size, new_source):
+        return (
+            self.turns + turns <= self.limits.max_turns
+            and self.bytes + size <= self.limits.max_input_bytes
+            and self.sources + int(new_source) <= self.limits.max_sources
+        )
+
+    def add(self, turns, size, new_source):
+        self.turns += turns
+        self.bytes += size
+        self.sources += int(new_source)
+
+
+def current_identity() -> dict[str, str]:
+    workspace = Path(os.environ.get("TA_CURATOR_WORKSPACE") or Path.cwd()).resolve(strict=False)
+    result = {"workspace": str(workspace)}
+    for env, key in (("TA_CURATOR_RUN_ID", "run_id"), ("TA_CURATOR_SESSION_ID", "session_id")):
+        if value := os.environ.get(env):
+            result[key] = value
+    return result
 
 
 def _text_from_content(content) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
-        return "\n".join(p for p in parts if p)
+        return "\n".join(
+            b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+        ).strip()
     return ""
 
 
 def parse_claude_lines(lines) -> list[dict]:
-    """Extract user/assistant text turns from Claude JSONL lines."""
     turns = []
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
         try:
-            d = json.loads(line)
+            row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if d.get("type") not in ("user", "assistant"):
+        if row.get("type") not in ("user", "assistant") or row.get("isMeta") or row.get("isSidechain"):
             continue
-        if d.get("isMeta") or d.get("isSidechain"):
-            continue
-        msg = d.get("message") or {}
-        text = _text_from_content(msg.get("content")).strip()
-        if not text or _SCAFFOLD.search(text):
-            continue
-        turns.append({"role": msg.get("role", d["type"]), "text": text, "ts": d.get("timestamp")})
+        message = row.get("message") or {}
+        text = _text_from_content(message.get("content")).strip()
+        if text and not _SCAFFOLD.search(text):
+            turns.append({"role": message.get("role", row["type"]), "text": text, "ts": row.get("timestamp")})
     return turns
 
 
@@ -73,203 +118,331 @@ def _text_from_codex_content(content) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") in ("input_text", "output_text", "text"):
-                parts.append(block.get("text", ""))
-        return "\n".join(p for p in parts if p)
+        return "\n".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") in ("input_text", "output_text", "text")
+        ).strip()
     return ""
 
 
 def parse_codex_lines(lines) -> list[dict]:
-    """Extract user/assistant text turns from Codex JSONL response items."""
     turns = []
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
         try:
-            d = json.loads(line)
+            row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if d.get("type") != "response_item":
-            continue
-        payload = d.get("payload") or {}
-        if payload.get("type") != "message":
+        payload = row.get("payload") or {}
+        if row.get("type") != "response_item" or payload.get("type") != "message":
             continue
         role = payload.get("role")
-        if role not in ("user", "assistant"):
-            continue
         text = _text_from_codex_content(payload.get("content")).strip()
-        if not text or _SCAFFOLD.search(text) or text.startswith(_CODEX_CONTEXT_PREFIXES):
-            continue
-        turns.append({"role": role, "text": text, "ts": d.get("timestamp")})
+        if role in ("user", "assistant") and text and not _SCAFFOLD.search(text) and not text.startswith(_CODEX_CONTEXT_PREFIXES):
+            turns.append({"role": role, "text": text, "ts": row.get("timestamp")})
     return turns
 
 
-def _iso_ts(ts) -> str | None:
-    if not ts:
-        return None
+def _iso_ts(value):
     try:
-        return datetime.fromtimestamp(float(ts), tz=UTC).isoformat()
+        return datetime.fromtimestamp(float(value), tz=UTC).isoformat() if value else None
     except (TypeError, ValueError, OSError):
         return None
 
 
 def parse_hermes_rows(rows) -> list[dict]:
-    """Extract user/assistant text turns from Hermes state.db message rows.
-
-    Tool-call rows (role="tool", and assistant rows with empty content while a tool
-    call is in flight) are dropped the same way Claude's tool_use/tool_result blocks
-    are dropped in parse_claude_lines -- signal only.
-    """
     turns = []
     for row in rows:
-        role = row.get("role")
-        if role not in ("user", "assistant"):
-            continue
         text = (row.get("content") or "").strip()
-        if not text or _SCAFFOLD.search(text):
-            continue
-        turns.append({"role": role, "text": text, "ts": _iso_ts(row.get("timestamp"))})
+        if row.get("role") in ("user", "assistant") and text and not _SCAFFOLD.search(text):
+            turns.append({"role": row["role"], "text": text, "ts": _iso_ts(row.get("timestamp"))})
     return turns
 
 
-def _completed_jsonl_lines(text: str) -> tuple[list[str], int]:
-    """Return only newline-terminated JSONL records."""
-    lines = text.splitlines()
-    if text and not text.endswith("\n"):
-        return lines[:-1], max(len(lines) - 1, 0)
-    return lines, len(lines)
+def _legacy_start(path, previous, stat, limits):
+    if "offset" in previous:
+        offset = previous.get("offset")
+        return offset if isinstance(offset, int) and 0 <= offset <= stat.st_size else 0
+    count = previous.get("lines")
+    if not isinstance(count, int) or count <= 0:
+        return 0
+    # Legacy line-watermarks are the supported disabled-installation input. Do not
+    # discard them or treat them as a new baseline.
+    if previous.get("mtime") == stat.st_mtime and previous.get("size") == stat.st_size:
+        return None
+    with path.open("rb") as fh:
+        for _ in range(count):
+            data = fh.readline(limits.max_record_bytes + 1)
+            while data and not data.endswith(b"\n"):
+                data = fh.readline(limits.max_record_bytes + 1)
+        return fh.tell()
 
 
-def _harvest_jsonl_sessions(mark: dict, sessions: list[dict], parse_lines) -> tuple[list[dict], dict]:
-    sessions_out, pending = [], {}
-    for sess in sessions:
-        path = Path(sess["path"])
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            continue
-        prev = mark.get(sess["path"], {})
-        prev_lines = prev.get("lines", 0)
-        if prev.get("mtime") == stat.st_mtime and prev.get("size") == stat.st_size and prev_lines:
-            continue  # unchanged since last run
-        text = path.read_text(encoding="utf-8", errors="replace")
-        complete_lines, complete_count = _completed_jsonl_lines(text)
-        new_lines = complete_lines[prev_lines:]
-        pending[sess["path"]] = {"lines": complete_count, "mtime": stat.st_mtime, "size": stat.st_size}
-        if not new_lines:
-            continue
-        turns = parse_lines(new_lines)
-        for t in turns:
-            t["text"] = redact(t["text"])
-        if turns:
-            sessions_out.append({**sess, "turns": turns})
-    return sessions_out, pending
+def _read_record(fh, limits):
+    data = fh.readline(limits.max_record_bytes + 1)
+    if not data:
+        return fh.tell(), None, False, False
+    if not data.endswith(b"\n"):
+        # Discard a complete oversized record without materializing it.  An EOF
+        # before its newline is a live incomplete record, which must remain for
+        # the next harvest rather than becoming part of the cursor.
+        while data and not data.endswith(b"\n"):
+            data = fh.readline(limits.max_record_bytes + 1)
+        return fh.tell(), None, bool(data), not bool(data)
+    return fh.tell(), data, False, False
 
 
-def _harvest_claude_sessions(mark: dict) -> tuple[list[dict], dict]:
-    return _harvest_jsonl_sessions(mark, discover.claude_sessions(), parse_claude_lines)
+def _jsonl_source(sess, mark, parser: Callable[[list[str]], list[dict]], budget):
+    path = Path(sess["path"])
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None, None, False, False
+    start = _legacy_start(path, mark.get(sess["path"], {}), stat, budget.limits)
+    if start is None:
+        return None, None, False, False
+    turns, last = [], None
+    with path.open("rb") as fh:
+        fh.seek(start)
+        for _ in range(budget.limits.max_rows_per_source):
+            end, data, oversized, incomplete = _read_record(fh, budget.limits)
+            if data is None:
+                if incomplete:
+                    cursor = (
+                        {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size}
+                        if last is not None
+                        else None
+                    )
+                    return ({**sess, "turns": turns} if turns else None), cursor, False, True
+                if not oversized:
+                    break
+                # This complete record is deliberately rejected for size, so it
+                # is safe to scan through even when no turn is emitted.
+                last = end
+                continue
+            parsed = parser([data.decode("utf-8", errors="replace")])
+            if not parsed:
+                # Parsed noise has no curator signal.  Persist the scan cursor
+                # so a row-limited run cannot stall before a later real turn.
+                last = end
+                continue
+            size = len(data)
+            if not budget.accepts(len(parsed), size, not turns):
+                cursor = {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size} if last is not None else None
+                return ({**sess, "turns": turns} if turns else None), cursor, True, False
+            for turn in parsed:
+                turn["text"] = redact(turn["text"])
+            budget.add(len(parsed), size, not turns)
+            turns.extend(parsed)
+            last = end
+    cursor = {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size} if last is not None else None
+    return ({**sess, "turns": turns} if turns else None), cursor, False, False
 
 
-def _harvest_codex_sessions(mark: dict) -> tuple[list[dict], dict]:
-    return _harvest_jsonl_sessions(mark, discover.codex_sessions(), parse_codex_lines)
+def _jsonl_sessions(mark, sessions, parser, budget):
+    output, pending, partial_sources = [], {}, []
+    for sess in sorted(sessions, key=lambda s: (s["head"], s["path"], s["session_id"])):
+        entry, cursor, stopped, incomplete = _jsonl_source(sess, mark, parser, budget)
+        if entry:
+            output.append(entry)
+        if cursor:
+            pending[sess["path"]] = cursor
+        if incomplete:
+            # An EOF tail belongs only to this source.  Its cursor remains at the
+            # last complete record while later sessions may still safely settle.
+            partial_sources.append({"head": sess["head"], "path": sess["path"], "session_id": sess["session_id"]})
+        if stopped:
+            return output, pending, True, partial_sources
+    return output, pending, False, partial_sources
 
 
-def _harvest_hermes_sessions(mark: dict) -> tuple[list[dict], dict]:
-    """Watermarked by session_id -> last message id read, not by (path, mtime)/lines --
-    Hermes sessions share one SQLite file (discover.HERMES_STATE_DB) that is written
-    continuously by every live session, so file-level mtime/line-count doesn't identify
-    which session actually has new turns."""
-    sessions_out, pending = [], {}
-    for sess in discover.hermes_sessions():
+def _hermes_sessions(mark, budget):
+    output, pending = [], {}
+    for sess in sorted(discover.hermes_sessions(), key=lambda s: (s["head"], s["path"], s["session_id"])):
         key = f"hermes:{sess['session_id']}"
-        since_id = mark.get(key, {}).get("last_id", 0)
-        rows = discover.hermes_messages(sess["session_id"], since_id)
-        if not rows:
-            continue
-        pending[key] = {"last_id": rows[-1]["id"]}
-        turns = parse_hermes_rows(rows)
-        for t in turns:
-            t["text"] = redact(t["text"])
+        rows = discover.hermes_messages(
+            sess["session_id"], mark.get(key, {}).get("last_id", 0), budget.limits.max_rows_per_source,
+            budget.limits.max_record_bytes,
+        )
+        turns, last = [], None
+        for row in rows:
+            parsed = parse_hermes_rows([row])
+            if not parsed:
+                # Tool, empty, and byte-capped rows are complete database rows
+                # with no signal, so scanning through them cannot drop a turn.
+                last = row["id"]
+                continue
+            size = row.get("content_bytes", len((row.get("content") or "").encode()))
+            if not budget.accepts(len(parsed), size, not turns):
+                if turns:
+                    output.append({**sess, "turns": turns})
+                    pending[key] = {"last_id": last}
+                return output, pending, True
+            for turn in parsed:
+                turn["text"] = redact(turn["text"])
+            budget.add(len(parsed), size, not turns)
+            turns.extend(parsed)
+            last = row["id"]
         if turns:
-            sessions_out.append({**sess, "turns": turns})
-    return sessions_out, pending
+            output.append({**sess, "turns": turns})
+        if last is not None:
+            pending[key] = {"last_id": last}
+    return output, pending, False
 
 
-def harvest_memory_files(mark: dict) -> tuple[list[dict], dict]:
-    """Read new/changed personal-memory files since the watermark.
-
-    Watermarked by (mtime, size) per path — files are read whole, there is no line
-    count to resume from. Returns (entries, pending) with the same pending-dict shape
-    `advance()` already merges for sessions.
-    """
-    entries, pending = [], {}
-    for mem in discover.all_memory_files():
+def harvest_memory_files(mark, budget):
+    entries, pending, rejected = [], {}, []
+    for mem in sorted(discover.all_memory_files(), key=lambda m: (m["head"], m["path"])):
         path = Path(mem["path"])
         try:
             stat = path.stat()
         except FileNotFoundError:
             continue
-        prev = mark.get(mem["path"], {})
-        if prev.get("mtime") == stat.st_mtime and prev.get("size") == stat.st_size:
-            continue  # unchanged since last run
-        pending[mem["path"]] = {"mtime": stat.st_mtime, "size": stat.st_size}
+        previous = mark.get(mem["path"], {})
+        if previous.get("mtime") == stat.st_mtime and previous.get("size") == stat.st_size:
+            continue
+        if stat.st_size > budget.limits.max_memory_bytes:
+            rejected.append({"head": mem["head"], "path": str(path), "reason": "memory-file-too-large"})
+            continue
+        if not budget.accepts(1, stat.st_size, True):
+            return entries, pending, rejected, True
         text = path.read_text(encoding="utf-8", errors="replace")
+        if len(text.encode()) > budget.limits.max_memory_bytes:
+            rejected.append({"head": mem["head"], "path": str(path), "reason": "memory-file-too-large"})
+            continue
+        budget.add(1, stat.st_size, True)
         entries.append({**mem, "text": redact(text)})
-    return entries, pending
+        pending[mem["path"]] = {"mtime": stat.st_mtime, "size": stat.st_size}
+    return entries, pending, rejected, False
 
 
-def harvest(st) -> dict:
-    """Read all new turns and changed memory files since the watermark. Does NOT advance
-    the watermark.
+def _batch_id(identity, batch, base):
+    payload = json.dumps({"identity": identity, "batch": batch, "base": base}, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
 
-    Returns {"sessions": [...], "memory": [...], "pending": {source_key: watermark}}
-    where pending is the combined watermark to persist via advance() after the canon commit.
-    """
+
+def pending_record(batch, identity, base):
+    payload = copy.deepcopy(batch)
+    payload.pop("batch_id", None)
+    return {
+        "version": PENDING_VERSION,
+        "identity": copy.deepcopy(identity),
+        "base": copy.deepcopy(base),
+        "batch": payload,
+        "batch_id": _batch_id(identity, payload, base),
+    }
+
+
+def read_pending(st, identity=None):
+    identity = identity or current_identity()
+    try:
+        record = json.loads(st.pending_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PendingError("curator pending record is unreadable") from exc
+    if not isinstance(record, dict) or record.get("version") != PENDING_VERSION:
+        raise PendingError("curator pending record is legacy or unsupported; preserve it and resolve it manually")
+    if record.get("identity") != identity:
+        raise PendingError("curator pending record belongs to a different run identity")
+    batch, base = record.get("batch"), record.get("base")
+    if not isinstance(batch, dict) or not isinstance(base, dict) or not isinstance(batch.get("pending"), dict):
+        raise PendingError("curator pending record has an invalid batch")
+    if record.get("batch_id") != _batch_id(identity, batch, base):
+        raise PendingError("curator pending record identity does not match its contents")
+    if not batch.get("sessions") and not batch.get("memory"):
+        raise PendingError("curator pending record has no fact-bearing input")
+    if batch.get("incomplete"):
+        raise PendingError("curator pending record has incomplete input")
+    return record
+
+
+def harvest(st, identity=None, limits=None):
+    identity = identity or current_identity()
+    if st.pending_file.is_file():
+        record = read_pending(st, identity)
+        return {**copy.deepcopy(record["batch"]), "batch_id": record["batch_id"]}
+    mark, budget = st.load_watermark(), _Budget(limits or Limits.from_env())
+    claude, cp, stopped, cpartial = _jsonl_sessions(
+        mark, discover.claude_sessions(), parse_claude_lines, budget
+    )
+    if stopped:
+        codex, xp, xstop, xpartial = [], {}, True, []
+    else:
+        codex, xp, xstop, xpartial = _jsonl_sessions(
+            mark, discover.codex_sessions(), parse_codex_lines, budget
+        )
+    hermes, hp, hstop = (
+        ([], {}, True)
+        if stopped or xstop
+        else _hermes_sessions(mark, budget)
+    )
+    memory, mp, rejected, _ = (
+        ([], {}, [], True)
+        if stopped or xstop or hstop
+        else harvest_memory_files(mark, budget)
+    )
+    pending = {**cp, **xp, **hp, **mp}
+    base = {key: copy.deepcopy(mark.get(key)) for key in pending}
+    batch = {
+        "sessions": claude + codex + hermes,
+        "memory": memory,
+        "pending": pending,
+        "rejected": rejected,
+        # This is observability only.  It does not invalidate safe records or
+        # cursors from this or later sources.
+        "partial_sources": cpartial + xpartial,
+    }
+    batch["batch_id"] = _batch_id(identity, batch, base)
+    return batch
+
+
+def advance(st, record, identity=None):
+    identity = identity or current_identity()
+    if not isinstance(record, dict) or record.get("version") != PENDING_VERSION:
+        raise PendingError("curator advance requires the versioned pending record")
+    if record.get("identity") != identity:
+        raise PendingError("curator pending record belongs to a different run identity")
+    batch, base = record.get("batch"), record.get("base")
+    if not isinstance(batch, dict) or not isinstance(base, dict) or not isinstance(batch.get("pending"), dict):
+        raise PendingError("curator pending record has an invalid batch")
+    if record.get("batch_id") != _batch_id(identity, batch, base):
+        raise PendingError("curator pending record identity does not match its contents")
+    if batch.get("incomplete"):
+        raise PendingError("curator pending record has incomplete input")
     mark = st.load_watermark()
-    claude_out, claude_pending = _harvest_claude_sessions(mark)
-    hermes_out, hermes_pending = _harvest_hermes_sessions(mark)
-    codex_out, codex_pending = _harvest_codex_sessions(mark)
-    pending = {**claude_pending, **hermes_pending, **codex_pending}
-    memory_out, mem_pending = harvest_memory_files(mark)
-    pending.update(mem_pending)
-    return {"sessions": claude_out + hermes_out + codex_out, "memory": memory_out, "pending": pending}
-
-
-def advance(st, pending: dict) -> None:
-    """Persist the watermark after a successful canon commit."""
-    mark = st.load_watermark()
-    mark.update(pending)
+    for source, expected in base.items():
+        if mark.get(source) != expected:
+            raise PendingError(f"curator pending record is stale for {source}")
+    mark.update(copy.deepcopy(batch["pending"]))
     st.save_watermark(mark)
 
 
-def render_markdown(batch: dict) -> str:
-    """Human/agent-readable batch of transcripts and personal-memory files. Secrets already
-    redacted."""
-    sessions = batch["sessions"]
-    memory = batch.get("memory", [])
+def render_markdown(batch):
+    sessions, memory = batch["sessions"], batch.get("memory", [])
+    partial_sources = batch.get("partial_sources", [])
     if not sessions and not memory:
+        if partial_sources:
+            lines = ["# No new complete turns since the previous run.", "", "## Source-local partial JSONL tails", ""]
+            lines.extend(
+                f"- {source['head']} session {source['session_id'][:8]}: {source['path']}"
+                for source in partial_sources
+            )
+            return "\n".join(lines) + "\n"
         return "# No new turns since the previous run.\n"
     lines = ["# Transcript batch for the curator", ""]
     for sess in sessions:
-        lines.append(f"## {sess['head']} · `{sess['cwd']}` · session {sess['session_id'][:8]}")
-        lines.append("")
-        for t in sess["turns"]:
-            who = "**User**" if t["role"] == "user" else "**Agent**"
-            ts = f" _{t['ts']}_" if t.get("ts") else ""
-            lines.append(f"{who}{ts}:")
-            lines.append(t["text"])
-            lines.append("")
+        lines.extend([f"## {sess['head']} · {sess['cwd']} · session {sess['session_id'][:8]}", ""])
+        for turn in sess["turns"]:
+            who = "**User**" if turn["role"] == "user" else "**Agent**"
+            stamp = f" _{turn['ts']}_" if turn.get("ts") else ""
+            lines.extend([f"{who}{stamp}:", turn["text"], ""])
     if memory:
-        lines.append("# Personal memory of the heads (new or changed)")
-        lines.append("")
-        for m in memory:
-            lines.append(f"## {m['head']} · `{m['cwd']}` · `{Path(m['path']).name}`")
-            lines.append("")
-            lines.append(m["text"])
-            lines.append("")
+        lines.extend(["# Personal memory of the heads (new or changed)", ""])
+        for mem in memory:
+            lines.extend([f"## {mem['head']} · {mem['cwd']} · {Path(mem['path']).name}", "", mem["text"], ""])
+    if partial_sources:
+        lines.extend(["## Source-local partial JSONL tails", ""])
+        lines.extend(
+            f"- {source['head']} session {source['session_id'][:8]}: {source['path']}"
+            for source in partial_sources
+        )
     return "\n".join(lines)

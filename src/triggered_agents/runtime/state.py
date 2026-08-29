@@ -23,7 +23,8 @@ STATE_ROOT = Path(os.environ.get("TA_STATE", str(Path.home() / "secretary-data" 
 
 # Precheck exit-code protocol, shared by every agent's `precheck` command and the systemd gate
 # (deploy/ta-gate.sh): 0 = there is work (dispatch the head), PRECHECK_SKIP = a deliberate skip
-# (nothing changed / paused: a clean run, not a failure), any OTHER code = precheck itself broke.
+# (nothing changed / paused: a clean run, not a failure), PRECHECK_DEFERRED = a deliberately
+# unclaimed tick (no dispatch or cleanup), and any OTHER code = precheck itself broke.
 # 100 is deliberately NOT 1: Python's default uncaught-crash exit code is 1 (ImportError, an
 # exception before the return, a raise inside the except handler), so a crashed precheck must land
 # in the gate's error branch and fail the unit, never masquerade as a quiet skip (triggered-agents-276).
@@ -38,6 +39,11 @@ PRECHECK_SKIP = 100
 # daily unit that crashes there loses the whole day, since the timer does not re-fire
 # (secretary-964). Distinct from PRECHECK_SKIP, which claims the tick was answered and clean.
 PRECHECK_BOARD_UNREACHABLE = 101
+
+# A short, crash-safe transaction is already settling the role's durable state.  This differs from
+# PRECHECK_SKIP: cleanup could race the holder's live head, so the gate exits successfully without
+# calling dispatch at all.  Curator uses this for cursor-settlement contention (secretary-1501).
+PRECHECK_DEFERRED = 102
 
 
 class AgentState:

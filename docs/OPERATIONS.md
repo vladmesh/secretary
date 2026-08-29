@@ -1603,6 +1603,24 @@ The sources are the live data plane, not a checkout:
   event that answered, that is, one whose result is neither `error` nor `board-unreachable` (the record of a tick the
   gate deferred because the board never accepted a connection): the precheck writes one of those every tick until the
   board and environment come up, so by the raw last event a dead role would look forever fresh.
+
+Curator harvest is bounded before either Markdown or JSON output. Its environment controls maximum signal
+turns, input bytes and sources (TA_CURATOR_MAX_TURNS, TA_CURATOR_MAX_INPUT_BYTES,
+TA_CURATOR_MAX_SOURCES), with record/row and personal-memory caps for source reads. Harvest, precheck and
+advance share one cursor-settlement transaction: a curator-local advisory flock serializes watermark.json and
+pending.json without taking the agent lifecycle lock. A selected fact-bearing batch is stored as versioned, identity-bound pending.json
+and replayed exactly until advance checks its identity and starting cursors. A scan with only complete
+non-emitting rows advances its cursors immediately under that lock and writes no pending.json, so a zero-input
+prompt has nothing to advance. A legacy line-based watermark.json from the disabled installation remains a
+supported read input and converts a source to its byte cursor only after that source is selected and advanced.
+An unversioned, stale, foreign, corrupt, or cursor-only pending file is deliberately refused and left untouched.
+Discovery excludes only the current curator workspace/session, not the Secretary checkout or sibling worker,
+reviewer and observer workspaces. Complete non-emitting or oversized rows are included in a scan cursor. An
+incomplete trailing JSONL row is source-local: only its uncommitted tail remains unwatermarked, while complete
+prefixes and independent sources settle normally. Precheck reports a source-local partial tail rather than a
+role-wide clean skip, and retries that source from its last complete cursor after the writer completes the row.
+Precheck tries this transaction without waiting: exit 102 is a successful deferred tick, and the gate performs
+neither dispatch nor cleanup. A process death releases the flock, so its lock file never needs stale-PID repair.
 - the `pipeline` line is built from the production dispatcher's tick telemetry in its production state file. The
   dispatcher writes it at the end of every terminal tick: time, healthy or degraded, and diagnostics (step, reason,
   error codes). A tick that ended degraded colours the line by itself; the previous healthy tick does not vouch for
