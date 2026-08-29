@@ -92,10 +92,6 @@ def _prepare_batch(*, nonblocking: bool = False) -> dict:
             return {**record["batch"], "batch_id": record["batch_id"]}
 
         batch = harvest.harvest(STATE, identity)
-        # A writer may still be extending a JSONL record.  None of this scan is a durable batch:
-        # preserve both pending.json and watermarks until a complete retry can settle it.
-        if batch.get("incomplete"):
-            return batch
         if batch["sessions"] or batch["memory"]:
             base = {key: STATE.load_watermark().get(key) for key in batch["pending"]}
             _write_pending(harvest.pending_record(batch, identity, base))
@@ -148,13 +144,13 @@ def cmd_precheck() -> int:
     except harvest.PendingError as exc:
         print(f"curator: {exc}", file=sys.stderr)
         return 1
-    if batch.get("incomplete"):
-        STATE.log_run("precheck", result="incomplete")
-        print("curator: input is incomplete; retrying next tick", file=sys.stderr)
-        return PRECHECK_SKIP
     if batch["sessions"] or batch["memory"]:
         STATE.log_run("precheck", result="change")
         return 0
+    if batch.get("partial_sources"):
+        STATE.log_run("precheck", result="source-local-partial")
+        print("curator: source-local partial JSONL tail; safe cursors settled", file=sys.stderr)
+        return PRECHECK_SKIP
     STATE.log_run("precheck", result="no-change")
     print("curator: no new turns since watermark", file=sys.stderr)
     return PRECHECK_SKIP

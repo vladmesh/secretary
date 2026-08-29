@@ -1713,8 +1713,10 @@ never writes pending.json. Advance accepts only the fact-bearing pending form, v
 source's starting cursor, then moves only the listed cursors. Legacy line-based watermarks remain readable
 until a selected source advances to a byte cursor; unversioned, stale, foreign, corrupt, or cursor-only pending
 data is not guessed, rewritten or advanced. A row-limited scan records complete non-emitting or oversized
-records it has classified, so noise prefixes cannot stall a source. An incomplete trailing JSONL record makes
-the fresh scan unsettled: it writes neither pending.json nor a watermark until a complete retry. Precheck takes
+records it has classified, so noise prefixes cannot stall a source. An incomplete trailing JSONL record is
+source-local: its cursor remains at its last complete record, while safe records from that source and later
+sources still settle. The partial source is reported for observability and is retried from that cursor after its
+writer completes the row. Precheck takes
 the transaction nonblocking; contention returns the dedicated 102 defer result, which the gate answers
 successfully without dispatch or cleanup. flock ownership is released by the OS if its holder exits.
 

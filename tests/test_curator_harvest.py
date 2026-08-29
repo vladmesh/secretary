@@ -25,6 +25,19 @@ def claude_tool() -> str:
     ) + "\n"
 
 
+def codex(text: str) -> str:
+    return json.dumps(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        }
+    ) + "\n"
+
+
 class CuratorHarvestTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -136,18 +149,32 @@ class CuratorHarvestTests(unittest.TestCase):
         self.assertEqual(cursors, [2, 4, 6])
         self.assertEqual(harvest.harvest(self.state, self.identity, limits)["pending"], {})
 
-    def test_jsonl_incomplete_trailing_record_is_not_scanned_through(self) -> None:
+    def test_jsonl_incomplete_trailing_record_keeps_a_source_local_cursor(self) -> None:
         path = self.root / "claude.jsonl"
         path.write_text(claude_tool() + claude("still-writing").rstrip("\n"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
         limits = harvest.Limits(2, 10_000, 8, 4, 256, 4096)
         with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
             first = harvest.harvest(self.state, self.identity, limits)
-        self.assertTrue(first["incomplete"])
+        self.assertEqual(first["partial_sources"], [{"head": "claude", "path": str(path), "session_id": "c"}])
         self.assertEqual(first["pending"][str(path)]["offset"], len(claude_tool()))
-        self.assertEqual(self.state.load_watermark(), {})
+        self.assertIn("Source-local partial JSONL tails", harvest.render_markdown(first))
+        record = self._persist(first)
+        harvest.advance(self.state, record, self.identity)
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(claude_tool()))
+
+    def test_incomplete_legacy_pending_is_refused_without_advancing(self) -> None:
+        path = self.root / "claude.jsonl"
+        batch = {
+            "sessions": [{"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project", "turns": [{"role": "user", "text": "fact", "ts": None}]}],
+            "memory": [],
+            "pending": {str(path): {"offset": 1}},
+            "rejected": [],
+            "incomplete": True,
+        }
+        record = harvest.pending_record(batch, self.identity, {str(path): None})
         with self.assertRaisesRegex(harvest.PendingError, "incomplete"):
-            harvest.advance(self.state, harvest.pending_record(first, self.identity, {}), self.identity)
+            harvest.advance(self.state, record, self.identity)
         self.assertEqual(self.state.load_watermark(), {})
 
     def test_memory_is_selected_and_large_memory_is_rejected_before_prompt(self) -> None:
@@ -310,14 +337,54 @@ class CuratorCliPreparationTests(unittest.TestCase):
         self.assertEqual(second, first)
         self.assertEqual(self.state.load_watermark(), {})
 
-    def test_incomplete_input_leaves_pending_and_watermark_untouched(self) -> None:
+    def test_partial_tail_settles_complete_prefix_and_retries_once_completed(self) -> None:
         path = self.root / "writing.jsonl"
         path.write_text(claude_tool() + claude("still-writing").rstrip("\n"), encoding="utf-8")
         session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
         with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
             self.assertEqual(cli.cmd_precheck(), PRECHECK_SKIP)
-        self.assertEqual(self.state.load_watermark(), {})
+            self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(claude_tool()))
+            self.assertFalse(self.state.pending_file.exists())
+            path.write_text(claude_tool() + claude("still-writing"), encoding="utf-8")
+            self.assertEqual(cli.cmd_precheck(), 0)
+            self.assertEqual(cli.cmd_advance(), 0)
+            self.assertEqual(cli.cmd_precheck(), PRECHECK_SKIP)
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], path.stat().st_size)
         self.assertFalse(self.state.pending_file.exists())
+
+    def test_partial_tail_does_not_suppress_later_fact_or_safe_cursor_settlement(self) -> None:
+        partial = self.root / "a-writing.jsonl"
+        partial.write_text(claude_tool() + claude("still-writing").rstrip("\n"), encoding="utf-8")
+        healthy = self.root / "b-live.jsonl"
+        healthy.write_text(claude("fact"), encoding="utf-8")
+        sessions = [
+            {"head": "claude", "path": str(partial), "session_id": "a", "cwd": "/project"},
+            {"head": "claude", "path": str(healthy), "session_id": "b", "cwd": "/project"},
+        ]
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            self.assertEqual(cli.cmd_precheck(), 0)
+            pending = harvest.read_pending(self.state)
+            self.assertEqual([turn["text"] for entry in pending["batch"]["sessions"] for turn in entry["turns"]], ["fact"])
+            self.assertEqual(pending["batch"]["partial_sources"][0]["path"], str(partial))
+            self.assertEqual(cli.cmd_advance(), 0)
+        mark = self.state.load_watermark()
+        self.assertEqual(mark[str(partial)]["offset"], len(claude_tool()))
+        self.assertEqual(mark[str(healthy)]["offset"], healthy.stat().st_size)
+
+    def test_codex_partial_tail_does_not_suppress_later_codex_session(self) -> None:
+        partial = self.root / "a-writing.jsonl"
+        partial.write_text(codex("prefix").rstrip("\n"), encoding="utf-8")
+        healthy = self.root / "b-live.jsonl"
+        healthy.write_text(codex("fact"), encoding="utf-8")
+        sessions = [
+            {"head": "codex", "path": str(partial), "session_id": "a", "cwd": "/project"},
+            {"head": "codex", "path": str(healthy), "session_id": "b", "cwd": "/project"},
+        ]
+        with mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=sessions):
+            self.assertEqual(cli.cmd_precheck(), 0)
+            pending = harvest.read_pending(self.state)
+        self.assertEqual([turn["text"] for entry in pending["batch"]["sessions"] for turn in entry["turns"]], ["fact"])
+        self.assertEqual(pending["batch"]["partial_sources"][0]["path"], str(partial))
 
     def _hold_settlement_lock(self):
         self.state.ensure_dir()
@@ -379,7 +446,6 @@ class CuratorCliPreparationTests(unittest.TestCase):
             "memory": [],
             "pending": {source: {"offset": 1}},
             "rejected": [],
-            "incomplete": False,
         }
         with (
             mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[]),

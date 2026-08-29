@@ -240,7 +240,7 @@ def _jsonl_source(sess, mark, parser: Callable[[list[str]], list[dict]], budget)
 
 
 def _jsonl_sessions(mark, sessions, parser, budget):
-    output, pending = [], {}
+    output, pending, partial_sources = [], {}, []
     for sess in sorted(sessions, key=lambda s: (s["head"], s["path"], s["session_id"])):
         entry, cursor, stopped, incomplete = _jsonl_source(sess, mark, parser, budget)
         if entry:
@@ -248,10 +248,12 @@ def _jsonl_sessions(mark, sessions, parser, budget):
         if cursor:
             pending[sess["path"]] = cursor
         if incomplete:
-            return output, pending, False, True
+            # An EOF tail belongs only to this source.  Its cursor remains at the
+            # last complete record while later sessions may still safely settle.
+            partial_sources.append({"head": sess["head"], "path": sess["path"], "session_id": sess["session_id"]})
         if stopped:
-            return output, pending, True, False
-    return output, pending, False, False
+            return output, pending, True, partial_sources
+    return output, pending, False, partial_sources
 
 
 def _hermes_sessions(mark, budget):
@@ -359,23 +361,23 @@ def harvest(st, identity=None, limits=None):
         record = read_pending(st, identity)
         return {**copy.deepcopy(record["batch"]), "batch_id": record["batch_id"]}
     mark, budget = st.load_watermark(), _Budget(limits or Limits.from_env())
-    claude, cp, stopped, incomplete = _jsonl_sessions(
+    claude, cp, stopped, cpartial = _jsonl_sessions(
         mark, discover.claude_sessions(), parse_claude_lines, budget
     )
-    if stopped or incomplete:
-        codex, xp, xstop, xincomplete = [], {}, True, False
+    if stopped:
+        codex, xp, xstop, xpartial = [], {}, True, []
     else:
-        codex, xp, xstop, xincomplete = _jsonl_sessions(
+        codex, xp, xstop, xpartial = _jsonl_sessions(
             mark, discover.codex_sessions(), parse_codex_lines, budget
         )
     hermes, hp, hstop = (
         ([], {}, True)
-        if stopped or xstop or incomplete or xincomplete
+        if stopped or xstop
         else _hermes_sessions(mark, budget)
     )
     memory, mp, rejected, _ = (
         ([], {}, [], True)
-        if stopped or xstop or hstop or incomplete or xincomplete
+        if stopped or xstop or hstop
         else harvest_memory_files(mark, budget)
     )
     pending = {**cp, **xp, **hp, **mp}
@@ -385,7 +387,9 @@ def harvest(st, identity=None, limits=None):
         "memory": memory,
         "pending": pending,
         "rejected": rejected,
-        "incomplete": incomplete or xincomplete,
+        # This is observability only.  It does not invalidate safe records or
+        # cursors from this or later sources.
+        "partial_sources": cpartial + xpartial,
     }
     batch["batch_id"] = _batch_id(identity, batch, base)
     return batch
@@ -413,10 +417,16 @@ def advance(st, record, identity=None):
 
 
 def render_markdown(batch):
-    if batch.get("incomplete"):
-        return "# Curator input is incomplete; retry after the writer finishes.\n"
     sessions, memory = batch["sessions"], batch.get("memory", [])
+    partial_sources = batch.get("partial_sources", [])
     if not sessions and not memory:
+        if partial_sources:
+            lines = ["# No new complete turns since the previous run.", "", "## Source-local partial JSONL tails", ""]
+            lines.extend(
+                f"- {source['head']} session {source['session_id'][:8]}: {source['path']}"
+                for source in partial_sources
+            )
+            return "\n".join(lines) + "\n"
         return "# No new turns since the previous run.\n"
     lines = ["# Transcript batch for the curator", ""]
     for sess in sessions:
@@ -429,4 +439,10 @@ def render_markdown(batch):
         lines.extend(["# Personal memory of the heads (new or changed)", ""])
         for mem in memory:
             lines.extend([f"## {mem['head']} · {mem['cwd']} · {Path(mem['path']).name}", "", mem["text"], ""])
+    if partial_sources:
+        lines.extend(["## Source-local partial JSONL tails", ""])
+        lines.extend(
+            f"- {source['head']} session {source['session_id'][:8]}: {source['path']}"
+            for source in partial_sources
+        )
     return "\n".join(lines)

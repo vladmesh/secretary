@@ -1616,7 +1616,9 @@ supported read input and converts a source to its byte cursor only after that so
 An unversioned, stale, foreign, corrupt, or cursor-only pending file is deliberately refused and left untouched.
 Discovery excludes only the current curator workspace/session, not the Secretary checkout or sibling worker,
 reviewer and observer workspaces. Complete non-emitting or oversized rows are included in a scan cursor. An
-incomplete trailing JSONL row leaves both pending.json and watermarks unchanged until the next complete harvest.
+incomplete trailing JSONL row is source-local: only its uncommitted tail remains unwatermarked, while complete
+prefixes and independent sources settle normally. Precheck reports a source-local partial tail rather than a
+role-wide clean skip, and retries that source from its last complete cursor after the writer completes the row.
 Precheck tries this transaction without waiting: exit 102 is a successful deferred tick, and the gate performs
 neither dispatch nor cleanup. A process death releases the flock, so its lock file never needs stale-PID repair.
 - the `pipeline` line is built from the production dispatcher's tick telemetry in its production state file. The
