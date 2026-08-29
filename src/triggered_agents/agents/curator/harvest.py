@@ -24,29 +24,6 @@ PENDING_VERSION = 3
 BASELINE_VERSION = 1
 _SCAFFOLD = re.compile(r"<(local-command|command-name|command-message|command-args)[\s>]")
 _CODEX_CONTEXT_PREFIXES = ("# AGENTS.md instructions for ", "<environment_context>")
-# These are the timestamp-less Claude records that are metadata controls, not transcript
-# messages.  The exact top-level grammar is intentional: a new field, especially a
-# message-shaped one, is retained until this list is deliberately reviewed.  `last-prompt`
-# and `file-history-snapshot` are intentionally absent because their payloads can preserve
-# user or workspace content.
-_CLAUDE_NONCONTENT_CONTROL_KEYS = {
-    "mode": frozenset({"type", "sessionId", "mode"}),
-    "permission-mode": frozenset({"type", "sessionId", "permissionMode"}),
-    "ai-title": frozenset({"type", "sessionId", "aiTitle"}),
-    "atis-latch": frozenset({"type", "sessionId", "atis"}),
-    "bridge-session": frozenset(
-        {"type", "sessionId", "bridgeSessionId", "lastSequenceNum", "ownerAccountUuid", "ownerOrganizationUuid"}
-    ),
-    "cost-state": frozenset(
-        {
-            "type", "sessionId", "hasUnknownModelCost", "modelUsage", "startTime", "totalAPIDuration",
-            "totalAPIDurationWithoutRetries", "totalCostUSD", "totalDuration", "totalLinesAdded",
-            "totalLinesRemoved", "totalToolDuration",
-        }
-    ),
-    "agent-name": frozenset({"type", "sessionId", "agentName"}),
-    "custom-title": frozenset({"type", "sessionId", "customTitle"}),
-}
 
 
 class PendingError(ValueError):
@@ -632,20 +609,6 @@ def _baseline_timestamp(value: object) -> datetime | None:
         return None
 
 
-def _claude_noncontent_control(row: object) -> bool:
-    """Recognize only an exact, non-message Claude control grammar.
-
-    `parse_claude_lines` accepts curator signal only from `user` and `assistant`
-    rows carrying a `message`.  The allowlist below excludes both types and demands
-    the known complete key set, so a control cannot smuggle that signal shape across
-    a timestamp-less cursor proof.
-    """
-    if not isinstance(row, dict):
-        return False
-    keys = _CLAUDE_NONCONTENT_CONTROL_KEYS.get(row.get("type"))
-    return keys is not None and set(row) == keys
-
-
 def _baseline_source_metadata(source: dict, *, outcome: str, reason: str, base=None, target=None, records: int = 0) -> dict:
     result = {
         "head": source.get("head"),
@@ -674,8 +637,12 @@ def _baseline_jsonl_source(source: dict, mark: dict, parser, cutoff: datetime, l
         start = _legacy_start(path, base or {}, stat, limits)
         if start is None:
             return _baseline_source_metadata(source, outcome="unselected", reason="no-unadvanced-records", base=base)
-        last, records, proof_kinds = None, 0, set()
-        retained_reason = None
+        last, records, incomplete_tail = None, 0, False
+        barriers, bracketed = [], []
+
+        def barrier_note(reasons: list[str], suffix: str) -> str:
+            """Describe complete rows retained or crossed by the append-time proof."""
+            return f"{','.join(sorted(set(reasons)))}-barrier-{suffix}"
 
         with path.open("rb") as fh:
             fh.seek(start)
@@ -685,51 +652,56 @@ def _baseline_jsonl_source(source: dict, mark: dict, parser, cutoff: datetime, l
                     if incomplete:
                         # A completed prefix is still safe; the incomplete tail remains ordinary
                         # harvest work.  There is no invented timestamp for the tail.
-                        retained_reason = "incomplete-tail"
+                        incomplete_tail = True
                         break
                     if oversized:
-                        # `_read_record` retains only a bounded prefix of an oversized line.
-                        # Without this row's own timestamp or control proof it cannot cross,
-                        # regardless of timestamps on neighbouring rows.
-                        retained_reason = "oversized-record"
-                        break
+                        # A complete oversized row is an undecidable barrier, not a reason to
+                        # discard the preceding proved prefix.  A later at-or-before-cutoff
+                        # timestamp may prove it lies inside the same append-time bracket.
+                        barriers.append("oversized-record")
+                        continue
                     break
                 try:
                     row = json.loads(data)
                 except (TypeError, json.JSONDecodeError):
-                    retained_reason = "unparseable-record"
-                    break
+                    barriers.append("unparseable-record")
+                    continue
                 timestamp = _baseline_timestamp(row.get("timestamp") if isinstance(row, dict) else None)
                 if timestamp is None:
-                    if source.get("head") == "claude" and _claude_noncontent_control(row):
-                        proof_kinds.add("noncontent-control")
-                    else:
-                        retained_reason = "unapproved-timestamp-less-record"
-                        break
-                elif timestamp > cutoff:
-                    retained_reason = "post-cutoff"
+                    barriers.append("missing-or-invalid-timestamp")
+                    continue
+                if timestamp > cutoff:
+                    # A later post-cutoff timestamp proves nothing about a preceding barrier.
                     break
-                else:
-                    proof_kinds.add("timestamp")
                 # Reuse the normal parser only as a format guard.  Both emitted and non-emitting
-                # records receive their own cutoff or non-content-control proof.
+                # records receive the same timestamp proof and cursor treatment.
                 parser([data.decode("utf-8", errors="replace")])
+                if barriers:
+                    # JSONL source timestamps are append-ordered.  This second timestamp at or
+                    # before the cutoff brackets every complete barrier since `last`.
+                    bracketed.extend(barriers)
+                    barriers.clear()
                 last, records = end, records + 1
     except (OSError, ValueError):
         return _baseline_source_metadata(source, outcome="unselected", reason="unreadable-source", base=base)
     if last is None:
-        return _baseline_source_metadata(source, outcome="unselected", reason=retained_reason or "post-cutoff", base=base)
+        if barriers:
+            return _baseline_source_metadata(
+                source, outcome="unselected", reason=barrier_note(barriers, "tail-retained"), base=base
+            )
+        return _baseline_source_metadata(source, outcome="unselected", reason="post-cutoff", base=base)
     target = {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size}
-    proof = "per-record-timestamp-or-noncontent-control" if proof_kinds == {"noncontent-control", "timestamp"} else (
-        "per-record-noncontent-control" if proof_kinds == {"noncontent-control"} else "at-or-before-cutoff"
-    )
-    reason = proof
-    if retained_reason:
-        reason = f"complete-prefix-{proof}; {retained_reason}-tail-retained"
+    notes = []
+    if bracketed:
+        notes.append(barrier_note(bracketed, "bracketed"))
+    if barriers:
+        notes.append(barrier_note(barriers, "tail-retained"))
+    if incomplete_tail:
+        notes.append("incomplete-tail-retained")
     return _baseline_source_metadata(
         source,
         outcome="affected",
-        reason=reason,
+        reason="complete-prefix-at-or-before-cutoff; " + "; ".join(notes) if notes else "at-or-before-cutoff",
         base=base,
         target=target,
         records=records,
