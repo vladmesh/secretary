@@ -25,15 +25,15 @@ splits them. Write facts through `curator memory-write` (see step 4); you never 
 and you run no Git operations.
 
 The helper returns a redacted, deterministic bounded batch (secrets already stripped) of new turns since
-the last watermark. "No new turns" means there is no work and you exit. It does NOT move the watermark yet.
-The service environment sets maximum signal turns, source bytes and sources, plus per-source rows/records
-and personal-memory bytes. A changed personal-memory file above its byte cap is rejected before it reaches
-this prompt.
+the last watermark. "No new turns" means there is no work and you exit: the helper has already advanced any
+complete non-emitting scan cursors, and there is no pending work for step 5. The service environment sets
+maximum signal turns, source bytes and sources, plus per-source rows/records and personal-memory bytes. A
+changed personal-memory file above its byte cap is rejected before it reaches this prompt.
 
-The first harvest writes an identity-bound pending record. Repeating harvest before advance returns that
-same batch even if sources have grown. Do not alter the state directory or pending file. Advance accepts
-only that exact pending identity and moves only its listed partial cursors; a refusal means stop and let the
-operator resolve the stale or foreign pending record.
+The first fact-bearing harvest writes an identity-bound pending record. Repeating harvest before advance
+returns that same batch even if sources have grown. Do not alter the state directory or pending file. Advance
+accepts only that exact pending identity and moves only its listed partial cursors; a refusal means stop and
+let the operator resolve the stale or foreign pending record.
 
 The batch comes from two kinds of source:
 
@@ -163,8 +163,9 @@ carry it over — refer to it by name and location instead.
 python3 -P -m triggered_agents curator advance
 ```
 
-Order matters: move the watermark ONLY after every fact has been written through `memory-write`. If you
-found no facts, `advance` anyway, so the same turns are not re-read.
+Order matters: move the watermark ONLY after every fact has been written through `memory-write`. If the
+fact-bearing batch produced no facts, `advance` anyway, so the same turns are not re-read. Do not run
+`advance` after a zero-input harvest: it has no pending work.
 
 ### 6. The index
 

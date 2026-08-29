@@ -1702,15 +1702,18 @@ Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<proje
 fact is one distilled markdown record. The curator is the writer role; every other agent reads through
 `memory_search`, `memory_get` and `memory_list`.
 
-Curator input is a bounded, two-phase batch protocol. Harvest selects a deterministic prefix of transcript
-records and changed personal-memory files before rendering; its configured turn, byte and source limits
-bound the read as well as the prompt. The selected batch and its partial cursors are written as a versioned
-pending record bound to the current curator workspace/run/session identity. A retry replays that pending
-batch exactly. Advance verifies that identity and each source's starting cursor, then moves only the listed
-cursors. Legacy line-based watermarks remain readable until a selected source advances to a byte cursor;
-unversioned pending data is not guessed, rewritten or advanced. A row-limited scan also records complete
-non-emitting or oversized records it has classified, so noise prefixes cannot stall a source; it never
-advances over an incomplete trailing JSONL record.
+Curator input is a bounded, two-phase batch protocol. Harvest and precheck use the same locked preparation:
+it first replays a valid identity-bound pending batch, otherwise selects a deterministic prefix of transcript
+records and changed personal-memory files before rendering. Its configured turn, byte and source limits
+bound the read as well as the prompt. A selected batch with turns or memory is written as a versioned pending
+record bound to the current curator workspace/run/session identity; a retry replays it exactly. A fresh scan
+that classified only complete non-emitting records advances those precise cursors atomically instead, and
+never writes pending.json. Advance accepts only the fact-bearing pending form, verifies its identity and each
+source's starting cursor, then moves only the listed cursors. Legacy line-based watermarks remain readable
+until a selected source advances to a byte cursor; unversioned, stale, foreign, corrupt, or cursor-only pending
+data is not guessed, rewritten or advanced. A row-limited scan records complete non-emitting or oversized
+records it has classified, so noise prefixes cannot stall a source; it never advances over an incomplete
+trailing JSONL record.
 
 ### Memory read identity
 

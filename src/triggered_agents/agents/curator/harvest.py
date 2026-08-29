@@ -337,6 +337,8 @@ def read_pending(st, identity=None):
         raise PendingError("curator pending record has an invalid batch")
     if record.get("batch_id") != _batch_id(identity, batch, base):
         raise PendingError("curator pending record identity does not match its contents")
+    if not batch.get("sessions") and not batch.get("memory"):
+        raise PendingError("curator pending record has no fact-bearing input")
     return record
 
 

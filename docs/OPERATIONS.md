@@ -1606,15 +1606,16 @@ The sources are the live data plane, not a checkout:
 
 Curator harvest is bounded before either Markdown or JSON output. Its environment controls maximum signal
 turns, input bytes and sources (TA_CURATOR_MAX_TURNS, TA_CURATOR_MAX_INPUT_BYTES,
-TA_CURATOR_MAX_SOURCES), with record/row and personal-memory caps for source reads. A selected batch is
-stored as versioned, identity-bound pending.json: retrying harvest replays it exactly, and advance checks
-the batch identity and starting cursors before moving only the listed cursors. A legacy line-based
-watermark.json from the disabled installation remains a supported read input and converts a source to its
-byte cursor only after that source is selected and advanced. An unversioned pending file is deliberately
-refused and left untouched. Discovery excludes only the current curator workspace/session, not the Secretary
-checkout or sibling worker, reviewer and observer workspaces. Complete non-emitting or oversized rows are
-included in a scan cursor, including a batch with no turns, while an incomplete trailing JSONL row is left
-for the next harvest.
+TA_CURATOR_MAX_SOURCES), with record/row and personal-memory caps for source reads. Harvest and precheck
+share one locked preparation: a selected fact-bearing batch is stored as versioned, identity-bound pending.json
+and replayed exactly until advance checks its identity and starting cursors. A scan with only complete
+non-emitting rows advances its cursors immediately under that lock and writes no pending.json, so a zero-input
+prompt has nothing to advance. A legacy line-based watermark.json from the disabled installation remains a
+supported read input and converts a source to its byte cursor only after that source is selected and advanced.
+An unversioned, stale, foreign, corrupt, or cursor-only pending file is deliberately refused and left untouched.
+Discovery excludes only the current curator workspace/session, not the Secretary checkout or sibling worker,
+reviewer and observer workspaces. Complete non-emitting or oversized rows are included in a scan cursor, while
+an incomplete trailing JSONL row is left for the next harvest.
 - the `pipeline` line is built from the production dispatcher's tick telemetry in its production state file. The
   dispatcher writes it at the end of every terminal tick: time, healthy or degraded, and diagnostics (step, reason,
   error codes). A tick that ended degraded colours the line by itself; the previous healthy tick does not vouch for

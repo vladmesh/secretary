@@ -3,8 +3,9 @@
 Flow the agent follows each run:
   1. `python3 -m triggered_agents curator harvest`  -> redacted batch (markdown) of new
                                      Claude/Hermes/Codex session turns and changed
-                                     personal-memory files on stdout, and the pending
-                                     identity-bound pending batch cached on disk.
+                                     personal-memory files on stdout, and a fact-bearing,
+                                     identity-bound pending batch cached on disk. Cursor-only
+                                     scans advance before the command returns.
   2. agent extracts durable facts, dedups via memory_search, writes each accepted fact
      through `python3 -m triggered_agents curator memory-write`.
   3. `python3 -m triggered_agents curator advance`  -> moves the watermark past step 1.
@@ -33,16 +34,48 @@ from .memory_protocol import (
 STATE = AgentState("curator")
 
 
+def _write_pending(record: dict) -> None:
+    """Atomically publish the fact-bearing batch that a later advance consumes."""
+    STATE.ensure_dir()
+    tmp = STATE.pending_file.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(STATE.pending_file)
+
+
+def _prepare_batch() -> dict:
+    """Replay fact work or atomically settle a fresh bounded scan under the curator lock.
+
+    Every complete source record the scan classified leaves this function either in an
+    identity-bound fact batch or in the watermark.  A cursor-only pending record is not
+    a supported batch because no curator step can consume it, so it fails closed.
+    """
+    with STATE.lock():
+        identity = harvest.current_identity()
+        if STATE.pending_file.is_file():
+            record = harvest.read_pending(STATE, identity)
+            # A stale record must win over new discovery, but cannot be replayed or
+            # advanced as though it belonged to the current watermark.
+            for source, expected in record["base"].items():
+                if STATE.load_watermark().get(source) != expected:
+                    raise harvest.PendingError(f"curator pending record is stale for {source}")
+            return {**record["batch"], "batch_id": record["batch_id"]}
+
+        batch = harvest.harvest(STATE, identity)
+        if batch["sessions"] or batch["memory"]:
+            base = {key: STATE.load_watermark().get(key) for key in batch["pending"]}
+            _write_pending(harvest.pending_record(batch, identity, base))
+        elif batch["pending"]:
+            # These are complete non-emitting records.  Persist their precise scan
+            # cursor now, not as a pending batch that the zero-input skill will exit
+            # without advancing.
+            base = {key: STATE.load_watermark().get(key) for key in batch["pending"]}
+            harvest.advance(STATE, harvest.pending_record(batch, identity, base), identity)
+        return batch
+
+
 def cmd_harvest(as_json: bool) -> int:
     try:
-        with STATE.lock():
-            identity = harvest.current_identity()
-            batch = harvest.harvest(STATE, identity)
-            if batch["pending"] and not STATE.pending_file.exists():
-                base = {key: STATE.load_watermark().get(key) for key in batch["pending"]}
-                record = harvest.pending_record(batch, identity, base)
-                STATE.ensure_dir()
-                STATE.pending_file.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        batch = _prepare_batch()
     except harvest.PendingError as exc:
         print(f"curator: {exc}", file=sys.stderr)
         return 1
@@ -54,11 +87,10 @@ def cmd_harvest(as_json: bool) -> int:
 
 
 def cmd_advance() -> int:
-    if not STATE.pending_file.is_file():
-        print("curator: nothing to advance (run harvest first)", file=sys.stderr)
-        return 1
     try:
         with STATE.lock():
+            if not STATE.pending_file.is_file():
+                raise harvest.PendingError("nothing to advance (run harvest first)")
             pending = harvest.read_pending(STATE)
             harvest.advance(STATE, pending)
             STATE.pending_file.unlink()
@@ -75,7 +107,11 @@ def cmd_precheck() -> int:
     run when nothing is new. Any other code means precheck crashed. An uncaught exception exits 1,
     which the systemd gate treats as an error, not a skip. See runtime/state.py PRECHECK_SKIP and
     deploy/ta-gate.sh."""
-    batch = harvest.harvest(STATE)
+    try:
+        batch = _prepare_batch()
+    except harvest.PendingError as exc:
+        print(f"curator: {exc}", file=sys.stderr)
+        return 1
     if batch["sessions"] or batch["memory"]:
         STATE.log_run("precheck", result="change")
         return 0

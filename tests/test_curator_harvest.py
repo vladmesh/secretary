@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from triggered_agents.agents.curator import cli
 from triggered_agents.agents.curator import harvest
+from triggered_agents.runtime.state import PRECHECK_SKIP
 from triggered_agents.runtime.state import AgentState
 
 
@@ -224,3 +227,84 @@ class CuratorHarvestTests(unittest.TestCase):
         with self.assertRaisesRegex(harvest.PendingError, "legacy"):
             harvest.harvest(self.state, self.identity, self.limits)
         self.assertEqual(json.loads(self.state.pending_file.read_text(encoding="utf-8")), {"old": {"lines": 3}})
+
+
+class CuratorCliPreparationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.state = AgentState("curator", self.root / "state")
+        self.patches = [
+            mock.patch.object(cli, "STATE", self.state),
+            mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=[]),
+            mock.patch.dict(
+                "os.environ",
+                {
+                    "TA_CURATOR_MAX_TURNS": "2",
+                    "TA_CURATOR_MAX_INPUT_BYTES": "10000",
+                    "TA_CURATOR_MAX_SOURCES": "8",
+                    "TA_CURATOR_MAX_ROWS_PER_SOURCE": "2",
+                    "TA_CURATOR_MAX_RECORD_BYTES": "4096",
+                    "TA_CURATOR_MAX_MEMORY_BYTES": "4096",
+                },
+                clear=False,
+            ),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self) -> None:
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.tmp.cleanup()
+
+    def test_precheck_settles_noise_windows_then_exposes_later_turn(self) -> None:
+        path = self.root / "noise.jsonl"
+        path.write_text(claude_tool() * 4 + claude("real"), encoding="utf-8")
+        session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+            self.assertEqual(cli.cmd_precheck(), PRECHECK_SKIP)
+            first = self.state.load_watermark()[str(path)]["offset"]
+            self.assertFalse(self.state.pending_file.exists())
+            self.assertEqual(cli.cmd_precheck(), PRECHECK_SKIP)
+            second = self.state.load_watermark()[str(path)]["offset"]
+            self.assertGreater(second, first)
+            self.assertEqual(cli.cmd_precheck(), 0)
+        self.assertTrue(self.state.pending_file.exists())
+        pending = harvest.read_pending(self.state)
+        self.assertEqual([turn["text"] for entry in pending["batch"]["sessions"] for turn in entry["turns"]], ["real"])
+
+    def test_cursor_only_harvest_leaves_no_deadlock_or_later_source_hidden(self) -> None:
+        noisy = self.root / "a-noise.jsonl"
+        noisy.write_text(claude_tool() * 2, encoding="utf-8")
+        later = self.root / "b-later.jsonl"
+        sessions = [{"head": "claude", "path": str(noisy), "session_id": "a", "cwd": "/project"}]
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            self.assertEqual(cli.cmd_harvest(False), 0)
+            self.assertFalse(self.state.pending_file.exists())
+            self.assertIn(str(noisy), self.state.load_watermark())
+            later.write_text(claude("later"), encoding="utf-8")
+            sessions.append({"head": "claude", "path": str(later), "session_id": "b", "cwd": "/project"})
+            self.assertEqual(cli.cmd_precheck(), 0)
+        self.assertTrue(self.state.pending_file.exists())
+        pending = harvest.read_pending(self.state)
+        self.assertEqual([turn["text"] for entry in pending["batch"]["sessions"] for turn in entry["turns"]], ["later"])
+
+    def test_valid_pending_replays_before_fresh_discovery(self) -> None:
+        path = self.root / "session.jsonl"
+        path.write_text(claude("first"), encoding="utf-8")
+        session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]), mock.patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as stdout:
+            self.assertEqual(cli.cmd_harvest(True), 0)
+            first = json.loads(stdout.getvalue())
+            stdout.seek(0)
+            stdout.truncate(0)
+            path.write_text(claude("first") + claude("second"), encoding="utf-8")
+            self.assertEqual(cli.cmd_harvest(True), 0)
+            second = json.loads(stdout.getvalue())
+        self.assertEqual(second, first)
+        self.assertEqual(self.state.load_watermark(), {})
