@@ -21,6 +21,10 @@
 #                     (secretary-964). The waiting lives here rather than in the unit because
 #                     systemd refuses `RestartForceExitStatus=` on a `Type=oneshot` service, and a
 #                     oneshot has no start timeout to run into.
+#   102            -> a short role-local settlement transaction is busy. The tick is deliberately
+#                     unclaimed: exit successfully without dispatch or cleanup, because either can
+#                     race the live transaction holder. Curator uses this for watermark/pending
+#                     settlement contention (secretary-1501).
 #   any other code -> precheck itself broke (crash, bad env): propagate the code so the unit is
 #                     recorded `failed` in systemctl, distinguishable from a skip.
 # 100 is deliberately not 1: Python's default uncaught-crash exit code is 1, so a precheck that dies
@@ -88,6 +92,9 @@ elif [ "$rc" -eq 101 ]; then
     # No dispatch and no cleanup: both talk to the same board none of the attempts could reach.
     echo "[ta-$agent] precheck: board unreachable after $board_attempts attempts; run not taken" >&2
     exit "$rc"
+elif [ "$rc" -eq 102 ]; then
+    echo "[ta-$agent] precheck: settlement busy, tick deferred" >&2
+    exit 0
 else
     echo "[ta-$agent] precheck: ERROR (rc=$rc); see runs.jsonl" >&2
     exit "$rc"

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +11,7 @@ from unittest import mock
 
 from triggered_agents.agents.curator import cli
 from triggered_agents.agents.curator import harvest
-from triggered_agents.runtime.state import PRECHECK_SKIP
+from triggered_agents.runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP
 from triggered_agents.runtime.state import AgentState
 
 
@@ -141,13 +143,12 @@ class CuratorHarvestTests(unittest.TestCase):
         limits = harvest.Limits(2, 10_000, 8, 4, 256, 4096)
         with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
             first = harvest.harvest(self.state, self.identity, limits)
-            self.assertEqual(first["pending"][str(path)]["offset"], len(claude_tool()))
-            record = self._persist(first)
-            harvest.advance(self.state, record, self.identity)
-            self.state.pending_file.unlink()
-            second = harvest.harvest(self.state, self.identity, limits)
-        self.assertEqual(second["pending"], {})
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(claude_tool()))
+        self.assertTrue(first["incomplete"])
+        self.assertEqual(first["pending"][str(path)]["offset"], len(claude_tool()))
+        self.assertEqual(self.state.load_watermark(), {})
+        with self.assertRaisesRegex(harvest.PendingError, "incomplete"):
+            harvest.advance(self.state, harvest.pending_record(first, self.identity, {}), self.identity)
+        self.assertEqual(self.state.load_watermark(), {})
 
     def test_memory_is_selected_and_large_memory_is_rejected_before_prompt(self) -> None:
         small, large = self.root / "small.md", self.root / "large.md"
@@ -308,3 +309,90 @@ class CuratorCliPreparationTests(unittest.TestCase):
             second = json.loads(stdout.getvalue())
         self.assertEqual(second, first)
         self.assertEqual(self.state.load_watermark(), {})
+
+    def test_incomplete_input_leaves_pending_and_watermark_untouched(self) -> None:
+        path = self.root / "writing.jsonl"
+        path.write_text(claude_tool() + claude("still-writing").rstrip("\n"), encoding="utf-8")
+        session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+            self.assertEqual(cli.cmd_precheck(), PRECHECK_SKIP)
+        self.assertEqual(self.state.load_watermark(), {})
+        self.assertFalse(self.state.pending_file.exists())
+
+    def _hold_settlement_lock(self):
+        self.state.ensure_dir()
+        path = self.state.dir / "cursor-settlement.lock"
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import fcntl, pathlib, sys\n"
+                    "with pathlib.Path(sys.argv[1]).open('a+') as handle:\n"
+                    "    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)\n"
+                    "    print('locked', flush=True)\n"
+                    "    sys.stdin.read()\n"
+                ),
+                str(path),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(holder.stdout.readline().strip(), "locked")
+        return holder
+
+    def test_precheck_defers_on_another_process_settlement_without_state_mutation(self) -> None:
+        holder = self._hold_settlement_lock()
+        try:
+            self.assertEqual(cli.cmd_precheck(), PRECHECK_DEFERRED)
+            self.assertEqual(self.state.load_watermark(), {})
+            self.assertFalse(self.state.pending_file.exists())
+            self.assertFalse((self.state.dir / "runs.jsonl").exists())
+        finally:
+            holder.stdin.close()
+            holder.wait(timeout=10)
+            holder.stdout.close()
+
+    def test_killed_settlement_holder_does_not_leave_a_stale_owner(self) -> None:
+        holder = self._hold_settlement_lock()
+        holder.kill()
+        holder.wait(timeout=10)
+        holder.stdin.close()
+        holder.stdout.close()
+        with cli.cursor_settlement_transaction(nonblocking=True):
+            pass
+
+    def test_all_curator_settlement_paths_use_the_one_transaction_boundary(self) -> None:
+        source = str(self.root / "source.jsonl")
+        identity = harvest.current_identity()
+        batch = {
+            "sessions": [
+                {
+                    "head": "claude",
+                    "path": source,
+                    "session_id": "c",
+                    "cwd": "/project",
+                    "turns": [{"role": "user", "text": "fact", "ts": None}],
+                }
+            ],
+            "memory": [],
+            "pending": {source: {"offset": 1}},
+            "rejected": [],
+            "incomplete": False,
+        }
+        with (
+            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[]),
+            mock.patch.object(self.state, "lock", side_effect=AssertionError("run lock must not be used")),
+            mock.patch.object(
+                cli, "cursor_settlement_transaction", wraps=cli.cursor_settlement_transaction
+            ) as transaction,
+        ):
+            self.assertEqual(cli.cmd_precheck(), PRECHECK_SKIP)
+            self.assertEqual(cli.cmd_harvest(False), 0)
+            self.state.ensure_dir()
+            self.state.pending_file.write_text(
+                json.dumps(harvest.pending_record(batch, identity, {source: None})), encoding="utf-8"
+            )
+            self.assertEqual(cli.cmd_advance(), 0)
+        self.assertEqual(transaction.call_count, 3)

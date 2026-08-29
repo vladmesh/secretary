@@ -181,15 +181,15 @@ def _legacy_start(path, previous, stat, limits):
 def _read_record(fh, limits):
     data = fh.readline(limits.max_record_bytes + 1)
     if not data:
-        return fh.tell(), None, False
+        return fh.tell(), None, False, False
     if not data.endswith(b"\n"):
         # Discard a complete oversized record without materializing it.  An EOF
         # before its newline is a live incomplete record, which must remain for
         # the next harvest rather than becoming part of the cursor.
         while data and not data.endswith(b"\n"):
             data = fh.readline(limits.max_record_bytes + 1)
-        return fh.tell(), None, bool(data)
-    return fh.tell(), data, False
+        return fh.tell(), None, bool(data), not bool(data)
+    return fh.tell(), data, False, False
 
 
 def _jsonl_source(sess, mark, parser: Callable[[list[str]], list[dict]], budget):
@@ -197,16 +197,23 @@ def _jsonl_source(sess, mark, parser: Callable[[list[str]], list[dict]], budget)
     try:
         stat = path.stat()
     except FileNotFoundError:
-        return None, None, False
+        return None, None, False, False
     start = _legacy_start(path, mark.get(sess["path"], {}), stat, budget.limits)
     if start is None:
-        return None, None, False
+        return None, None, False, False
     turns, last = [], None
     with path.open("rb") as fh:
         fh.seek(start)
         for _ in range(budget.limits.max_rows_per_source):
-            end, data, oversized = _read_record(fh, budget.limits)
+            end, data, oversized, incomplete = _read_record(fh, budget.limits)
             if data is None:
+                if incomplete:
+                    cursor = (
+                        {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size}
+                        if last is not None
+                        else None
+                    )
+                    return ({**sess, "turns": turns} if turns else None), cursor, False, True
                 if not oversized:
                     break
                 # This complete record is deliberately rejected for size, so it
@@ -222,27 +229,29 @@ def _jsonl_source(sess, mark, parser: Callable[[list[str]], list[dict]], budget)
             size = len(data)
             if not budget.accepts(len(parsed), size, not turns):
                 cursor = {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size} if last is not None else None
-                return ({**sess, "turns": turns} if turns else None), cursor, True
+                return ({**sess, "turns": turns} if turns else None), cursor, True, False
             for turn in parsed:
                 turn["text"] = redact(turn["text"])
             budget.add(len(parsed), size, not turns)
             turns.extend(parsed)
             last = end
     cursor = {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size} if last is not None else None
-    return ({**sess, "turns": turns} if turns else None), cursor, False
+    return ({**sess, "turns": turns} if turns else None), cursor, False, False
 
 
 def _jsonl_sessions(mark, sessions, parser, budget):
     output, pending = [], {}
     for sess in sorted(sessions, key=lambda s: (s["head"], s["path"], s["session_id"])):
-        entry, cursor, stopped = _jsonl_source(sess, mark, parser, budget)
+        entry, cursor, stopped, incomplete = _jsonl_source(sess, mark, parser, budget)
         if entry:
             output.append(entry)
         if cursor:
             pending[sess["path"]] = cursor
+        if incomplete:
+            return output, pending, False, True
         if stopped:
-            return output, pending, True
-    return output, pending, False
+            return output, pending, True, False
+    return output, pending, False, False
 
 
 def _hermes_sessions(mark, budget):
@@ -339,6 +348,8 @@ def read_pending(st, identity=None):
         raise PendingError("curator pending record identity does not match its contents")
     if not batch.get("sessions") and not batch.get("memory"):
         raise PendingError("curator pending record has no fact-bearing input")
+    if batch.get("incomplete"):
+        raise PendingError("curator pending record has incomplete input")
     return record
 
 
@@ -348,13 +359,34 @@ def harvest(st, identity=None, limits=None):
         record = read_pending(st, identity)
         return {**copy.deepcopy(record["batch"]), "batch_id": record["batch_id"]}
     mark, budget = st.load_watermark(), _Budget(limits or Limits.from_env())
-    claude, cp, stopped = _jsonl_sessions(mark, discover.claude_sessions(), parse_claude_lines, budget)
-    codex, xp, xstop = ([], {}, True) if stopped else _jsonl_sessions(mark, discover.codex_sessions(), parse_codex_lines, budget)
-    hermes, hp, hstop = ([], {}, True) if stopped or xstop else _hermes_sessions(mark, budget)
-    memory, mp, rejected, _ = ([], {}, [], True) if stopped or xstop or hstop else harvest_memory_files(mark, budget)
+    claude, cp, stopped, incomplete = _jsonl_sessions(
+        mark, discover.claude_sessions(), parse_claude_lines, budget
+    )
+    if stopped or incomplete:
+        codex, xp, xstop, xincomplete = [], {}, True, False
+    else:
+        codex, xp, xstop, xincomplete = _jsonl_sessions(
+            mark, discover.codex_sessions(), parse_codex_lines, budget
+        )
+    hermes, hp, hstop = (
+        ([], {}, True)
+        if stopped or xstop or incomplete or xincomplete
+        else _hermes_sessions(mark, budget)
+    )
+    memory, mp, rejected, _ = (
+        ([], {}, [], True)
+        if stopped or xstop or hstop or incomplete or xincomplete
+        else harvest_memory_files(mark, budget)
+    )
     pending = {**cp, **xp, **hp, **mp}
     base = {key: copy.deepcopy(mark.get(key)) for key in pending}
-    batch = {"sessions": claude + codex + hermes, "memory": memory, "pending": pending, "rejected": rejected}
+    batch = {
+        "sessions": claude + codex + hermes,
+        "memory": memory,
+        "pending": pending,
+        "rejected": rejected,
+        "incomplete": incomplete or xincomplete,
+    }
     batch["batch_id"] = _batch_id(identity, batch, base)
     return batch
 
@@ -370,6 +402,8 @@ def advance(st, record, identity=None):
         raise PendingError("curator pending record has an invalid batch")
     if record.get("batch_id") != _batch_id(identity, batch, base):
         raise PendingError("curator pending record identity does not match its contents")
+    if batch.get("incomplete"):
+        raise PendingError("curator pending record has incomplete input")
     mark = st.load_watermark()
     for source, expected in base.items():
         if mark.get(source) != expected:
@@ -379,6 +413,8 @@ def advance(st, record, identity=None):
 
 
 def render_markdown(batch):
+    if batch.get("incomplete"):
+        return "# Curator input is incomplete; retry after the writer finishes.\n"
     sessions, memory = batch["sessions"], batch.get("memory", [])
     if not sessions and not memory:
         return "# No new turns since the previous run.\n"

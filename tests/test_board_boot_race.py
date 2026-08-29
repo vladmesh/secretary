@@ -26,7 +26,7 @@ from unittest import mock
 from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.runtime import health, kanboard
-from triggered_agents.runtime.state import PRECHECK_BOARD_UNREACHABLE, AgentState
+from triggered_agents.runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_DEFERRED, AgentState
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GATE = REPO_ROOT / "scripts" / "secretary-agent-gate.sh"
@@ -289,6 +289,13 @@ class GateTests(unittest.TestCase):
         self.assertIn("ERROR (rc=2)", broke.stderr)
         # Only the board's own code is waited on; a broken precheck is not re-run.
         self.assertEqual(broke.attempts, 1)
+
+    def test_settlement_defer_exits_successfully_without_dispatch_or_cleanup(self):
+        result = self.run_gate([PRECHECK_DEFERRED])
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.attempts, 1)
+        self.assertIn("settlement busy, tick deferred", result.stderr)
+        self.assertNotIn("ran:", result.stdout)
 
 
 class UnitSpecTests(unittest.TestCase):

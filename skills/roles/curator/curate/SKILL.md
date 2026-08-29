@@ -28,7 +28,9 @@ The helper returns a redacted, deterministic bounded batch (secrets already stri
 the last watermark. "No new turns" means there is no work and you exit: the helper has already advanced any
 complete non-emitting scan cursors, and there is no pending work for step 5. The service environment sets
 maximum signal turns, source bytes and sources, plus per-source rows/records and personal-memory bytes. A
-changed personal-memory file above its byte cap is rejected before it reaches this prompt.
+changed personal-memory file above its byte cap is rejected before it reaches this prompt. If a JSONL writer
+has left a trailing incomplete record, harvest returns an explicit retry notice and settles neither pending.json
+nor watermarks; exit and let the next tick retry after the writer finishes.
 
 The first fact-bearing harvest writes an identity-bound pending record. Repeating harvest before advance
 returns that same batch even if sources have grown. Do not alter the state directory or pending file. Advance
