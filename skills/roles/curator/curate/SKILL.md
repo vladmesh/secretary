@@ -42,6 +42,13 @@ the stale or foreign pending record. To inspect work without changing state, use
 `python3 -P -m triggered_agents curator backlog [--project <canonical-id>] [--json]`; it emits aggregate
 metadata only, never source text.
 
+`curator baseline` is not part of routine curation and a curator head does not choose or authorise one. An operator
+who has an authorised per-project decision may run `python3 -P -m triggered_agents curator baseline --project
+<canonical-id> --cutoff <RFC3339-with-timezone> --actor <operator> --reason <reason>`. It records only cursor
+metadata in the append-only `baseline-audit.jsonl` under curator state and prints the baseline identity. If it is
+interrupted, repeat the exact command to recover `baseline-pending.json`; do not edit any watermark or recovery
+record. A fact-bearing pending batch or a stale prepared baseline takes precedence and must remain untouched.
+
 The batch comes from two kinds of source:
 
 - **Transcripts**: new turns of sessions. For some runtimes that is line-based JSONL per session; for

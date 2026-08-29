@@ -1634,6 +1634,30 @@ prefixes and independent sources settle normally. Precheck reports a source-loca
 role-wide clean skip, and retries that source from its last complete cursor after the writer completes the row.
 Precheck tries this transaction without waiting: exit 102 is a successful deferred tick, and the gate performs
 neither dispatch nor cleanup. A process death releases the flock, so its lock file never needs stale-PID repair.
+
+An operator may make a deliberate, project-specific historical retirement only through:
+
+```
+python3 -P -m triggered_agents curator baseline \
+  --project <canonical-id> --cutoff <RFC3339-with-timezone> \
+  --actor <operator> --reason <authorised-reason>
+```
+
+`baseline` rejects all-backlog, `unknown`, `global`, unregistered projects, blank actor/reason, ambiguous or future
+cutoffs before state changes. It uses the same canonical route boundary as harvest and moves only complete source
+cursors demonstrably at or before the cutoff. A later record, message or changed memory file remains for ordinary
+bounded harvest. An unreadable source, missing or invalid source timestamp, oversized record, partial source, or
+route that cannot be selected is never guessed: it is retained and recorded as unselected metadata. The command
+prints the versioned baseline identity and compact counts, not transcript or personal-memory text.
+
+The durable audit is `$TA_STATE/curator/baseline-audit.jsonl` (or the curator state directory under the data root).
+Its append-only prepared and settled entries contain the identity, project, normalized cutoff, actor, reason,
+operation time, exact affected source cursors and unselected-source reasons, but no source content. A sibling
+`baseline-pending.json` is recoverable evidence: if a run is interrupted, repeat the exact same command. It resumes
+only if its recorded base watermarks still match, or finishes the already-applied target; a changed base, different
+request, ordinary fact-bearing pending batch, or another settlement holder fails closed. Harvest and advance refuse
+to cross a prepared baseline. A production baseline remains an authorised per-project operational decision; this
+command neither chooses such a project nor authorises a live run.
 - the `pipeline` line is built from the production dispatcher's tick telemetry in its production state file. The
   dispatcher writes it at the end of every terminal tick: time, healthy or degraded, and diagnostics (step, reason,
   error codes). A tick that ended degraded colours the line by itself; the previous healthy tick does not vouch for

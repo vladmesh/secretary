@@ -13,6 +13,8 @@ Flow the agent follows each run:
 Two-phase so a crash before the memory commit re-harvests instead of dropping turns.
 `harvest --json` emits the structured batch; `backlog [--project <canonical-id>] [--json]`
 reports metadata only without changing state; `sessions` lists discovered sources;
+`baseline --project <canonical-id> --cutoff <RFC3339> --actor <name> --reason <text>` makes one
+audited, recoverable project-only historical baseline;
 `status` shows the watermark; `precheck` exits PRECHECK_SKIP (100) when there is nothing new, so
 the systemd gate can skip the run without spinning up a head.
 """
@@ -83,6 +85,7 @@ def _prepare_batch(*, nonblocking: bool = False, project: str | None = None) -> 
     """
     with cursor_settlement_transaction(nonblocking=nonblocking):
         project = harvest.validate_project(project)
+        harvest.require_no_prepared_baseline(STATE)
         identity = harvest.current_identity()
         if STATE.pending_file.is_file():
             record = harvest.read_pending(STATE, identity, project)
@@ -123,6 +126,7 @@ def cmd_advance(project: str | None = None) -> int:
     try:
         with cursor_settlement_transaction():
             project = harvest.validate_project(project)
+            harvest.require_no_prepared_baseline(STATE)
             if not STATE.pending_file.is_file():
                 raise harvest.PendingError("nothing to advance (run harvest first)")
             identity = harvest.current_identity()
@@ -183,6 +187,20 @@ def cmd_backlog(as_json: bool, project: str | None = None) -> int:
             f"{group['project']} {group['head']} {group['session_count']} {group['signal_turn_count']} "
             f"{group['memory_file_count']} {group['oldest'] or '-'} {group['newest'] or '-'}"
         )
+    return 0
+
+
+def cmd_baseline(project: str, cutoff: str, actor: str, reason: str) -> int:
+    """Make or recover one operator-authorized project baseline under the normal cursor lock."""
+    try:
+        # Validation inside `baseline` happens before either prepared state or audit is written.
+        with cursor_settlement_transaction():
+            result = harvest.baseline(STATE, project, cutoff, actor, reason)
+    except harvest.PendingError as exc:
+        print(f"curator: {exc}", file=sys.stderr)
+        return 1
+    STATE.log_run("baseline", result=result["status"], baseline_id=result["baseline_id"], project=result["project"])
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 
 
@@ -259,18 +277,24 @@ def cmd_memory_write(argv: list[str]) -> int:
 def main(argv=None) -> int:
     argv = list(argv or [])
     cmd = argv[0] if argv else "help"
-    if cmd in {"harvest", "advance", "backlog"}:
+    if cmd in {"harvest", "advance", "backlog", "baseline"}:
         import argparse
 
         parser = argparse.ArgumentParser(prog=f"python3 -m triggered_agents curator {cmd}")
-        parser.add_argument("--project")
+        parser.add_argument("--project", required=cmd == "baseline")
         if cmd in {"harvest", "backlog"}:
             parser.add_argument("--json", action="store_true")
+        if cmd == "baseline":
+            parser.add_argument("--cutoff", required=True)
+            parser.add_argument("--actor", required=True)
+            parser.add_argument("--reason", required=True)
         ns = parser.parse_args(argv[1:])
         if cmd == "harvest":
             return cmd_harvest(ns.json, ns.project)
         if cmd == "advance":
             return cmd_advance(ns.project)
+        if cmd == "baseline":
+            return cmd_baseline(ns.project, ns.cutoff, ns.actor, ns.reason)
         return cmd_backlog(ns.json, ns.project)
     if cmd == "precheck":
         return cmd_precheck()

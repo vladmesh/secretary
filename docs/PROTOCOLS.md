@@ -1730,6 +1730,18 @@ writer completes the row. Precheck takes
 the transaction nonblocking; contention returns the dedicated 102 defer result, which the gate answers
 successfully without dispatch or cleanup. flock ownership is released by the OS if its holder exits.
 
+`curator baseline --project <canonical-id> --cutoff <RFC3339> --actor <non-empty> --reason <non-empty>` is the
+separate operator protocol for retiring a defined historical project slice. It never accepts the all-backlog,
+`unknown`, `global`, or unregistered selector. Under that same cursor-settlement transaction it records a
+versioned `baseline-pending.json`, appends a durable prepared audit entry, verifies every recorded base cursor, then
+moves only the source targets proved at or before the normalized cutoff and appends the settled entry to
+`baseline-audit.jsonl`. The identity is a hash of the version, canonical project, normalized cutoff and exact target
+cursors. Audit entries contain operator and cursor metadata, never transcript or memory text. A retry of the same
+request recovers its prepared record or returns the settled identity without advancing twice. A different request,
+changed base cursor, fact-bearing pending batch, invalid source timestamp, unreadable source, or unresolved prepared
+baseline fails closed; ordinary harvest and advance also refuse to cross a prepared baseline. The command is only a
+mechanism: a production invocation still requires an authorised per-project operational decision.
+
 ### Memory read identity
 
 The Memory MCP endpoint requires FastMCP Bearer authentication. Before a head is opened, its launcher

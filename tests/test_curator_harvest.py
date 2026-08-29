@@ -38,6 +38,18 @@ def codex(text: str) -> str:
     ) + "\n"
 
 
+def timestamped_claude(text: str, timestamp: str) -> str:
+    row = json.loads(claude(text))
+    row["timestamp"] = timestamp
+    return json.dumps(row) + "\n"
+
+
+def timestamped_codex(text: str, timestamp: str) -> str:
+    row = json.loads(codex(text))
+    row["timestamp"] = timestamp
+    return json.dumps(row) + "\n"
+
+
 class CuratorHarvestTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -318,6 +330,167 @@ class CuratorHarvestTests(unittest.TestCase):
         self.assertFalse(self.state.pending_file.exists())
 
 
+class CuratorBaselineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.state = AgentState("curator", self.root / "state")
+        self.limits = harvest.Limits(20, 100_000, 20, 1000, 4096, 4096)
+        self.patches = [
+            mock.patch("triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}),
+            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=[]),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self) -> None:
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.tmp.cleanup()
+
+    def baseline(self, **overrides):
+        request = {
+            "project": "alpha",
+            "cutoff": "2025-01-01T00:00:00Z",
+            "actor": "operator",
+            "reason": "authorised retirement",
+            "limits": self.limits,
+        }
+        request.update(overrides)
+        return harvest.baseline(self.state, **request)
+
+    def test_jsonl_cutoff_preserves_later_rows_and_audit_contains_only_metadata(self) -> None:
+        path = self.root / "alpha.jsonl"
+        old = timestamped_claude("secret before cutoff", "2024-01-01T00:00:00Z")
+        later = timestamped_claude("secret after cutoff", "2026-01-01T00:00:00Z")
+        path.write_text(old + later, encoding="utf-8")
+        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
+            result = self.baseline()
+            replay = self.baseline()
+        self.assertEqual(result["status"], "settled")
+        self.assertEqual(replay["status"], "replayed")
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(old))
+        audit = self.state.baseline_audit_file.read_text(encoding="utf-8")
+        self.assertNotIn("secret before cutoff", audit)
+        self.assertNotIn("secret after cutoff", audit)
+        records = [json.loads(line) for line in audit.splitlines()]
+        self.assertEqual([record["phase"] for record in records], ["prepared", "settled"])
+        self.assertEqual(records[-1]["affected_sources"][0]["target"]["offset"], len(old))
+
+    def test_codex_hermes_and_memory_sources_use_the_same_cutoff_without_cross_project_movement(self) -> None:
+        codex_path, memory_path = self.root / "codex.jsonl", self.root / "memory.md"
+        codex_old = timestamped_codex("old", "2024-01-01T00:00:00Z")
+        codex_path.write_text(codex_old + timestamped_codex("new", "2026-01-01T00:00:00Z"), encoding="utf-8")
+        memory_path.write_text("personal secret", encoding="utf-8")
+        old_mtime = 1_700_000_000
+        import os
+        os.utime(memory_path, (old_mtime, old_mtime))
+        alpha_codex = {"head": "codex", "path": str(codex_path), "session_id": "c", "cwd": "/alpha", "route": "alpha"}
+        alpha_hermes = {"head": "hermes", "path": "state.db", "session_id": "h", "cwd": "/alpha", "route": "alpha"}
+        beta = {"head": "claude", "path": str(self.root / "beta.jsonl"), "session_id": "b", "cwd": "/beta", "route": "beta"}
+        beta_path = Path(beta["path"])
+        beta_path.write_text(timestamped_claude("beta", "2024-01-01T00:00:00Z"), encoding="utf-8")
+        memory = {"head": "claude", "path": str(memory_path), "cwd": "/alpha", "route": "alpha"}
+        rows = [
+            {"id": 1, "role": "user", "content": "old", "timestamp": 1_700_000_000, "content_bytes": 3},
+            {"id": 2, "role": "assistant", "content": "new", "timestamp": 1_800_000_000, "content_bytes": 3},
+        ]
+        with (
+            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[beta]),
+            mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[alpha_codex]),
+            mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[alpha_hermes]),
+            mock.patch("triggered_agents.agents.curator.discover.hermes_messages", return_value=rows),
+            mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=[memory]),
+        ):
+            result = self.baseline()
+        mark = self.state.load_watermark()
+        self.assertEqual(mark[str(codex_path)]["offset"], len(codex_old))
+        self.assertEqual(mark["hermes:h"], {"last_id": 1})
+        self.assertEqual(mark[str(memory_path)]["size"], len("personal secret"))
+        self.assertNotIn(str(beta_path), mark)
+        self.assertEqual(result["unselected_source_count"], 1)
+
+    def test_invalid_request_and_fact_pending_fail_before_any_baseline_state_change(self) -> None:
+        for request in (
+            {"project": "all"},
+            {"project": "unknown"},
+            {"cutoff": "2025-01-01T00:00:00"},
+            {"cutoff": "2999-01-01T00:00:00Z"},
+            {"actor": " "},
+            {"reason": "\t"},
+        ):
+            with self.assertRaises(harvest.BaselineError):
+                self.baseline(**request)
+        self.assertFalse(self.state.baseline_pending_file.exists())
+        self.assertFalse(self.state.baseline_audit_file.exists())
+        batch = {"sessions": [{"turns": [{"text": "fact"}]}], "memory": [], "pending": {"source": {"offset": 1}}}
+        record = harvest.pending_record(batch, harvest.current_identity(), {"source": None})
+        self.state.ensure_dir()
+        self.state.pending_file.write_text(json.dumps(record), encoding="utf-8")
+        with self.assertRaisesRegex(harvest.BaselineError, "fact-bearing"):
+            self.baseline()
+        self.assertFalse(self.state.baseline_audit_file.exists())
+
+    def test_missing_timestamp_is_audited_unselected_without_advancing_source(self) -> None:
+        path = self.root / "missing-timestamp.jsonl"
+        path.write_text(claude("not safe"), encoding="utf-8")
+        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
+            result = self.baseline()
+        self.assertNotIn(str(path), self.state.load_watermark())
+        self.assertEqual(result["affected_source_count"], 0)
+        audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
+        self.assertEqual(audit["unselected_sources"][0]["reason"], "missing-or-invalid-timestamp")
+
+    def test_interrupted_audit_retries_the_same_prepared_baseline_once(self) -> None:
+        path = self.root / "retry.jsonl"
+        old = timestamped_claude("old", "2024-01-01T00:00:00Z")
+        path.write_text(old, encoding="utf-8")
+        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]), mock.patch.object(
+            self.state, "save_watermark", side_effect=OSError("interrupted")
+        ):
+            with self.assertRaisesRegex(OSError, "interrupted"):
+                self.baseline()
+        self.assertTrue(self.state.baseline_pending_file.exists())
+        self.assertEqual([json.loads(line)["phase"] for line in self.state.baseline_audit_file.read_text().splitlines()], ["prepared"])
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
+            retry = self.baseline()
+        self.assertEqual(retry["status"], "settled")
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(old))
+        self.assertFalse(self.state.baseline_pending_file.exists())
+
+    def test_stale_prepared_baseline_blocks_all_cursor_movement(self) -> None:
+        path = self.root / "stale.jsonl"
+        old = timestamped_claude("old", "2024-01-01T00:00:00Z")
+        path.write_text(old, encoding="utf-8")
+        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
+            affected, unselected = harvest._baseline_plan(self.state, "alpha", harvest._rfc3339("2025-01-01T00:00:00Z", field="cutoff")[0], self.limits)
+        record = {
+            "version": harvest.BASELINE_VERSION,
+            "project": "alpha",
+            "cutoff": "2025-01-01T00:00:00Z",
+            "actor": "operator",
+            "reason": "authorised retirement",
+            "operation_at": "2025-01-02T00:00:00Z",
+            "affected_sources": affected,
+            "unselected_sources": unselected,
+        }
+        record["identity"] = harvest._baseline_identity("alpha", record["cutoff"], affected)
+        harvest._atomic_json(self.state.baseline_pending_file, record)
+        changed = {str(path): {"offset": 0}}
+        self.state.save_watermark(changed)
+        with self.assertRaisesRegex(harvest.BaselineError, "stale"):
+            self.baseline()
+        self.assertEqual(self.state.load_watermark(), changed)
+        self.assertTrue(self.state.baseline_pending_file.exists())
+
+
 class CuratorCliPreparationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -522,4 +695,8 @@ class CuratorCliPreparationTests(unittest.TestCase):
                 json.dumps(harvest.pending_record(batch, identity, {source: None})), encoding="utf-8"
             )
             self.assertEqual(cli.cmd_advance(), 0)
-        self.assertEqual(transaction.call_count, 3)
+            with mock.patch("triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha"}):
+                self.assertEqual(
+                    cli.cmd_baseline("alpha", "2025-01-01T00:00:00Z", "operator", "authorised retirement"), 0
+                )
+        self.assertEqual(transaction.call_count, 4)

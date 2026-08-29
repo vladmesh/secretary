@@ -54,6 +54,11 @@ class AgentState:
         self.dir = Path(state_dir) if state_dir is not None else STATE_ROOT / agent
         self.watermark_file = self.dir / "watermark.json"
         self.pending_file = self.dir / "pending.json"
+        # Baseline recovery is deliberately separate from a fact-bearing pending batch:
+        # each has a different owner and recovery rule, but both are settled under the
+        # curator cursor-settlement transaction.
+        self.baseline_pending_file = self.dir / "baseline-pending.json"
+        self.baseline_audit_file = self.dir / "baseline-audit.jsonl"
         self.lockfile = self.dir / "lock"
         self.head_profile_file = self.dir / "head_profile.json"
         self.terminal_handle_file = self.dir / "terminal_handle.json"
