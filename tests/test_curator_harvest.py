@@ -1,0 +1,157 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from triggered_agents.agents.curator import harvest
+from triggered_agents.runtime.state import AgentState
+
+
+def claude(text: str) -> str:
+    return json.dumps({"type": "user", "message": {"content": [{"type": "text", "text": text}]}}) + "\n"
+
+
+class CuratorHarvestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.state = AgentState("curator", self.root / "state")
+        self.identity = {"workspace": str(self.root / "curator")}
+        self.limits = harvest.Limits(2, 10_000, 8, 20, 4096, 4096)
+        self.patches = [
+            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=[]),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self) -> None:
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.tmp.cleanup()
+
+    def _persist(self, batch):
+        base = {key: self.state.load_watermark().get(key) for key in batch["pending"]}
+        record = harvest.pending_record(batch, self.identity, base)
+        self.state.ensure_dir()
+        self.state.pending_file.write_text(json.dumps(record), encoding="utf-8")
+        return record
+
+    def test_partial_jsonl_advances_only_the_last_emitted_record(self) -> None:
+        path = self.root / "claude.jsonl"
+        path.write_text(claude("one") + claude("two") + claude("three"), encoding="utf-8")
+        session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+            first = harvest.harvest(self.state, self.identity, self.limits)
+            self.assertEqual([t["text"] for t in first["sessions"][0]["turns"]], ["one", "two"])
+            record = self._persist(first)
+            self.assertEqual(harvest.harvest(self.state, self.identity, self.limits), first)
+            harvest.advance(self.state, record, self.identity)
+            self.state.pending_file.unlink()
+            second = harvest.harvest(self.state, self.identity, self.limits)
+        self.assertEqual([t["text"] for t in second["sessions"][0]["turns"]], ["three"])
+        self.assertEqual(first["pending"][str(path)]["offset"], len(claude("one") + claude("two")))
+
+    def test_partial_hermes_rows_resume_at_last_selected_id(self) -> None:
+        session = {"head": "hermes", "path": "state.db", "session_id": "h", "cwd": "/project"}
+        rows = [
+            {"id": 1, "role": "user", "content": "one", "timestamp": 0, "content_bytes": 3},
+            {"id": 2, "role": "assistant", "content": "two", "timestamp": 0, "content_bytes": 3},
+            {"id": 3, "role": "user", "content": "three", "timestamp": 0, "content_bytes": 5},
+        ]
+        def messages(_session, since, *_limits):
+            return [row for row in rows if row["id"] > since]
+        with mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[session]), mock.patch(
+            "triggered_agents.agents.curator.discover.hermes_messages", side_effect=messages
+        ):
+            first = harvest.harvest(self.state, self.identity, self.limits)
+            record = self._persist(first)
+            harvest.advance(self.state, record, self.identity)
+            self.state.pending_file.unlink()
+            second = harvest.harvest(self.state, self.identity, self.limits)
+        self.assertEqual(first["pending"]["hermes:h"], {"last_id": 2})
+        self.assertEqual([t["text"] for t in second["sessions"][0]["turns"]], ["three"])
+
+    def test_memory_is_selected_and_large_memory_is_rejected_before_prompt(self) -> None:
+        small, large = self.root / "small.md", self.root / "large.md"
+        small.write_text("durable memory", encoding="utf-8")
+        large.write_text("x" * 50, encoding="utf-8")
+        files = [
+            {"head": "claude", "path": str(small), "cwd": "/project"},
+            {"head": "hermes", "path": str(large), "cwd": ""},
+        ]
+        limits = harvest.Limits(5, 100, 5, 10, 100, 20)
+        with mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=files):
+            batch = harvest.harvest(self.state, self.identity, limits)
+        self.assertEqual(batch["memory"][0]["text"], "durable memory")
+        self.assertEqual(batch["rejected"][0]["reason"], "memory-file-too-large")
+        self.assertNotIn(str(large), batch["pending"])
+
+    def test_mismatched_or_stale_pending_never_moves_a_watermark(self) -> None:
+        path = self.root / "claude.jsonl"
+        path.write_text(claude("one"), encoding="utf-8")
+        session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+            batch = harvest.harvest(self.state, self.identity, self.limits)
+        record = self._persist(batch)
+        with self.assertRaises(harvest.PendingError):
+            harvest.advance(self.state, record, {"workspace": "/other"})
+        self.assertEqual(self.state.load_watermark(), {})
+        self.state.save_watermark({str(path): {"offset": 1}})
+        with self.assertRaises(harvest.PendingError):
+            harvest.advance(self.state, record, self.identity)
+        self.assertEqual(self.state.load_watermark(), {str(path): {"offset": 1}})
+
+    def test_legacy_watermark_is_read_and_upgraded_only_when_selected(self) -> None:
+        path = self.root / "claude.jsonl"
+        first = claude("old")
+        path.write_text(first, encoding="utf-8")
+        old_stat = path.stat()
+        path.write_text(first + claude("new"), encoding="utf-8")
+        self.state.save_watermark({str(path): {"lines": 1, "mtime": old_stat.st_mtime, "size": old_stat.st_size}})
+        session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+            batch = harvest.harvest(self.state, self.identity, self.limits)
+        self.assertEqual([t["text"] for t in batch["sessions"][0]["turns"]], ["new"])
+        record = self._persist(batch)
+        harvest.advance(self.state, record, self.identity)
+        self.assertIn("offset", self.state.load_watermark()[str(path)])
+
+    def test_an_already_advanced_record_fails_closed(self) -> None:
+        path = self.root / "claude.jsonl"
+        path.write_text(claude("one"), encoding="utf-8")
+        session = {"head": "claude", "path": str(path), "session_id": "c", "cwd": "/project"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]):
+            batch = harvest.harvest(self.state, self.identity, self.limits)
+        record = self._persist(batch)
+        harvest.advance(self.state, record, self.identity)
+        advanced = self.state.load_watermark()
+        with self.assertRaisesRegex(harvest.PendingError, "stale"):
+            harvest.advance(self.state, record, self.identity)
+        self.assertEqual(self.state.load_watermark(), advanced)
+
+    def test_source_order_and_limit_are_fixed_before_rendering(self) -> None:
+        a, b = self.root / "a.jsonl", self.root / "b.jsonl"
+        a.write_text(claude("a"), encoding="utf-8")
+        b.write_text(claude("b"), encoding="utf-8")
+        sessions = [
+            {"head": "claude", "path": str(b), "session_id": "b", "cwd": "/project"},
+            {"head": "claude", "path": str(a), "session_id": "a", "cwd": "/project"},
+        ]
+        limits = harvest.Limits(1, 10_000, 1, 20, 4096, 4096)
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            batch = harvest.harvest(self.state, self.identity, limits)
+        self.assertEqual([s["path"] for s in batch["sessions"]], [str(a)])
+        self.assertNotIn("\nb\n", harvest.render_markdown(batch))
+
+    def test_legacy_pending_is_refused_without_overwrite(self) -> None:
+        self.state.ensure_dir()
+        self.state.pending_file.write_text(json.dumps({"old": {"lines": 3}}), encoding="utf-8")
+        with self.assertRaisesRegex(harvest.PendingError, "legacy"):
+            harvest.harvest(self.state, self.identity, self.limits)
+        self.assertEqual(json.loads(self.state.pending_file.read_text(encoding="utf-8")), {"old": {"lines": 3}})

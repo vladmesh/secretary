@@ -1603,6 +1603,16 @@ The sources are the live data plane, not a checkout:
   event that answered, that is, one whose result is neither `error` nor `board-unreachable` (the record of a tick the
   gate deferred because the board never accepted a connection): the precheck writes one of those every tick until the
   board and environment come up, so by the raw last event a dead role would look forever fresh.
+
+Curator harvest is bounded before either Markdown or JSON output. Its environment controls maximum signal
+turns, input bytes and sources (TA_CURATOR_MAX_TURNS, TA_CURATOR_MAX_INPUT_BYTES,
+TA_CURATOR_MAX_SOURCES), with record/row and personal-memory caps for source reads. A selected batch is
+stored as versioned, identity-bound pending.json: retrying harvest replays it exactly, and advance checks
+the batch identity and starting cursors before moving only the listed cursors. A legacy line-based
+watermark.json from the disabled installation remains a supported read input and converts a source to its
+byte cursor only after that source is selected and advanced. An unversioned pending file is deliberately
+refused and left untouched. Discovery excludes only the current curator workspace/session, not the Secretary
+checkout or sibling worker, reviewer and observer workspaces.
 - the `pipeline` line is built from the production dispatcher's tick telemetry in its production state file. The
   dispatcher writes it at the end of every terminal tick: time, healthy or degraded, and diagnostics (step, reason,
   error codes). A tick that ended degraded colours the line by itself; the previous healthy tick does not vouch for

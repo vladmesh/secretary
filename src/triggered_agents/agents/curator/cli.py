@@ -4,7 +4,7 @@ Flow the agent follows each run:
   1. `python3 -m triggered_agents curator harvest`  -> redacted batch (markdown) of new
                                      Claude/Hermes/Codex session turns and changed
                                      personal-memory files on stdout, and the pending
-                                     watermark cached on disk.
+                                     identity-bound pending batch cached on disk.
   2. agent extracts durable facts, dedups via memory_search, writes each accepted fact
      through `python3 -m triggered_agents curator memory-write`.
   3. `python3 -m triggered_agents curator advance`  -> moves the watermark past step 1.
@@ -34,10 +34,18 @@ STATE = AgentState("curator")
 
 
 def cmd_harvest(as_json: bool) -> int:
-    with STATE.lock():
-        batch = harvest.harvest(STATE)
-        STATE.ensure_dir()
-        STATE.pending_file.write_text(json.dumps(batch["pending"], ensure_ascii=False), encoding="utf-8")
+    try:
+        with STATE.lock():
+            identity = harvest.current_identity()
+            batch = harvest.harvest(STATE, identity)
+            if batch["pending"] and not STATE.pending_file.exists():
+                base = {key: STATE.load_watermark().get(key) for key in batch["pending"]}
+                record = harvest.pending_record(batch, identity, base)
+                STATE.ensure_dir()
+                STATE.pending_file.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    except harvest.PendingError as exc:
+        print(f"curator: {exc}", file=sys.stderr)
+        return 1
     if as_json:
         print(json.dumps(batch, ensure_ascii=False, indent=2))
     else:
@@ -49,12 +57,16 @@ def cmd_advance() -> int:
     if not STATE.pending_file.is_file():
         print("curator: nothing to advance (run harvest first)", file=sys.stderr)
         return 1
-    pending = json.loads(STATE.pending_file.read_text(encoding="utf-8"))
-    with STATE.lock():
-        harvest.advance(STATE, pending)
-        STATE.pending_file.unlink()
+    try:
+        with STATE.lock():
+            pending = harvest.read_pending(STATE)
+            harvest.advance(STATE, pending)
+            STATE.pending_file.unlink()
+    except harvest.PendingError as exc:
+        print(f"curator: {exc}", file=sys.stderr)
+        return 1
     STATE.log_run("advance")
-    print(f"curator: watermark advanced for {len(pending)} source(s)")
+    print(f"curator: watermark advanced for {len(pending['batch']['pending'])} source(s)")
     return 0
 
 
@@ -84,6 +96,8 @@ def cmd_status() -> int:
     for src, v in mark.items():
         if "lines" in v:
             print(f"  {v['lines']:>6} lines  {Path(src).name}")
+        elif "offset" in v:
+            print(f"  {v['offset']:>6} bytes  {Path(src).name}")
         else:
             print(f"  {v.get('size', 0):>6} bytes  {Path(src).name}")
     return 0

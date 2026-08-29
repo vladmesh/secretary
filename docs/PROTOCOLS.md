@@ -1702,6 +1702,14 @@ Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<proje
 fact is one distilled markdown record. The curator is the writer role; every other agent reads through
 `memory_search`, `memory_get` and `memory_list`.
 
+Curator input is a bounded, two-phase batch protocol. Harvest selects a deterministic prefix of transcript
+records and changed personal-memory files before rendering; its configured turn, byte and source limits
+bound the read as well as the prompt. The selected batch and its partial cursors are written as a versioned
+pending record bound to the current curator workspace/run/session identity. A retry replays that pending
+batch exactly. Advance verifies that identity and each source's starting cursor, then moves only the listed
+cursors. Legacy line-based watermarks remain readable until a selected source advances to a byte cursor;
+unversioned pending data is not guessed, rewritten or advanced.
+
 ### Memory read identity
 
 The Memory MCP endpoint requires FastMCP Bearer authentication. Before a head is opened, its launcher
