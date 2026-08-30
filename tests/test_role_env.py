@@ -45,9 +45,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
     def _ruff_version(root: Path) -> str:
         pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
         dependency = next(
-            item
-            for item in pyproject["project"]["optional-dependencies"]["dev"]
-            if item.startswith("ruff==")
+            item for item in pyproject["project"]["optional-dependencies"]["dev"] if item.startswith("ruff==")
         )
         return dependency.removeprefix("ruff==")
 
@@ -55,17 +53,15 @@ class RuntimeEnvRoleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             expected = self._ruff_version(Path(__file__).resolve().parents[1])
-            (root / "src").symlink_to(
-                Path(__file__).resolve().parents[1] / "src", target_is_directory=True
-            )
+            (root / "src").symlink_to(Path(__file__).resolve().parents[1] / "src", target_is_directory=True)
             ruff = root / ".venv" / "bin" / "ruff"
             ruff.parent.mkdir(parents=True)
             ruff.write_text(
                 "#!/bin/sh\n"
-                "case \"$1\" in\n"
+                'case "$1" in\n'
                 f"  --version) echo 'ruff {expected}' ;;\n"
-                "  check) test \"$2\" = changed.py ;;\n"
-                "  format) test \"$2\" = --check && test \"$3\" = changed.py ;;\n"
+                '  check) test "$2" = changed.py ;;\n'
+                '  format) test "$2" = --check && test "$3" = changed.py ;;\n'
                 "  *) exit 2 ;;\n"
                 "esac\n",
                 encoding="utf-8",
@@ -83,9 +79,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                     with mock.patch.dict(os.environ, base_env, clear=True):
                         version_command = wrap_role_command(role, "ruff --version")
                         lint_commands = (
-                            wrap_role_command(
-                                role, "printf '%s\\0' changed.py | xargs -0r ruff check"
-                            ),
+                            wrap_role_command(role, "printf '%s\\0' changed.py | xargs -0r ruff check"),
                             wrap_role_command(
                                 role, "printf '%s\\0' changed.py | xargs -0r ruff format --check"
                             ),
@@ -94,6 +88,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                         ["/bin/sh", "-c", version_command],
                         cwd=root,
                         env=base_env,
+                        check=False,
                         capture_output=True,
                         text=True,
                     )
@@ -104,6 +99,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                             ["/bin/sh", "-c", command],
                             cwd=root,
                             env=base_env,
+                            check=False,
                             capture_output=True,
                             text=True,
                         )

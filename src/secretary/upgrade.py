@@ -240,7 +240,7 @@ def _declared_ruff_version(product_root: Path) -> str:
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
         raise ValueError(f"cannot read the dev Ruff pin: {exc}") from None
     if not isinstance(dependencies, list):
-        raise ValueError("the dev extra is not a dependency list")
+        raise TypeError("the dev extra is not a dependency list")
     for dependency in dependencies:
         if isinstance(dependency, str) and (match := RUFF_VERSION_RE.fullmatch(dependency)):
             return match.group(1)
@@ -251,7 +251,7 @@ def _ruff_runtime_problem(product_root: Path, venv_python: Path) -> str:
     """Why this venv cannot run the Ruff version its checkout declares, if any."""
     try:
         expected = _declared_ruff_version(product_root)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         return str(exc)
     executable = venv_python.parent / "ruff"
     if not executable.is_file():
