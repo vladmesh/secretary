@@ -1,21 +1,21 @@
 """curator agent — deterministic helpers the curator skill drives via Bash.
 
 Flow the agent follows each run:
-  1. `python3 -m triggered_agents curator harvest [--project <canonical-id>]`  -> redacted batch (markdown) of new
+  1. `python3 -m triggered_agents curator harvest [--project <canonical-id|review:po>]`  -> redacted batch (markdown) of new
                                      Claude/Hermes/Codex session turns and changed
                                      personal-memory files on stdout, and a fact-bearing,
                                      identity-bound pending batch cached on disk. Cursor-only
                                      scans advance before the command returns.
   2. agent extracts durable facts, dedups via memory_search, writes each accepted fact
      through `python3 -m triggered_agents curator memory-write`.
-  3. `python3 -m triggered_agents curator advance [--project <canonical-id>]`  -> moves the watermark past step 1.
+  3. `python3 -m triggered_agents curator advance [--project <canonical-id|review:po>]`  -> moves the watermark past step 1.
 
 An operator can settle an already-reviewed project backlog without running the curator:
 `backlog --project ID --json` emits a metadata-only cutoff identity, and `baseline` accepts that
 identity or the `batch_id` of the one matching pending batch.  Baseline writes no facts or source text.
 
 Two-phase so a crash before the memory commit re-harvests instead of dropping turns.
-`harvest --json` emits the structured batch; `backlog [--project <canonical-id>] [--json]`
+`harvest --json` emits the structured batch; `backlog [--project <canonical-id|review:po>] [--json]`
 reports metadata only without changing state; `sessions` lists discovered sources;
 `status` shows the watermark; `precheck` exits PRECHECK_SKIP (100) when there is nothing new, so
 the systemd gate can skip the run without spinning up a head.
@@ -117,7 +117,7 @@ def _baseline_inputs(
 ) -> tuple[str, str, str, str, str]:
     project = harvest.validate_project(project)
     if project is None:
-        raise harvest.PendingError("curator baseline requires one canonical project")
+        raise harvest.PendingError("curator baseline requires one project or review:po selector")
     if not isinstance(actor, str) or not _BASELINE_ACTOR.fullmatch(actor) or looks_like_credential(actor):
         raise harvest.PendingError("curator baseline actor is malformed")
     if (

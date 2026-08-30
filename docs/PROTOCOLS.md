@@ -1724,12 +1724,13 @@ ad-hoc historical checkout trees; these roots affect curator input only and gran
 directory boundaries and an unambiguous route are required. Empty, relative, unreadable, malformed, unregistered or ambiguous paths are
 `unknown`; installation-wide sources are `global`. An observer workspace named
 `workspaces/observers/sprint-<token>` restores the `sprint:` prefix removed by the dispatcher's token before it
-consults the board. It has no inferred owner: it is project-routed only when its readable sprint record has exactly
-one structured reservation. Harvest, precheck and advance enter the same cursor-settlement
+consults the board. It has no inferred owner: one registered structured reservation routes to that project; multiple
+distinct registered reservations route to the reserved `review:po` selector, while malformed, duplicate or
+unregistered sets remain `unknown`. Harvest, precheck and advance enter the same cursor-settlement
 transaction: a curator-local advisory flock serializes watermark.json and pending.json without owning the dispatcher
-lifecycle. `harvest --project <canonical-id>` filters routes before taking the deterministic bounded prefix; omitted
+lifecycle. `harvest --project <canonical-id|review:po>` filters routes before taking the deterministic bounded prefix; omitted
 `--project` explicitly means all backlog. A pending batch records and signs this selector, so a retry or advance
-with a different selected project or all-backlog mode fails closed. `curator backlog [--project <canonical-id>]
+with a different selected project or all-backlog mode fails closed. `curator backlog [--project <canonical-id|review:po>]
 [--json]` only reports deterministic aggregate route/head metadata (session, signal-turn and memory-file counts plus
 timestamp bounds); selected JSON with no pending batch and baseline-valid cursor state also carries one opaque cutoff
 identity and cursor count. It
@@ -1751,12 +1752,18 @@ successfully without dispatch or cleanup. flock ownership is released by the OS 
 
 `python3 -P -m triggered_agents curator baseline` is the narrow operator path for intentionally settling existing
 curator input without running the curator, changing its schedule, or writing memory facts. It accepts one registered
-canonical project id, an explicit actor, a non-empty one-line reason, and exactly one opaque evidence identity:
+canonical project id or the reserved `review:po` selector, an explicit actor, a non-empty one-line reason, and exactly
+one opaque evidence identity:
 
 ```bash
 python3 -P -m triggered_agents curator backlog --project PROJECT --json
 python3 -P -m triggered_agents curator baseline \
   --project PROJECT --actor OPERATOR --reason 'reviewed historical backlog' --cutoff-id CUTOFF_ID
+
+# The same audited flow settles manually reviewed multi-project observer input.
+python3 -P -m triggered_agents curator backlog --project review:po --json
+python3 -P -m triggered_agents curator baseline \
+  --project review:po --actor OPERATOR --reason 'reviewed multi-project observer backlog' --cutoff-id CUTOFF_ID
 
 # Or settle the exact fact-bearing pending batch already returned by `harvest --json`.
 python3 -P -m triggered_agents curator baseline \

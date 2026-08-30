@@ -37,11 +37,13 @@ def selector(project: str | None) -> str:
 
 
 def validate_project(project: str | None) -> str | None:
-    """Reject a selector that is not a canonical id in the selected instance registry."""
+    """Accept a canonical project id or the reserved PO-review selector."""
     if project is None:
         return None
+    if project == discover.ROUTE_PO_REVIEW:
+        return project
     if project not in discover.registered_project_ids():
-        raise PendingError(f"unknown curator project {project!r}")
+        raise PendingError(f"unknown curator selector {project!r}")
     return project
 
 
@@ -624,7 +626,7 @@ def _cutoff_id(project: str, base: dict, pending: dict) -> str:
 
 
 def baseline_cutoff(st, project: str, limits: Limits | None = None) -> dict:
-    """Build the internal, project-bound cutoff plan for manual settlement.
+    """Build the internal, selector-bound cutoff plan for manual settlement.
 
     The caller exposes only ``cutoff_id`` and the cursor count.  This internal plan
     binds current starting cursors and exact complete terminal cursors without parsing
@@ -632,7 +634,7 @@ def baseline_cutoff(st, project: str, limits: Limits | None = None) -> dict:
     """
     project = validate_project(project)
     if project is None:
-        raise PendingError("curator baseline requires one canonical project")
+        raise PendingError("curator baseline requires one project or review:po selector")
     mark, limits = _baseline_watermark(st), limits or Limits.from_env()
     sources, pending = _baseline_sources(project), {}
     for key, descriptor in sorted(sources.items()):
@@ -657,10 +659,10 @@ def baseline_cutoff(st, project: str, limits: Limits | None = None) -> dict:
 
 
 def baseline_pending(st, identity: dict, project: str, batch_id: str) -> dict:
-    """Validate an existing matching pending batch as a project-only settlement plan."""
+    """Validate an existing matching pending batch as a selector-only settlement plan."""
     project = validate_project(project)
     if project is None:
-        raise PendingError("curator baseline requires one canonical project")
+        raise PendingError("curator baseline requires one project or review:po selector")
     record = read_pending(st, identity, project)
     if record["batch_id"] != batch_id:
         raise PendingError("curator baseline batch evidence does not match pending state")
