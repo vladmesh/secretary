@@ -93,6 +93,7 @@ unit tests/test_sprint_restore.py
 unit tests/test_sprints.py
 unit tests/test_state_repo.py
 unit tests/test_status.py
+integration-board tests/test_standing_agent_entrypoint.py
 unit tests/test_task_commands.py
 unit tests/test_tasks.py
 integration-board tests/test_triggered_dispatch.py
