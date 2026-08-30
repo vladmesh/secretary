@@ -20,7 +20,7 @@ from secretary.board.card_transitions import CARD_TRANSITIONS
 from secretary.board.host import TransitionRequest
 from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
-from secretary.board.steward_reports import StewardReportBoard
+from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.board_transport import BoardTransport
 from secretary.cli import main
@@ -211,6 +211,50 @@ class TaskReaderTests(unittest.TestCase):
             client.batch_calls[0],
             [("getTaskMetadata", {"task_id": 12}), ("getTaskMetadata", {"task_id": 14})],
         )
+
+    def test_steward_signal_cards_are_bounded_normalized_and_filtered(self) -> None:
+        cards = self.reader.steward_signal_cards(states={"ready"}, project="secretary")
+
+        self.assertEqual(
+            cards,
+            [
+                {
+                    "reference": "secretary-468",
+                    "state": "ready",
+                    "column": "Ready",
+                    "project": "secretary",
+                    "date_moved": None,
+                    "steward_report": "1",
+                }
+            ],
+        )
+        self.assertEqual(len(self.client.batch_calls), 1)
+        self.assertEqual(
+            self.client.batch_calls[0],
+            [("getTaskMetadata", {"task_id": 12}), ("getTaskMetadata", {"task_id": 13})],
+        )
+        self.assertEqual(set(cards[0]), {"reference", "state", "column", "project", "date_moved", "steward_report"})
+        self.assertIsInstance(StewardSignalBoard(self.reader).active_cards(states={"ready"}), list)
+
+    def test_steward_signal_cards_reject_invalid_backend_shapes(self) -> None:
+        with self.assertRaisesRegex(TaskError, "unknown task states") as raised:
+            self.reader.steward_signal_cards(states={"not-a-state"})
+        self.assertEqual(raised.exception.code, "validation")
+        original_call = self.client.call
+        with (
+            mock.patch.object(
+                self.client,
+                "call",
+                side_effect=lambda method, **params: ["not-a-card"]
+                if method == "getAllTasks"
+                else original_call(method, **params),
+            ),
+            self.assertRaisesRegex(TaskError, "invalid task list"),
+        ):
+            self.reader.steward_signal_cards()
+        self.client.metadata[12] = "not-a-map"  # type: ignore[assignment]
+        with self.assertRaisesRegex(TaskError, "invalid task metadata"):
+            self.reader.steward_signal_cards()
 
 
 class TaskCliTests(unittest.TestCase):

@@ -61,7 +61,7 @@ def cmd_scan(as_json: bool) -> int:
     return 0
 
 
-def cmd_advance() -> int:
+def cmd_advance(reader: signals.StewardSignalReader | None = None) -> int:
     if not STATE.pending_file.is_file():
         print("steward: nothing to advance (run scan first)", file=sys.stderr)
         return 1
@@ -74,8 +74,8 @@ def cmd_advance() -> int:
         # triggered-agents-244 note Z2).
         current_blocked = {
             c["reference"]
-            for c in signals.pipeline_ops.list_cards(column="Blocked")
-            if c.get("steward_report") != "1"
+            for c in signals.resolve_reader(reader).active_cards(states={"blocked"})
+            if c["steward_report"] != "1"
         }
         pending["notified_blocked"] = sorted(set(pending["notified_blocked"]) | current_blocked)
         STATE.save_watermark(pending)

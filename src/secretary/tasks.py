@@ -550,6 +550,47 @@ class TaskReader:
             )
         return reports
 
+    def steward_signal_cards(
+        self, *, states: set[str] | None = None, project: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return the bounded operational card view used by steward anomaly reads.
+
+        This is deliberately narrower than :meth:`list`: it exposes only the
+        active-card fields a watchdog needs and keeps Kanboard rows private.
+        Metadata is fetched once for the active board snapshot, never per card.
+        """
+        if states is not None and (unknown := states - set(_STATE_BY_COLUMN.values())):
+            raise TaskError("validation", f"unknown task states: {sorted(unknown)}", 2)
+        project_id, columns, _ = self._board()
+        raw = self.client.call("getAllTasks", project_id=project_id, status_id=1)
+        if not isinstance(raw, list) or any(not isinstance(card, dict) for card in raw):
+            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+        metadata = self._metadata_of(raw)
+        cards: list[dict[str, Any]] = []
+        for card in raw:
+            task_id = _task_number(card)
+            column = columns.get(_positive_int(card.get("column_id")) or -1)
+            state = _STATE_BY_COLUMN.get(column or "")
+            if state is None:
+                raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+            meta = metadata[task_id]
+            card_project = _text(meta.get("project"))
+            if states is not None and state not in states:
+                continue
+            if project is not None and card_project != project:
+                continue
+            cards.append(
+                {
+                    "reference": _text(card.get("reference")),
+                    "state": state,
+                    "column": column,
+                    "project": card_project,
+                    "date_moved": _positive_int(card.get("date_moved")),
+                    "steward_report": _text(meta.get("steward_report")),
+                }
+            )
+        return cards
+
     def export(self) -> list[dict[str, Any]]:
         """Return the complete legacy checkpoint projection in bounded board reads.
 

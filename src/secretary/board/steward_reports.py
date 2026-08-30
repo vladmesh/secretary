@@ -43,3 +43,15 @@ class StewardReportBoard:
             target=target,
             reason=reason,
         )
+
+
+class StewardSignalBoard:
+    """Secretary-owned implementation of the steward's structural read port."""
+
+    def __init__(self, reader: TaskReader) -> None:
+        self.reader = reader
+
+    def active_cards(
+        self, *, states: set[str] | None = None, project: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.reader.steward_signal_cards(states=states, project=project)
