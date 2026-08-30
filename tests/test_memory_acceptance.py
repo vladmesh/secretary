@@ -17,13 +17,17 @@ except ImportError:
     memory_service = None
 
 from secretary.memory import access
+from tests.integration_setup import require_integration_setup
 from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef
 from triggered_agents.runtime.head.identity import publish_heartbeat
 
 
-@unittest.skipIf(memory_service is None, "secretary[memory] is not installed")
 class MemoryScopeAcceptanceTests(unittest.TestCase):
     """A safe isolated matrix over the production token verifier and read tools."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        require_integration_setup(memory_service, "secretary[memory] is not installed")
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
