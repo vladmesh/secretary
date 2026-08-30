@@ -71,10 +71,7 @@ EPISODE_VERSION = 1
 BASIS_TOKEN_LIMIT = 80
 BASIS_ENTRY_LIMIT = 10
 
-# The sources whose axis is Progress. An episode that has ever seen one of these answer --
-# a cursor on file or a dark entry in ``unavailable_since`` -- has witnessed progress
-# evidence, which is what separates "the progress channel broke" (freeze, never spend)
-# from "nothing but the pid has ever spoken here" (issue 656: bare existence ages).
+# Progress sources distinguish a broken observed channel from pid-only aging.
 _PROGRESS_SOURCES = frozenset({SnapshotSource.PROVIDER_CURSOR.value})
 
 
@@ -167,24 +164,8 @@ class VitalityEpisode:
     # Structured provenance: which sources and axes drove the verdict, newest reduction last.
     basis: tuple[str, ...] = ()
     reason: str = ""
-    # Owned by the recovery policy (card S1-5). The reducer neither sets nor reads any of
-    # them; ``replace`` carries them through every reduction untouched, which is exactly how
-    # rung state survives from one tick's decision to the next.
-    #
-    # ``recovery_rung`` is the ladder position this head's current intervention episode has
-    # reached (0 none, 1 suspicion noted, 2 SIGCONT sent, 3 response window running,
-    # 4 operator escalated -- see ``head_vitality_policy``).
-    #
-    # ``recovery_span_started_at`` is the freeze stamp (``stall_frozen_since`` value) of the
-    # suspension span those rungs were climbed in. Keying the rung to the span is what makes
-    # SIGCONT-once-per-span work across ticks and dispatcher restarts: a resumed-and-
-    # re-suspended head starts a new span and therefore a fresh ladder, while every tick
-    # inside one span sees the same key.
-    #
-    # ``deterministic_refusals`` counts consecutive observations whose reason carried an
-    # authoritative deterministic terminal class (the 1194 allowlist). It is deliberately
-    # NOT keyed to the suspension span: a launch-refusal loop is not a suspension story, and
-    # a resumed head does not un-refuse the command that refused.
+    # Policy-owned recovery state survives reductions; rungs are keyed by suspension span,
+    # while deterministic launch refusals remain consecutive across spans.
     recovery_rung: int = 0
     recovery_span_started_at: float = 0.0
     deterministic_refusals: int = 0
@@ -304,9 +285,7 @@ class VitalityEpisode:
             raise HeadVitalityError("vitality episode recovery rung is a non-negative int")
         if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
             raise HeadVitalityError("vitality episode activity epoch is a non-negative int")
-        # Fields the recovery policy (S1-5) added: absent on records written before it ran,
-        # which is exactly "no rung climbed yet" -- mapped to their zero values rather than
-        # refused, so pre-policy episodes load and keep deciding.
+        # Missing recovery fields mean no rung or deterministic refusal has been recorded.
         span = payload.get("recovery_span_started_at", 0.0)
         refusals = payload.get("deterministic_refusals", 0)
         if isinstance(refusals, bool) or not isinstance(refusals, int) or refusals < 0:
@@ -364,8 +343,7 @@ def reduce_vitality(
 
     target_run_id, foreign = _resolve_run_id(previous, snapshots)
     owned = _latest_per_source([snapshot for snapshot in snapshots if snapshot.run_id == target_run_id])
-    # ``basis`` is durable provenance that tests and humans compare; it is built from sorted
-    # sources so batch order cannot change the words a deterministic reduction writes.
+    # Sort sources so durable provenance is independent of batch order.
     basis = [f"dropped-foreign-run:{name}" for name in sorted(foreign)]
     if previous is not None and previous.run_id != target_run_id:
         basis.append(f"identity-changed-from:{previous.run_id}")
@@ -496,29 +474,8 @@ def reduce_vitality(
         else:
             verdict = VitalityVerdict.HEALTHY_QUIET
     elif strong:
-        # A strong channel answered about the process but none could speak about progress
-        # (the pid heartbeat alone, or a provider still on its first observation). Two
-        # sub-cases the plan separates, and conflating them caused the incidents:
-        #
-        #   * A progress source this episode has *witnessed* -- it left a cursor, or it is
-        #     tracked dark in ``unavailable_since`` -- has evidence on file. Its silence is
-        #     unavailability, and unavailable evidence freezes instead of spending (the
-        #     plan's ``Unavailable != no progress``; sprint Done-when: an unavailable source
-        #     never feeds the stall counter), so no NEW stall time accrues here: a broken
-        #     channel must not age a live head toward its death.
-        #   * No progress source has ever answered: the pid is this episode's only witness.
-        #     The run is provably alive, and claiming ``quiet`` would assert an observation
-        #     nobody made -- but neither may it rest healthy forever. Issue 656's contract
-        #     is that the existence of a process is not proof of liveness, so the pid's own
-        #     sustained answer of "running, and nothing else" ages from the same reference
-        #     every quiet conclusion uses. The absent source contributes no vote of its
-        #     own: it is neither progress (the reference never moves) nor quiet (no
-        #     ``quiet:<n>s`` token names it).
-        #
-        # In both arms the sticky-confirmation invariant holds unchanged (only progress,
-        # suspension, death or an identity change ends an earned confirmation): a phase the
-        # ladder has already reached is preserved below, never demoted by its observers'
-        # silence.
+        # A witnessed dark progress source freezes stall time; pid-only runs age without
+        # inventing progress evidence. Either path preserves an earned confirmation.
         reference = episode.last_progress_at or episode.started_at
         quiet_seconds = max(0.0, now - reference)
         basis.append(
@@ -530,19 +487,7 @@ def reduce_vitality(
             or episode.evidence_cursors.keys() & _PROGRESS_SOURCES
         )
         if progress_witnessed:
-            # The freeze arm: no new stall time accrues while the witnessed progress source
-            # is silent. One exception, and it is the sticky-confirmation invariant, not an
-            # aging rule: a confirmation the ladder already EARNED on real quiet evidence
-            # is not laundered back to health by its observers going dark -- exactly as in
-            # the all-strong-dark branch below. Only progress, suspension, death or an
-            # identity change ends it; its onset stands so the phase stays auditable.
-            # A dark source never advances AND never rewinds a phase. Whatever the ladder has
-            # EARNED on real evidence before the channel went dark stands frozen -- with its
-            # onset -- until one of the four authorised endings moves it; only phases below
-            # suspicion stay (truthfully) at HealthyQuiet, because freezing must not invent
-            # a suspicion nobody earned. The dark channel's own diagnostic still rides on
-            # ``reason`` (see the tail of this function): a launch refusal must stay readable
-            # for the policy's deterministic allowlist even while the pid keeps the head alive.
+            # Dark sources freeze an earned phase and preserve their diagnostic for policy.
             if episode.verdict is VitalityVerdict.CONFIRMED_STALL:
                 verdict = VitalityVerdict.CONFIRMED_STALL
                 episode = replace(
@@ -583,9 +528,7 @@ def reduce_vitality(
                     ),
                 )
         elif quiet_seconds >= thresholds.suspect_after + thresholds.confirm_after:
-            # The pid-only aging arm: no progress source has ever answered, so issue 656's
-            # "existence is not liveness" applies and the pid's own long silence about
-            # progress climbs the ladder from the episode's reference.
+            # A pid-only run ages: existence alone is not liveness.
             verdict = VitalityVerdict.CONFIRMED_STALL
             episode = replace(
                 episode,
@@ -638,12 +581,7 @@ def reduce_vitality(
     return replace(
         episode,
         verdict=verdict,
-        # A dark source's own bounded diagnostic rides on the episode's reason whenever no
-        # conclusion of our own claims the field: the recovery policy (S1-5) keys its
-        # deterministic-refusal allowlist on exactly this string, so a launch refusal like
-        # ``terminal_split_source_not_found`` must survive reduction, not be flattened into
-        # an anonymous "nothing answered". Verdicts that DO write a reason (stalls,
-        # suspension) keep theirs -- those conclusions outrank quoting a channel.
+        # Preserve a dark source diagnostic unless a stronger conclusion supplies one.
         reason=episode.reason
         if episode.reason
         else next(

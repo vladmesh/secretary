@@ -126,11 +126,7 @@ class OrcaLegacyHeadRuntime:
     ) -> None:
         self._session = session
         self.activity = activity or HeadActivity()
-        # One lock for every verb of every head this runtime owns, held across the session-manager
-        # call each verb makes. Per-head locks would let two heads be worked on at once, which is
-        # true but buys nothing here: a verb is one Orca call, the dispatcher drives them from one
-        # tick, and a single lock is the version of this whose critical sections are obviously
-        # non-overlapping. It is reentrant because `stop_if_quiescent` performs `stop`.
+        # Serialize all head verbs, including the nested stop in `stop_if_quiescent`.
         self._lock = threading.RLock()
 
     @property
@@ -356,12 +352,7 @@ class OrcaLegacyHeadRuntime:
             try:
                 panes = list(self.host.panes(run.workspace))
             except PaneHostError as exc:
-                # An observation that raised is an observation that could not be made. It is
-                # emphatically not evidence that the pane is gone: reporting it as absent is how a
-                # live head loses its pane to a replacement opened beside it. Only the pane host's
-                # own refusal is classified here — a session manager failing on some other terms is
-                # not a fact about this head, and swallowing it would hide it from the caller that
-                # does know what it means.
+                # An unreadable observation is not evidence that the pane is absent.
                 return _unobservable(
                     run,
                     OBSERVE_INVENTORY_UNREADABLE,
@@ -615,13 +606,7 @@ class OrcaLegacyHeadRuntime:
         if not isinstance(initiator, StopInitiator):
             raise TypeError("a stop names who ended the head")
         with self._lock:
-            # The epoch is compared first, and it is the thing that actually guards this stop. The
-            # lease below can be reclaimed from the backend, so it is not a barrier a caller can
-            # rely on; the epoch is, because it moves for every prompt this runtime typed and every
-            # line the pane printed since the caller formed its judgement. That is why the caller
-            # owes an epoch read at the moment it decided this head was finished, not one read in
-            # the argument list of this call: activity between the judgement and the stop has to
-            # refuse the stop, and an epoch read here would have already absorbed it.
+            # The epoch fences activity since the caller decided this head was finished.
             epoch = self.activity.epoch(run.run_id)
             if epoch != expected_activity_epoch:
                 return StopReceipt(
@@ -633,16 +618,7 @@ class OrcaLegacyHeadRuntime:
                 )
             held = self.activity.lease(run.run_id)
             if held is not None and not head_process_alive:
-                # The caller established this head's process is gone, by the pid heartbeat it
-                # already read to decide the head needed replacing. A lease outstanding on a
-                # process that no longer exists is stale by definition — the turn it names ended
-                # when the process did — so it is closed here and the pane is never asked.
-                #
-                # Not asking is the whole repair. The probe below says `busy` for the bare wrapper
-                # shell a dead head leaves behind exactly as it does for a working agent, so asking
-                # it here refused the rotation in precisely the state the rotation exists for, and
-                # refused it forever: nothing on this path moves the epoch or closes the lease, so
-                # the next tick got the same answer, and the one after that.
+                # A dead process invalidates its lease; do not probe its surviving wrapper shell.
                 self.activity.release(run.run_id)
                 held = None
             if held is not None:

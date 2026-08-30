@@ -416,12 +416,7 @@ class Supervisor:
             try:
                 self._begin()
             except BaseException:
-                # The window between forking the head and finishing the bring-up. Everything the
-                # `finally` below does is about letting go, and letting go of a pty master hangs
-                # the head up — which is a request, not an ending: a head that ignores `SIGHUP`
-                # survives its supervisor's failure, orphaned, holding this run id against the
-                # restart that would otherwise take the run over. So the head this process forked
-                # and never took ownership of is ended here, by the supervisor that forked it.
+                # A failed bring-up must end the forked head: closing a pty only requests SIGHUP.
                 self._abandon_head()
                 raise
             while self._head_status is None:
@@ -1293,12 +1288,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return supervisor.run()
     except Exception as exc:  # noqa: BLE001 - the launcher is owed the reason, whatever it is
-        # A launcher still waiting is owed a name for this, or it learns nothing until its own
-        # timeout, having been left a socket file that answers nobody. Which name depends on what
-        # actually happened: a failure before `run.started` is a run that never came up, and one
-        # after it is a run that was up and lost its supervisor. Calling the second a *startup*
-        # error would leave a head that worked for an hour described by a file that says it never
-        # started, so the two get different names and different exit codes.
         name, reason, code = failure_of(supervisor.started)
         where = "after the run was up" if supervisor.started else "on the way up"
         _write_failure(run_dir, name, reason, f"the supervisor failed {where}: {exc!r}")
