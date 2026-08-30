@@ -40,6 +40,7 @@ from secretary.tasks import (
     TaskReader,
     TaskWriter,
     is_significant_observer_event,
+    specification_revision,
     standing_decision,
 )
 from tests.fakes.board import BatchedCalls
@@ -1081,6 +1082,10 @@ class TaskWriterTests(unittest.TestCase):
         self.assertIsNone(payload["title_sha256"])
         self.assertEqual(payload["head"], "codex-terra")
         self.assertEqual(payload["review_head"], "claude-opus")
+        self.assertEqual(
+            specification_revision(self.writer.audit.events("secretary-468"), "revised spec"),
+            event["event_id"],
+        )
 
     def test_edit_retry_does_not_repeat_backend_write(self) -> None:
         first = self.writer.edit(

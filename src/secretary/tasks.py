@@ -217,6 +217,36 @@ def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def specification_revision(events: Iterable[dict[str, Any]], description: str) -> str:
+    """Return the durable event id of the description the card currently exposes.
+
+    A digest identifies content, but not an edit that returns a card to earlier text. The latest
+    create/edit event which wrote the current digest is therefore the revision boundary. Legacy,
+    malformed, or divergent history deliberately has no boundary: callers that would otherwise
+    replay an instruction must fail closed.
+    """
+    current_digest = _digest(description)
+    latest: dict[str, Any] | None = None
+    for event in events:
+        if str(event.get("kind") or "") not in {"created", "edited"}:
+            continue
+        payload = _event_payload(event)
+        digest = payload.get("description_sha256")
+        if digest is None:
+            # A title/routing-only edit does not create a specification revision.
+            continue
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return ""
+        latest = event
+    if latest is None:
+        return ""
+    payload = _event_payload(latest)
+    if payload.get("description_sha256") != current_digest:
+        return ""
+    revision = latest.get("event_id")
+    return revision if isinstance(revision, str) and revision else ""
+
+
 def _check_execution_record(task: dict[str, Any]) -> None:
     """Reject a Product or an Issue on an execution-task path, before any write."""
     if task.get("record_type") in _TYPED_RECORD_TYPES:
@@ -1641,6 +1671,8 @@ class TaskWriter:
         body = self._redact_for_board(body)
         if kind not in {"green", "red"} or not body.strip():
             raise TaskError("validation", "verdicts require a non-empty body", 2)
+        current = self.reader.show(reference)
+        revision = specification_revision(self.audit.events(reference), current["description"])
         return self._marker_write(
             action="verdict",
             event_kind=EventKind.CARD_VERDICTED,
@@ -1649,7 +1681,14 @@ class TaskWriter:
             reference=reference,
             reason=body,
             request_id=request_id,
-            data={"marker": f"review:{kind}", "status": kind, "body": body, "body_sha256": _digest(body)},
+            data={
+                "marker": f"review:{kind}",
+                "status": kind,
+                "body": body,
+                "body_sha256": _digest(body),
+                "description_sha256": _digest(current["description"]),
+                "specification_revision": revision or None,
+            },
         )
 
     def decide(
@@ -1687,6 +1726,18 @@ class TaskWriter:
                     message = "request id belongs to another operation or payload"
                 raise TaskError("validation", message, 2) from None
             if owned is not None:
+                # A retry must carry the immutable binding which the first decision committed.
+                # Do not re-derive it from mutable board state or drop it from the marker identity.
+                owned_data = owned.data if isinstance(owned.data, dict) else {}
+                replay_data = {
+                    "marker": f"decision:{kind}",
+                    "decision": kind,
+                    "body": body,
+                    "body_sha256": _digest(body),
+                }
+                for field_name in ("description_sha256", "specification_revision"):
+                    if field_name in owned_data:
+                        replay_data[field_name] = owned_data[field_name]
                 return self._marker_write(
                     action="decided",
                     event_kind=EventKind.CARD_DECIDED,
@@ -1695,12 +1746,7 @@ class TaskWriter:
                     reference=reference,
                     reason=body,
                     request_id=request_id,
-                    data={
-                        "marker": f"decision:{kind}",
-                        "decision": kind,
-                        "body": body,
-                        "body_sha256": _digest(body),
-                    },
+                    data=replay_data,
                 )
             current = self.reader.show(reference)
             # Authorization before anything about the card: which sprint holds the project is the
@@ -1731,6 +1777,11 @@ class TaskWriter:
                 "body": body,
                 "body_sha256": _digest(body),
                 "assessment_visit": visit or None,
+                "description_sha256": _digest(current["description"]),
+                "specification_revision": specification_revision(
+                    committed_events, current["description"]
+                )
+                or None,
             }
             if current["state"] != "assessment":
                 raise TaskError(

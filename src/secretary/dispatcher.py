@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -425,6 +426,7 @@ from secretary.tasks import (
     TaskReader,
     TaskWriter,
     durability_dirt,
+    specification_revision,
     standing_decision,
 )
 from triggered_agents.agents.pipeline.heads import (
@@ -965,6 +967,9 @@ class CommandHostRuntime:
     def __init__(self, catalog: InstanceCatalog, data_dir: Path, *, mode: str = "real") -> None:
         self.catalog = catalog
         self.data_dir = data_dir
+        # TASK.md is a durable projection, so its feedback selector reads the same audit journal
+        # as the dispatcher rather than depending on a live record or wall-clock ordering.
+        self.audit = TaskAudit(data_dir)
         self.mode = mode
         # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
         # save. Its durable-state owner installs this only while it holds the record's file: this
@@ -3661,7 +3666,7 @@ class CommandHostRuntime:
             "subagents or child agents. Use ordinary tools directly when needed.",
             "",
         ]
-        decision = (decision or "").strip()
+        decision, review_red = self._select_revision_bound_worker_feedback(task, decision)
         if decision:
             # Rendered above the findings it was made on, and named as the thing to follow.
             sections += [
@@ -3677,7 +3682,6 @@ class CommandHostRuntime:
                 decision,
                 "",
             ]
-        review_red = _last_review_red_body(task)
         if review_red and decision:
             sections += [
                 "## Reviewer findings, as supporting context (previous submission was RED)",
@@ -3832,6 +3836,66 @@ class CommandHostRuntime:
             "",
         ]
         return "\n".join(sections)
+
+    def _select_revision_bound_worker_feedback(
+        self, task: dict[str, Any], decision: str
+    ) -> tuple[str, str | None]:
+        """Select only review/decision instructions bound to this description revision.
+
+        The board keeps comments forever, while `TASK.md` must only carry instructions for the
+        specification it renders. Missing, malformed, or non-unique bindings intentionally
+        produce no historical instruction; the current card description remains the work item.
+        """
+        events = self.audit.events(str(task.get("ref") or ""))
+        description = str(task.get("description") or "")
+        revision = specification_revision(events, description)
+        if not revision:
+            return "", None
+        digest = hashlib.sha256(description.encode("utf-8")).hexdigest()
+        decision = (decision or "").strip()
+        if decision:
+            if not self._bound_marker_body(task, events, "decision:rework", revision, digest, decision):
+                return "", None
+            review = self._bound_marker_body(task, events, "review:red", revision, digest)
+            return decision, review
+        return "", self._bound_marker_body(task, events, "review:red", revision, digest)
+
+    @staticmethod
+    def _bound_marker_body(
+        task: dict[str, Any],
+        events: list[dict[str, Any]],
+        marker: str,
+        revision: str,
+        description_digest: str,
+        required_body: str = "",
+    ) -> str | None:
+        """Return the latest uniquely located marker body with an exact spec binding."""
+        comments = task.get("comments") or []
+        for event in reversed(events):
+            data = event.get("data") if isinstance(event.get("data"), dict) else event.get("payload")
+            if not isinstance(data, dict) or data.get("marker") != marker:
+                continue
+            if (
+                data.get("specification_revision") != revision
+                or data.get("description_sha256") != description_digest
+            ):
+                continue
+            body = data.get("body")
+            occurrence = data.get("marker_occurrence")
+            if not isinstance(body, str) or not body.strip() or not isinstance(occurrence, int) or occurrence < 1:
+                return None
+            if required_body and body.strip() != required_body:
+                continue
+            rendered = f"[{marker}]\n{body}"
+            matches = [
+                comment
+                for comment in comments
+                if comment.get("marker") == marker and comment.get("body") == rendered
+            ]
+            if len(matches) < occurrence:
+                return None
+            return body.strip()
+        return None
 
     def _review_prompt(
         self,

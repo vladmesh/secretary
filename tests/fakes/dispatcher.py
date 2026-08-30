@@ -37,7 +37,7 @@ from secretary.projects.contract import (
 )
 from secretary.routing_journal import HeadRun, head_run_from_profile
 from secretary.sprints import SPRINT_BOARD_NAME
-from secretary.tasks import TaskError
+from secretary.tasks import TaskAudit, TaskError
 from tests.fakes.board import BatchedCalls
 from tests.head_registry import write_installed_pair
 from triggered_agents.runtime.head import operations as head_ops
@@ -703,6 +703,9 @@ class FakeCatalog:
 class FakeHost:
     def __init__(self, root: Path, catalog: FakeCatalog | None = None) -> None:
         self.root = root
+        # The real task-document selector reads the dispatcher audit. Fixture roots are the
+        # workspaces directory below that audit owner.
+        self.audit = TaskAudit(root.parent)
         # The real host snapshots the head at bring-up and hands the record back; the fake goes
         # through the same catalog so the routing journal sees real configurations here too.
         self.catalog = catalog or FakeCatalog()
@@ -830,6 +833,9 @@ class FakeHost:
         # launch, so both can be interrupted there. Fires once and clears itself, so the tick that
         # recovers runs the same path for real.
         self.crash_after_task_doc: BaseException | None = None
+
+    _select_revision_bound_worker_feedback = CommandHostRuntime._select_revision_bound_worker_feedback
+    _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)
 
     def _write_task_doc(
         self, task: dict, workspace: Path, attempt_id: str, generation: int, decision: str = ""
