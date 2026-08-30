@@ -27,7 +27,7 @@ jobs:
         run: >-
           python3 scripts/ci_test_shards.py --suite "${{ matrix.suite }}"
           --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
-          --candidate-sha "$GITHUB_SHA"
+          --candidate-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Write suite evidence summary
         if: ${{ always() }}
         continue-on-error: true
@@ -40,7 +40,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: ci-evidence-${{ matrix.suite }}-${{ github.sha }}
+          name: ci-evidence-${{ matrix.suite }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/ci-evidence/${{ matrix.suite }}
           if-no-files-found: error
           retention-days: 14

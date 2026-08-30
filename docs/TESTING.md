@@ -17,8 +17,9 @@ Each exact-SHA suite execution writes its GitHub step summary and uploads the
 `ci-evidence-<suite>-<sha>` artifact. Its artifact root contains `report.json`, `junit.xml` and
 `test-output.log`; the log contains all output up to 1,000,000 bytes and carries an explicit
 truncation marker if it reaches that boundary. Artifacts, including the JUnit XML, are retained for
-14 days. The summary names the candidate SHA, outcome, counts, duration, slowest tests and concise
-failure locations.
+14 days. For pull requests, `<sha>` is the branch-head candidate SHA; for other events it is
+`github.sha`. The summary names the same candidate SHA, outcome, counts, duration, slowest tests
+and concise failure locations.
 
 The test job remains the aggregate required result and succeeds only when every applicable suite
 succeeds. Its own summary lists each suite as `success`, `product_failure`,

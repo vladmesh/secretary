@@ -247,16 +247,96 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertLess(elapsed, 2)
         self.assertIn("timed out after 0.5 seconds; test child was stopped", stderr.getvalue())
 
-    def test_workflow_keeps_a_test_aggregator_after_all_suites(self) -> None:
+    def test_workflow_publishes_and_preserves_reported_suite_evidence(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(
             encoding="utf-8"
         )
 
         for suite in SUITES:
             self.assertIn(suite, workflow)
-        self.assertIn("python3 scripts/ci_test_shards.py --suite", workflow)
-        self.assertIn("needs: test_suites", workflow)
-        self.assertIn("name: test", workflow)
+        candidate_sha = "${{ github.event.pull_request.head.sha || github.sha }}"
+        self.assertIn(f'--candidate-sha "{candidate_sha}"', workflow)
+        self.assertNotIn('--candidate-sha "$GITHUB_SHA"', workflow)
+        self.assertIn(
+            f"name: ci-evidence-${{{{ matrix.suite }}}}-{candidate_sha}",
+            workflow,
+        )
+        self.assertIn(
+            f"""      - name: Run reported suite
+        id: run_suite
+        continue-on-error: true
+        run: >-
+          python3 scripts/ci_test_shards.py --suite "${{{{ matrix.suite }}}}"
+          --report-dir "$RUNNER_TEMP/ci-evidence/${{{{ matrix.suite }}}}"
+          --candidate-sha "{candidate_sha}""",
+            workflow,
+        )
+        self.assertIn(
+            """      - name: Write suite evidence summary
+        if: ${{ always() }}
+        continue-on-error: true
+        run: >-
+          python3 scripts/ci_test_shards.py --summary
+          --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
+          >> "$GITHUB_STEP_SUMMARY""",
+            workflow,
+        )
+        self.assertIn(
+            f"""      - name: Upload suite JUnit and bounded log
+        if: ${{{{ always() }}}}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-${{{{ matrix.suite }}}}-{candidate_sha}
+          path: ${{{{ runner.temp }}}}/ci-evidence/${{{{ matrix.suite }}}}
+          if-no-files-found: error
+          retention-days: 14""",
+            workflow,
+        )
+        self.assertIn(
+            """      - name: Preserve suite result
+        if: ${{ always() }}
+        run: >-
+          python3 scripts/ci_test_shards.py --summary
+          --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
+          > /dev/null""",
+            workflow,
+        )
+
+    def test_workflow_aggregate_downloads_and_classifies_all_suite_evidence(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            """  test:
+    name: test
+    if: ${{ always() }}
+    needs: test_suites""",
+            workflow,
+        )
+        self.assertIn(
+            """      - name: Download suite evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ci-evidence-*
+          path: ${{ runner.temp }}/ci-evidence
+          merge-multiple: false""",
+            workflow,
+        )
+        self.assertIn(
+            """      - name: Require and classify every test suite
+        env:
+          SUITES_RESULT: ${{ needs.test_suites.result }}
+        run: >-
+          python3 scripts/ci_test_shards.py --aggregate
+          --evidence-dir "$RUNNER_TEMP/ci-evidence"
+          --needs-result "$SUITES_RESULT"
+          >> "$GITHUB_STEP_SUMMARY""",
+            workflow,
+        )
 
     def _write_report(self, directory: Path, evidence: SuiteEvidence) -> None:
         directory.mkdir(parents=True, exist_ok=True)
