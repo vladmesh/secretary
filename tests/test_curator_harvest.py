@@ -483,6 +483,31 @@ class CuratorBaselineTests(unittest.TestCase):
                 )
         self.assertEqual(len(self._audit_rows()), 1)
 
+    def test_cutoff_migrates_valid_legacy_line_cursor_without_reprocessing_it(self) -> None:
+        alpha, beta, sessions = self._sessions(alpha_text="already reviewed", beta_text="unrelated")
+        alpha.write_text(claude("already reviewed") + claude("skip this too"), encoding="utf-8")
+        stat = alpha.stat()
+        self.state.save_watermark(
+            {
+                str(alpha): {"lines": 1, "mtime": stat.st_mtime, "size": stat.st_size},
+                str(beta): {"lines": 1, "mtime": beta.stat().st_mtime, "size": beta.stat().st_size},
+            }
+        )
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            cutoff = harvest.baseline_cutoff(self.state, "alpha")
+            self.assertEqual(cutoff["base"][str(alpha)]["lines"], 1)
+            self.assertEqual(cutoff["pending"][str(alpha)]["offset"], alpha.stat().st_size)
+            cli.baseline_settlement(
+                project="alpha",
+                actor="operator",
+                reason="current state reviewed separately",
+                cutoff_id=cutoff["cutoff_id"],
+            )
+
+        mark = self.state.load_watermark()
+        self.assertEqual(mark[str(alpha)]["offset"], alpha.stat().st_size)
+        self.assertIn("lines", mark[str(beta)])
+
     def test_batch_proof_settles_only_its_project_and_rejects_foreign_selector(self) -> None:
         alpha, beta, sessions = self._sessions()
         record = self._pending_batch(alpha, sessions)
@@ -541,7 +566,7 @@ class CuratorBaselineTests(unittest.TestCase):
 
     def test_malformed_state_and_invalid_evidence_leave_everything_unchanged(self) -> None:
         alpha, _beta, sessions = self._sessions()
-        self.state.save_watermark({str(alpha): {"lines": 1, "mtime": 1, "size": 1}})
+        self.state.save_watermark({str(alpha): {"lines": "one", "mtime": 1, "size": 1}})
         before = self.state.watermark_file.read_bytes()
         with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
             with self.assertRaisesRegex(harvest.PendingError, "malformed or legacy"):
