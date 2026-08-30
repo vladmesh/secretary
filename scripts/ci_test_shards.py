@@ -857,8 +857,15 @@ def aggregate_coverage(
         }
         combined_path = output_dir / COVERAGE_JSON_NAME
         changed_path = output_dir / CHANGED_LINES_JSON_NAME
-        combined_path.write_text(json.dumps(combined, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        changed_path.write_text(json.dumps(changed_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # Per-file line and branch detail is large for the full product. Keep
+        # the downloaded evidence deterministic and within its published bound
+        # without dropping any machine-readable coverage detail.
+        combined_path.write_text(
+            json.dumps(combined, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+        )
+        changed_path.write_text(
+            json.dumps(changed_report, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+        )
         if combined_path.stat().st_size > MAX_COVERAGE_JSON_BYTES:
             raise CoverageError("published combined coverage JSON exceeds its bound")
     except (CoverageError, OSError) as exc:

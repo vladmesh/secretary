@@ -18,6 +18,7 @@ from scripts.ci_test_shards import (
     COVERAGE_JSON_NAME,
     EVIDENCE_FILES,
     FAST_MODULES,
+    MAX_COVERAGE_JSON_BYTES,
     SUITES,
     BoundedTee,
     CheckoutStatusError,
@@ -446,12 +447,20 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             ):
                 self.assertEqual(aggregate_coverage(root, raw, output, CANDIDATE_SHA, None), 0)
 
-            combined = json.loads((output / COVERAGE_JSON_NAME).read_text(encoding="utf-8"))
+            combined_path = output / COVERAGE_JSON_NAME
+            combined_text = combined_path.read_text(encoding="utf-8")
+            combined_size = combined_path.stat().st_size
+            combined = json.loads(combined_text)
             changed = json.loads((output / CHANGED_LINES_JSON_NAME).read_text(encoding="utf-8"))
 
         self.assertEqual(combined["candidate_sha"], CANDIDATE_SHA)
         self.assertEqual(combined["source_roots"], ["src/secretary", "src/triggered_agents"])
         self.assertIn("executed_branches", combined["coverage"]["files"]["src/secretary/example.py"])
+        self.assertEqual(
+            combined_text,
+            json.dumps(combined, sort_keys=True, separators=(",", ":")) + "\n",
+        )
+        self.assertLessEqual(combined_size, MAX_COVERAGE_JSON_BYTES)
         self.assertFalse(changed["applicable"])
         self.assertIn("no pull-request base SHA", changed["reason"])
         combine = next(command for command in commands if "combine" in command)
