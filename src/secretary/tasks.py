@@ -512,6 +512,44 @@ class TaskReader:
             result.append(normalized)
         return sorted(result, key=lambda task: (task["state"], task["position"], task["ref"], task["id"]))
 
+    def steward_reports_in_progress(self, project: str) -> list[dict[str, Any]]:
+        """Return the small, durable report view a steward dispatch needs.
+
+        This intentionally is not a second public Card list: callers get only the
+        identity, freshness timestamp and report marker needed to decide whether a
+        steward sweep is already running.  Kanboard exposes metadata per task, so
+        all candidate metadata is fetched in one batch rather than one RPC per row.
+        """
+        project_id, columns, _ = self._board()
+        in_progress_id = next(
+            (identifier for identifier, title in columns.items() if title == "In progress"), None
+        )
+        if in_progress_id is None:
+            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+        raw = self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
+        if not isinstance(raw, list):
+            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+        cards = [
+            card
+            for card in raw
+            if isinstance(card, dict) and _positive_int(card.get("column_id")) == in_progress_id
+        ]
+        metadata = self._metadata_of(cards)
+        reports: list[dict[str, Any]] = []
+        for card in cards:
+            task_id = _task_number(card)
+            meta = metadata[task_id]
+            if meta.get("project") != project or meta.get("steward_report") != "1":
+                continue
+            reports.append(
+                {
+                    "reference": _text(card.get("reference")),
+                    "date_moved": _positive_int(card.get("date_moved")),
+                    "steward_report": "1",
+                }
+            )
+        return reports
+
     def export(self) -> list[dict[str, Any]]:
         """Return the complete legacy checkpoint projection in bounded board reads.
 
@@ -1303,6 +1341,62 @@ class TaskWriter:
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
+        """Create an ordinary task through the released admission contract."""
+        return self._create(
+            role=role,
+            actor=actor,
+            project=project,
+            task_type=task_type,
+            title=title,
+            description=description,
+            target=target,
+            reference=reference,
+            blocked_by=blocked_by,
+            head=head,
+            review_head=review_head,
+            slug=slug,
+            base_branch=base_branch,
+            complexity=complexity,
+            family_preference=family_preference,
+            codex_launch_mode=codex_launch_mode,
+            sprint=sprint,
+            priority=priority,
+            budget_event=budget_event,
+            sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason,
+            request_id=request_id,
+            restoring=restoring,
+            steward_report=False,
+        )
+
+    def _create(
+        self,
+        *,
+        role: str,
+        actor: str,
+        project: str,
+        task_type: str,
+        title: str,
+        description: str = "",
+        target: str = "ready",
+        reference: str = "",
+        blocked_by: str = "",
+        head: str = "",
+        review_head: str = "",
+        slug: str = "",
+        base_branch: str = "",
+        complexity: str = "standard",
+        family_preference: str = "auto",
+        codex_launch_mode: str = "",
+        sprint: str = "",
+        priority: str = "",
+        budget_event: str = "",
+        sprint_override: bool = False,
+        sprint_override_reason: str = "",
+        request_id: str | None = None,
+        restoring: bool = False,
+        steward_report: bool,
+    ) -> dict[str, Any]:
         # Restore bypasses new-work admission only; all other guards still apply.
         self._role(role, _CREATE_ROLES)
         project = project.strip()
@@ -1334,8 +1428,18 @@ class TaskWriter:
             raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2)
         if not title:
             raise TaskError("validation", "create requires a non-empty title", 2)
-        if target not in {"ready", "issues"}:
-            raise TaskError("validation", "create target must be ready or issues", 2)
+        if target not in {"ready", "issues", "in_progress"}:
+            raise TaskError("validation", "create target must be ready, issues or in_progress", 2)
+        if target == "in_progress" and not (role == "steward" and steward_report):
+            raise TaskError("transition_forbidden", "only a steward report may be created In progress", 3)
+        if steward_report and (role != "steward" or target != "in_progress"):
+            raise TaskError("role_forbidden", "steward report creation requires steward In progress", 3)
+        if steward_report and (task_type != "research" or not slug or reference or sprint):
+            raise TaskError(
+                "validation",
+                "a steward report requires research, a slug, no explicit reference and no sprint",
+                2,
+            )
         if role in _PROPOSAL_CREATE_ROLES:
             if target != "issues":
                 raise TaskError("role_forbidden", f"{role} may create only proposals in Issues", 3)
@@ -1403,6 +1507,7 @@ class TaskWriter:
             "codex_launch_mode": codex_launch_mode or None,
             "sprint": sprint or None,
             "budget_event": budget_event or None,
+            **({"steward_report": True} if steward_report else {}),
             **override_payload,
             "title_sha256": _digest(title),
             "description_sha256": _digest(description),
@@ -1475,6 +1580,7 @@ class TaskWriter:
                 family_preference=family_preference,
                 codex_launch_mode=codex_launch_mode,
                 sprint=sprint,
+                steward_report=steward_report,
                 event=event,
                 request_id=request_id,
             )
@@ -1497,6 +1603,36 @@ class TaskWriter:
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
         return {"action": "created", "task": task, "event_id": event_id, "replayed": False}
 
+    def create_steward_report(
+        self,
+        *,
+        actor: str,
+        project: str,
+        title: str,
+        slug: str,
+        description: str = "",
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create the steward's accounting artifact directly in In progress.
+
+        The generic create transaction owns its reference reservation, staged
+        identity and pending-audit recovery.  This narrow facade only supplies
+        the invariant report shape; it never creates a temporary Ready card and
+        deliberately does not require a sprint.
+        """
+        return self._create(
+            role="steward",
+            actor=actor,
+            project=project,
+            task_type="research",
+            title=title,
+            description=description,
+            target="in_progress",
+            slug=slug,
+            steward_report=True,
+            request_id=request_id,
+        )
+
     def _create_backend(
         self,
         *,
@@ -1515,6 +1651,7 @@ class TaskWriter:
         family_preference: str,
         codex_launch_mode: str,
         sprint: str,
+        steward_report: bool,
         event: dict[str, Any],
         request_id: str,
     ) -> str:
@@ -1584,7 +1721,20 @@ class TaskWriter:
                     values["codex_launch_mode"] = codex_launch_mode
                 if sprint:
                     values["sprint_ref"] = sprint
+                if steward_report:
+                    values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
                 self.client.call("saveTaskMetadata", task_id=task_id, values=values)
+                if steward_report:
+                    created = self.reader.show_id(task_id)
+                    if not (
+                        created["state"] == "in_progress"
+                        and created["project"] == project
+                        and created["type"] == "research"
+                        and created.get("record_type") == "task"
+                        and created["claim"]["worker"] == slug
+                        and _is_steward_report(created)
+                    ):
+                        raise _CommittedWriteError()
             except Exception as exc:
                 raise _CommittedWriteError() from exc
             return created_ref
@@ -1997,6 +2147,16 @@ class TaskWriter:
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
         task = self.reader.show(reference)
+        if (
+            role == "steward"
+            and (task["state"], target) == ("in_progress", "done")
+            and not _is_steward_report(task)
+        ):
+            raise TaskError(
+                "transition_forbidden",
+                "steward may close In progress only for its own report card",
+                3,
+            )
         if self._legacy_record(request_id) is not None:
             # A move recorded before Card transitions migrated is a generic audit operation, and
             # it stays one: its retry replays that record and its pending form is finished by the
@@ -3222,6 +3382,14 @@ class TaskWriter:
             expected_mode = ""
         if expected_mode and normalized["routing"]["codex_launch_mode"] != expected_mode:
             raise TaskError("backend_error", "pending create metadata remains incomplete", 1)
+        if payload.get("steward_report") is True and not (
+            normalized["state"] == "in_progress"
+            and normalized.get("record_type") == "task"
+            and normalized["type"] == "research"
+            and normalized["claim"]["worker"] == _text(payload.get("slug"))
+            and _is_steward_report(normalized)
+        ):
+            raise TaskError("backend_error", "pending steward report metadata remains incomplete", 1)
 
     def _pending_create_task(self, event: dict[str, Any]) -> dict[str, Any]:
         backend = event.get("backend")
@@ -3405,6 +3573,12 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
             continue
         if value:
             values[metadata_key] = value
+    if payload.get("steward_report") is True:
+        slug = _text(payload.get("slug"))
+        # A recovered report must prove the whole accounting identity, not merely
+        # that its row exists.  Keep these in the one metadata write so a retry
+        # repairs a partial backend write as one unit.
+        values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
     return values
 
 

@@ -20,6 +20,7 @@ from secretary.board.card_transitions import CARD_TRANSITIONS
 from secretary.board.host import TransitionRequest
 from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
+from secretary.board.steward_reports import StewardReportBoard
 from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.board_transport import BoardTransport
 from secretary.cli import main
@@ -181,6 +182,35 @@ class TaskReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "schema") as raised:
             self.reader.list()
         self.assertEqual(raised.exception.code, "backend_error")
+
+    def test_steward_report_read_is_bounded_and_exposes_no_backend_row(self) -> None:
+        client = WriteKanboard()
+        client.tasks[0]["column_id"] = 3
+        client.tasks.append(
+            {
+                "id": 14,
+                "reference": "secretary-469",
+                "title": "not a report",
+                "column_id": 3,
+                "position": 2,
+                "swimlane_id": 4,
+                "date_moved": "1720000400",
+            }
+        )
+        client.metadata[14] = {"project": "secretary", "task_type": "research"}
+        reader = TaskReader(client)  # type: ignore[arg-type]
+
+        reports = reader.steward_reports_in_progress("secretary")
+
+        self.assertEqual(
+            reports,
+            [{"reference": "secretary-468", "date_moved": None, "steward_report": "1"}],
+        )
+        self.assertEqual(len(client.batch_calls), 1)
+        self.assertEqual(
+            client.batch_calls[0],
+            [("getTaskMetadata", {"task_id": 12}), ("getTaskMetadata", {"task_id": 14})],
+        )
 
 
 class TaskCliTests(unittest.TestCase):
@@ -411,6 +441,138 @@ class TaskWriterTests(unittest.TestCase):
             self.writer.move(role="po", actor="p", reference="secretary-468", target="ready", reason="")
         self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+
+    def test_generic_create_keeps_in_progress_closed_to_steward_reports(self) -> None:
+        self.assertNotIn("steward_report", inspect.signature(self.writer.create).parameters)
+        with self.assertRaisesRegex(TaskError, "only a steward report") as raised:
+            self.writer.create(
+                role="steward",
+                actor="dispatch",
+                project="secretary",
+                task_type="research",
+                title="not an accounting artifact",
+                target="in_progress",
+                slug="not-a-report",
+            )
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertFalse(any(call[0] == "createTask" for call in self.client.calls))
+
+    def test_steward_report_create_is_audited_directly_in_progress_and_replays(self) -> None:
+        self.client.tasks.append(
+            {
+                "id": 14,
+                "reference": "secretary-700",
+                "title": "Archived high-water mark",
+                "column_id": 6,
+                "position": 1,
+                "swimlane_id": 4,
+                "is_active": 0,
+            }
+        )
+        self.client.metadata[14] = {}
+        self.client.comments[14] = []
+
+        result = self.writer.create_steward_report(
+            actor="dispatch",
+            project="secretary",
+            title="steward: hourly sweep",
+            slug="steward-sweep-20260830-120000",
+            request_id="steward-report-create",
+        )
+
+        self.assertEqual(result["task"]["ref"], "secretary-701")
+        self.assertEqual(result["task"]["state"], "in_progress")
+        task_id = int(str(result["task"]["id"]).removeprefix("task_kanboard_"))
+        self.assertEqual(
+            self.client.metadata[task_id],
+            {
+                "record_type": "task",
+                "task_type": "research",
+                "project": "secretary",
+                "complexity": "standard",
+                "family_preference": "auto",
+                "slug": "steward-sweep-20260830-120000",
+                "claim": "steward-sweep-20260830-120000",
+                "steward_report": "1",
+            },
+        )
+        self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+        event = self.writer.audit.committed_event("steward-report-create")
+        assert event is not None
+        self.assertTrue(event["payload"]["steward_report"])
+
+        replay = self.writer.create_steward_report(
+            actor="dispatch",
+            project="secretary",
+            title="steward: hourly sweep",
+            slug="steward-sweep-20260830-120000",
+            request_id="steward-report-create",
+        )
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+
+    def test_steward_report_pending_metadata_recovers_without_duplicate_create(self) -> None:
+        self.client.fail_metadata = True
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.create_steward_report(
+                actor="dispatch",
+                project="secretary",
+                title="steward: hourly sweep",
+                slug="steward-sweep-20260830-120001",
+                request_id="steward-report-pending",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+
+        self.client.fail_metadata = False
+        recovered = self.writer.create_steward_report(
+            actor="dispatch",
+            project="secretary",
+            title="steward: hourly sweep",
+            slug="steward-sweep-20260830-120001",
+            request_id="steward-report-pending",
+        )
+        self.assertTrue(recovered["replayed"])
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+
+    def test_steward_cannot_close_an_ordinary_in_progress_card(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        self.client.metadata[12].pop("steward_report")
+        with self.assertRaisesRegex(TaskError, "only for its own report") as raised:
+            self.writer.move(
+                role="steward",
+                actor="dispatch",
+                reference="secretary-468",
+                target="done",
+                reason="close",
+                request_id="ordinary-steward-close",
+            )
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+
+    def test_steward_can_close_its_in_progress_report(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        result = self.writer.move(
+            role="steward",
+            actor="dispatch",
+            reference="secretary-468",
+            target="done",
+            reason="sweep complete",
+            request_id="report-steward-close",
+        )
+        self.assertEqual(result["task"]["state"], "done")
+
+    def test_steward_report_adapter_is_structural_task_reader_writer_composition(self) -> None:
+        board = StewardReportBoard(self.writer.reader, self.writer, actor="dispatch")
+        reference = board.create_report(
+            project="secretary",
+            title="steward: hourly sweep",
+            slug="steward-sweep-20260830-120002",
+        )
+
+        self.assertEqual(board.in_progress_reports(project="secretary")[0]["reference"], reference)
+        board.move_report(reference=reference, target="done", reason="sweep complete")
+        self.assertEqual(self.writer.reader.show(reference)["state"], "done")
 
     def test_kanboard_host_executes_every_declared_card_edge_through_the_typed_canon(self) -> None:
         columns = {
