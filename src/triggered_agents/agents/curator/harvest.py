@@ -454,8 +454,8 @@ def _baseline_watermark(st) -> dict:
     """Read the watermark without treating damaged state as an empty first run.
 
     Ordinary harvesting retains its released compatibility behaviour for old line
-    cursors.  An intentional baseline is a settlement boundary, so it cannot turn
-    unreadable, legacy, or structurally malformed state into a new cursor.
+    cursors.  A baseline may migrate a structurally valid legacy JSONL cursor while
+    constructing its source-bound cutoff, but malformed state still fails closed.
     """
     if not st.watermark_file.exists():
         return {}
@@ -488,6 +488,16 @@ def _baseline_watermark(st) -> dict:
         elif keys == {"mtime", "size"}:
             valid = (
                 _baseline_number(cursor["mtime"])
+                and isinstance(cursor["size"], int)
+                and not isinstance(cursor["size"], bool)
+                and cursor["size"] >= 0
+            )
+        elif keys == {"lines", "mtime", "size"}:
+            valid = (
+                isinstance(cursor["lines"], int)
+                and not isinstance(cursor["lines"], bool)
+                and cursor["lines"] >= 0
+                and _baseline_number(cursor["mtime"])
                 and isinstance(cursor["size"], int)
                 and not isinstance(cursor["size"], bool)
                 and cursor["size"] >= 0
@@ -566,15 +576,30 @@ def _baseline_jsonl_cursor(source: dict, previous: dict | None, limits: Limits) 
         stat = path.stat()
     except OSError as exc:
         raise PendingError("curator baseline cutoff source is unavailable") from exc
-    if previous is not None:
-        if not _baseline_cursor(previous, "jsonl") or previous["offset"] > stat.st_size:
+    migrate_legacy = previous is not None and set(previous) == {"lines", "mtime", "size"}
+    if previous is None:
+        start = 0
+    elif migrate_legacy:
+        if previous["size"] > stat.st_size:
             raise PendingError("curator baseline cutoff is stale or malformed")
+        start = 0
+    elif _baseline_cursor(previous, "jsonl") and previous["offset"] <= stat.st_size:
         start = previous["offset"]
     else:
-        start = 0
+        raise PendingError("curator baseline cutoff is stale or malformed")
     last = start
     try:
         with path.open("rb") as fh:
+            if migrate_legacy:
+                for _ in range(previous["lines"]):
+                    data = fh.readline(limits.max_record_bytes + 1)
+                    if not data:
+                        raise PendingError("curator baseline cutoff is stale or malformed")
+                    while not data.endswith(b"\n"):
+                        data = fh.readline(limits.max_record_bytes + 1)
+                        if not data:
+                            raise PendingError("curator baseline cutoff has incomplete source input")
+                start = last = fh.tell()
             fh.seek(start)
             while True:
                 end, data, oversized, incomplete = _read_record(fh, limits)
@@ -586,7 +611,7 @@ def _baseline_jsonl_cursor(source: dict, previous: dict | None, limits: Limits) 
                 last = end
     except OSError as exc:
         raise PendingError("curator baseline cutoff source is unavailable") from exc
-    if last == start:
+    if last == start and not migrate_legacy:
         return None
     return {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size}
 
