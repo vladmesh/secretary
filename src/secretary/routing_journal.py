@@ -17,6 +17,7 @@ import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from triggered_agents.runtime.head import CODEX_TUI_MODE
@@ -63,6 +64,13 @@ class HeadRun:
     codex_mode: str = ""
     resource: str = ""
     account: str = ""
+    # The provider's durable conversation identity, rather than the dispatcher's own HeadRun id.
+    # Old records remain readable with a null value; new launch records say why it was unavailable.
+    session_id: str | None = None
+    session_id_reason: str = ""
+    # The exact document delivered to the role and its content address at bring-up.
+    prompt_path: str = ""
+    prompt_version: str = ""
 
     def __post_init__(self) -> None:
         if not self.model_source:
@@ -85,6 +93,10 @@ class HeadRun:
             "codex_mode": self.codex_mode,
             "resource": self.resource,
             "account": self.account,
+            "session_id": self.session_id,
+            "session_id_reason": self.session_id_reason,
+            "prompt_path": self.prompt_path,
+            "prompt_version": self.prompt_version,
         }
 
     @classmethod
@@ -106,6 +118,10 @@ class HeadRun:
             codex_mode=str(payload.get("codex_mode") or ""),
             resource=str(payload.get("resource") or ""),
             account=str(payload.get("account") or ""),
+            session_id=(str(payload["session_id"]) if payload.get("session_id") else None),
+            session_id_reason=str(payload.get("session_id_reason") or ""),
+            prompt_path=str(payload.get("prompt_path") or ""),
+            prompt_version=str(payload.get("prompt_version") or ""),
         )
 
 
@@ -159,6 +175,78 @@ def head_run_from_profile(
     )
 
 
+def launched_head_run_snapshot(
+    run: HeadRun | dict[str, Any], *, lifecycle_run: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Add the provider session and delivered-prompt facts to one launch snapshot.
+
+    The routing shape is deliberately separate from the lifecycle ``HeadRun``: the former is an
+    immutable description of the resolved configuration, while the latter receives pane and
+    provider-source updates as the head runs.  At bring-up the dispatcher has both, so this is the
+    one boundary that copies their stable, externally useful facts into the journal event.
+    """
+    snapshot = run.to_json() if isinstance(run, HeadRun) else dict(run)
+    lifecycle = dict(lifecycle_run or {})
+    session_id, session_id_reason = _session_identity(lifecycle)
+    # A launcher that already captured an adapter-specific identity has better information than a
+    # recovery snapshot.  Do not replace it with a later unavailable provider-source observation.
+    if snapshot.get("session_id"):
+        session_id = str(snapshot["session_id"])
+        session_id_reason = str(snapshot.get("session_id_reason") or "")
+    snapshot["session_id"] = session_id
+    snapshot["session_id_reason"] = session_id_reason
+    prompt_path = _prompt_path(lifecycle)
+    if prompt_path:
+        # A retained worker continues the document and conversation it originally received. Its
+        # rework route reuses that snapshot rather than hashing a rewritten TASK.md under the same
+        # launch identity.
+        if not snapshot.get("prompt_path"):
+            snapshot["prompt_path"] = prompt_path
+        if not snapshot.get("prompt_version"):
+            snapshot["prompt_version"] = _prompt_sha256(prompt_path)
+    else:
+        snapshot.setdefault("prompt_path", "")
+        snapshot.setdefault("prompt_version", "")
+    return HeadRun.from_json(snapshot).to_json()
+
+
+def _session_identity(lifecycle_run: dict[str, Any]) -> tuple[str | None, str]:
+    if not lifecycle_run:
+        return None, "launch lifecycle record is unavailable"
+    spec = lifecycle_run.get("spec")
+    adapter = str(spec.get("adapter") or "") if isinstance(spec, dict) else ""
+    policy = lifecycle_run.get("fanout_policy")
+    policy = policy if isinstance(policy, dict) else {}
+    source_name = "provider_source" if adapter == "codex" else "provider_progress_source"
+    source = policy.get(source_name)
+    source = source if isinstance(source, dict) else {}
+    session_id = str(source.get("session_id") or "")
+    if session_id:
+        return session_id, ""
+    if adapter not in {"codex", "claude"}:
+        return None, f"adapter {adapter or 'unknown'} has no session-id adapter"
+    reason = str(source.get("reason") or "")
+    if reason:
+        return None, reason
+    state = str(source.get("state") or "")
+    return None, f"{adapter} session id was not available at launch ({state or 'no provider source'})"
+
+
+def _prompt_path(lifecycle_run: dict[str, Any]) -> str:
+    task_ref = lifecycle_run.get("task_ref")
+    if not isinstance(task_ref, dict):
+        return ""
+    return str(task_ref.get("document") or "")
+
+
+def _prompt_sha256(path: str) -> str:
+    try:
+        content = Path(path).read_bytes()
+    except OSError:
+        return ""
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
 def run_key(run: HeadRun | dict[str, Any] | None) -> str:
     """Short digest of one launch configuration.
 
@@ -168,6 +256,11 @@ def run_key(run: HeadRun | dict[str, Any] | None) -> str:
     and still appends an event for the latter.
     """
     payload = run.to_json() if isinstance(run, HeadRun) else dict(run or {})
+    # A routing event is idempotent on its resolved launch configuration. Provider conversations
+    # and generated task documents are per-bring-up evidence, not configuration: including either
+    # would turn an unchanged respawn into a second route and break crash recovery's one-event key.
+    for field in ("session_id", "session_id_reason", "prompt_path", "prompt_version"):
+        payload.pop(field, None)
     material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
 

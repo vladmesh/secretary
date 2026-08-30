@@ -63,7 +63,10 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 transcript = claude_root / claude_project_dir_name(str(workspace)) / "session.jsonl"
                 foreign = claude_root / claude_project_dir_name(str(workspace)) / "foreign.jsonl"
                 transcript.parent.mkdir(parents=True)
-                transcript.write_text('{"type":"assistant","message":"secret"}\n', encoding="utf-8")
+                transcript.write_text(
+                    '{"type":"assistant","sessionId":"claude-session-1","message":"secret"}\n',
+                    encoding="utf-8",
+                )
                 claude_run = bind_claude_provider_progress_source(claude_run)
                 foreign.write_text('{"type":"assistant","message":"foreign"}\n', encoding="utf-8")
                 claude = provider_progress_for_run(claude_run)
@@ -72,6 +75,9 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             self.assertIn(":", claude["cursor"])
             self.assertNotIn("secret", str(claude))
             self.assertNotIn("foreign", str(claude))
+            self.assertEqual(
+                claude_run.fanout_policy["provider_progress_source"]["session_id"], "claude-session-1"
+            )
 
             codex_root = Path(tmp) / "codex-sessions"
             codex_path = codex_root / "session.jsonl"

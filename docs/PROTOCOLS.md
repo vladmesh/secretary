@@ -1493,7 +1493,10 @@ the round too: the merge tears the worktree down, waking the suspended head befo
   "heads": [{"role": "worker", "head": "codex", "head_source": "card",
              "adapter": "codex", "model": "gpt-5.6-terra", "model_source": "profile",
              "effort": "default", "codex_mode": "tui",
-             "resource": "openai-sub", "account": "openai-subscription"}]}}
+             "resource": "openai-sub", "account": "openai-subscription",
+             "session_id": "0198b0b0-...", "session_id_reason": "",
+             "prompt_path": "/workspaces/PROJECT-N/TASK.md",
+             "prompt_version": "sha256:..."}]}}
 ```
 
 `phase` is `worker` (worker launch), `review` (reviewer launch) or `verdict` (the attempt's outcome,
@@ -1552,6 +1555,13 @@ explicitly. A profile with no model launches its CLI without a model flag and th
 the same sources are read in the same order the CLI uses. If the model is pinned nowhere, the value stays
 empty under a `cli_default` source, meaning "chosen by the runtime" rather than a silent omission. The
 launch record rejects an empty model under any other source.
+
+Each launch record also carries the provider's durable `session_id`: the id in the Codex rollout or the
+Claude jsonl session. If an adapter cannot expose it at bring-up, `session_id` is explicitly `null` and
+`session_id_reason` says why. `prompt_path` names the task document delivered to that role, and
+`prompt_version` is its `sha256:` content address at that same bring-up. These facts let a journal reader
+follow a round directly to its conversation and prompt without reconstructing either from a workspace and
+time window.
 
 Those sources are read from the environment the head will actually get, not the dispatcher's own. A head
 command goes through the role-environment wrapper, which drops every `runtime.env` variable outside the

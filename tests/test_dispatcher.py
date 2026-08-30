@@ -5670,6 +5670,31 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
     def routing_history(self) -> list:
         return routing_attempts(TaskAudit(self.data_dir).events("secretary-510-pilot", kind="routing"))
 
+    def test_codex_worker_routing_records_the_mock_session_and_prompt_version(self) -> None:
+        self.start_dispatcher()
+
+        self.tick()
+
+        worker = self.routing_history()[-1].worker
+        self.assertEqual(worker.adapter, "codex")
+        self.assertTrue(worker.session_id)
+        self.assertEqual(worker.session_id_reason, "")
+        self.assertTrue(worker.prompt_path.endswith("/TASK.md"))
+        self.assertRegex(worker.prompt_version, r"^sha256:[0-9a-f]{64}$")
+
+    def test_claude_worker_routing_records_the_mock_session_and_prompt_version(self) -> None:
+        self.start_dispatcher()
+        self.board.metadata[12]["head"] = "claude-opus"
+
+        self.tick()
+
+        worker = self.routing_history()[-1].worker
+        self.assertEqual(worker.adapter, "claude")
+        self.assertTrue(worker.session_id)
+        self.assertEqual(worker.session_id_reason, "")
+        self.assertTrue(worker.prompt_path.endswith("/TASK.md"))
+        self.assertRegex(worker.prompt_version, r"^sha256:[0-9a-f]{64}$")
+
     def test_both_attempts_keep_their_head_pair_in_the_journal(self) -> None:
         """secretary-716: a finished card must still say who worked and who reviewed each attempt.
 
@@ -10752,6 +10777,10 @@ class DispatcherLauncherTests(unittest.TestCase):
                 "codex_mode": "tui",
                 "resource": "openai-sub",
                 "account": "openai-subscription",
+                "session_id": None,
+                "session_id_reason": "",
+                "prompt_path": "",
+                "prompt_version": "",
             },
         )
 

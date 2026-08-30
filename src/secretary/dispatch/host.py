@@ -2738,6 +2738,12 @@ class CommandHostRuntime:
             # Pane create gives the leaf after the head wrote its base identity. A best-effort bind
             # is enough: the reader still requires the run, role and task binding to match.
             _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=receipt.run.leaf)
+        lifecycle_run = receipt.run
+        if lifecycle_run.spec.adapter == "claude":
+            # Claude creates its jsonl after its pane starts.  Capture the one transcript that the
+            # pre-pane baseline identifies before routing records this bring-up, so the journal has
+            # the provider's session id rather than asking analytics to reconstruct it from cwd.
+            lifecycle_run = _bind_claude_provider_progress_source(lifecycle_run)
         delivery = receipt.delivery
         return self._launched(
             receipt.run.handle,
@@ -2748,7 +2754,7 @@ class CommandHostRuntime:
             failover,
             leaf=receipt.run.leaf,
             delivery_evidence=(_delivery_evidence_json(delivery, subject) if delivery is not None else {}),
-            head_run=receipt.run.to_json(),
+            head_run=lifecycle_run.to_json(),
             fallback_reason=receipt.fallback_reason,
         )
 

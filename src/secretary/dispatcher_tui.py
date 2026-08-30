@@ -389,6 +389,7 @@ def bind_claude_provider_progress_source(run: HeadRun) -> HeadRun:
                 "reason": "Claude source cannot be inspected",
             },
         )
+    session_id = _claude_session_id(candidates[0])
     return _replace_progress_source(
         run,
         {
@@ -399,8 +400,35 @@ def bind_claude_provider_progress_source(run: HeadRun) -> HeadRun:
             "inode": int(stat.st_ino),
             "initial_size": int(stat.st_size),
             "initial_mtime_ns": int(stat.st_mtime_ns),
+            "session_id": session_id,
         },
     )
+
+
+def _claude_session_id(path: Path) -> str:
+    """Read the jsonl session identifier without treating its absence as a bad transcript."""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as source:
+            for line in source:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                for key in ("sessionId", "session_id"):
+                    value = record.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+                payload = record.get("payload")
+                if isinstance(payload, dict):
+                    for key in ("sessionId", "session_id"):
+                        value = payload.get(key)
+                        if isinstance(value, str) and value:
+                            return value
+    except OSError:
+        return ""
+    return ""
 
 
 def provider_progress_for_run(run: HeadRun) -> dict[str, str]:

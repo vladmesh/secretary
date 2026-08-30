@@ -3673,6 +3673,23 @@ class RoutingJournalTests(unittest.TestCase):
 
         self.assertEqual(run.effort, "medium")
 
+    def test_head_run_round_trips_session_and_prompt_identity(self) -> None:
+        run = HeadRun(
+            role="worker",
+            head="codex",
+            adapter="codex",
+            model="gpt-5.6-terra",
+            model_source="profile",
+            session_id="rollout-123",
+            prompt_path="/workspaces/card/TASK.md",
+            prompt_version="sha256:" + "a" * 64,
+        )
+
+        restored = HeadRun.from_json(run.to_json())
+
+        self.assertEqual(restored, run)
+        self.assertEqual(restored.session_id_reason, "")
+
 
 class ReportDurabilityGateTests(unittest.TestCase):
     """`report --kind done` refuses to run from a dirty workspace (secretary-653).
