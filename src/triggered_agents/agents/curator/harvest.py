@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from ...runtime.redact import redact
 from . import discover
 
 PENDING_VERSION = 3
+CUTOFF_VERSION = 1
 _SCAFFOLD = re.compile(r"<(local-command|command-name|command-message|command-args)[\s>]")
 _CODEX_CONTEXT_PREFIXES = ("# AGENTS.md instructions for ", "<environment_context>")
 
@@ -361,7 +363,7 @@ def read_pending(st, identity=None, project=None):
     identity = identity or current_identity()
     try:
         record = json.loads(st.pending_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise PendingError("curator pending record is unreadable") from exc
     if not isinstance(record, dict) or record.get("version") != PENDING_VERSION:
         raise PendingError("curator pending record is legacy or unsupported; preserve it and resolve it manually")
@@ -444,6 +446,238 @@ def advance(st, record, identity=None, project=None):
             raise PendingError(f"curator pending record is stale for {source}")
     mark.update(copy.deepcopy(batch["pending"]))
     st.save_watermark(mark)
+
+
+def _baseline_watermark(st) -> dict:
+    """Read the watermark without treating damaged state as an empty first run.
+
+    Ordinary harvesting retains its released compatibility behaviour for old line
+    cursors.  An intentional baseline is a settlement boundary, so it cannot turn
+    unreadable, legacy, or structurally malformed state into a new cursor.
+    """
+    if not st.watermark_file.exists():
+        return {}
+    try:
+        mark = json.loads(st.watermark_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PendingError("curator baseline watermark is unreadable") from exc
+    if not isinstance(mark, dict):
+        raise PendingError("curator baseline watermark is malformed")
+    for source, cursor in mark.items():
+        if not isinstance(source, str) or not source or not isinstance(cursor, dict):
+            raise PendingError("curator baseline watermark is malformed")
+        keys = set(cursor)
+        if keys == {"last_id"}:
+            valid = (
+                isinstance(cursor["last_id"], int)
+                and not isinstance(cursor["last_id"], bool)
+                and cursor["last_id"] >= 0
+            )
+        elif keys == {"offset", "mtime", "size"}:
+            valid = (
+                isinstance(cursor["offset"], int)
+                and not isinstance(cursor["offset"], bool)
+                and cursor["offset"] >= 0
+                and _baseline_number(cursor["mtime"])
+                and isinstance(cursor["size"], int)
+                and not isinstance(cursor["size"], bool)
+                and cursor["size"] >= 0
+            )
+        elif keys == {"mtime", "size"}:
+            valid = (
+                _baseline_number(cursor["mtime"])
+                and isinstance(cursor["size"], int)
+                and not isinstance(cursor["size"], bool)
+                and cursor["size"] >= 0
+            )
+        else:
+            valid = False
+        if not valid:
+            raise PendingError("curator baseline watermark is malformed or legacy")
+    return mark
+
+
+def _baseline_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _baseline_sources(project: str) -> dict[str, dict]:
+    """Return selected current source identities from the canonical routing surface."""
+    selected = []
+    for source in _selected(discover.claude_sessions(), project):
+        selected.append((source, "jsonl"))
+    for source in _selected(discover.codex_sessions(), project):
+        selected.append((source, "jsonl"))
+    for source in _selected(discover.hermes_sessions(), project):
+        selected.append((source, "hermes"))
+    for source in _selected(discover.all_memory_files(), project):
+        selected.append((source, "memory"))
+
+    result = {}
+    for source, kind in selected:
+        if kind == "hermes":
+            session_id = source.get("session_id")
+            key = f"hermes:{session_id}" if isinstance(session_id, str) and session_id else ""
+        else:
+            path = source.get("path")
+            key = path if isinstance(path, str) and path else ""
+        if not key or source.get("route") != project or key in result:
+            raise PendingError("curator baseline source identity is malformed or ambiguous")
+        result[key] = {"kind": kind, "source": source}
+    return result
+
+
+def _baseline_cursor(cursor, kind: str) -> bool:
+    if not isinstance(cursor, dict):
+        return False
+    if kind == "hermes":
+        return (
+            set(cursor) == {"last_id"}
+            and isinstance(cursor["last_id"], int)
+            and not isinstance(cursor["last_id"], bool)
+            and cursor["last_id"] >= 0
+        )
+    if kind == "jsonl":
+        return (
+            set(cursor) == {"offset", "mtime", "size"}
+            and isinstance(cursor["offset"], int)
+            and not isinstance(cursor["offset"], bool)
+            and cursor["offset"] >= 0
+            and _baseline_number(cursor["mtime"])
+            and isinstance(cursor["size"], int)
+            and not isinstance(cursor["size"], bool)
+            and cursor["size"] >= 0
+        )
+    return (
+        set(cursor) == {"mtime", "size"}
+        and _baseline_number(cursor["mtime"])
+        and isinstance(cursor["size"], int)
+        and not isinstance(cursor["size"], bool)
+        and cursor["size"] >= 0
+    )
+
+
+def _baseline_jsonl_cursor(source: dict, previous: dict | None, limits: Limits) -> dict | None:
+    """Find a complete terminal JSONL cursor without parsing or retaining source text."""
+    path = Path(source["path"])
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise PendingError("curator baseline cutoff source is unavailable") from exc
+    if previous is not None:
+        if not _baseline_cursor(previous, "jsonl") or previous["offset"] > stat.st_size:
+            raise PendingError("curator baseline cutoff is stale or malformed")
+        start = previous["offset"]
+    else:
+        start = 0
+    last = start
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            while True:
+                end, data, oversized, incomplete = _read_record(fh, limits)
+                if data is None:
+                    if incomplete:
+                        raise PendingError("curator baseline cutoff has incomplete source input")
+                    if not oversized:
+                        break
+                last = end
+    except OSError as exc:
+        raise PendingError("curator baseline cutoff source is unavailable") from exc
+    if last == start:
+        return None
+    return {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size}
+
+
+def _baseline_hermes_cursor(source: dict, previous: dict | None, limits: Limits) -> dict | None:
+    if previous is not None and not _baseline_cursor(previous, "hermes"):
+        raise PendingError("curator baseline cutoff is stale or malformed")
+    last = previous["last_id"] if previous is not None else 0
+    session_id = source["session_id"]
+    rows = discover.hermes_messages(session_id, last, 2**31 - 1, limits.max_record_bytes)
+    for row in rows:
+        row_id = row.get("id") if isinstance(row, dict) else None
+        if not isinstance(row_id, int) or isinstance(row_id, bool) or row_id <= last:
+            raise PendingError("curator baseline cutoff source is malformed")
+        last = row_id
+    return {"last_id": last} if rows else None
+
+
+def _baseline_memory_cursor(source: dict, previous: dict | None) -> dict | None:
+    if previous is not None and not _baseline_cursor(previous, "memory"):
+        raise PendingError("curator baseline cutoff is stale or malformed")
+    try:
+        stat = Path(source["path"]).stat()
+    except OSError as exc:
+        raise PendingError("curator baseline cutoff source is unavailable") from exc
+    current = {"mtime": stat.st_mtime, "size": stat.st_size}
+    return None if current == previous else current
+
+
+def _cutoff_id(project: str, base: dict, pending: dict) -> str:
+    payload = json.dumps(
+        {"version": CUTOFF_VERSION, "selector": selector(project), "base": base, "pending": pending},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def baseline_cutoff(st, project: str, limits: Limits | None = None) -> dict:
+    """Build the internal, project-bound cutoff plan for manual settlement.
+
+    The caller exposes only ``cutoff_id`` and the cursor count.  This internal plan
+    binds current starting cursors and exact complete terminal cursors without parsing
+    or retaining transcript or personal-memory text.
+    """
+    project = validate_project(project)
+    if project is None:
+        raise PendingError("curator baseline requires one canonical project")
+    mark, limits = _baseline_watermark(st), limits or Limits.from_env()
+    sources, pending = _baseline_sources(project), {}
+    for key, descriptor in sorted(sources.items()):
+        previous = mark.get(key)
+        kind, source = descriptor["kind"], descriptor["source"]
+        if kind == "jsonl":
+            cursor = _baseline_jsonl_cursor(source, previous, limits)
+        elif kind == "hermes":
+            cursor = _baseline_hermes_cursor(source, previous, limits)
+        else:
+            cursor = _baseline_memory_cursor(source, previous)
+        if cursor is not None:
+            pending[key] = cursor
+    base = {key: copy.deepcopy(mark.get(key)) for key in pending}
+    return {
+        "version": CUTOFF_VERSION,
+        "project": project,
+        "base": base,
+        "pending": pending,
+        "cutoff_id": _cutoff_id(project, base, pending),
+    }
+
+
+def baseline_pending(st, identity: dict, project: str, batch_id: str) -> dict:
+    """Validate an existing matching pending batch as a project-only settlement plan."""
+    project = validate_project(project)
+    if project is None:
+        raise PendingError("curator baseline requires one canonical project")
+    record = read_pending(st, identity, project)
+    if record["batch_id"] != batch_id:
+        raise PendingError("curator baseline batch evidence does not match pending state")
+    mark, pending, base = _baseline_watermark(st), record["batch"]["pending"], record["base"]
+    if record["batch"].get("project") != selector(project) or not pending or set(base) != set(pending):
+        raise PendingError("curator baseline pending batch is malformed")
+    sources = _baseline_sources(project)
+    for key, cursor in pending.items():
+        descriptor = sources.get(key)
+        if descriptor is None or not _baseline_cursor(cursor, descriptor["kind"]):
+            raise PendingError("curator baseline pending batch has a foreign or malformed cursor")
+        if mark.get(key) != base[key]:
+            raise PendingError("curator baseline pending batch is stale")
+    for entry in [*record["batch"].get("sessions", []), *record["batch"].get("memory", [])]:
+        if not isinstance(entry, dict) or entry.get("route") != project:
+            raise PendingError("curator baseline pending batch has a project mismatch")
+    return {"project": project, "base": base, "pending": copy.deepcopy(pending), "batch_id": batch_id}
 
 
 def _timestamp(value) -> str | None:

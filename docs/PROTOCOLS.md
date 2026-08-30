@@ -1729,7 +1729,9 @@ lifecycle. `harvest --project <canonical-id>` filters routes before taking the d
 `--project` explicitly means all backlog. A pending batch records and signs this selector, so a retry or advance
 with a different selected project or all-backlog mode fails closed. `curator backlog [--project <canonical-id>]
 [--json]` only reports deterministic aggregate route/head metadata (session, signal-turn and memory-file counts plus
-timestamp bounds), creates no pending record and changes no cursor. A selected batch with turns or memory is written
+timestamp bounds); selected JSON with no pending batch and baseline-valid cursor state also carries one opaque cutoff
+identity and cursor count. It
+creates no pending record and changes no cursor. A selected batch with turns or memory is written
 as a versioned pending record bound to the current curator workspace/run/session identity and selector; a retry replays it exactly. A fresh scan
 that classified only complete non-emitting records advances those precise cursors atomically instead, and
 never writes pending.json. Advance accepts only the fact-bearing pending form, verifies its identity and each
@@ -1742,6 +1744,40 @@ sources still settle. The partial source is reported for observability and is re
 writer completes the row. Precheck takes
 the transaction nonblocking; contention returns the dedicated 102 defer result, which the gate answers
 successfully without dispatch or cleanup. flock ownership is released by the OS if its holder exits.
+
+### Project baseline settlement
+
+`python3 -P -m triggered_agents curator baseline` is the narrow operator path for intentionally settling existing
+curator input without running the curator, changing its schedule, or writing memory facts. It accepts one registered
+canonical project id, an explicit actor, a non-empty one-line reason, and exactly one opaque evidence identity:
+
+```bash
+python3 -P -m triggered_agents curator backlog --project PROJECT --json
+python3 -P -m triggered_agents curator baseline \
+  --project PROJECT --actor OPERATOR --reason 'reviewed historical backlog' --cutoff-id CUTOFF_ID
+
+# Or settle the exact fact-bearing pending batch already returned by `harvest --json`.
+python3 -P -m triggered_agents curator baseline \
+  --project PROJECT --actor OPERATOR --reason 'approved pending batch' --batch-id BATCH_ID
+```
+
+For a selected project with no pending batch and baseline-valid state, JSON backlog output includes `cutoff.id` and
+`cutoff.cursor_count`.
+The cutoff id binds the project, each selected source's starting watermark and its current complete terminal cursor;
+it is metadata only, never a source path, cursor value, transcript, or personal-memory body. A changed source,
+incomplete JSONL tail, malformed watermark, stale proof, or empty cutoff is refused. A fact-bearing pending batch is
+instead bound by its existing versioned identity, selector and starting cursors; its `batch_id` is the alternative
+evidence identity. A baseline never accepts the all-backlog selector, cannot bypass any pending record, and rejects a
+foreign, ambiguous, mismatched, malformed, or stale source before state changes.
+
+The callable API is `triggered_agents.agents.curator.cli.baseline_settlement`, with the same required `project`,
+`actor`, `reason` and exactly one of `cutoff_id` or `batch_id`. It runs under the same local cursor-settlement lock as
+harvest and advance. The transition writes the watermark, removes a selected pending record when settling that exact
+batch, and publishes `baseline-audit.ndjson` in the curator state directory together with rollback on a local write
+failure. Each
+audit event records version, time, project, actor, redacted reason, evidence kind/id, outcome, and hashed affected
+cursor identities/count; it contains no transcript text, personal-memory text, fact content, raw source payloads or
+credentials. Command output names only the selected project and cursor count.
 
 ### Memory read identity
 
