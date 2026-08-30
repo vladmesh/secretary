@@ -1609,9 +1609,11 @@ turns, input bytes and sources (TA_CURATOR_MAX_TURNS, TA_CURATOR_MAX_INPUT_BYTES
 TA_CURATOR_MAX_SOURCES), with record/row and personal-memory caps for source reads. Discovery decorates every
 transcript and personal-memory source with a route from the selected instance's canonical project registry:
 every valid `id` plus absolute `repo` binding routes its resolved checkout to that `id`; a safe optional
-`orca_binding` additionally routes its `<workspaces root>/<orca_binding>/` tree. A missing binding name never
-invents a workspace route.
-Directory boundaries are exact after path normalization, so a prefix, unreadable binding, missing checkout,
+`orca_binding` additionally routes its `<workspaces root>/<orca_binding>/` tree, including recorded descendants
+whose ephemeral worktree has since been removed. Optional absolute `curator_roots` name ad-hoc historical checkout
+trees for input routing only; they neither register an Orca workspace nor authorize execution. A missing binding
+name never invents a workspace route.
+Directory boundaries are exact after path normalization, so a prefix, relative alias, unreadable binding, missing checkout,
 ambiguous match or unregistered cwd is `unknown`, never guessed. Dispatcher tokens a reference such as
 `sprint:1412` as `sprint-1412`, so observer workspaces under `workspaces/observers/sprint-<token>` restore the
 canonical `sprint:` prefix and route only when that readable sprint has exactly one structured reservation;

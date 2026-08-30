@@ -23,7 +23,9 @@ class CuratorIdentityDiscoveryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.curator = "/home/dev/orca/workspaces/secretary/curator"
-        self.env = mock.patch.dict("os.environ", {"TA_CURATOR_WORKSPACE": self.curator, "TA_CURATOR_SESSION_ID": "self"})
+        self.env = mock.patch.dict(
+            "os.environ", {"TA_CURATOR_WORKSPACE": self.curator, "TA_CURATOR_SESSION_ID": "self"}
+        )
         self.env.start()
 
     def tearDown(self) -> None:
@@ -52,14 +54,21 @@ class CuratorIdentityDiscoveryTests(unittest.TestCase):
             project.mkdir()
             (project / f"{session_id}.jsonl").write_text(json.dumps({"cwd": cwd}) + "\n", encoding="utf-8")
             (sessions / f"{session_id}.jsonl").write_text(
-                json.dumps({"type": "session_meta", "payload": {"session_id": session_id, "cwd": cwd}}) + "\n",
+                json.dumps({"type": "session_meta", "payload": {"session_id": session_id, "cwd": cwd}})
+                + "\n",
                 encoding="utf-8",
             )
-        with mock.patch.object(discover, "CLAUDE_PROJECTS", projects), mock.patch.object(discover, "CODEX_SESSIONS", sessions):
+        with (
+            mock.patch.object(discover, "CLAUDE_PROJECTS", projects),
+            mock.patch.object(discover, "CODEX_SESSIONS", sessions),
+        ):
             self.assertEqual([s["cwd"] for s in discover.claude_sessions()], [included])
             self.assertEqual([s["cwd"] for s in discover.codex_sessions()], [included])
-        with mock.patch.object(discover, "HERMES_STATE_DB", self.root / "state.db"), mock.patch.object(
-            discover, "_hermes_query", return_value=[("self", self.curator), ("other", included)]
+        with (
+            mock.patch.object(discover, "HERMES_STATE_DB", self.root / "state.db"),
+            mock.patch.object(
+                discover, "_hermes_query", return_value=[("self", self.curator), ("other", included)]
+            ),
         ):
             (self.root / "state.db").touch()
             self.assertEqual([s["cwd"] for s in discover.hermes_sessions()], [included])
@@ -77,10 +86,20 @@ class CuratorProjectRoutingTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _binding(self, project: str, repo: Path, binding: str | None = None, *, include_binding: bool = True) -> None:
+    def _binding(
+        self,
+        project: str,
+        repo: Path,
+        binding: str | None = None,
+        *,
+        include_binding: bool = True,
+        curator_roots: list[Path] | None = None,
+    ) -> None:
         content = f"id: {project}\nrepo: {repo}\n"
         if include_binding:
             content += f"orca_binding: {binding or project}\n"
+        if curator_roots:
+            content += "curator_roots:\n" + "".join(f"  - {root}\n" for root in curator_roots)
         (self.instance / "projects" / f"{project}.yaml").write_text(content, encoding="utf-8")
 
     def test_checkout_and_binding_workspace_routes_are_boundary_safe(self) -> None:
@@ -96,8 +115,49 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}):
             self.assertEqual(discover.resolve_route(str(repo_a / "child"), instance=self.instance), "a")
             self.assertEqual(discover.resolve_route(str(alias / "child"), instance=self.instance), "a")
-            self.assertEqual(discover.resolve_route(str(self.workspaces / "a" / "worker"), instance=self.instance), "a")
-            self.assertEqual(discover.resolve_route(str(self.root / "repo-a-not-a-route"), instance=self.instance), "unknown")
+            self.assertEqual(
+                discover.resolve_route(str(self.workspaces / "a" / "worker"), instance=self.instance), "a"
+            )
+            self.assertEqual(
+                discover.resolve_route(str(self.root / "repo-a-not-a-route"), instance=self.instance),
+                "unknown",
+            )
+
+    def test_removed_binding_workspace_still_routes_by_its_durable_boundary(self) -> None:
+        repo = self.root / "repo"
+        repo.mkdir()
+        self._binding("alpha", repo, "alpha-binding")
+        removed = self.workspaces / "alpha-binding" / "finished-card"
+        self.assertFalse(removed.exists())
+        with mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}):
+            self.assertEqual(discover.resolve_route(str(removed), instance=self.instance), "alpha")
+            self.assertEqual(
+                discover.resolve_route(
+                    str(self.workspaces / "alpha-binding-other" / "finished-card"), instance=self.instance
+                ),
+                "unknown",
+            )
+
+    def test_explicit_historical_roots_route_missing_descendants_and_fail_ambiguous(self) -> None:
+        repo_a, repo_b = self.root / "repo-a", self.root / "repo-b"
+        repo_a.mkdir()
+        repo_b.mkdir()
+        historical = self.root / "removed-manual-checkout"
+        self._binding("alpha", repo_a, curator_roots=[historical])
+        self.assertEqual(discover.resolve_route(str(historical / "worker"), instance=self.instance), "alpha")
+        self._binding("beta", repo_b, curator_roots=[historical])
+        self.assertEqual(
+            discover.resolve_route(str(historical / "worker"), instance=self.instance), "unknown"
+        )
+
+    def test_relative_historical_root_is_not_a_route(self) -> None:
+        repo = self.root / "repo"
+        repo.mkdir()
+        content = f"id: alpha\nrepo: {repo}\ncurator_roots: [relative/path]\n"
+        (self.instance / "projects" / "alpha.yaml").write_text(content, encoding="utf-8")
+        self.assertEqual(
+            discover.resolve_route(str(self.root / "relative/path"), instance=self.instance), "unknown"
+        )
 
     def test_ambiguous_or_missing_binding_never_guesses_a_project(self) -> None:
         repo = self.root / "repo"
@@ -106,7 +166,9 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         self._binding("b", repo, "b")
         self._binding("gone", self.root / "missing", "gone")
         self.assertEqual(discover.resolve_route(str(repo), instance=self.instance), "unknown")
-        self.assertEqual(discover.resolve_route(str(self.root / "missing"), instance=self.instance), "unknown")
+        self.assertEqual(
+            discover.resolve_route(str(self.root / "missing"), instance=self.instance), "unknown"
+        )
 
     def test_binding_without_orca_name_routes_checkout_and_remains_selectable(self) -> None:
         repo = self.root / "repo"
@@ -117,7 +179,9 @@ class CuratorProjectRoutingTests(unittest.TestCase):
             self.assertEqual(discover.registered_project_ids(self.instance), {"ready-for-traffic"})
             self.assertEqual(discover.resolve_route(str(repo), instance=self.instance), "ready-for-traffic")
             self.assertEqual(
-                discover.resolve_route(str(self.workspaces / "ready-for-traffic" / "worker"), instance=self.instance),
+                discover.resolve_route(
+                    str(self.workspaces / "ready-for-traffic" / "worker"), instance=self.instance
+                ),
                 "unknown",
             )
 
@@ -130,9 +194,11 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         self.assertEqual(token, "sprint-1412")
         observer = self.workspaces / "observers" / token / "head"
         observer.mkdir(parents=True)
-        with mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}), mock.patch.object(
-            discover, "SprintReader"
-        ) as reader, mock.patch.object(discover.KanboardClient, "for_instance"):
+        with (
+            mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}),
+            mock.patch.object(discover, "SprintReader") as reader,
+            mock.patch.object(discover.KanboardClient, "for_instance"),
+        ):
             reader.return_value.show.return_value = {"reservations": ["alpha"]}
             self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "alpha")
             reader.return_value.show.assert_called_once_with(
@@ -142,3 +208,17 @@ class CuratorProjectRoutingTests(unittest.TestCase):
             self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "unknown")
             reader.return_value.show.side_effect = OSError("board unavailable")
             self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "unknown")
+
+    def test_removed_observer_workspace_still_uses_its_sprint_reservation(self) -> None:
+        repo = self.root / "repo"
+        repo.mkdir()
+        self._binding("alpha", repo)
+        observer = self.workspaces / "observers" / request_token("sprint:1412") / "removed-head"
+        self.assertFalse(observer.exists())
+        with (
+            mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}),
+            mock.patch.object(discover, "SprintReader") as reader,
+            mock.patch.object(discover.KanboardClient, "for_instance"),
+        ):
+            reader.return_value.show.return_value = {"reservations": ["alpha"]}
+            self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "alpha")

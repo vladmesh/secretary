@@ -27,6 +27,16 @@
       "minLength": 1,
       "description": "Explicit durable Orca registration name. It is never derived from id or repo and may be present while task routing remains disabled."
     },
+    "curator_roots": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/",
+        "minLength": 2
+      },
+      "uniqueItems": true,
+      "description": "Optional absolute historical cwd roots used only to route curator input after an ad-hoc checkout has been removed. They grant no execution authority."
+    },
     "enabled": {
       "type": "boolean",
       "description": "Only true after a green onboarding gate."
