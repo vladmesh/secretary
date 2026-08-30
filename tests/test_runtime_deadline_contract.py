@@ -70,11 +70,13 @@ class ShippedRuntimeDeadlineContractTests(unittest.TestCase):
             _kill(head)
             _kill(supervisor)
         deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and any(_alive(head) for head, _supervisor in self._pids):
+        while time.monotonic() < deadline and any(
+            _alive(pid) for head, supervisor in self._pids for pid in (head, supervisor)
+        ):
             time.sleep(0.02)
         self.assertFalse(
-            any(_alive(head) for head, _supervisor in self._pids),
-            "the default-deadline contract left a head process behind",
+            any(_alive(pid) for head, supervisor in self._pids for pid in (head, supervisor)),
+            "the default-deadline contract left a head or supervisor process behind",
         )
 
     def _remember(self, run_dir: Path) -> None:
@@ -105,6 +107,11 @@ class ShippedRuntimeDeadlineContractTests(unittest.TestCase):
         self.assertEqual(delivered["state"], protocol.DELIVERY_COMPLETE)
 
     def test_local_pty_runtime_forwards_the_shipped_deadlines_to_its_production_substrate(self) -> None:
+        runtime, receipt, forwarded = self._start_production_runtime()
+
+        self._assert_runtime_deadline_contract(runtime, receipt, forwarded)
+
+    def _start_production_runtime(self) -> tuple[LocalPtyHeadRuntime, object, list[float | None]]:
         forwarded: list[float | None] = []
 
         def production_spawn(**kwargs):
@@ -126,8 +133,11 @@ class ShippedRuntimeDeadlineContractTests(unittest.TestCase):
             quiet_seconds=0.1,
         )
         self.assertTrue(receipt.ok, receipt.reason)
-        self.assertEqual(forwarded, [None], "the runtime overrode the substrate's shipped deadline")
         self._remember(self.root / receipt.run.run_id)
+        return runtime, receipt, forwarded
+
+    def _assert_runtime_deadline_contract(self, runtime, receipt, forwarded) -> None:
+        self.assertEqual(forwarded, [None], "the runtime overrode the substrate's shipped deadline")
 
         with SupervisorClient.connect(self.root / receipt.run.run_id / protocol.SOCKET_NAME) as client:
             admitted = client.send_input("runtime default\n")
@@ -139,6 +149,25 @@ class ShippedRuntimeDeadlineContractTests(unittest.TestCase):
             protocol.INPUT_DELIVERY_SECONDS + DELIVERY_GRACE_SECONDS,
         )
         self.assertEqual(runtime._stop_timeout, STOP_CONFIRM_SECONDS)
+
+    def test_a_failing_runtime_contract_assertion_reaps_its_processes_and_state(self) -> None:
+        probe = ShippedRuntimeDeadlineContractTests(
+            "test_local_pty_runtime_forwards_the_shipped_deadlines_to_its_production_substrate"
+        )
+        probe.setUp()
+        root = probe.root
+        workspace = probe.workspace
+        try:
+            runtime, receipt, _forwarded = probe._start_production_runtime()
+            tracked_pids = tuple(pid for head, supervisor in probe._pids for pid in (head, supervisor))
+            with self.assertRaisesRegex(AssertionError, "overrode the substrate"):
+                probe._assert_runtime_deadline_contract(runtime, receipt, [0.25])
+        finally:
+            self.assertTrue(probe.doCleanups(), "a failed deadline-contract assertion did not clean up")
+
+        self.assertFalse(any(_alive(pid) for pid in tracked_pids))
+        self.assertFalse(root.exists(), "cleanup left the head, supervisor, socket, or run state behind")
+        self.assertFalse(workspace.exists(), "cleanup left the default-contract workspace behind")
 
 
 if __name__ == "__main__":

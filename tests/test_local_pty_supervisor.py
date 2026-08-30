@@ -65,8 +65,10 @@ CHILD_COMMAND = f"{sys.executable} -u {CHILD}"
 # These are test-only bounds.  The shipped values belong to
 # ShippedRuntimeDeadlineContractTests; expiry behaviour must not make ordinary runtime feedback
 # wait for them.
-TEST_DELIVERY_SECONDS = 0.5
+TEST_DELIVERY_SECONDS = 1.0
 TEST_DELIVERY_WAIT_SECONDS = 3.0
+TEST_RESPONSE_SECONDS = 0.5
+TEST_BYSTANDER_DELIVERY_SECONDS = 3.0
 
 
 def _identity_of(pid: int, run_id: str) -> dict[str, object]:
@@ -426,7 +428,9 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
         payload = b"z" * protocol.INPUT_MAX_BYTES
         answer = self._prompt(
-            lambda: client.send_input(payload, subject="nudge"), within=2.0, what="send_input"
+            lambda: client.send_input(payload, subject="nudge"),
+            within=TEST_RESPONSE_SECONDS,
+            what="send_input",
         )
         self.assertTrue(answer["ok"], answer)
         self.assertTrue(answer["accepted"], answer)
@@ -439,7 +443,11 @@ class LocalPtySubstrateTests(unittest.TestCase):
         deadline = time.monotonic() + TEST_DELIVERY_WAIT_SECONDS
         seen_in_flight = False
         while time.monotonic() < deadline:
-            status = self._prompt(client.status, within=2.0, what="status during a stuck delivery")
+            status = self._prompt(
+                client.status,
+                within=TEST_RESPONSE_SECONDS,
+                what="status during a stuck delivery",
+            )
             self.assertTrue(status["ok"], status)
             self.assertIn("alive", status)
             self.assertTrue(status["alive"], "a live head was reported dead")
@@ -494,11 +502,13 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self._await_output(client, b"UP")
 
         payload = b"s" * 40000
-        answer = self._prompt(lambda: client.send_input(payload), within=2.0, what="send_input")
+        answer = self._prompt(
+            lambda: client.send_input(payload), within=TEST_RESPONSE_SECONDS, what="send_input"
+        )
         self.assertTrue(answer["ok"], answer)
         delivery_id = answer["delivery"]["id"]
 
-        status = self._prompt(client.status, within=2.0, what="status mid-delivery")
+        status = self._prompt(client.status, within=TEST_RESPONSE_SECONDS, what="status mid-delivery")
         self.assertTrue(status["alive"], "a live head was reported dead")
         self.assertEqual(status["delivery"]["id"], delivery_id)
 
@@ -528,7 +538,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
             "bystander",
             chunk=4096,
             pause=600.0,
-            delivery_seconds=1.5,
+            delivery_seconds=TEST_BYSTANDER_DELIVERY_SECONDS,
         )
         deliverer = self._client(handle)
         bystander = self._client(handle)
@@ -536,21 +546,36 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
         accepted = deliverer.send_input(b"z" * protocol.INPUT_MAX_BYTES)
         self.assertTrue(accepted["ok"], accepted)
+        self.assertEqual(accepted["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT)
 
         for _ in range(10):
-            status = self._prompt(bystander.status, within=2.0, what="a bystander's status during a delivery")
+            status = self._prompt(
+                bystander.status,
+                within=TEST_RESPONSE_SECONDS,
+                what="a bystander's status during a delivery",
+            )
             self.assertTrue(status["ok"], status)
             self.assertTrue(status["alive"])
+            self.assertEqual(status["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT)
             time.sleep(0.1)
         self.assertEqual(bystander.stale_frames, 0)
 
         # The delivering connection is not out of step either: its next question is its own.
-        own = self._prompt(deliverer.status, within=2.0, what="the deliverer's next status")
+        own = self._prompt(
+            deliverer.status,
+            within=TEST_RESPONSE_SECONDS,
+            what="the deliverer's next status",
+        )
         self.assertTrue(own["alive"])
+        self.assertEqual(own["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT)
         self.assertEqual(deliverer.stale_frames, 0)
 
         # And the loop is still doing its own work: a stop, asked for by the bystander mid-delivery.
-        stop = self._prompt(lambda: bystander.stop(initiator="test"), within=2.0, what="stop mid-delivery")
+        stop = self._prompt(
+            lambda: bystander.stop(initiator="test"),
+            within=TEST_RESPONSE_SECONDS,
+            what="stop mid-delivery",
+        )
         self.assertTrue(stop["ok"], stop)
         self._await(
             lambda: not _alive(handle.head_pid),
@@ -575,7 +600,11 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
         first = client.send_input(b"z" * protocol.INPUT_MAX_BYTES)
         self.assertTrue(first["ok"], first)
-        second = self._prompt(lambda: client.send_input(b"second\n"), within=2.0, what="a second delivery")
+        second = self._prompt(
+            lambda: client.send_input(b"second\n"),
+            within=TEST_RESPONSE_SECONDS,
+            what="a second delivery",
+        )
         self.assertFalse(second["ok"], second)
         self.assertEqual(second["error"], protocol.ERROR_INPUT_IN_FLIGHT)
         self.assertEqual(second["delivery"]["id"], first["delivery"]["id"])
