@@ -16,16 +16,22 @@ jobs:
         suite: [unit, component, runtime-component, integration-recovery, integration-memory, integration-board, packaging]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python3 -m pip install --upgrade pip
-      - run: python3 -m pip install -e '.[memory]'
+      - run: python3 -m pip install -e '.[memory,ci]'
       - name: Run reported suite
         id: run_suite
         continue-on-error: true
         run: >-
-          python3 scripts/ci_test_shards.py --suite "${{ matrix.suite }}"
+          mkdir -p "$RUNNER_TEMP/ci-coverage/${{ matrix.suite }}"
+          &&
+          python3 -m coverage run
+          --data-file "$RUNNER_TEMP/ci-coverage/${{ matrix.suite }}/coverage.${{ matrix.suite }}"
+          scripts/ci_test_shards.py --suite "${{ matrix.suite }}"
           --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
           --candidate-sha "${{ github.event.pull_request.head.sha || github.sha }}"
       - name: Write suite evidence summary
@@ -44,6 +50,15 @@ jobs:
           path: ${{ runner.temp }}/ci-evidence/${{ matrix.suite }}
           if-no-files-found: error
           retention-days: 14
+      - name: Upload raw suite coverage
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-coverage-${{ matrix.suite }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/ci-coverage/${{ matrix.suite }}/coverage.${{ matrix.suite }}
+          if-no-files-found: error
+          retention-days: 14
       - name: Preserve suite result
         if: ${{ always() }}
         run: >-
@@ -58,6 +73,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --upgrade pip
+      - run: python3 -m pip install -e '.[ci]'
       - name: Download suite evidence
         if: ${{ always() }}
         continue-on-error: true
@@ -66,7 +89,41 @@ jobs:
           pattern: ci-evidence-*
           path: ${{ runner.temp }}/ci-evidence
           merge-multiple: false
+      - name: Download raw suite coverage
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ci-coverage-*
+          path: ${{ runner.temp }}/ci-coverage
+          merge-multiple: false
+      - name: Combine exact-SHA coverage evidence
+        id: coverage_aggregate
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python3 scripts/ci_test_shards.py --coverage-aggregate
+          --coverage-dir "$RUNNER_TEMP/ci-coverage"
+          --coverage-output-dir "$RUNNER_TEMP/ci-coverage-combined"
+          --candidate-sha "$CANDIDATE_SHA"
+          --base-sha "$BASE_SHA"
+          >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload combined coverage evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-coverage-combined-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/ci-coverage-combined
+          if-no-files-found: warn
+          retention-days: 14
       - name: Require and classify every test suite
+        id: suite_aggregate
+        if: ${{ always() }}
+        continue-on-error: true
         env:
           SUITES_RESULT: ${{ needs.test_suites.result }}
         run: >-
@@ -74,3 +131,28 @@ jobs:
           --evidence-dir "$RUNNER_TEMP/ci-evidence"
           --needs-result "$SUITES_RESULT"
           >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish main coverage baseline
+        if: >-
+          ${{ github.ref == 'refs/heads/main' && steps.coverage_aggregate.outcome == 'success' &&
+          steps.suite_aggregate.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-coverage-baseline-${{ github.sha }}
+          path: ${{ runner.temp }}/ci-coverage-combined
+          if-no-files-found: error
+          retention-days: 90
+      - name: Write main coverage baseline summary
+        if: >-
+          ${{ github.ref == 'refs/heads/main' && steps.coverage_aggregate.outcome == 'success' &&
+          steps.suite_aggregate.outcome == 'success' }}
+        env:
+          BASELINE_SHA: ${{ github.sha }}
+          BASELINE_ARTIFACT: ci-coverage-baseline-${{ github.sha }}
+        run: >-
+          printf '## Main coverage baseline\n\n- Candidate SHA: `%s`\n- Artifact: `%s`\n'
+          "$BASELINE_SHA" "$BASELINE_ARTIFACT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve required aggregate result
+        if: ${{ always() }}
+        run: >-
+          test "${{ steps.coverage_aggregate.outcome }}" = success
+          && test "${{ steps.suite_aggregate.outcome }}" = success

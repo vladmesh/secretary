@@ -44,6 +44,12 @@ SLOWEST_TEST_LIMIT = 10
 MAX_STATUS_CHANGE_SAMPLES = 10
 MAX_STATUS_CHANGE_CHARS = 200
 EVIDENCE_FILES = ("report.json", "junit.xml", "test-output.log")
+COVERAGE_SOURCE_ROOTS = ("src/secretary", "src/triggered_agents")
+COVERAGE_RAW_PREFIX = "coverage."
+COVERAGE_JSON_NAME = "combined-coverage.json"
+CHANGED_LINES_JSON_NAME = "changed-lines.json"
+MAX_COVERAGE_JSON_BYTES = 5_000_000
+MAX_CHANGED_LINES = 10_000
 OUTCOMES = (
     "success",
     "product_failure",
@@ -106,6 +112,10 @@ class EvidenceError(ValueError):
 
 
 class CheckoutStatusError(RuntimeError):
+    pass
+
+
+class CoverageError(ValueError):
     pass
 
 
@@ -615,6 +625,267 @@ def aggregate_evidence(evidence_dir: Path, needs_result: str) -> int:
     return 0
 
 
+def _exact_sha(value: str, label: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40,64}", value):
+        raise CoverageError(f"{label} is not an exact SHA")
+    return value
+
+
+def _suite_coverage_data(coverage_dir: Path, candidate_sha: str) -> list[Path]:
+    paths: list[Path] = []
+    for suite in SUITES:
+        path = coverage_dir / f"ci-coverage-{suite}-{candidate_sha}" / f"{COVERAGE_RAW_PREFIX}{suite}"
+        if not path.is_file() or path.stat().st_size == 0:
+            raise CoverageError(f"missing or empty raw coverage datum for {suite} at {path}")
+        paths.append(path)
+    return paths
+
+
+def _validate_coverage_datum(path: Path) -> None:
+    """Reject corrupt or incompatible coverage databases before combining."""
+    try:
+        from coverage import CoverageData
+        from coverage.exceptions import CoverageException
+    except ImportError as exc:
+        raise CoverageError("coverage.py is unavailable for aggregate validation") from exc
+    try:
+        data = CoverageData(basename=str(path))
+        data.read()
+        data.measured_files()
+    except (CoverageException, OSError, ValueError) as exc:
+        raise CoverageError(f"unreadable or incompatible raw coverage datum at {path}: {exc}") from exc
+
+
+def _run_coverage(command: list[str], root: Path) -> None:
+    try:
+        subprocess.run(command, cwd=root, capture_output=True, check=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = (
+            exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
+        )
+        raise CoverageError(f"coverage command failed: {detail}") from exc
+
+
+def _candidate_checkout(root: Path, candidate_sha: str) -> None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, check=True, text=True
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise CoverageError(f"cannot verify candidate checkout: {exc}") from exc
+    if result.stdout.strip() != candidate_sha:
+        raise CoverageError("coverage aggregate checkout does not match the candidate SHA")
+
+
+def _source_file(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return any(normalized.startswith(f"{root}/") for root in COVERAGE_SOURCE_ROOTS)
+
+
+def _coverage_payload(path: Path) -> dict[str, object]:
+    if not path.is_file() or path.stat().st_size > MAX_COVERAGE_JSON_BYTES:
+        raise CoverageError("combined coverage JSON is missing, empty, or exceeds its bound")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        files = data["files"]
+        if not isinstance(files, dict) or not files:
+            raise TypeError("files is empty or not an object")
+        for filename, payload in files.items():
+            if not isinstance(filename, str) or not _source_file(filename) or not isinstance(payload, dict):
+                raise TypeError("coverage includes a file outside the configured source roots")
+            for key in (
+                "executed_lines",
+                "missing_lines",
+                "excluded_lines",
+                "executed_branches",
+                "missing_branches",
+            ):
+                if not isinstance(payload.get(key), list):
+                    raise TypeError(f"coverage file lacks {key}")
+            summary = payload.get("summary")
+            if not isinstance(summary, dict) or not isinstance(summary.get("num_branches"), int):
+                raise TypeError("coverage file lacks branch summary")
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise CoverageError(f"malformed combined coverage JSON: {exc}") from exc
+    return data
+
+
+def _changed_candidate_lines(root: Path, base_sha: str, candidate_sha: str) -> dict[str, list[int]]:
+    _exact_sha(base_sha, "base SHA")
+    _exact_sha(candidate_sha, "candidate SHA")
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--no-ext-diff",
+                "--unified=0",
+                base_sha,
+                candidate_sha,
+                "--",
+                *COVERAGE_SOURCE_ROOTS,
+            ],
+            cwd=root,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise CoverageError(f"cannot diff exact base and candidate SHAs: {exc}") from exc
+    changed: dict[str, list[int]] = {}
+    filename: str | None = None
+    for line in result.stdout.splitlines():
+        if line.startswith("+++ b/"):
+            candidate = line.removeprefix("+++ b/")
+            filename = candidate if _source_file(candidate) else None
+            continue
+        match = re.match(r"^@@ -[^ ]+ \+(\d+)(?:,(\d+))? @@", line)
+        if match and filename is not None:
+            start, count = (int(value) if value else 1 for value in match.groups())
+            if count:
+                changed.setdefault(filename, []).extend(range(start, start + count))
+    total = sum(len(lines) for lines in changed.values())
+    if total > MAX_CHANGED_LINES:
+        raise CoverageError(f"changed executable-line report exceeds its {MAX_CHANGED_LINES}-line bound")
+    return changed
+
+
+def _changed_line_report(
+    coverage: dict[str, object], changed: dict[str, list[int]], *, base_sha: str, candidate_sha: str
+) -> dict[str, object]:
+    files = coverage["files"]
+    assert isinstance(files, dict)
+    entries: list[dict[str, object]] = []
+    for filename in sorted(changed):
+        payload = files.get(filename, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        executed = set(payload.get("executed_lines", []))
+        missing = set(payload.get("missing_lines", []))
+        excluded = set(payload.get("excluded_lines", []))
+        for number in sorted(set(changed[filename])):
+            classification = (
+                "excluded"
+                if number in excluded
+                else "covered"
+                if number in executed
+                else "missed"
+                if number in missing
+                else "not_executable"
+            )
+            entries.append({"path": filename, "line": number, "classification": classification})
+    return {
+        "schema_version": 1,
+        "base_sha": base_sha,
+        "candidate_sha": candidate_sha,
+        "applicable": True,
+        "reason": "changed candidate source lines classified from the exact GitHub pull-request base SHA",
+        "line_limit": MAX_CHANGED_LINES,
+        "lines": entries,
+    }
+
+
+def aggregate_coverage(
+    root: Path, coverage_dir: Path, output_dir: Path, candidate_sha: str, base_sha: str | None
+) -> int:
+    try:
+        candidate_sha = _exact_sha(candidate_sha, "candidate SHA")
+        _candidate_checkout(root, candidate_sha)
+        raw_data = _suite_coverage_data(coverage_dir, candidate_sha)
+        for path in raw_data:
+            _validate_coverage_datum(path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="secretary-coverage-") as work:
+            # coverage combine recognizes inputs by the basename set through
+            # --data-file. Keep that basename aligned with coverage.<suite>,
+            # while keeping its intermediate SQLite data outside the published
+            # aggregate artifact directory.
+            combined_data = Path(work) / "coverage"
+            raw_json = output_dir / ".coverage.native.json"
+            _run_coverage(
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "combine",
+                    "--data-file",
+                    str(combined_data),
+                    *map(str, raw_data),
+                ],
+                root,
+            )
+            _run_coverage(
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "json",
+                    "--data-file",
+                    str(combined_data),
+                    "-o",
+                    str(raw_json),
+                ],
+                root,
+            )
+        coverage = _coverage_payload(raw_json)
+        if base_sha:
+            changed_report = _changed_line_report(
+                coverage,
+                _changed_candidate_lines(root, base_sha, candidate_sha),
+                base_sha=base_sha,
+                candidate_sha=candidate_sha,
+            )
+        else:
+            changed_report = {
+                "schema_version": 1,
+                "candidate_sha": candidate_sha,
+                "applicable": False,
+                "reason": "not applicable: this event has no pull-request base SHA",
+                "line_limit": MAX_CHANGED_LINES,
+                "lines": [],
+            }
+        combined = {
+            "schema_version": 1,
+            "candidate_sha": candidate_sha,
+            "source_roots": list(COVERAGE_SOURCE_ROOTS),
+            "aggregate_artifacts": [COVERAGE_JSON_NAME, CHANGED_LINES_JSON_NAME],
+            "changed_line_visibility": {
+                "applicable": changed_report["applicable"],
+                "reason": changed_report["reason"],
+            },
+            "coverage": coverage,
+        }
+        combined_path = output_dir / COVERAGE_JSON_NAME
+        changed_path = output_dir / CHANGED_LINES_JSON_NAME
+        # Per-file line and branch detail is large for the full product. Keep
+        # the downloaded evidence deterministic and within its published bound
+        # without dropping any machine-readable coverage detail.
+        combined_path.write_text(
+            json.dumps(combined, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+        )
+        changed_path.write_text(
+            json.dumps(changed_report, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+        )
+        if combined_path.stat().st_size > MAX_COVERAGE_JSON_BYTES:
+            raise CoverageError("published combined coverage JSON exceeds its bound")
+    except (CoverageError, OSError) as exc:
+        print(f"## CI coverage infrastructure failure\n\n- {exc}")
+        return 3
+    print(
+        "\n".join(
+            (
+                "## Combined CI coverage",
+                "",
+                f"- Candidate SHA: `{candidate_sha}`",
+                f"- Source roots: {', '.join(f'`{path}`' for path in COVERAGE_SOURCE_ROOTS)}",
+                f"- Aggregate artifacts: `{COVERAGE_JSON_NAME}`, `{CHANGED_LINES_JSON_NAME}`",
+                f"- Changed-line visibility: {'applicable' if changed_report['applicable'] else 'not applicable'} ({changed_report['reason']})",
+            )
+        )
+    )
+    return 0
+
+
 def load_manifest(root: Path, manifest: Path | None = None) -> dict[str, list[str]]:
     manifest = manifest or root / "tests" / "ci-shards.txt"
     grouped = {name: [] for name in SUITES}
@@ -840,9 +1111,15 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--fast", action="store_true", help="run the bounded hermetic control-host profile")
     action.add_argument("--summary", action="store_true", help="validate evidence and print a step summary")
     action.add_argument("--aggregate", action="store_true", help="summarize all downloaded suite evidence")
+    action.add_argument(
+        "--coverage-aggregate", action="store_true", help="combine downloaded raw coverage evidence"
+    )
     parser.add_argument("--report-dir", type=Path, help="directory containing one suite's CI evidence")
     parser.add_argument("--candidate-sha", help="exact candidate SHA recorded in suite evidence")
     parser.add_argument("--evidence-dir", type=Path, help="download directory containing suite artifacts")
+    parser.add_argument("--coverage-dir", type=Path, help="download directory containing raw suite coverage")
+    parser.add_argument("--coverage-output-dir", type=Path, help="directory for combined coverage artifacts")
+    parser.add_argument("--base-sha", default="", help="pull-request base SHA for changed-line coverage")
     parser.add_argument(
         "--needs-result",
         choices=("success", "failure", "cancelled", "skipped"),
@@ -859,6 +1136,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.evidence_dir is None or args.needs_result is None:
             parser.error("--aggregate requires --evidence-dir and --needs-result")
         return aggregate_evidence(args.evidence_dir, args.needs_result)
+    if args.coverage_aggregate:
+        if args.coverage_dir is None or args.coverage_output_dir is None or args.candidate_sha is None:
+            parser.error(
+                "--coverage-aggregate requires --coverage-dir, --coverage-output-dir and --candidate-sha"
+            )
+        return aggregate_coverage(
+            root, args.coverage_dir, args.coverage_output_dir, args.candidate_sha, args.base_sha or None
+        )
     if args.fast:
         return run_fast(root)
 

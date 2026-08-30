@@ -25,6 +25,21 @@ A green suite requires those snapshots to match exactly. Evidence retains snapsh
 digests, plus at most ten bounded changed-status entries, rather than publishing unbounded checkout
 contents.
 
+Each of those same seven executions also writes one raw `coverage.<suite>` datum outside that
+three-file evidence root and uploads it as `ci-coverage-<suite>-<sha>`. Coverage is a CI-only
+dependency and is configured for line and branch coverage of `src/secretary` and
+`src/triggered_agents` only. The required aggregate downloads every raw datum, rejects missing,
+malformed, incompatible or uncombinable data as infrastructure failure, and publishes the bounded
+`ci-coverage-combined-<sha>` artifact. It contains `combined-coverage.json`, with per-file
+executed/missing/excluded lines and executed/missing branches, and `changed-lines.json`.
+
+For pull requests, `changed-lines.json` classifies each changed candidate source line against the
+exact GitHub base and candidate SHAs as `covered`, `missed`, `excluded` or `not_executable`. Other
+events state that this view is not applicable because they have no pull-request base SHA. A
+successful push to `main` also retains the same exact-SHA aggregate artifact as
+`ci-coverage-baseline-<sha>` for 90 days. This baseline is evidence and comparison context only:
+there is no numeric coverage threshold or local coverage collection.
+
 The test job remains the aggregate required result and succeeds only when every applicable suite
 succeeds. Its own summary lists each suite as `success`, `product_failure`,
 `infrastructure_failure`, `cancelled` or `not_applicable`. A failing test is a product failure;

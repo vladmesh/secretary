@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -13,17 +14,24 @@ from unittest.mock import patch
 from xml.etree import ElementTree
 
 from scripts.ci_test_shards import (
+    CHANGED_LINES_JSON_NAME,
+    COVERAGE_JSON_NAME,
     EVIDENCE_FILES,
     FAST_MODULES,
+    MAX_COVERAGE_JSON_BYTES,
     SUITES,
     BoundedTee,
     CheckoutStatusError,
+    CoverageError,
     ManifestError,
     SuiteEvidence,
     TestRecord,
+    _changed_line_report,
     _read_evidence,
+    _suite_coverage_data,
     _summary,
     _write_evidence,
+    aggregate_coverage,
     aggregate_evidence,
     fast_environment,
     load_manifest,
@@ -299,7 +307,11 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         id: run_suite
         continue-on-error: true
         run: >-
-          python3 scripts/ci_test_shards.py --suite "${{{{ matrix.suite }}}}"
+          mkdir -p "$RUNNER_TEMP/ci-coverage/${{{{ matrix.suite }}}}"
+          &&
+          python3 -m coverage run
+          --data-file "$RUNNER_TEMP/ci-coverage/${{{{ matrix.suite }}}}/coverage.${{{{ matrix.suite }}}}"
+          scripts/ci_test_shards.py --suite "${{{{ matrix.suite }}}}"
           --report-dir "$RUNNER_TEMP/ci-evidence/${{{{ matrix.suite }}}}"
           --candidate-sha "{candidate_sha}""",
             workflow,
@@ -335,6 +347,17 @@ class CiTestSuiteManifestTests(unittest.TestCase):
           > /dev/null""",
             workflow,
         )
+        self.assertIn(
+            f"""      - name: Upload raw suite coverage
+        if: ${{{{ always() }}}}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-coverage-${{{{ matrix.suite }}}}-{candidate_sha}
+          path: ${{{{ runner.temp }}}}/ci-coverage/${{{{ matrix.suite }}}}/coverage.${{{{ matrix.suite }}}}
+          if-no-files-found: error""",
+            workflow,
+        )
 
     def test_workflow_aggregate_downloads_and_classifies_all_suite_evidence(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(
@@ -361,6 +384,9 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         )
         self.assertIn(
             """      - name: Require and classify every test suite
+        id: suite_aggregate
+        if: ${{ always() }}
+        continue-on-error: true
         env:
           SUITES_RESULT: ${{ needs.test_suites.result }}
         run: >-
@@ -370,6 +396,175 @@ class CiTestSuiteManifestTests(unittest.TestCase):
           >> "$GITHUB_STEP_SUMMARY""",
             workflow,
         )
+        self.assertIn("pattern: ci-coverage-*", workflow)
+        self.assertIn("--coverage-aggregate", workflow)
+        self.assertIn('--base-sha "$BASE_SHA"', workflow)
+        self.assertIn(
+            "name: ci-coverage-combined-${{ github.event.pull_request.head.sha || github.sha }}", workflow
+        )
+        self.assertIn("name: ci-coverage-baseline-${{ github.sha }}", workflow)
+        self.assertIn("## Main coverage baseline", workflow)
+        self.assertIn("fetch-depth: 0", workflow)
+
+    def test_main_coverage_baseline_summary_preserves_sha_and_artifact(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        step = workflow.split("      - name: Write main coverage baseline summary\n", 1)[1].split(
+            "      - name:", 1
+        )[0]
+        self.assertIn("BASELINE_SHA: ${{ github.sha }}", step)
+        self.assertIn("BASELINE_ARTIFACT: ci-coverage-baseline-${{ github.sha }}", step)
+        command = " ".join(
+            line.strip() for line in step.split("        run: >-\n", 1)[1].splitlines() if line.strip()
+        ).replace("${{ github.sha }}", CANDIDATE_SHA)
+        artifact = f"ci-coverage-baseline-{CANDIDATE_SHA}"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = Path(tmp) / "summary.md"
+            result = subprocess.run(
+                ["bash", "-e", "-c", command],
+                env={
+                    **os.environ,
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "BASELINE_SHA": CANDIDATE_SHA,
+                    "BASELINE_ARTIFACT": artifact,
+                },
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                summary.read_text(encoding="utf-8"),
+                f"## Main coverage baseline\n\n- Candidate SHA: `{CANDIDATE_SHA}`\n- Artifact: `{artifact}`\n",
+            )
+
+    def _coverage_payload(self) -> dict[str, object]:
+        return {
+            "meta": {"branch_coverage": True},
+            "files": {
+                "src/secretary/example.py": {
+                    "executed_lines": [2, 4],
+                    "missing_lines": [3],
+                    "excluded_lines": [5],
+                    "executed_branches": [[2, 4]],
+                    "missing_branches": [[2, 3]],
+                    "summary": {"num_branches": 2},
+                }
+            },
+        }
+
+    def test_coverage_aggregate_combines_one_named_datum_per_suite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            for suite in SUITES:
+                path = raw / f"ci-coverage-{suite}-{CANDIDATE_SHA}" / f"coverage.{suite}"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"coverage data")
+            output = root / "combined"
+
+            commands: list[list[str]] = []
+
+            def write_native_json(command: list[str], _root: Path) -> None:
+                commands.append(command)
+                if "json" in command:
+                    Path(command[command.index("-o") + 1]).write_text(
+                        json.dumps(self._coverage_payload()), encoding="utf-8"
+                    )
+
+            with (
+                patch("scripts.ci_test_shards._candidate_checkout"),
+                patch("scripts.ci_test_shards._validate_coverage_datum"),
+                patch("scripts.ci_test_shards._run_coverage", side_effect=write_native_json),
+            ):
+                self.assertEqual(aggregate_coverage(root, raw, output, CANDIDATE_SHA, None), 0)
+
+            combined_path = output / COVERAGE_JSON_NAME
+            combined_text = combined_path.read_text(encoding="utf-8")
+            combined_size = combined_path.stat().st_size
+            combined = json.loads(combined_text)
+            changed = json.loads((output / CHANGED_LINES_JSON_NAME).read_text(encoding="utf-8"))
+
+        self.assertEqual(combined["candidate_sha"], CANDIDATE_SHA)
+        self.assertEqual(combined["source_roots"], ["src/secretary", "src/triggered_agents"])
+        self.assertIn("executed_branches", combined["coverage"]["files"]["src/secretary/example.py"])
+        self.assertEqual(
+            combined_text,
+            json.dumps(combined, sort_keys=True, separators=(",", ":")) + "\n",
+        )
+        self.assertLessEqual(combined_size, MAX_COVERAGE_JSON_BYTES)
+        self.assertFalse(changed["applicable"])
+        self.assertIn("no pull-request base SHA", changed["reason"])
+        combine = next(command for command in commands if "combine" in command)
+        data_file = Path(combine[combine.index("--data-file") + 1])
+        self.assertEqual(data_file.name, "coverage")
+        raw_paths = [Path(path) for path in combine[-len(SUITES) :]]
+        self.assertEqual({path.name for path in raw_paths}, {f"coverage.{suite}" for suite in SUITES})
+        self.assertTrue(all(path.name.startswith(f"{data_file.name}.") for path in raw_paths))
+
+    def test_coverage_aggregate_rejects_missing_or_uncombinable_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            raw.mkdir()
+            with self.assertRaisesRegex(CoverageError, "unit"):
+                _suite_coverage_data(raw, CANDIDATE_SHA)
+            for suite in SUITES:
+                path = raw / f"ci-coverage-{suite}-{CANDIDATE_SHA}" / f"coverage.{suite}"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"coverage data")
+            with (
+                patch("scripts.ci_test_shards._candidate_checkout"),
+                patch("scripts.ci_test_shards._validate_coverage_datum"),
+                patch("scripts.ci_test_shards._run_coverage", side_effect=CoverageError("incompatible data")),
+            ):
+                self.assertEqual(aggregate_coverage(root, raw, root / "combined", CANDIDATE_SHA, None), 3)
+
+    def test_coverage_aggregate_rejects_a_corrupt_datum_before_combine(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            for suite in SUITES:
+                path = raw / f"ci-coverage-{suite}-{CANDIDATE_SHA}" / f"coverage.{suite}"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"coverage data")
+            with (
+                patch("scripts.ci_test_shards._candidate_checkout"),
+                patch(
+                    "scripts.ci_test_shards._validate_coverage_datum",
+                    side_effect=CoverageError("corrupt coverage data"),
+                ),
+                patch("scripts.ci_test_shards._run_coverage") as coverage,
+            ):
+                self.assertEqual(aggregate_coverage(root, raw, root / "combined", CANDIDATE_SHA, None), 3)
+
+        coverage.assert_not_called()
+
+    def test_changed_line_report_classifies_coverage_and_non_executable_lines(self) -> None:
+        report = _changed_line_report(
+            self._coverage_payload(),
+            {"src/secretary/example.py": [2, 3, 5, 9]},
+            base_sha="b" * 40,
+            candidate_sha=CANDIDATE_SHA,
+        )
+
+        self.assertTrue(report["applicable"])
+        self.assertEqual(
+            [entry["classification"] for entry in report["lines"]],
+            ["covered", "missed", "excluded", "not_executable"],
+        )
+
+    def test_coverage_configuration_enables_branch_scope_without_a_threshold(self) -> None:
+        config = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertIn("[tool.coverage.run]", config)
+        self.assertIn("branch = true", config)
+        self.assertIn("relative_files = true", config)
+        self.assertIn('source = ["src/secretary", "src/triggered_agents"]', config)
+        self.assertNotIn("fail_under", config)
 
     def _write_report(self, directory: Path, evidence: SuiteEvidence) -> None:
         directory.mkdir(parents=True, exist_ok=True)
