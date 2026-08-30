@@ -30,21 +30,21 @@ are later-card work.
 ## Changed Python lint
 
 The product checkout's `.venv` supplies the same pinned Ruff that worker and reviewer role commands
-receive. Never lint the repository as a whole. Against the task base, build the non-deleted changed
-and untracked Python path set, then pass only that set explicitly to both checks:
+receive on `PATH`. Never lint the repository as a whole. Against the task base, build the non-deleted
+changed and untracked Python path set, then pass only that set explicitly to both checks:
 
 ```bash
 base=$(git merge-base main HEAD)
 {
   git diff --name-only -z --diff-filter=d "$base" -- '*.py'
   git ls-files --others --exclude-standard -z -- '*.py'
-} | sort -zu | xargs -0r .venv/bin/ruff check
+} | sort -zu | xargs -0r ruff check
 
 base=$(git merge-base main HEAD)
 {
   git diff --name-only -z --diff-filter=d "$base" -- '*.py'
   git ls-files --others --exclude-standard -z -- '*.py'
-} | sort -zu | xargs -0r .venv/bin/ruff format --check
+} | sort -zu | xargs -0r ruff format --check
 ```
 
 Use both commands whenever the set contains Python files. The `xargs -r` guard leaves an empty set

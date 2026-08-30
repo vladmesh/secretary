@@ -60,7 +60,16 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             )
             ruff = root / ".venv" / "bin" / "ruff"
             ruff.parent.mkdir(parents=True)
-            ruff.write_text(f"#!/bin/sh\necho 'ruff {expected}'\n", encoding="utf-8")
+            ruff.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                f"  --version) echo 'ruff {expected}' ;;\n"
+                "  check) test \"$2\" = changed.py ;;\n"
+                "  format) test \"$2\" = --check && test \"$3\" = changed.py ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
             ruff.chmod(0o755)
             ensure_board_transport(root, allow_default=True)
             base_env = {
@@ -72,15 +81,33 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             for role in ("worker", "reviewer"):
                 with self.subTest(role=role):
                     with mock.patch.dict(os.environ, base_env, clear=True):
-                        command = wrap_role_command(role, "ruff --version")
-                    completed = subprocess.run(
-                        ["/bin/sh", "-c", command],
+                        version_command = wrap_role_command(role, "ruff --version")
+                        lint_commands = (
+                            wrap_role_command(
+                                role, "printf '%s\\0' changed.py | xargs -0r ruff check"
+                            ),
+                            wrap_role_command(
+                                role, "printf '%s\\0' changed.py | xargs -0r ruff format --check"
+                            ),
+                        )
+                    version = subprocess.run(
+                        ["/bin/sh", "-c", version_command],
+                        cwd=root,
                         env=base_env,
                         capture_output=True,
                         text=True,
                     )
-                    self.assertEqual(completed.returncode, 0, completed.stderr)
-                    self.assertEqual(completed.stdout.strip(), f"ruff {expected}")
+                    self.assertEqual(version.returncode, 0, version.stderr)
+                    self.assertEqual(version.stdout.strip(), f"ruff {expected}")
+                    for command in lint_commands:
+                        completed = subprocess.run(
+                            ["/bin/sh", "-c", command],
+                            cwd=root,
+                            env=base_env,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_launcher_only_observer_identity_cannot_come_from_runtime_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
