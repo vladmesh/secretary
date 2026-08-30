@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import dispatcher as dispatcher_module
+from secretary.dispatch import host as dispatcher_host_module
 from secretary.checkpoint import CheckpointResult
 from secretary.dispatcher import (
     STOPPED_BY_OPERATOR,
@@ -570,7 +570,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         host = NudgingReviewHost(self.root)
         with (
             mock.patch.object(
-                dispatcher_module,
+                dispatcher_host_module,
                 "_write_prompt_document",
                 side_effect=PromptDocumentError("read-only artifacts directory"),
             ),
@@ -873,7 +873,7 @@ class WorkerLifecycleTests(unittest.TestCase):
         Path(record.worker_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
 
         with (
-            mock.patch.object(dispatcher_module, "HEAD_STOP_GRACE_SECONDS", 0.05),
+            mock.patch.object(dispatcher_host_module, "HEAD_STOP_GRACE_SECONDS", 0.05),
             mock.patch.object(host, "_signal_head", lambda *a: None),
             self.assertRaises(HostError),
         ):
@@ -1086,7 +1086,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
         Path(record.review_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
 
         with (
-            mock.patch.object(dispatcher_module, "HEAD_STOP_GRACE_SECONDS", 0.05),
+            mock.patch.object(dispatcher_host_module, "HEAD_STOP_GRACE_SECONDS", 0.05),
             mock.patch.object(host, "_signal_head", lambda *a: None),
             self.assertRaises(HostError),
         ):

@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
+from secretary.dispatch import host as dispatcher_host_module
 from secretary import dispatcher_observer_fence
 from secretary.dispatcher import (
     CommandHostRuntime,
@@ -5282,7 +5283,7 @@ class ObserverConfigurationTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 1, stdout=BLOCKED_PANE_WAIT_BODY, stderr="")
                 raise AssertionError(args)
 
-            with mock.patch.object(dispatcher_module.subprocess, "run", side_effect=run):
+            with mock.patch.object(dispatcher_host_module.subprocess, "run", side_effect=run):
                 status = host.observer_status(record)
 
         self.assertEqual(status, {"last_activity": 1_753_456_789.123, "idle": False})
@@ -6253,7 +6254,7 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
         self.stops: list[str] = []
         self.stop_refused = False
         delivery = mock.patch.object(
-            dispatcher_module,
+            dispatcher_host_module,
             "_deliver_tui_prompt",
             mock.Mock(side_effect=TuiDeliveryError("TUI prompt was not delivered")),
         )
@@ -6300,7 +6301,7 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
         )
         with (
             mock.patch.object(
-                dispatcher_module,
+                dispatcher_host_module,
                 "_deliver_tui_prompt",
                 mock.Mock(side_effect=TuiDeliveryError("TUI prompt was not delivered", evidence=evidence)),
             ),
@@ -6356,7 +6357,7 @@ class ObserverCodexTrustTests(unittest.TestCase):
         self.host.preflight_codex_run = self._trust_attested_run  # type: ignore[method-assign]
         self.commands: list[str] = []
         self.registered = False
-        delivery = mock.patch.object(dispatcher_module, "_deliver_tui_prompt", mock.Mock())
+        delivery = mock.patch.object(dispatcher_host_module, "_deliver_tui_prompt", mock.Mock())
         delivery.start()
         self.addCleanup(delivery.stop)
         run_json = mock.patch.object(

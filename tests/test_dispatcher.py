@@ -23,6 +23,7 @@ from secretary._fsutil import try_file_lock
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
+from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch.head_vitality import HeadVitalityError
 from secretary.dispatch.head_vitality_episode import (
     VitalityEpisode,
@@ -10275,7 +10276,7 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
     def test_a_launch_prompt_refused_by_the_drain_gate_is_not_a_delivered_launch(self) -> None:
         self._refuse(DeliverReceipt(status=HEAD_DRAINING, reason="a drain was requested for this head"))
 
-        with self.assertRaises(dispatcher_module.ObserverLaunchAborted):
+        with self.assertRaises(dispatcher_host_module.ObserverLaunchAborted):
             self.host.prepare_observer({"ref": "sprint:1462"}, "codex-observer", prompt="# Sprint")
 
         self.assertEqual(self.stopped, [str(self.workspace)], "the pane it opened was taken back down")
@@ -10399,7 +10400,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
     def test_a_tui_worker_is_sent_the_round_s_prompt_and_nothing_else(self) -> None:
         delivered = mock.Mock()
 
-        with mock.patch.object(dispatcher_module, "_deliver_tui_prompt", delivered):
+        with mock.patch.object(dispatcher_host_module, "_deliver_tui_prompt", delivered):
             self.assertIsNone(self.host.prompt_worker_report(self.task, self.record))
 
         self.assertEqual(
@@ -10414,7 +10415,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         self.record.worker_run = {"adapter": "claude"}
         delivered = mock.Mock(return_value=DELIVERY_CONFIRMED)
 
-        with mock.patch.object(dispatcher_module, "_deliver_tui_prompt", delivered):
+        with mock.patch.object(dispatcher_host_module, "_deliver_tui_prompt", delivered):
             self.host.prompt_worker_report(self.task, self.record)
 
         self.assertEqual(delivered.call_args.args[:3], ("term:worker", str(self.workspace), "TASK.md"))
@@ -10433,7 +10434,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         """Waking one is a lifecycle transition with its own durable boundary, and this is not it."""
         with (
             mock.patch.object(
-                dispatcher_module,
+                dispatcher_host_module,
                 "_head_run_process_status",
                 lambda path, **kwargs: {"known": True, "alive": True, "stopped": True, "state": "live-match"},
             ),
@@ -10445,7 +10446,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         self.pid_file.write_text("1", encoding="utf-8")
         with (
             mock.patch.object(
-                dispatcher_module,
+                dispatcher_host_module,
                 "_head_process_status",
                 lambda path, **kwargs: {"known": True, "alive": False},
             ),
@@ -10457,7 +10458,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         """An unconfirmed send is the caller's failure to act on, never a prompt to assume landed."""
         refuse = mock.Mock(side_effect=TuiDeliveryError("the pane could not be probed"))
 
-        with mock.patch.object(dispatcher_module, "_deliver_tui_prompt", refuse):
+        with mock.patch.object(dispatcher_host_module, "_deliver_tui_prompt", refuse):
             with self.assertRaisesRegex(HostError, "report prompt was not delivered"):
                 self.host.prompt_worker_report(self.task, self.record)
 

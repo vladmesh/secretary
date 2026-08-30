@@ -23,6 +23,7 @@ from typing import Any
 from unittest import mock
 
 from secretary import dispatcher as secretary_dispatcher
+from secretary.dispatch import host as dispatcher_host_module
 from secretary._fsutil import file_lock
 from secretary.dispatcher import (
     CommandHostRuntime,
@@ -3017,7 +3018,7 @@ class HostLaunchContourTests(unittest.TestCase):
                 with self.run_json(created):
                     with mock.patch.object(self.host, "_launched", lambda *a, **k: "launched"):
                         with mock.patch.object(
-                            secretary_dispatcher,
+                            dispatcher_host_module,
                             "_deliver_tui_prompt",
                             mock.Mock(side_effect=TuiDeliveryError("the head never took the prompt")),
                         ):
@@ -3205,7 +3206,7 @@ class HostLaunchContourTests(unittest.TestCase):
         pid_file = self.pid_file(str(os.getpid()))
 
         with mock.patch.object(self.host, "_signal_head", lambda *a, **k: None):
-            with mock.patch.object(secretary_dispatcher, "HEAD_STOP_GRACE_SECONDS", 0.05):
+            with mock.patch.object(dispatcher_host_module, "HEAD_STOP_GRACE_SECONDS", 0.05):
                 with self.assertRaisesRegex(HostError, "still running after stop"):
                     self.host._confirm_head_process_gone(pid_file)
 
