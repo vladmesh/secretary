@@ -50,6 +50,10 @@ An unavailable Git status command or any test-generated tracked or untracked pro
 also an infrastructure failure. If a product test failed in the same contaminated suite, its concise
 failure location remains in the evidence, but the suite is classified as infrastructure failure
 because the execution boundary cannot be trusted.
+`integration-memory` requires the `secretary[memory]` dependency, and `integration-board` requires
+its disposable FakeKanboard fixture. If either required setup is unavailable, its suite is an
+infrastructure failure, never a green skip. These fixtures use only temporary state and never
+contact a live board; real host, systemd, Orca and credential contours remain outside PR CI.
 The manifest owns the taxonomy: every top-level tests/test_*.py file must occur once, under one
 of those names. Unknown names, missing files, stale entries, duplicate entries and empty suites
 make the manifest invalid before a selected suite starts.

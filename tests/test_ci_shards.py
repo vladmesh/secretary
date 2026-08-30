@@ -80,6 +80,45 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                     del sys.modules[name]
             sys.modules.update(loaded_tests)
 
+    def _run_generated_suite(
+        self, root: Path, suite: str, report_dir: Path, test_source: str
+    ) -> int:
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "__init__.py").write_text("", encoding="utf-8")
+        fixture_source = (Path(__file__).parent / "integration_setup.py").read_text(encoding="utf-8")
+        (tests / "integration_setup.py").write_text(fixture_source, encoding="utf-8")
+        (tests / "test_generated.py").write_text(test_source, encoding="utf-8")
+        self._commit_checkout(root)
+
+        grouped = {name: ["tests/test_generated.py"] for name in SUITES}
+        loaded_tests = {
+            name: module
+            for name, module in list(sys.modules.items())
+            if name == "tests" or name.startswith("tests.")
+        }
+        for name in loaded_tests:
+            del sys.modules[name]
+        try:
+            with (
+                patch.object(sys, "dont_write_bytecode", True),
+                redirect_stdout(StringIO()),
+                patch("scripts.ci_test_shards.load_manifest", return_value=grouped),
+            ):
+                return run_suite_with_evidence(root, suite, report_dir, CANDIDATE_SHA)
+        finally:
+            for name in list(sys.modules):
+                if name == "tests" or name.startswith("tests."):
+                    del sys.modules[name]
+            sys.modules.update(loaded_tests)
+
+    def _aggregate_generated_suite(self, evidence_dir: Path, suite: str) -> int:
+        for name in SUITES:
+            if name != suite:
+                self._write_report(evidence_dir / name, self._evidence(name))
+        with redirect_stdout(StringIO()):
+            return aggregate_evidence(evidence_dir, "success")
+
     def test_live_manifest_partitions_every_top_level_test_once(self) -> None:
         root = Path(__file__).resolve().parents[1]
 
@@ -665,6 +704,103 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertIn("Candidate SHA", summary.getvalue())
         self.assertIn("collected 1, passed 1", summary.getvalue())
         self.assertIn("Checkout status: unchanged", summary.getvalue())
+
+    def test_missing_memory_setup_is_infrastructure_failure_through_aggregate(self) -> None:
+        source = (
+            "import unittest\n"
+            "from tests.integration_setup import require_integration_setup\n"
+            "class MemoryAcceptance(unittest.TestCase):\n"
+            "    @classmethod\n"
+            "    def setUpClass(cls):\n"
+            "        require_integration_setup(None, 'secretary[memory] is not installed')\n"
+            "    def test_scope(self): pass\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            root.mkdir()
+            evidence_dir = Path(tmp) / "evidence"
+            report_dir = evidence_dir / "integration-memory"
+            self.assertEqual(
+                self._run_generated_suite(root, "integration-memory", report_dir, source), 3
+            )
+            evidence = _read_evidence(report_dir)
+            summary = StringIO()
+            with redirect_stdout(summary):
+                self.assertEqual(report_summary(report_dir), 3)
+            self.assertEqual(self._aggregate_generated_suite(evidence_dir, "integration-memory"), 3)
+
+            junit = ElementTree.parse(report_dir / "junit.xml").getroot()
+            log = (report_dir / "test-output.log").read_text(encoding="utf-8")
+
+        self.assertEqual(evidence.outcome, "infrastructure_failure")
+        self.assertEqual(evidence.counts["skipped"], 0)
+        self.assertEqual(evidence.counts["error"], 1)
+        self.assertEqual(junit.attrib["errors"], "1")
+        self.assertIn("secretary[memory] is not installed", evidence.detail)
+        self.assertIn("required integration setup unavailable", summary.getvalue())
+        self.assertIn("secretary[memory] is not installed", log)
+
+    def test_unavailable_disposable_board_fixture_is_infrastructure_failure_through_aggregate(self) -> None:
+        source = (
+            "import unittest\n"
+            "from tests.integration_setup import require_disposable_board_fixture\n"
+            "class BoardIntegration(unittest.TestCase):\n"
+            "    @classmethod\n"
+            "    def setUpClass(cls):\n"
+            "        require_disposable_board_fixture(None)\n"
+            "    def test_board(self): pass\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            root.mkdir()
+            evidence_dir = Path(tmp) / "evidence"
+            report_dir = evidence_dir / "integration-board"
+            self.assertEqual(self._run_generated_suite(root, "integration-board", report_dir, source), 3)
+            evidence = _read_evidence(report_dir)
+            self.assertEqual(self._aggregate_generated_suite(evidence_dir, "integration-board"), 3)
+
+        self.assertEqual(evidence.outcome, "infrastructure_failure")
+        self.assertEqual(evidence.counts["skipped"], 0)
+        self.assertIn("required disposable-board fixture is unavailable", evidence.detail)
+
+    def test_intentional_skip_remains_a_success_through_aggregate(self) -> None:
+        source = (
+            "import unittest\n"
+            "class IntentionalSkip(unittest.TestCase):\n"
+            "    @unittest.skip('intentional control skip')\n"
+            "    def test_skip(self): pass\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            root.mkdir()
+            evidence_dir = Path(tmp) / "evidence"
+            report_dir = evidence_dir / "integration-memory"
+            self.assertEqual(
+                self._run_generated_suite(root, "integration-memory", report_dir, source), 0
+            )
+            evidence = _read_evidence(report_dir)
+            self.assertEqual(self._aggregate_generated_suite(evidence_dir, "integration-memory"), 0)
+
+        self.assertEqual(evidence.outcome, "success")
+        self.assertEqual(evidence.counts["skipped"], 1)
+
+    def test_product_failure_remains_a_product_failure_through_aggregate(self) -> None:
+        source = (
+            "import unittest\n"
+            "class ProductFailure(unittest.TestCase):\n"
+            "    def test_failure(self): self.fail('product control failure')\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            root.mkdir()
+            evidence_dir = Path(tmp) / "evidence"
+            report_dir = evidence_dir / "integration-board"
+            self.assertEqual(self._run_generated_suite(root, "integration-board", report_dir, source), 1)
+            evidence = _read_evidence(report_dir)
+            self.assertEqual(self._aggregate_generated_suite(evidence_dir, "integration-board"), 1)
+
+        self.assertEqual(evidence.outcome, "product_failure")
+        self.assertEqual(evidence.counts["failed"], 1)
 
     def test_reported_runner_detects_a_tracked_checkout_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

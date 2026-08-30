@@ -119,6 +119,20 @@ class CoverageError(ValueError):
     pass
 
 
+def _required_integration_setup_reason(error: object) -> str | None:
+    """Recognize only the explicit test-fixture setup signal, never arbitrary errors."""
+    try:
+        from tests.integration_setup import RequiredIntegrationSetup
+    except ImportError:
+        return None
+    if not isinstance(error, tuple) or len(error) < 2:
+        return None
+    exception = error[1]
+    if isinstance(exception, RequiredIntegrationSetup):
+        return str(exception) or "required integration setup is unavailable"
+    return None
+
+
 @dataclasses.dataclass
 class TestRecord:
     identifier: str
@@ -220,6 +234,7 @@ class EvidenceResult(unittest.TextTestResult):
         super().__init__(*args, **kwargs)
         self.records: dict[str, TestRecord] = {}
         self._started: dict[str, float] = {}
+        self.required_integration_setup_reasons: list[str] = []
 
     def startTest(self, test: unittest.case.TestCase) -> None:
         identifier = test.id()
@@ -255,6 +270,8 @@ class EvidenceResult(unittest.TextTestResult):
     def addError(self, test: unittest.case.TestCase, err: object) -> None:
         detail = self._exc_info_to_string(err, test)
         self._mark(test, "error", detail)
+        if reason := _required_integration_setup_reason(err):
+            self.required_integration_setup_reasons.append(reason)
         super().addError(test, err)
 
     def addSkip(self, test: unittest.case.TestCase, reason: str) -> None:
@@ -378,14 +395,22 @@ def run_reported_suite(
     records = list(result.records.values())
     failures = [record for record in records if record.outcome in {"failed", "error"}]
     counts = _counts(result)
+    setup_reasons = result.required_integration_setup_reasons
+    if setup_reasons:
+        outcome = "infrastructure_failure"
+        detail = f"required integration setup unavailable: {setup_reasons[0]}"
+    else:
+        outcome = "success" if result.wasSuccessful() else "product_failure"
+        detail = None
     return SuiteEvidence(
         suite_name,
         candidate_sha,
-        "success" if result.wasSuccessful() else "product_failure",
+        outcome,
         counts,
         time.monotonic() - started,
         sorted(records, key=lambda record: record.duration_seconds, reverse=True)[:SLOWEST_TEST_LIMIT],
         [_failure_location(record.identifier, record.detail) for record in failures],
+        detail=detail,
         test_records=records,
     )
 

@@ -159,6 +159,7 @@ from tests.fakes.dispatcher import (
     _legacy_unbound_v1_run,
 )
 from tests.fanout_fixtures import accepted_transport_run
+from tests.integration_setup import require_disposable_board_fixture
 from tests.observer_identity import bind_observer
 from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
@@ -184,6 +185,11 @@ from triggered_agents.runtime.prompt_document import (
     PromptDocumentError,
 )
 from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
+
+
+def setUpModule() -> None:
+    """Confirm this CI shard can build its disposable board seam before tests run."""
+    require_disposable_board_fixture(FakeKanboard)
 
 
 class LegacyDispatcherRecordTests(unittest.TestCase):
