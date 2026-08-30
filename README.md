@@ -18,6 +18,7 @@ path is documented in [Recovery](docs/RECOVERY.md).
 - [Protocols](docs/PROTOCOLS.md) — command contracts for tasks, sprints, memory and secrets
 - [Operations](docs/OPERATIONS.md) — runbooks for a running installation
 - [Recovery](docs/RECOVERY.md) — the checkpoint contract, fresh install and restore
+- [Testing](docs/TESTING.md) — CI suite taxonomy and local test boundaries
 
 ## Install
 
