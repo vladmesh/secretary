@@ -785,9 +785,7 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_an_editable_install_with_missing_pinned_ruff_is_repaired(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._venv(
-                Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, None
-            )
+            root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, None)
             context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)
 
             result = upgrade.step_dependencies(context)
@@ -797,9 +795,7 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_an_editable_install_with_the_wrong_ruff_version_is_repaired(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._venv(
-                Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, "0.15.0"
-            )
+            root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, "0.15.0")
             context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)
 
             result = upgrade.step_dependencies(context)
@@ -820,9 +816,7 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_ruff_repair_installs_the_declared_dev_extra(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._venv(
-                Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, None
-            )
+            root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, None)
             context = self.context(FakeUnitInstaller(), product_root=root)
             with mock.patch(
                 "secretary.upgrade._proc.run", return_value=subprocess.CompletedProcess([], 0)
