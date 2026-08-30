@@ -128,6 +128,7 @@ class CodexShapeTests(unittest.TestCase):
             self.render({"model": "gpt-5.5", "effort": "extra"}),
             "CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox "
             "--enable multi_agent_v2 -c features.multi_agent_v2.wait_agent_enabled=false "
+            "-c 'mcp_servers.memory.bearer_token_env_var=\"SECRETARY_MEMORY_ACCESS_TOKEN\"' "
             "-m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' "
             f'-c \'projects."{self.workspace}".trust_level="trusted"\'',
         )

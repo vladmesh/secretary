@@ -359,6 +359,8 @@ def _render_codex_tui(profile: Mapping[str, Any], *, prompt: str | None, workspa
         "multi_agent_v2",
         "-c",
         "features.multi_agent_v2.wait_agent_enabled=false",
+        "-c",
+        'mcp_servers.memory.bearer_token_env_var="SECRETARY_MEMORY_ACCESS_TOKEN"',
     ]
     model = profile.get("model")
     if model:
