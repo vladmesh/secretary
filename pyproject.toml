@@ -51,6 +51,11 @@ select = [
 # protocol prose and command examples intact instead of wrapping them for a column limit.
 ignore = ["E501", "S101"]
 
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["src/secretary", "src/triggered_agents"]
+
 [project]
 name = "secretary"
 version = "0.1.0"
@@ -71,6 +76,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "ruff==0.16.4",
+]
+ci = [
+    "coverage>=7.6",
 ]
 memory = [
     "mcp==1.28.1",
