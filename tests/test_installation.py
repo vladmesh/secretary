@@ -34,7 +34,7 @@ from secretary.installation import (
 from secretary.routing_journal import attempts
 from secretary.runtime_env import RuntimeEnvError
 from secretary.upgrade import UpgradeResult, step_host
-from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
+from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git
 
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
