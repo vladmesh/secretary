@@ -602,7 +602,7 @@ class SeamGrepTests(unittest.TestCase):
         from triggered_agents.runtime.pane_host import SessionHost
 
         self.assertIn("stop_workspace", dir(SessionHost))
-        source = (REPO_ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "src" / "secretary" / "dispatch" / "host.py").read_text(encoding="utf-8")
         self.assertIn("self.head_runtime_for(ORCA_LEGACY_RUNTIME).stop_workspace(workspace)", source)
         self.assertNotIn("head_ops.stop(", source)
         runtime_source = Path(orca_legacy_head.__file__).read_text(encoding="utf-8")

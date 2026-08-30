@@ -31,6 +31,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
+from secretary.dispatch import host as dispatcher_host_module
 from secretary import (
     dispatcher_launcher,
     dispatcher_observer,
@@ -211,7 +212,7 @@ class HostSurfaceContractTests(unittest.TestCase):
     def test_host_internal_catalog_calls_exist_on_the_real_catalog(self) -> None:
         """`CommandHostRuntime` drives the catalog itself when launching a head. No double covers
         that path (the launcher tests use the real classes), but a rename must still fail here."""
-        tree = ast.parse(Path(inspect.getsourcefile(dispatcher_module)).read_text(encoding="utf-8"))
+        tree = ast.parse(Path(inspect.getsourcefile(dispatcher_host_module)).read_text(encoding="utf-8"))
         host_class = next(
             node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "CommandHostRuntime"
         )
