@@ -1,6 +1,6 @@
 # Testing
 
-GitHub CI is the complete test contract. It validates tests/ci-shards.txt before it starts a
+Dispatcher-owned exact-SHA GitHub CI is the complete test contract. It validates tests/ci-shards.txt before it starts a
 suite, then runs these seven named jobs in parallel:
 
 | Suite | CI job | Scope |
