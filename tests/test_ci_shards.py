@@ -406,6 +406,41 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertIn("## Main coverage baseline", workflow)
         self.assertIn("fetch-depth: 0", workflow)
 
+    def test_main_coverage_baseline_summary_preserves_sha_and_artifact(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        step = workflow.split("      - name: Write main coverage baseline summary\n", 1)[1].split(
+            "      - name:", 1
+        )[0]
+        self.assertIn("BASELINE_SHA: ${{ github.sha }}", step)
+        self.assertIn("BASELINE_ARTIFACT: ci-coverage-baseline-${{ github.sha }}", step)
+        command = " ".join(
+            line.strip() for line in step.split("        run: >-\n", 1)[1].splitlines() if line.strip()
+        ).replace("${{ github.sha }}", CANDIDATE_SHA)
+        artifact = f"ci-coverage-baseline-{CANDIDATE_SHA}"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = Path(tmp) / "summary.md"
+            result = subprocess.run(
+                ["bash", "-e", "-c", command],
+                env={
+                    **os.environ,
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "BASELINE_SHA": CANDIDATE_SHA,
+                    "BASELINE_ARTIFACT": artifact,
+                },
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                summary.read_text(encoding="utf-8"),
+                f"## Main coverage baseline\n\n- Candidate SHA: `{CANDIDATE_SHA}`\n- Artifact: `{artifact}`\n",
+            )
+
     def _coverage_payload(self) -> dict[str, object]:
         return {
             "meta": {"branch_coverage": True},

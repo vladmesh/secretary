@@ -145,9 +145,12 @@ jobs:
         if: >-
           ${{ github.ref == 'refs/heads/main' && steps.coverage_aggregate.outcome == 'success' &&
           steps.suite_aggregate.outcome == 'success' }}
+        env:
+          BASELINE_SHA: ${{ github.sha }}
+          BASELINE_ARTIFACT: ci-coverage-baseline-${{ github.sha }}
         run: >-
-          printf '%s\n' "## Main coverage baseline" "" "- Candidate SHA: `${{ github.sha }}`"
-          "- Artifact: `ci-coverage-baseline-${{ github.sha }}`" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Main coverage baseline\n\n- Candidate SHA: `%s`\n- Artifact: `%s`\n'
+          "$BASELINE_SHA" "$BASELINE_ARTIFACT" >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve required aggregate result
         if: ${{ always() }}
         run: >-
