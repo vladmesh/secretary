@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +45,62 @@ PRECHECK_BOARD_UNREACHABLE = 101
 # PRECHECK_SKIP: cleanup could race the holder's live head, so the gate exits successfully without
 # calling dispatch at all.  Curator uses this for cursor-settlement contention (secretary-1501).
 PRECHECK_DEFERRED = 102
+
+
+def publish_state_atomic(
+    writes: list[tuple[Path, str]],
+    *,
+    removes: list[Path] | None = None,
+) -> None:
+    """Publish one triggered-agent state transition or restore every changed path.
+
+    Curator baseline settlement updates its watermark and audit as one local transaction.
+    Staging each replacement first lets an audit-write failure leave the prior watermark and
+    pending record intact; a later replace or removal failure restores every affected file.
+    """
+    removals = removes or []
+    paths = [path for path, _ in writes] + removals
+    before = {path: path.read_bytes() if path.exists() else None for path in paths}
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for path, text in writes:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            staged.append((path, Path(temporary)))
+        for path, temporary in staged:
+            os.replace(temporary, path)
+        for path in removals:
+            path.unlink(missing_ok=True)
+    except OSError:
+        for path in reversed(paths):
+            _restore_state_file(path, before[path])
+        raise
+    finally:
+        for _, temporary in staged:
+            temporary.unlink(missing_ok=True)
+
+
+def _restore_state_file(path: Path, before: bytes | None) -> None:
+    if before is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(before)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 class AgentState:

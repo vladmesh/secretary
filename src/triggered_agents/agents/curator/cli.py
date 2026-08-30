@@ -31,9 +31,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from secretary._fsutil import publish_state_atomic
-
-from ...runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP, AgentState
+from ...runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP, AgentState, publish_state_atomic
 from ...runtime.redact import looks_like_credential, scrub_secrets
 from . import discover, harvest
 from .memory_protocol import (
