@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,8 @@ _FAST_TERMINATE_GRACE_SECONDS = 5
 EVIDENCE_SCHEMA_VERSION = 1
 MAX_LOG_BYTES = 1_000_000
 SLOWEST_TEST_LIMIT = 10
+MAX_STATUS_CHANGE_SAMPLES = 10
+MAX_STATUS_CHANGE_CHARS = 200
 EVIDENCE_FILES = ("report.json", "junit.xml", "test-output.log")
 OUTCOMES = (
     "success",
@@ -102,6 +105,10 @@ class EvidenceError(ValueError):
     pass
 
 
+class CheckoutStatusError(RuntimeError):
+    pass
+
+
 @dataclasses.dataclass
 class TestRecord:
     identifier: str
@@ -110,6 +117,28 @@ class TestRecord:
     duration_seconds: float
     outcome: str = "passed"
     detail: str | None = None
+
+
+@dataclasses.dataclass
+class CheckoutStatus:
+    before_entries: int
+    before_sha256: str
+    after_entries: int
+    after_sha256: str
+    changed: bool
+    changed_entry_count: int
+    changed_entries: list[str]
+    omitted_changed_entries: int
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "before": {"entries": self.before_entries, "sha256": self.before_sha256},
+            "after": {"entries": self.after_entries, "sha256": self.after_sha256},
+            "changed": self.changed,
+            "changed_entry_count": self.changed_entry_count,
+            "changed_entries": self.changed_entries,
+            "omitted_changed_entries": self.omitted_changed_entries,
+        }
 
 
 @dataclasses.dataclass
@@ -124,6 +153,7 @@ class SuiteEvidence:
     log_truncated: bool = False
     detail: str | None = None
     test_records: list[TestRecord] = dataclasses.field(default_factory=list, repr=False)
+    checkout_status: CheckoutStatus | None = None
 
     def as_json(self) -> dict[str, object]:
         return {
@@ -138,6 +168,7 @@ class SuiteEvidence:
             "log_truncated": self.log_truncated,
             "detail": self.detail,
             "artifacts": {"junit": "junit.xml", "log": "test-output.log"},
+            "checkout_status": self.checkout_status.as_json() if self.checkout_status else None,
         }
 
 
@@ -255,6 +286,51 @@ def _empty_counts() -> dict[str, int]:
     return {"collected": 0, "passed": 0, "failed": 0, "error": 0, "skipped": 0}
 
 
+def _checkout_snapshot(root: Path) -> str:
+    """Return Git's complete tracked and untracked checkout-state snapshot."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=root,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise CheckoutStatusError("git status command failed") from exc
+    return result.stdout
+
+
+def _bounded_status_entry(entry: str) -> str:
+    if len(entry) <= MAX_STATUS_CHANGE_CHARS:
+        return entry
+    return f"{entry[:MAX_STATUS_CHANGE_CHARS]}..."
+
+
+def _checkout_status(before: str, after: str) -> CheckoutStatus:
+    before_entries = before.splitlines()
+    after_entries = after.splitlines()
+    changed_entries = [f"- {entry}" for entry in before_entries if entry not in after_entries]
+    changed_entries.extend(f"+ {entry}" for entry in after_entries if entry not in before_entries)
+    samples = [_bounded_status_entry(entry) for entry in changed_entries[:MAX_STATUS_CHANGE_SAMPLES]]
+    return CheckoutStatus(
+        len(before_entries),
+        hashlib.sha256(before.encode()).hexdigest(),
+        len(after_entries),
+        hashlib.sha256(after.encode()).hexdigest(),
+        before != after,
+        len(changed_entries),
+        samples,
+        max(len(changed_entries) - len(samples), 0),
+    )
+
+
+def _checkout_failure_detail(test_outcome: str, reason: str) -> str:
+    if test_outcome == "product_failure":
+        return f"test outcome before checkout verification: product_failure; {reason}"
+    return reason
+
+
 def run_reported_suite(
     suite_name: str, paths: list[str], candidate_sha: str, log: BoundedTee
 ) -> SuiteEvidence:
@@ -341,6 +417,68 @@ def _write_evidence(report_dir: Path, evidence: SuiteEvidence, log: BoundedTee) 
     )
 
 
+def _read_checkout_status(data: object) -> CheckoutStatus | None:
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise EvidenceError("invalid checkout status")
+    try:
+        before = data["before"]
+        after = data["after"]
+        changed = data["changed"]
+        changed_entry_count = data["changed_entry_count"]
+        changed_entries = data["changed_entries"]
+        omitted_changed_entries = data["omitted_changed_entries"]
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            raise TypeError("snapshots must be objects")
+        before_entries = before["entries"]
+        before_sha256 = before["sha256"]
+        after_entries = after["entries"]
+        after_sha256 = after["sha256"]
+        if (
+            not all(
+                isinstance(value, int) and value >= 0
+                for value in (
+                    before_entries,
+                    after_entries,
+                    changed_entry_count,
+                    omitted_changed_entries,
+                )
+            )
+            or type(changed) is not bool
+            or not isinstance(changed_entries, list)
+            or len(changed_entries) > MAX_STATUS_CHANGE_SAMPLES
+            or not all(
+                isinstance(entry, str) and len(entry) <= MAX_STATUS_CHANGE_CHARS + 3
+                for entry in changed_entries
+            )
+            or not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (before_sha256, after_sha256))
+            or changed_entry_count != len(changed_entries) + omitted_changed_entries
+            or changed != (before_sha256 != after_sha256)
+            or (
+                not changed
+                and (
+                    before_entries != after_entries
+                    or changed_entry_count != 0
+                    or omitted_changed_entries != 0
+                )
+            )
+        ):
+            raise ValueError("invalid checkout status values")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EvidenceError(f"invalid checkout status: {exc}") from exc
+    return CheckoutStatus(
+        before_entries,
+        before_sha256,
+        after_entries,
+        after_sha256,
+        changed,
+        changed_entry_count,
+        changed_entries,
+        omitted_changed_entries,
+    )
+
+
 def _read_evidence(report_dir: Path) -> SuiteEvidence:
     required = {name: report_dir / name for name in EVIDENCE_FILES}
     missing = [name for name, path in required.items() if not path.is_file() or path.stat().st_size == 0]
@@ -358,6 +496,7 @@ def _read_evidence(report_dir: Path) -> SuiteEvidence:
         if not data.get("suite") or not re.fullmatch(r"[0-9a-f]{40,64}", data.get("candidate_sha", "")):
             raise EvidenceError("report lacks an exact candidate SHA")
         ET.parse(required["junit.xml"])
+        checkout_status = _read_checkout_status(data.get("checkout_status"))
     except (KeyError, TypeError, ValueError, ET.ParseError) as exc:
         raise EvidenceError(f"malformed evidence: {exc}") from exc
     return SuiteEvidence(
@@ -370,6 +509,7 @@ def _read_evidence(report_dir: Path) -> SuiteEvidence:
         list(data.get("failure_locations", [])),
         bool(data.get("log_truncated")),
         data.get("detail"),
+        checkout_status=checkout_status,
     )
 
 
@@ -400,6 +540,28 @@ def _summary(evidence: SuiteEvidence) -> str:
         )
     if evidence.detail:
         lines.append(f"- Detail: {evidence.detail}")
+    if evidence.checkout_status:
+        status = evidence.checkout_status
+        if status.changed:
+            lines.append(
+                "- Checkout status: changed "
+                f"(before {status.before_entries} entries, after {status.after_entries}; "
+                f"{status.changed_entry_count} changed entries)"
+            )
+            if status.changed_entries:
+                lines.extend(
+                    [
+                        "- Changed checkout status entries:",
+                        *[f"  - {json.dumps(entry)}" for entry in status.changed_entries],
+                    ]
+                )
+            if status.omitted_changed_entries:
+                lines.append(f"  - {status.omitted_changed_entries} additional entries omitted")
+        else:
+            lines.append(
+                "- Checkout status: unchanged "
+                f"({status.before_entries} entries; SHA-256 `{status.before_sha256}`)"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -620,7 +782,46 @@ def run_suite_with_evidence(root: Path, suite_name: str, report_dir: Path, candi
         else:
             sys.path.insert(0, str(root))
             try:
-                evidence = run_reported_suite(suite_name, grouped[suite_name], candidate_sha, log)
+                with contextlib.chdir(root):
+                    try:
+                        before = _checkout_snapshot(root)
+                    except CheckoutStatusError:
+                        print("CI checkout status is unavailable before suite execution", file=log)
+                        evidence = SuiteEvidence(
+                            suite_name,
+                            candidate_sha,
+                            "infrastructure_failure",
+                            _empty_counts(),
+                            time.monotonic() - started,
+                            [],
+                            ["checkout status unavailable before suite execution"],
+                            detail="git status command failed",
+                        )
+                    else:
+                        evidence = run_reported_suite(suite_name, grouped[suite_name], candidate_sha, log)
+                        try:
+                            after = _checkout_snapshot(root)
+                        except CheckoutStatusError:
+                            print("CI checkout status is unavailable after suite execution", file=log)
+                            original_outcome = evidence.outcome
+                            evidence.outcome = "infrastructure_failure"
+                            evidence.detail = _checkout_failure_detail(
+                                original_outcome, "git status command failed after suite execution"
+                            )
+                            evidence.failure_locations.append(
+                                "checkout status unavailable after suite execution"
+                            )
+                        else:
+                            evidence.checkout_status = _checkout_status(before, after)
+                            if evidence.checkout_status.changed:
+                                original_outcome = evidence.outcome
+                                evidence.outcome = "infrastructure_failure"
+                                evidence.detail = _checkout_failure_detail(
+                                    original_outcome, "checkout status changed during suite execution"
+                                )
+                                evidence.failure_locations.append(
+                                    "checkout status changed during suite execution"
+                                )
             finally:
                 sys.path.pop(0)
     try:
