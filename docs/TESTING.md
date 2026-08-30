@@ -23,9 +23,29 @@ Use a focused local check while changing the runner or its manifest:
     python3 -m unittest -v tests.test_ci_shards
     python3 scripts/ci_test_shards.py --check
 
-The control host intentionally uses focused checks only. Complete validation belongs to GitHub CI
-for the exact candidate SHA. Fast profiles, artifacts, coverage, timings and integration fixtures
-are later-card work.
+## Control-host fast profile
+
+    python3 scripts/ci_test_shards.py --fast
+
+This is the one canonical executable fast profile for worker feedback. It validates its fixed
+module list before it starts, then runs only the existing hermetic Kanboard, Orca-discovery and
+pipeline-state proofs. It is deliberately not a CI suite and does not read `tests/ci-shards.txt`,
+expand to the seven-suite taxonomy, or use repository-wide discovery.
+
+The runner gives the complete child process group a 120-second ceiling. On timeout it reports a
+failure, terminates the group, and waits for the test child to stop. The child inherits only a
+fixture-owned temporary home, XDG directories, Codex home, pipeline-state directory, temporary
+directory and a restricted standard tool path, together with the candidate checkout source path. It does not
+inherit board, API, cloud or other ambient credentials. A process-startup guard rejects network
+connections and subprocesses other than Python and the read-only temporary-instance Git queries
+used by the board seam. Live board/API use and Docker, VM, Ansible or provisioning commands
+therefore fail loudly. Mutable state is limited to those temporary fixtures and the candidate
+workspace.
+
+The profile is intentionally narrow: it proves the existing isolation seams rather than testing
+real host, systemd, Orca, credentials, Docker, VM, Ansible or provisioning behaviour. Those runtime
+contours remain in their named CI suites or explicit operator checks. The control host intentionally
+uses focused checks only. Complete validation remains dispatcher-owned exact-SHA GitHub CI.
 
 ## Changed Python lint
 
