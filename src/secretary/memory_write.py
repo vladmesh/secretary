@@ -23,6 +23,7 @@ from secretary._fsutil import (
 from secretary._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
+from secretary.memory.access import PO_REVIEW_SCOPE, PO_REVIEW_SCOPE_DIR
 from secretary.memory_errors import (
     MemoryExportPublishError,
     MemoryLockError,  # noqa: F401  # Public compatibility re-export.
@@ -275,9 +276,11 @@ def _scope_dir(scope: str) -> str:
     value = scope.strip()
     if value == "global":
         return "global"
+    if value == PO_REVIEW_SCOPE:
+        return PO_REVIEW_SCOPE_DIR
     if value.startswith("project:"):
         return _clean_path_part(value.removeprefix("project:"), "scope")
-    raise MemoryValidationError("scope must be global or project:<dir>")
+    raise MemoryValidationError("scope must be global, review:po, or project:<dir>")
 
 
 def _clean_slug(slug: str) -> str:

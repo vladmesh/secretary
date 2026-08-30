@@ -1845,6 +1845,14 @@ own role, so a butler proposal stays visibly butler-sourced through commit. Publ
 owned by another actor remains the existing ownership rule: an actor commits its own proposal, and a
 `secretary` or `operator` actor may commit anyone's.
 
+Facts whose current owner cannot be resolved without product-owner judgment use the dedicated
+`review:po` scope (`state/memory/facts/po-review`). This is a triage basket, not operational truth:
+entries should carry the `pending-review` tag, identify their source sprint/session, and state the
+candidate project scopes. Interactive PO, curator, and retro identities may read it; worker, reviewer,
+observer, and steward grants never receive it. The PO can inspect it explicitly with
+`scope=review:po`, then publish the resolved fact into `global` or `project:<dir>` with `supersede`,
+atomically removing the review entry.
+
 ```bash
 python3 -P -m secretary memory verify --instance INSTANCE
 python3 -P -m secretary memory propose --instance INSTANCE --actor ACTOR \

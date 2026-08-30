@@ -100,6 +100,15 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertNotIn("global/b", self.rows())
 
+    def test_po_review_directory_has_a_distinct_non_project_scope(self):
+        fact = memory_service.parse_fact_text(
+            "---\nsource: curator\n---\nNeeds manual ownership review.\n",
+            "po-review/ambiguous-conclusion.md",
+        )
+
+        self.assertEqual(fact["id"], "po-review/ambiguous-conclusion")
+        self.assertEqual(fact["scope"], "review:po")
+
     def test_embedding_failure_preserves_index(self):
         self.write_export([("global/a", "alpha")])
         self.update()
@@ -228,6 +237,7 @@ class MemoryReadAuthorizationTests(unittest.TestCase):
                     ("allowed project fact", "project:alpha", None, None, None),
                     ("foreign project fact", "project:foreign", None, None, None),
                     ("Secretary development fact", "project:secretary", None, None, None),
+                    ("pending PO review", "review:po", "pending-review", "curator", None),
                 ],
             )
             conn.commit()
@@ -250,6 +260,21 @@ class MemoryReadAuthorizationTests(unittest.TestCase):
             self.assertEqual(memory_service.memory_get(1)["text"], "allowed project fact")
             self.assertEqual(memory_service.memory_get(2), {"error": "not found", "id": 2})
             self.assertEqual([entry["text"] for entry in memory_service.memory_list()], ["allowed project fact"])
+
+    def test_po_can_narrow_to_review_bucket_while_worker_cannot_receive_it(self):
+        po = memory_service.memory_access.MemoryReadIdentity(
+            "po", {"kind": "interactive", "ref": "interactive"}, None, "po-grant"
+        )
+        narrowed = memory_service.memory_access.narrow(po, "review:po")
+        assert isinstance(narrowed, memory_service.memory_access.MemoryReadIdentity)
+        with mock.patch.object(memory_service, "read_guard", return_value=narrowed):
+            self.assertEqual([entry["text"] for entry in memory_service.memory_list()], ["pending PO review"])
+
+        worker = self.identity({"project:alpha", "product:secretary"})
+        self.assertIsInstance(
+            memory_service.memory_access.narrow(worker, "review:po"),
+            memory_service.memory_access.MemoryAccessDenial,
+        )
 
     def test_missing_runtime_identity_returns_a_data_free_denial_for_every_read(self):
         denial = memory_service.memory_access.MemoryAccessDenial("runtime_identity_missing")
@@ -302,6 +327,7 @@ class MemoryReadAuthorizationTests(unittest.TestCase):
         with mock.patch.object(memory_service, "read_guard", return_value=denial):
             self.assertEqual(memory_service.memory_list(), [denial.response()])
         self.assertEqual([entry["text"] for entry in memory_service.list_memory_entries()], [
+            "pending PO review",
             "Secretary development fact",
             "foreign project fact",
             "allowed project fact",

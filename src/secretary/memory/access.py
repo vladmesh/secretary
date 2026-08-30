@@ -31,6 +31,8 @@ GRANT_VERSION = 1
 DEFAULT_GRANT_TTL_SECONDS = 12 * 60 * 60
 PRODUCT_SECRETARY_SCOPE = "product:secretary"
 PROJECT_SECRETARY_SCOPE = "project:secretary"
+PO_REVIEW_SCOPE = "review:po"
+PO_REVIEW_SCOPE_DIR = "po-review"
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$")
 
@@ -240,7 +242,7 @@ def normalize_scope(scope: str | None) -> str | None:
     value = str(scope).strip()
     if not value:
         return None
-    if value == "global" or value == PRODUCT_SECRETARY_SCOPE:
+    if value in {"global", PRODUCT_SECRETARY_SCOPE, PO_REVIEW_SCOPE}:
         return value
     if value.startswith("project:"):
         name = value.removeprefix("project:")

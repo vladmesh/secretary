@@ -454,6 +454,12 @@ it may stage a fact for the curator inbox with `secretary memory propose`, and c
 NDJSON export and the SQLite/vector index in the data directory are rebuilt from the canon. Only one
 index writer may publish derived state at a time.
 
+Unresolved cross-project conclusions are quarantined under `state/memory/facts/po-review`, exposed as
+the distinct `review:po` scope. They remain visible to the interactive PO and installation-wide curator
+and retro duties for manual triage, but are not included in worker, reviewer, observer, or steward scope
+grants. A reviewed item is superseded into its final global or project scope; until then it is explicitly
+pending review rather than project canon.
+
 The shipped `packaging/memory/product-secretary` pack is a second input to that same canon, not a second
 database. Its facts live at `state/memory/facts/product-secretary` and resolve as `product:secretary`.
 Before materialization the selected product checkout's complete manifest, safe paths, regular files and

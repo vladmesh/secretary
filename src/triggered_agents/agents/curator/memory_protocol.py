@@ -206,6 +206,8 @@ def _fact_id(request: MemoryWriteRequest) -> str:
 def _scope_dir(scope: str) -> str:
     if scope == "global":
         return "global"
+    if scope == "review:po":
+        return "po-review"
     if scope.startswith("project:"):
         return _clean_slug(scope.split(":", 1)[1])
     return _clean_slug(scope)
