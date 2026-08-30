@@ -1702,6 +1702,72 @@ The current templates and what they are for are documented in
 The production dispatcher timer runs a one-shot tick. Memory, curator, steward and retro must each have exactly one
 scheduler owner.
 
+### Curator installation-canon rollout
+
+The portable product default now routes `role_defaults.curator` to `codex-curator`: GPT-5.6 Terra at extra reasoning,
+with its declared `claude-default` fallback. That source change is not an activation path. It neither edits an
+installation canon nor enables a component. The later live change is a separately authorised, manual operation on the
+selected installation only.
+
+For the selected live installation, the canon is
+`/home/dev/secretary-instance/heads/heads.toml`. Before changing it, an operator records the actor, a concise reason,
+the old and new route, and the planned time in the installation's change record. The preflight is read-only: confirm
+that this canon already has a valid `profiles.codex-curator` with the shipped model, effort and fallback, that its
+`[role_defaults]` currently contains `curator = "claude-opus-medium"`, and that the component remains disabled.
+
+```bash
+INSTANCE=/home/dev/secretary-instance
+python3 -P -m secretary doctor --offline --instance "$INSTANCE"
+python3 -P -m secretary status --json --instance "$INSTANCE"
+SECRETARY_INSTANCE="$INSTANCE" python3 -P -m triggered_agents health
+```
+
+The commands report configuration, routing and role health only. They do not print transcript text, fact content,
+secrets or raw source payloads. A failed or unavailable preflight stops the operation; it is not a reason to infer a
+route, adjust a watermark, or invoke the curator.
+
+When the preflight and change authority are present, edit exactly the `curator` value in that canon's
+`[role_defaults]` table:
+
+```toml
+# before
+curator = "claude-opus-medium"
+
+# after
+curator = "codex-curator"
+```
+
+Do not copy a product registry over the canon, add a second registry, alter the profile or its fallback, or edit the
+generated `heads/heads.yaml` snapshot. After the canonical edit, the separately authorised operator materializes and
+checkpoints it through the ordinary installation owner:
+
+```bash
+secretary upgrade --instance "$INSTANCE" --no-pull
+python3 -P -m secretary doctor --offline --instance "$INSTANCE"
+python3 -P -m secretary status --json --instance "$INSTANCE"
+SECRETARY_INSTANCE="$INSTANCE" python3 -P -m triggered_agents health
+```
+
+Confirm that the published snapshot names this canon and that the health output calls curator `DISABLED`. In
+particular, `curator.enabled` remains `false`; changing it, running the timer, launching `/curate`, or applying a
+baseline/backfill needs a later, separate authorization. `secretary-curator.timer` remains the sole scheduler owner,
+and the disabled component must not acquire any second schedule through Orca or a manual unit.
+
+Baseline or backfill is not part of this route edit, upgrade, or startup. It is an actor-and-reason-audited
+per-project operation: first use the read-only `curator backlog --project PROJECT --json`, then only an authorized
+operator may settle that exact canonical project with its one cutoff or pending-batch identity. See
+[Project baseline settlement](PROTOCOLS.md#project-baseline-settlement) for the required evidence and audit record.
+It is not a startup action, and a legacy, malformed, foreign, stale or unavailable cursor/pending state fails closed
+without fact mutation.
+
+#### Rollback
+
+Record the rollback actor and reason, repeat the read-only preflight, and change only
+`curator = "codex-curator"` back to `curator = "claude-opus-medium"` in the same canonical table. Then run the same
+`secretary upgrade --instance "$INSTANCE" --no-pull` materialization and read-only verification. Keep
+`curator.enabled` false throughout. The rollback changes routing metadata and its snapshot only; it performs no
+curator run, baseline or backfill, and completes without fact mutation.
+
 ## Upgrade
 
 `secretary upgrade --instance <dir>` pulls a new product version and re-materialises the installation onto it. It is

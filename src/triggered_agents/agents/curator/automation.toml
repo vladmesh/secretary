@@ -18,8 +18,9 @@ reuse_session = false
 ephemeral = true
 # Last resort only. The head this agent launches on is `role_defaults.curator` in the selected
 # head registry (the installation's own snapshot when it has one); this line answers for a
-# registry that routes the curator nowhere at all.
-head = "codex"
+# registry that routes the curator nowhere at all, using the same dedicated profile as the
+# shipped registry.
+head = "codex-curator"
 # Skip the run when no session has new turns since the watermark. Gated in the systemd unit,
 # not Orca's field (manual `automations run` ignores --precheck).
 precheck = "python3 -P -m triggered_agents curator precheck"

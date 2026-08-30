@@ -44,6 +44,28 @@ class ProductRegistryTests(unittest.TestCase):
             head = registry.role_default(role)
             self.assertIsInstance(head_spec(str(head), registry), HeadSpec)
 
+    def test_shipped_curator_route_uses_the_dedicated_terra_profile(self) -> None:
+        """The registry loader validates both the role/default and fallback references."""
+        registry = load_registry(HEADS_TOML)
+
+        self.assertEqual(registry.role_default("curator"), "codex-curator")
+        curator = registry.profile("codex-curator")
+        self.assertEqual(
+            {
+                key: curator.get(key)
+                for key in ("resource", "adapter", "model", "effort", "codex_mode", "fallback")
+            },
+            {
+                "resource": "openai-sub",
+                "adapter": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "extra",
+                "codex_mode": "tui",
+                "fallback": ["claude-default"],
+            },
+        )
+        self.assertIsInstance(head_spec("codex-curator", registry), HeadSpec)
+
 
 class InstalledSnapshotTests(unittest.TestCase):
     """A real installation's snapshot, profile shapes and all."""

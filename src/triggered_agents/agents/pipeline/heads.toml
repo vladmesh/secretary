@@ -122,6 +122,17 @@ effort = "extra"
 codex_mode = "tui"
 fallback = ["claude-opus"]
 
+[profiles.codex-curator]
+# Curator is the memory canon's writer.  It gets the dedicated Terra xhigh profile, while a red
+# OpenAI subscription still falls back to the deliberately generic Claude profile that can run on
+# a clean single-subscription host.
+resource = "openai-sub"
+adapter = "codex"
+model = "gpt-5.6-terra"
+effort = "extra"
+codex_mode = "tui"
+fallback = ["claude-default"]
+
 [profiles.codex-observer]
 # Sprint observer: one long-lived head per open sprint, launched by the dispatcher and held until
 # the sprint closes. It was the first head held to an interactive session, because the observer is
@@ -139,6 +150,6 @@ fallback = ["claude-observer"]
 new_card = "codex"
 reviewer = "codex-reviewer"
 observer = "codex-observer"
-curator = "codex"
+curator = "codex-curator"
 retro = "codex"
 steward = "codex-high"

@@ -1779,6 +1779,16 @@ audit event records version, time, project, actor, redacted reason, evidence kin
 cursor identities/count; it contains no transcript text, personal-memory text, fact content, raw source payloads or
 credentials. Command output names only the selected project and cursor count.
 
+Route installation, scheduler activation and baseline/backfill are three separate decisions. Changing
+`role_defaults.curator` in an installation canon does not grant permission to run the curator or settle accumulated
+input. A baseline/backfill is an actor-and-reason-audited per-project operation, never an automatic startup action:
+it must have one registered canonical project, the current pending record's matching workspace/run/session identity or
+one freshly observed cutoff identity, and the explicit `actor` and `reason` accepted by `baseline`. No all-backlog
+baseline exists. A failed proof or a legacy, malformed, stale, foreign or unavailable cursor/pending state is left
+untouched and makes no fact mutation; an operator investigates or obtains new evidence rather than repairing it by
+guessing. The audit and human/JSON output remain metadata-only: no transcript text, fact content, secrets or raw
+source payloads.
+
 ### Memory read identity
 
 The Memory MCP endpoint requires FastMCP Bearer authentication. Before a head is opened, its launcher
