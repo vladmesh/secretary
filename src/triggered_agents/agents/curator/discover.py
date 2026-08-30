@@ -186,43 +186,67 @@ def _observer_route(reference: str, instance: Path, known_ids: set[str]) -> str:
     return reservations[0] if len(reservations) == 1 else ROUTE_PO_REVIEW
 
 
-def resolve_route(cwd: str, *, instance: Path | None = None, global_source: bool = False) -> str:
-    """Return a canonical project id, or an explicit review/global/unknown route.
+class RouteResolver:
+    """One immutable routing snapshot shared by a complete source scan.
 
-    Registered checkout descendants and the corresponding Orca workspace descendants are valid
-    routes.  The candidate must match exactly one resolved boundary, so prefixes, duplicate
-    bindings, missing repositories, and symlink spellings cannot produce a guessed owner.
+    Discovery used to reload and normalize every project binding for every session file.  A host
+    with a few thousand sessions therefore performed tens of thousands of YAML reads and path
+    resolutions before the project selector could discard unrelated sources.  The registry and
+    path boundaries cannot legitimately change halfway through one scan, so compile them once and
+    cache observer sprint lookups for the lifetime of that scan.
     """
-    if global_source:
-        return ROUTE_GLOBAL
-    candidate = _normalized_absolute_path(cwd) if cwd else None
-    if candidate is None:
-        return ROUTE_UNKNOWN
-    instance = instance_dir(instance or selected_instance())
-    bindings = project_bindings(instance)
-    known_ids = {binding["id"] for binding in bindings}
-    reference = _observer_reference(candidate)
-    if reference is not None:
-        return _observer_route(reference, instance, known_ids)
 
-    root = _normalized_directory(_workspace_root(), strict=False)
-    matches = []
-    for binding in bindings:
-        repo = _normalized_directory(binding["repo"], strict=True)
-        orca_binding = binding.get("orca_binding")
-        workspace = _normalized_absolute_path(root / orca_binding) if root and orca_binding else None
-        curator_roots = (_normalized_absolute_path(value) for value in binding.get("curator_roots", ()))
-        if (
-            (repo and _within(candidate, repo))
-            or (workspace and _within(candidate, workspace))
-            or any(alias and _within(candidate, alias) for alias in curator_roots)
-        ):
-            matches.append(binding["id"])
-    return matches[0] if len(matches) == 1 else ROUTE_UNKNOWN
+    def __init__(self, instance: Path | None = None):
+        self.instance = instance_dir(instance or selected_instance())
+        bindings = project_bindings(self.instance)
+        self.known_ids = {binding["id"] for binding in bindings}
+        workspace_root = _normalized_directory(_workspace_root(), strict=False)
+        self.boundaries: list[tuple[str, tuple[Path, ...]]] = []
+        for binding in bindings:
+            roots = []
+            if repo := _normalized_directory(binding["repo"], strict=True):
+                roots.append(repo)
+            orca_binding = binding.get("orca_binding")
+            if (
+                workspace_root
+                and orca_binding
+                and (workspace := _normalized_absolute_path(workspace_root / orca_binding))
+            ):
+                roots.append(workspace)
+            roots.extend(
+                root
+                for value in binding.get("curator_roots", ())
+                if (root := _normalized_absolute_path(value)) is not None
+            )
+            self.boundaries.append((binding["id"], tuple(dict.fromkeys(roots))))
+        self._observer_routes: dict[str, str] = {}
+
+    def resolve(self, cwd: str, *, global_source: bool = False) -> str:
+        if global_source:
+            return ROUTE_GLOBAL
+        candidate = _normalized_absolute_path(cwd) if cwd else None
+        if candidate is None:
+            return ROUTE_UNKNOWN
+        reference = _observer_reference(candidate)
+        if reference is not None:
+            if reference not in self._observer_routes:
+                self._observer_routes[reference] = _observer_route(reference, self.instance, self.known_ids)
+            return self._observer_routes[reference]
+        matches = [
+            project_id
+            for project_id, roots in self.boundaries
+            if any(_within(candidate, root) for root in roots)
+        ]
+        return matches[0] if len(matches) == 1 else ROUTE_UNKNOWN
 
 
-def _with_route(source: dict, *, global_source: bool = False) -> dict:
-    return {**source, "route": resolve_route(source.get("cwd", ""), global_source=global_source)}
+def resolve_route(cwd: str, *, instance: Path | None = None, global_source: bool = False) -> str:
+    """Return a canonical project id, or an explicit review/global/unknown route."""
+    return RouteResolver(instance).resolve(cwd, global_source=global_source)
+
+
+def _with_route(source: dict, *, resolver: RouteResolver, global_source: bool = False) -> dict:
+    return {**source, "route": resolver.resolve(source.get("cwd", ""), global_source=global_source)}
 
 
 def curator_workspace() -> Path:
@@ -283,6 +307,7 @@ def claude_sessions() -> list[dict]:
     out = []
     if not CLAUDE_PROJECTS.is_dir():
         return out
+    resolver = RouteResolver()
     for proj in sorted(CLAUDE_PROJECTS.iterdir()):
         if not proj.is_dir():
             continue
@@ -291,7 +316,11 @@ def claude_sessions() -> list[dict]:
             cwd = _cwd_from_file(f, fallback)
             if _excluded(cwd, f.stem):
                 continue
-            out.append(_with_route({"head": "claude", "path": str(f), "session_id": f.stem, "cwd": cwd}))
+            out.append(
+                _with_route(
+                    {"head": "claude", "path": str(f), "session_id": f.stem, "cwd": cwd}, resolver=resolver
+                )
+            )
     return out
 
 
@@ -325,13 +354,15 @@ def hermes_sessions() -> list[dict]:
     rows = _hermes_query("SELECT id, cwd FROM sessions WHERE archived = 0 ORDER BY id")
     if not rows:
         return out
+    resolver = RouteResolver()
     for session_id, cwd in rows:
         cwd = cwd or ""
         if _excluded(cwd, session_id):
             continue
         out.append(
             _with_route(
-                {"head": "hermes", "path": str(HERMES_STATE_DB), "session_id": session_id, "cwd": cwd}
+                {"head": "hermes", "path": str(HERMES_STATE_DB), "session_id": session_id, "cwd": cwd},
+                resolver=resolver,
             )
         )
     return out
@@ -366,13 +397,17 @@ def codex_sessions() -> list[dict]:
     out = []
     if not CODEX_SESSIONS.is_dir():
         return out
+    resolver = RouteResolver()
     for f in sorted(CODEX_SESSIONS.glob("**/*.jsonl")):
         meta = _codex_meta_from_file(f)
         cwd = meta["cwd"]
         if _excluded(cwd, meta["session_id"]):
             continue
         out.append(
-            _with_route({"head": "codex", "path": str(f), "session_id": meta["session_id"], "cwd": cwd})
+            _with_route(
+                {"head": "codex", "path": str(f), "session_id": meta["session_id"], "cwd": cwd},
+                resolver=resolver,
+            )
         )
     return out
 
@@ -417,6 +452,7 @@ def claude_memory_files() -> list[dict]:
     out = []
     if not CLAUDE_PROJECTS.is_dir():
         return out
+    resolver = RouteResolver()
     for proj in sorted(CLAUDE_PROJECTS.iterdir()):
         if not proj.is_dir():
             continue
@@ -434,7 +470,7 @@ def claude_memory_files() -> list[dict]:
         for f in sorted(mem_dir.glob("*.md")):
             if f.name == "MEMORY.md":
                 continue
-            out.append(_with_route({"head": "claude", "path": str(f), "cwd": cwd}))
+            out.append(_with_route({"head": "claude", "path": str(f), "cwd": cwd}, resolver=resolver))
     return out
 
 
@@ -451,10 +487,15 @@ def hermes_memory_files() -> list[dict]:
     out = []
     if not HERMES_MEMORY_DIR.is_dir():
         return out
+    resolver = RouteResolver()
     for name in ("MEMORY.md", "USER.md"):
         f = HERMES_MEMORY_DIR / name
         if f.is_file():
-            out.append(_with_route({"head": "hermes", "path": str(f), "cwd": ""}, global_source=True))
+            out.append(
+                _with_route(
+                    {"head": "hermes", "path": str(f), "cwd": ""}, resolver=resolver, global_source=True
+                )
+            )
     return out
 
 

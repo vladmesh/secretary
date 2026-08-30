@@ -73,6 +73,26 @@ class CuratorIdentityDiscoveryTests(unittest.TestCase):
             (self.root / "state.db").touch()
             self.assertEqual([s["cwd"] for s in discover.hermes_sessions()], [included])
 
+    def test_one_scan_compiles_registry_and_observer_route_once(self) -> None:
+        projects = self.root / "claude"
+        observer = self.root / "workspaces" / "observers" / "sprint-1412" / "head"
+        project = projects / discover._dirname_for_cwd(str(observer))
+        project.mkdir(parents=True)
+        for session_id in ("one", "two"):
+            (project / f"{session_id}.jsonl").write_text(
+                json.dumps({"cwd": str(observer)}) + "\n", encoding="utf-8"
+            )
+        with (
+            mock.patch.object(discover, "CLAUDE_PROJECTS", projects),
+            mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.root / "workspaces")}),
+            mock.patch.object(discover, "project_bindings", return_value=[]) as bindings,
+            mock.patch.object(discover, "_observer_route", return_value="alpha") as observer_route,
+        ):
+            sessions = discover.claude_sessions()
+        self.assertEqual([session["route"] for session in sessions], ["alpha", "alpha"])
+        bindings.assert_called_once()
+        observer_route.assert_called_once()
+
 
 class CuratorProjectRoutingTests(unittest.TestCase):
     def setUp(self) -> None:
