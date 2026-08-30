@@ -97,6 +97,14 @@ class MemoryAccessTests(unittest.TestCase):
         assert isinstance(worker_identity, memory_access.MemoryReadIdentity)
         self.assertIsNone(po_identity.scopes)
         self.assertNotIn("global", worker_identity.scopes)
+        self.assertEqual(
+            memory_access.narrow(po_identity, memory_access.PO_REVIEW_SCOPE).scopes,
+            frozenset({memory_access.PO_REVIEW_SCOPE}),
+        )
+        self.assertIsInstance(
+            memory_access.narrow(worker_identity, memory_access.PO_REVIEW_SCOPE),
+            memory_access.MemoryAccessDenial,
+        )
 
     def test_spoofed_token_hand_supplied_scope_and_stale_run_fail_closed(self) -> None:
         grant = memory_access.issue_grant(

@@ -310,6 +310,8 @@ def scope_for_relative(path: Path) -> str:
     top = path.parts[0]
     if top == "product-secretary":
         return "product:secretary"
+    if top == memory_access.PO_REVIEW_SCOPE_DIR:
+        return memory_access.PO_REVIEW_SCOPE
     return "global" if top == "global" else f"project:{top}"
 
 

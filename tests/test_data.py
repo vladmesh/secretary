@@ -821,6 +821,37 @@ class ExportTests(unittest.TestCase):
                     source="worker:codex/session",
                 )
 
+    def test_memory_protocol_publishes_po_review_bucket_without_project_aliasing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_dir = root / "secretary-data"
+            fact = root / "fact.md"
+            fact.write_text(
+                "---\ntags: pending-review,multi-project\n---\nNeeds PO ownership review.\n",
+                encoding="utf-8",
+            )
+            instance_dir = init_instance_repo(root / "instance")
+            proposal = propose_memory_fact(
+                data_dir,
+                actor="curator:claude/session",
+                scope="review:po",
+                slug="ambiguous-conclusion",
+                fact_file=fact,
+                source="curator:claude/session",
+            )
+
+            result = commit_memory_proposal(
+                data_dir,
+                instance_dir,
+                actor="curator:claude/session",
+                propose_id=proposal.propose_id,
+            )
+            tracked = tracked_facts(instance_dir)
+
+        self.assertEqual(proposal.scope_dir, "po-review")
+        self.assertEqual(result.fact, "po-review/ambiguous-conclusion")
+        self.assertEqual(tracked, ["po-review/ambiguous-conclusion.md"])
+
     def test_memory_protocol_supersede_unknown_fact_fails_cleanly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
