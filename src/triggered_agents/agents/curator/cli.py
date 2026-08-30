@@ -10,6 +10,10 @@ Flow the agent follows each run:
      through `python3 -m triggered_agents curator memory-write`.
   3. `python3 -m triggered_agents curator advance [--project <canonical-id>]`  -> moves the watermark past step 1.
 
+An operator can settle an already-reviewed project backlog without running the curator:
+`backlog --project ID --json` emits a metadata-only cutoff identity, and `baseline` accepts that
+identity or the `batch_id` of the one matching pending batch.  Baseline writes no facts or source text.
+
 Two-phase so a crash before the memory commit re-harvests instead of dropping turns.
 `harvest --json` emits the structured batch; `backlog [--project <canonical-id>] [--json]`
 reports metadata only without changing state; `sessions` lists discovered sources;
@@ -21,11 +25,16 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import sys
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
+from secretary._fsutil import publish_state_atomic
+
 from ...runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP, AgentState
+from ...runtime.redact import looks_like_credential, scrub_secrets
 from . import discover, harvest
 from .memory_protocol import (
     MemoryProtocolError,
@@ -35,6 +44,9 @@ from .memory_protocol import (
 )
 
 STATE = AgentState("curator")
+BASELINE_AUDIT_VERSION = 1
+_BASELINE_ID = re.compile(r"[0-9a-f]{64}\Z")
+_BASELINE_ACTOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}\Z")
 
 
 class SettlementDeferred(RuntimeError):
@@ -72,6 +84,163 @@ def _write_pending(record: dict) -> None:
     tmp = STATE.pending_file.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE.pending_file)
+
+
+def _baseline_audit_file() -> Path:
+    return STATE.dir / "baseline-audit.ndjson"
+
+
+def _read_baseline_audit() -> str:
+    """Return a validated existing journal without exposing it to command output."""
+    path = _baseline_audit_file()
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise harvest.PendingError("curator baseline audit is unreadable") from exc
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise harvest.PendingError("curator baseline audit is malformed") from exc
+        if not isinstance(record, dict) or record.get("version") != BASELINE_AUDIT_VERSION:
+            raise harvest.PendingError("curator baseline audit is malformed")
+    return text
+
+
+def _baseline_inputs(
+    project: str | None,
+    actor: str,
+    reason: str,
+    *,
+    cutoff_id: str | None,
+    batch_id: str | None,
+) -> tuple[str, str, str, str, str]:
+    project = harvest.validate_project(project)
+    if project is None:
+        raise harvest.PendingError("curator baseline requires one canonical project")
+    if not isinstance(actor, str) or not _BASELINE_ACTOR.fullmatch(actor) or looks_like_credential(actor):
+        raise harvest.PendingError("curator baseline actor is malformed")
+    if (
+        not isinstance(reason, str)
+        or not reason.strip()
+        or len(reason) > 280
+        or any(ord(char) < 32 for char in reason)
+    ):
+        raise harvest.PendingError("curator baseline reason is malformed")
+    if (cutoff_id is None) == (batch_id is None):
+        raise harvest.PendingError("curator baseline requires exactly one evidence identity")
+    evidence_kind, evidence_id = ("cutoff", cutoff_id) if cutoff_id is not None else ("batch", batch_id)
+    if not isinstance(evidence_id, str) or not _BASELINE_ID.fullmatch(evidence_id):
+        raise harvest.PendingError("curator baseline evidence identity is malformed")
+    return project, actor, scrub_secrets(reason.strip()), evidence_kind, evidence_id
+
+
+def _baseline_cursor_ids(pending: dict) -> list[str]:
+    """Stable cursor identities for audit, without retaining paths or cursor values."""
+    import hashlib
+
+    return [
+        hashlib.sha256(
+            json.dumps({"source": source, "cursor": cursor}, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        for source, cursor in sorted(pending.items())
+    ]
+
+
+def baseline_settlement(
+    *,
+    project: str | None,
+    actor: str,
+    reason: str,
+    cutoff_id: str | None = None,
+    batch_id: str | None = None,
+) -> dict:
+    """Settle one operator-approved project cutoff or pending batch under the cursor lock.
+
+    This API never harvests, invokes a curator head, or writes memory facts.  Callers must
+    present exactly one opaque identity produced by `backlog --json` (cutoff) or `harvest --json`
+    (batch).  The returned record is the redacted audit event that was durably published.
+    """
+    project, actor, reason, evidence_kind, evidence_id = _baseline_inputs(
+        project, actor, reason, cutoff_id=cutoff_id, batch_id=batch_id
+    )
+    with cursor_settlement_transaction():
+        if evidence_kind == "batch":
+            plan = harvest.baseline_pending(STATE, harvest.current_identity(), project, evidence_id)
+            remove_pending = True
+        else:
+            if STATE.pending_file.exists():
+                # Validate, rather than skipping over, a stale, foreign, or malformed pending
+                # record.  A cutoff must never leapfrog replayable curator input.
+                harvest.read_pending(STATE, harvest.current_identity(), project)
+                raise harvest.PendingError("curator baseline requires the existing pending batch evidence")
+            cutoff = harvest.baseline_cutoff(STATE, project)
+            if not cutoff["pending"] or cutoff["cutoff_id"] != evidence_id:
+                raise harvest.PendingError("curator baseline cutoff is stale or has no cursors")
+            plan = {
+                "project": project,
+                "base": cutoff["base"],
+                "pending": cutoff["pending"],
+                "cutoff_id": cutoff["cutoff_id"],
+            }
+            remove_pending = False
+
+        audit = {
+            "version": BASELINE_AUDIT_VERSION,
+            "event": "curator_baseline",
+            "time": datetime.now(UTC).isoformat(),
+            "project": project,
+            "actor": actor,
+            "reason": reason,
+            "evidence": {"kind": evidence_kind, "id": evidence_id},
+            "affected_cursor_count": len(plan["pending"]),
+            "affected_cursor_ids": _baseline_cursor_ids(plan["pending"]),
+            "outcome": "settled",
+        }
+        audit_text = _read_baseline_audit()
+        if audit_text and not audit_text.endswith("\n"):
+            audit_text += "\n"
+        audit_text += json.dumps(audit, ensure_ascii=False, sort_keys=True) + "\n"
+
+        mark = harvest._baseline_watermark(STATE)
+        # The batch path already compared every starting cursor.  This shared guard keeps the
+        # cutoff path fail-closed if state changed between proof construction and publication.
+        if any(mark.get(source) != expected for source, expected in plan["base"].items()):
+            raise harvest.PendingError("curator baseline cursor state is stale")
+        next_mark = {**mark, **plan["pending"]}
+        writes = [
+            (STATE.watermark_file, json.dumps(next_mark, indent=2, ensure_ascii=False)),
+            (_baseline_audit_file(), audit_text),
+        ]
+        publish_state_atomic(writes, removes=[STATE.pending_file] if remove_pending else [])
+    return audit
+
+
+def cmd_baseline(
+    *,
+    project: str | None,
+    actor: str,
+    reason: str,
+    cutoff_id: str | None = None,
+    batch_id: str | None = None,
+) -> int:
+    try:
+        audit = baseline_settlement(
+            project=project,
+            actor=actor,
+            reason=reason,
+            cutoff_id=cutoff_id,
+            batch_id=batch_id,
+        )
+    except (harvest.PendingError, OSError, RuntimeError):
+        # Inputs can contain source paths, transcript snippets, and credentials.  This command
+        # intentionally reports only the refusal, leaving precise evidence in no output channel.
+        print("curator: baseline refused; cursor state unchanged", file=sys.stderr)
+        return 1
+    print(f"curator: baseline settled {audit['project']} ({audit['affected_cursor_count']} cursor(s))")
+    return 0
 
 
 def _prepare_batch(*, nonblocking: bool = False, project: str | None = None) -> dict:
@@ -171,6 +340,15 @@ def cmd_backlog(as_json: bool, project: str | None = None) -> int:
     except harvest.PendingError as exc:
         print(f"curator: {exc}", file=sys.stderr)
         return 1
+    if as_json and project is not None and not STATE.pending_file.exists():
+        try:
+            cutoff = harvest.baseline_cutoff(STATE, project)
+        except harvest.PendingError:
+            # Backlog remains the released read-only diagnostic on legacy or partial state;
+            # only the opt-in settlement proof is unavailable until that state is resolved.
+            pass
+        else:
+            summary["cutoff"] = {"id": cutoff["cutoff_id"], "cursor_count": len(cutoff["pending"])}
     if as_json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
@@ -272,6 +450,24 @@ def main(argv=None) -> int:
         if cmd == "advance":
             return cmd_advance(ns.project)
         return cmd_backlog(ns.json, ns.project)
+    if cmd == "baseline":
+        import argparse
+
+        parser = argparse.ArgumentParser(prog="python3 -m triggered_agents curator baseline")
+        parser.add_argument("--project", required=True)
+        parser.add_argument("--actor", required=True)
+        parser.add_argument("--reason", required=True)
+        evidence = parser.add_mutually_exclusive_group(required=True)
+        evidence.add_argument("--cutoff-id")
+        evidence.add_argument("--batch-id")
+        ns = parser.parse_args(argv[1:])
+        return cmd_baseline(
+            project=ns.project,
+            actor=ns.actor,
+            reason=ns.reason,
+            cutoff_id=ns.cutoff_id,
+            batch_id=ns.batch_id,
+        )
     if cmd == "precheck":
         return cmd_precheck()
     if cmd == "sessions":

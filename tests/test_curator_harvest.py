@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import subprocess
@@ -316,6 +317,191 @@ class CuratorHarvestTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(summary))
         self.assertEqual(self.state.load_watermark(), before)
         self.assertFalse(self.state.pending_file.exists())
+
+
+class CuratorBaselineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.state = AgentState("curator", self.root / "state")
+        self.identity = harvest.current_identity()
+        self.patches = [
+            mock.patch.object(cli, "STATE", self.state),
+            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.hermes_sessions", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.all_memory_files", return_value=[]),
+            mock.patch("triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self) -> None:
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.tmp.cleanup()
+
+    def _sessions(self, *, alpha_text="alpha", beta_text="beta") -> tuple[Path, Path, list[dict]]:
+        alpha, beta = self.root / "alpha.jsonl", self.root / "beta.jsonl"
+        alpha.write_text(claude(alpha_text), encoding="utf-8")
+        beta.write_text(claude(beta_text), encoding="utf-8")
+        return alpha, beta, [
+            {"head": "claude", "path": str(alpha), "session_id": "a", "cwd": "/alpha", "route": "alpha"},
+            {"head": "claude", "path": str(beta), "session_id": "b", "cwd": "/beta", "route": "beta"},
+        ]
+
+    def _pending_batch(self, alpha: Path, sessions: list[dict]) -> dict:
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            batch = harvest.harvest(self.state, self.identity, project="alpha")
+        record = harvest.pending_record(batch, self.identity, {str(alpha): None}, project="alpha")
+        self.state.ensure_dir()
+        self.state.pending_file.write_text(json.dumps(record), encoding="utf-8")
+        return record
+
+    def _audit_rows(self) -> list[dict]:
+        path = self.state.dir / "baseline-audit.ndjson"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_cutoff_cli_is_project_isolated_and_audits_redacted_metadata_only(self) -> None:
+        secret = "sk-proj-abcdefghijklmnopqrstuvwx"
+        alpha, beta, sessions = self._sessions(alpha_text=f"alpha transcript {secret}", beta_text="beta transcript")
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            self.assertEqual(cli.cmd_backlog(True, "alpha"), 0)
+            backlog = json.loads(output.getvalue())
+            cutoff_id = backlog["cutoff"]["id"]
+            output.seek(0)
+            output.truncate(0)
+            self.assertEqual(
+                cli.main(
+                    [
+                        "baseline",
+                        "--project",
+                        "alpha",
+                        "--actor",
+                        "operator:alice",
+                        "--reason",
+                        f"reviewed {secret}",
+                        "--cutoff-id",
+                        cutoff_id,
+                    ]
+                ),
+                0,
+            )
+
+        mark = self.state.load_watermark()
+        self.assertIn(str(alpha), mark)
+        self.assertNotIn(str(beta), mark)
+        self.assertEqual(backlog["cutoff"]["cursor_count"], 1)
+        self.assertNotIn("transcript", json.dumps(backlog))
+        self.assertNotIn(secret, output.getvalue() + errors.getvalue())
+        row = self._audit_rows()[0]
+        self.assertEqual(row["project"], "alpha")
+        self.assertEqual(row["actor"], "operator:alice")
+        self.assertEqual(row["evidence"], {"kind": "cutoff", "id": cutoff_id})
+        self.assertEqual(row["affected_cursor_count"], 1)
+        self.assertEqual(len(row["affected_cursor_ids"][0]), 64)
+        self.assertEqual(row["outcome"], "settled")
+        self.assertTrue(row["time"])
+        self.assertIn("REDACTED", row["reason"])
+        self.assertNotIn(secret, json.dumps(row))
+        self.assertNotIn("alpha transcript", json.dumps(row))
+
+    def test_cutoff_proof_is_stale_after_growth_and_retry_cannot_repeat_it(self) -> None:
+        alpha, _beta, sessions = self._sessions()
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            cutoff = harvest.baseline_cutoff(self.state, "alpha")
+            alpha.write_text(claude("alpha") + claude("newer"), encoding="utf-8")
+            with self.assertRaisesRegex(harvest.PendingError, "stale"):
+                cli.baseline_settlement(
+                    project="alpha", actor="operator", reason="reviewed", cutoff_id=cutoff["cutoff_id"]
+                )
+            self.assertEqual(self.state.load_watermark(), {})
+            self.assertFalse((self.state.dir / "baseline-audit.ndjson").exists())
+
+            current = harvest.baseline_cutoff(self.state, "alpha")
+            cli.baseline_settlement(project="alpha", actor="operator", reason="reviewed", cutoff_id=current["cutoff_id"])
+            with self.assertRaisesRegex(harvest.PendingError, "stale"):
+                cli.baseline_settlement(
+                    project="alpha", actor="operator", reason="reviewed", cutoff_id=current["cutoff_id"]
+                )
+        self.assertEqual(len(self._audit_rows()), 1)
+
+    def test_batch_proof_settles_only_its_project_and_rejects_foreign_selector(self) -> None:
+        alpha, beta, sessions = self._sessions()
+        record = self._pending_batch(alpha, sessions)
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            with self.assertRaisesRegex(harvest.PendingError, "selector"):
+                cli.baseline_settlement(
+                    project="beta", actor="operator", reason="wrong project", batch_id=record["batch_id"]
+                )
+            audit = cli.baseline_settlement(
+                project="alpha", actor="operator", reason="approved batch", batch_id=record["batch_id"]
+            )
+        mark = self.state.load_watermark()
+        self.assertIn(str(alpha), mark)
+        self.assertNotIn(str(beta), mark)
+        self.assertFalse(self.state.pending_file.exists())
+        self.assertEqual(audit["evidence"]["kind"], "batch")
+
+    def test_batch_proof_rejects_a_foreign_cursor_before_mutation(self) -> None:
+        alpha, beta, sessions = self._sessions()
+        record = self._pending_batch(alpha, sessions)
+        batch = json.loads(json.dumps(record["batch"]))
+        stat = beta.stat()
+        batch["pending"][str(beta)] = {"offset": stat.st_size, "mtime": stat.st_mtime, "size": stat.st_size}
+        foreign = harvest.pending_record(batch, self.identity, {str(alpha): None, str(beta): None}, project="alpha")
+        self.state.pending_file.write_text(json.dumps(foreign), encoding="utf-8")
+        before_pending = self.state.pending_file.read_bytes()
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            with self.assertRaisesRegex(harvest.PendingError, "foreign"):
+                cli.baseline_settlement(
+                    project="alpha", actor="operator", reason="approved batch", batch_id=foreign["batch_id"]
+                )
+        self.assertEqual(self.state.load_watermark(), {})
+        self.assertEqual(self.state.pending_file.read_bytes(), before_pending)
+        self.assertFalse((self.state.dir / "baseline-audit.ndjson").exists())
+
+    def test_audit_write_failure_restores_watermark_and_pending(self) -> None:
+        alpha, _beta, sessions = self._sessions()
+        record = self._pending_batch(alpha, sessions)
+        before_pending = self.state.pending_file.read_bytes()
+        errors = io.StringIO()
+        with (
+            mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions),
+            mock.patch.object(cli, "publish_state_atomic", side_effect=OSError("audit unavailable")),
+            contextlib.redirect_stderr(errors),
+        ):
+            self.assertEqual(
+                cli.cmd_baseline(
+                    project="alpha", actor="operator", reason="approved batch", batch_id=record["batch_id"]
+                ),
+                1,
+            )
+        self.assertEqual(self.state.load_watermark(), {})
+        self.assertEqual(self.state.pending_file.read_bytes(), before_pending)
+        self.assertFalse((self.state.dir / "baseline-audit.ndjson").exists())
+        self.assertNotIn("approved batch", errors.getvalue())
+
+    def test_malformed_state_and_invalid_evidence_leave_everything_unchanged(self) -> None:
+        alpha, _beta, sessions = self._sessions()
+        self.state.save_watermark({str(alpha): {"lines": 1, "mtime": 1, "size": 1}})
+        before = self.state.watermark_file.read_bytes()
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            with self.assertRaisesRegex(harvest.PendingError, "malformed or legacy"):
+                harvest.baseline_cutoff(self.state, "alpha")
+            with self.assertRaisesRegex(harvest.PendingError, "exactly one"):
+                cli.baseline_settlement(project="alpha", actor="operator", reason="reviewed")
+            with self.assertRaisesRegex(harvest.PendingError, "exactly one"):
+                cli.baseline_settlement(
+                    project="alpha", actor="operator", reason="reviewed", cutoff_id="a" * 64, batch_id="b" * 64
+                )
+        self.assertEqual(self.state.watermark_file.read_bytes(), before)
+        self.assertFalse((self.state.dir / "baseline-audit.ndjson").exists())
 
 
 class CuratorCliPreparationTests(unittest.TestCase):
