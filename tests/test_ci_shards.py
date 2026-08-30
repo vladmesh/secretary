@@ -1,13 +1,28 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.ci_test_shards import ManifestError, SUITES, load_manifest, main, modules
+from scripts.ci_test_shards import (
+    FAST_MODULES,
+    ManifestError,
+    SUITES,
+    fast_environment,
+    load_manifest,
+    main,
+    modules,
+    run_bounded,
+    run_fast,
+    validate_fast_profile,
+)
 
 
 class CiTestSuiteManifestTests(unittest.TestCase):
@@ -105,6 +120,113 @@ class CiTestSuiteManifestTests(unittest.TestCase):
 
     def test_paths_become_unittest_module_names(self) -> None:
         self.assertEqual(modules(["tests/test_ci_shards.py"]), ["tests.test_ci_shards"])
+
+    def test_fast_profile_is_a_fixed_narrow_hermetic_module_list(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+
+        validate_fast_profile(root)
+
+        self.assertEqual(
+            FAST_MODULES,
+            (
+                "tests.test_hermetic_kanboard",
+                "tests.test_hermetic_orca",
+                "tests.test_hermetic_pipeline_state",
+            ),
+        )
+
+    def test_fast_profile_rejects_a_missing_declared_module_before_launch(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+
+        with patch("scripts.ci_test_shards.FAST_MODULES", ("tests.test_missing",)):
+            with self.assertRaisesRegex(ManifestError, "missing test module"):
+                validate_fast_profile(root)
+
+    def test_fast_action_skips_the_seven_suite_manifest(self) -> None:
+        with (
+            patch("scripts.ci_test_shards.load_manifest") as manifest,
+            patch("scripts.ci_test_shards.run_fast", return_value=0) as fast,
+        ):
+            self.assertEqual(main(["--fast"]), 0)
+
+        manifest.assert_not_called()
+        fast.assert_called_once()
+
+    def test_fast_runner_passes_only_the_fixed_modules_to_its_child(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with patch("scripts.ci_test_shards.run_bounded", return_value=0) as bounded:
+            self.assertEqual(run_fast(root), 0)
+
+        command = bounded.call_args.args[0]
+        self.assertEqual(command, [sys.executable, "-P", "-m", "unittest", "-v", *FAST_MODULES])
+
+    def test_fast_environment_discards_ambient_credentials_and_installs_guards(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture_root = Path(tmp)
+            environment = fast_environment(root, fixture_root)
+            for name in ("KANBOARD_API_TOKEN", "OPENAI_API_KEY", "AWS_ACCESS_KEY_ID"):
+                self.assertNotIn(name, environment)
+            for name in (
+                "HOME",
+                "TA_CODEX_HOME",
+                "TA_PIPELINE_STATE_DIR",
+                "TEMP",
+                "TMP",
+                "TMPDIR",
+                "XDG_CACHE_HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+            ):
+                self.assertTrue(Path(environment[name]).is_relative_to(fixture_root), name)
+            self.assertEqual(environment["PATH"], os.defpath)
+
+            network = subprocess.run(
+                [sys.executable, "-c", "import socket; socket.create_connection(('127.0.0.1', 1))"],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            command = subprocess.run(
+                [sys.executable, "-c", "import subprocess; subprocess.run(['docker', 'info'])"],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(network.returncode, 0)
+        self.assertIn("fast test profile forbids network access", network.stderr)
+        self.assertNotEqual(command.returncode, 0)
+        self.assertIn("fast test profile forbids external command execution", command.stderr)
+
+    def test_bounded_runner_stops_and_reaps_a_timed_out_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "child.pid"
+            command = [
+                sys.executable,
+                "-c",
+                "import os, time; from pathlib import Path; "
+                f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)",
+            ]
+            started = time.monotonic()
+            with redirect_stderr(StringIO()) as stderr:
+                result = run_bounded(
+                    command,
+                    root=Path(tmp),
+                    environment=dict(os.environ),
+                    timeout_seconds=0.5,
+                )
+            elapsed = time.monotonic() - started
+
+            pid = int(pid_file.read_text(encoding="utf-8"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+        self.assertEqual(result, 124)
+        self.assertLess(elapsed, 2)
+        self.assertIn("timed out after 0.5 seconds; test child was stopped", stderr.getvalue())
 
     def test_workflow_keeps_a_test_aggregator_after_all_suites(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(
