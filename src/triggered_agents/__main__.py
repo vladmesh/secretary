@@ -12,9 +12,48 @@ Agents are modules under `triggered_agents.agents.<name>` exposing `cli.main(arg
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from importlib import import_module
 
 AGENTS = ("curator", "retro", "pipeline", "steward")
+
+
+@dataclass(frozen=True)
+class DispatchArguments:
+    """The dispatch flags interpreted by both composition roots.
+
+    This deliberately preserves the legacy loose argv interpretation: a value
+    following ``--generation`` is still eligible to be the variant, because
+    that is what the original one-pass selector did.
+    """
+
+    cleanup_only: bool
+    finalize: bool
+    spawn_finalizer: bool
+    generation: int | None
+    variant: str | None
+
+
+def parse_dispatch_arguments(argv: list[str]) -> DispatchArguments:
+    """Return the legacy dispatch interpretation without performing dispatch."""
+    cleanup_only = "--cleanup-only" in argv
+    finalize = "--finalize" in argv
+    spawn_finalizer = "--spawn-finalizer" in argv
+    generation = None
+    if "--generation" in argv:
+        index = argv.index("--generation")
+        if index + 1 < len(argv):
+            try:
+                generation = int(argv[index + 1])
+            except ValueError:
+                generation = None
+    return DispatchArguments(
+        cleanup_only=cleanup_only,
+        finalize=finalize,
+        spawn_finalizer=spawn_finalizer,
+        generation=generation,
+        variant=next((arg for arg in argv if not arg.startswith("--")), None),
+    )
 
 
 def main(argv=None) -> int:
@@ -46,35 +85,24 @@ def main(argv=None) -> int:
             )
             return 2
         dispatch_args = rest[1:]
-        cleanup_only = "--cleanup-only" in dispatch_args
-        finalize = "--finalize" in dispatch_args
-        spawn_finalizer = "--spawn-finalizer" in dispatch_args
-        generation = None
-        if "--generation" in dispatch_args:
-            gi = dispatch_args.index("--generation")
-            if gi + 1 < len(dispatch_args):
-                try:
-                    generation = int(dispatch_args[gi + 1])
-                except ValueError:
-                    generation = None
+        parsed = parse_dispatch_arguments(dispatch_args)
         from .runtime import dispatch
 
-        if spawn_finalizer:
-            return dispatch.spawn_finalizer(agent, generation=generation)
-        if finalize:
+        if parsed.spawn_finalizer:
+            return dispatch.spawn_finalizer(agent, generation=parsed.generation)
+        if parsed.finalize:
             # The head's trailer starts a detached helper with `--spawn-finalizer`; this is the
             # helper's cleanup entrypoint. It never dispatches a skill and needs its own lock
             # handling (see dispatch.finalize's docstring). `--generation` carries the terminal's
             # identity so it never stops a replacement a concurrent tick created.
-            return dispatch.finalize(agent, generation=generation)
+            return dispatch.finalize(agent, generation=parsed.generation)
         # An optional variant name (e.g. the steward's "deep-sweep", triggered-agents-254)
         # selects a second, differently-scheduled mode of the same agent — see automation.toml's
         # [variants.<name>] table and dispatch.run's docstring. `--cleanup-only` (triggered-
         # agents-445) is ta-gate.sh's call on a precheck skip: no variant, no dispatch, just let
         # an ephemeral agent's finished/stuck terminal get torn down instead of waiting for a
         # tick that has real work.
-        variant = next((a for a in dispatch_args if not a.startswith("--")), None)
-        return dispatch.run(agent, variant, cleanup_only=cleanup_only)
+        return dispatch.run(agent, parsed.variant, cleanup_only=parsed.cleanup_only)
     cli = import_module(f"triggered_agents.agents.{agent}.cli")
     return cli.main(rest)
 

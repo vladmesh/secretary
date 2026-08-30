@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal
 
-from secretary.tasks import TaskReader, TaskWriter
+from secretary.tasks import TaskError, TaskReader, TaskWriter
 
 
 class StewardReportBoard:
@@ -17,11 +18,37 @@ class StewardReportBoard:
     """
 
     def __init__(
-        self, reader: TaskReader, writer: TaskWriter, *, actor: str = "triggered-agent-dispatch"
+        self,
+        reader: TaskReader | None = None,
+        writer: TaskWriter | None = None,
+        *,
+        actor: str = "triggered-agent-dispatch",
+        board_factory: Callable[[], tuple[TaskReader, TaskWriter]] | None = None,
     ) -> None:
-        self.reader = reader
-        self.writer = writer
+        if (reader is None) != (writer is None):
+            raise ValueError("StewardReportBoard needs both reader and writer")
+        if reader is None and board_factory is None:
+            raise ValueError("StewardReportBoard needs a board or board_factory")
+        if reader is not None and board_factory is not None:
+            raise ValueError("StewardReportBoard cannot combine a board and board_factory")
+        self._reader = reader
+        self._writer = writer
+        self._board_factory = board_factory
         self.actor = actor
+
+    def _ensure_board(self) -> tuple[TaskReader, TaskWriter]:
+        if self._reader is None or self._writer is None:
+            assert self._board_factory is not None
+            self._reader, self._writer = self._board_factory()
+        return self._reader, self._writer
+
+    @property
+    def reader(self) -> TaskReader:
+        return self._ensure_board()[0]
+
+    @property
+    def writer(self) -> TaskWriter:
+        return self._ensure_board()[1]
 
     def create_report(self, *, project: str, title: str, slug: str) -> str:
         result = self.writer.create_steward_report(
@@ -48,10 +75,34 @@ class StewardReportBoard:
 class StewardSignalBoard:
     """Secretary-owned implementation of the steward's structural read port."""
 
-    def __init__(self, reader: TaskReader) -> None:
-        self.reader = reader
+    def __init__(
+        self,
+        reader: TaskReader | None = None,
+        *,
+        reader_factory: Callable[[], TaskReader] | None = None,
+        error_mapper: Callable[[TaskError], None] | None = None,
+    ) -> None:
+        if reader is None and reader_factory is None:
+            raise ValueError("StewardSignalBoard needs a reader or reader_factory")
+        if reader is not None and reader_factory is not None:
+            raise ValueError("StewardSignalBoard cannot combine a reader and reader_factory")
+        self._reader = reader
+        self._reader_factory = reader_factory
+        self._error_mapper = error_mapper
+
+    @property
+    def reader(self) -> TaskReader:
+        if self._reader is None:
+            assert self._reader_factory is not None
+            self._reader = self._reader_factory()
+        return self._reader
 
     def active_cards(
         self, *, states: set[str] | None = None, project: str | None = None
     ) -> list[dict[str, Any]]:
-        return self.reader.steward_signal_cards(states=states, project=project)
+        try:
+            return self.reader.steward_signal_cards(states=states, project=project)
+        except TaskError as exc:
+            if self._error_mapper is not None:
+                self._error_mapper(exc)
+            raise
