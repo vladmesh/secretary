@@ -9982,6 +9982,27 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("worker-local broad receipt", doc)
         self.assertIn("dispatcher-owned exact-SHA gate receipt", doc)
 
+    def test_github_worker_runs_only_focused_tests_and_leaves_the_full_suite_to_ci(self) -> None:
+        self.host.catalog._adapter = {"validation": {"ci": "github"}}
+
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+        prose = " ".join(doc.split())
+
+        self.assertIn("Do not run the full local suite or any local broad suite", prose)
+        self.assertIn("Run only focused tests for the code you changed", prose)
+        self.assertIn("GitHub CI runs the complete required suite", prose)
+        self.assertIn("dispatcher-owned exact-SHA gate receipt", prose)
+        self.assertNotIn("secretary check broad", doc)
+        self.assertNotIn("The full suite takes", doc)
+
+    def test_local_worker_keeps_the_reusable_broad_receipt_contract(self) -> None:
+        self.host.catalog._adapter = {"validation": {"ci": "local", "command": "python3 -m unittest"}}
+
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("python3 -m secretary check broad --reuse --module", doc)
+        self.assertNotIn("Do not run the full local suite or any local broad suite", doc)
+
     def test_worker_prompt_names_each_receipt_at_its_own_site(self) -> None:
         worker = self.host._worker_task_doc(self.task, "main", "attempt-1")
 

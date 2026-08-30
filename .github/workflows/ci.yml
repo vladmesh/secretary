@@ -7,8 +7,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  test_shards:
+    name: test / ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [core, dispatcher, runtime, component]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,4 +21,15 @@ jobs:
           python-version: "3.12"
       - run: python3 -m pip install --upgrade pip
       - run: python3 -m pip install -e '.[memory]'
-      - run: python3 -m unittest -v
+      - run: python3 scripts/ci_test_shards.py --shard "${{ matrix.shard }}"
+
+  test:
+    name: test
+    if: ${{ always() }}
+    needs: test_shards
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every test shard
+        env:
+          SHARDS_RESULT: ${{ needs.test_shards.result }}
+        run: test "$SHARDS_RESULT" = success
