@@ -1840,6 +1840,66 @@ of that, so the launcher writes both names into the head's own command line. `SE
 never overrides either: which installation a role belongs to is decided by whoever started it, and `runtime.env` is a
 file inside an installation.
 
+### Manual curator routing in an instance canon
+
+This is a deferred, manual operator procedure for an installation whose private
+`INSTANCE/heads/heads.toml` already declares `profiles.codex-curator`. It changes only that instance canon. Do not
+add `codex-curator`, its model, or its account policy to
+`src/triggered_agents/agents/pipeline/heads.toml`: the product file remains the portable fallback for an installation
+with no canon of its own.
+
+Before changing the role default, record the current `role_defaults.curator` as `PREVIOUS_PROFILE`. Inspect the
+existing `profiles.codex-curator` without editing it: it must remain a Codex profile with
+`model = "gpt-5.6-terra"` and `effort = "extra"`, and its declared `fallback` sequence must name existing profiles.
+The fallback is instance policy. Record its current order and do not invent, delete, or reorder it as part of this
+routing change. If the profile is missing, malformed, has a different model or effort, or has an invalid fallback,
+stop. That is a separate canon-policy decision, not a reason to edit the portable registry or make a replacement
+profile here.
+
+Change the existing instance table only as follows:
+
+```toml
+[role_defaults]
+curator = "codex-curator"
+```
+
+`secretary-curator.timer` is the sole scheduler owner when the curator component is enabled. The Orca curator
+automation must remain disabled, and this installation's curator component must remain disabled for this deferred
+route change. Verify the latter read-only against the selected installation:
+
+```bash
+SECRETARY_INSTANCE=INSTANCE python3 -P -m triggered_agents health
+```
+
+The output must retain the `DISABLED curator` line. Do not change `host.components.curator`, enable the Orca
+automation, run `systemctl`, start or stop a service or timer, invoke the curator, run a production
+baseline/backfill, write or delete a fact, reindex, or run a canary. Routing a role authorizes none of those actions.
+
+After a separately approved instance-canon edit, materialize it manually with the normal instance rollout, for
+example `secretary upgrade --no-pull --instance INSTANCE --product-root PRODUCT_ROOT`. Confirm with
+`secretary status --json --instance INSTANCE` that the head-registry canonical owner is `instance` and that the new
+snapshot was written. The routing assignment has no automatic rollout, shim, migration, or dependency step. The
+routing change takes effect only for a later eligible scheduled run; it does not justify a
+manual invocation. To roll back, restore `role_defaults.curator = "PREVIOUS_PROFILE"` in the same private canon,
+leave `profiles.codex-curator` and its fallback untouched, repeat that same manual materialization, and confirm the
+resulting instance snapshot. Do not delete the profile or alter scheduler ownership during rollback.
+
+The role route does not widen the curator protocol. Selection is still bounded before content is read: normalized
+descendants of exactly one registered canonical project `repo`, or the matching safe Orca workspace binding, route to
+that project; ambiguous, malformed, unreadable, unregistered and prefix-only paths are `unknown`, while
+installation-wide sources are `global`. A fact-bearing pending batch remains bound to its curator workspace, run and
+session identity, its selected-project or all-backlog selector, and its starting cursors. Replay or advance with a
+different identity or selector fails closed.
+
+Likewise, a later intentional baseline is a separate manual operation. It requires one registered canonical project,
+an explicit actor, a non-empty reason, and exactly one current opaque cutoff or pending-batch identity. It cannot
+bypass a pending record or use all-backlog mode. The baseline audit records the project, actor, redacted reason,
+evidence identity, outcome, and hashed cursor identities/count only. It contains no transcript, personal-memory,
+fact, raw-source or credential payload. Legacy line watermarks remain readable only through the released conversion
+path; unversioned, stale, foreign, corrupt or cursor-only pending state, a changed source, an incomplete tail, or a
+failed write is refused and left for manual resolution rather than guessed forward. The detailed protocol is in
+[Memory](PROTOCOLS.md#memory) and [Project baseline settlement](PROTOCOLS.md#project-baseline-settlement).
+
 A broken snapshot still stops the tick and names the reason: a missing table, an entry of the wrong shape, an unknown
 resource or adapter on a profile, or a role in `role_defaults` pointing at a head that does not exist. A process handed
 `SECRETARY_INSTANCE` whose snapshot is missing, unreadable, a directory or a dangling link fails by that snapshot path
