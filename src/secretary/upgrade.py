@@ -73,10 +73,7 @@ from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runti
 from triggered_agents.runtime.paths import configured_product_root
 
 MEMORY_COMPONENT = "memory"
-# A pull that touches any of these can change what the long-running memory
-# service executes, so the service has to be restarted even when its unit file
-# is byte-identical. Restarting only on a changed unit leaves the MCP serving
-# the previous release's code, which is the opposite of re-materializing.
+# Changes here require restarting the memory service even if its unit is unchanged.
 MEMORY_CODE_PATHS = ("secretary/", "pyproject.toml", "uv.lock", "requirements.txt")
 DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock", "requirements.txt")
 RUFF_VERSION_RE = re.compile(r"^ruff==([^;\s]+)$")
@@ -110,14 +107,10 @@ class UpgradeContext:
     changed_paths: tuple[str, ...] = ()
     code_changed: bool = False
     unit_changed: bool = False
-    # A product-pack reconciliation changed the canonical export, so the warm
-    # memory service must run its existing incremental reconciliation path.
+    # Product-pack changes require incremental memory reconciliation.
     memory_pack_changed: bool = False
     memory_pack: Any = None
-    # The account that owns the selected installation and the home its paths hang off. Everything
-    # home-relative an upgrade materializes — skills, command entry points, role worktrees, the
-    # workspaces an automation is registered with — resolves against this home rather than the
-    # invoking process's, so a repair run as root writes what the rendered units then name.
+    # Resolve home-relative artifacts from the installation owner, not the invoker.
     runtime_user: str | None = None
     runtime_home: Path | None = None
 
@@ -149,9 +142,7 @@ class GitError(RuntimeError):
 
 def _git(root: Path, args: list[str], timeout: int = 120) -> str:
     try:
-        # `-C root` selects the checkout only if no inherited `GIT_DIR` outranks
-        # it, so an upgrade takes the same scrubbed environment as every other
-        # Git child of this product.
+        # Scrub inherited Git state so `-C root` selects this checkout.
         result = _proc.run(
             ["git", "-c", f"safe.directory={root}", "-C", str(root), *args],
             timeout=timeout,
@@ -439,9 +430,7 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
             dry_run=context.dry_run,
         )
         if not context.dry_run:
-            # Upgrade normally runs as root because later steps install system units. Keep the
-            # generated recovery pair writable by the installation account before the state-repo
-            # writer deliberately crosses to that account for `git add` and commit.
+            # The installation account must own recovery files before it commits them.
             _set_runtime_owner(target, context.runtime_user)
             _set_runtime_owner(source_path(context.instance_path), context.runtime_user)
     except (HeadRegistryConfigError, GitError) as exc:
@@ -533,9 +522,7 @@ def _set_runtime_owner(path: Path, runtime_user: str | None) -> None:
 
 def _assert_memory_export_readable(memory_dir: Path, runtime_user: str | None) -> None:
     """Require the daemon account to own readable export files before activation."""
-    # An unprivileged invocation already writes as its runtime account. The
-    # ownership proof is needed for the root path, where publication otherwise
-    # preserves root's temporary-file mode and ownership.
+    # Root publication must prove runtime-account ownership.
     if not runtime_user or os.geteuid() != 0:
         return
     try:
@@ -599,9 +586,7 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
     created: list[str] = []
     moved: list[str] = []
     stuck: list[str] = []
-    # `recover` and `upgrade` may run under sudo.  Git makes both the linked
-    # checkout and its administration directory as that invoking user, while
-    # the systemd units subsequently run as `runtime_user`.
+    # Sudo may create worktree metadata the runtime user must own.
     try:
         _set_runtime_owner(worktrees[0].parent, context.runtime_user)
         for parent in _workspace_owner_dirs(worktrees[0]):
@@ -848,10 +833,7 @@ def step_board_transport(context: UpgradeContext) -> StepResult:
     )
 
 
-# `registries` runs directly after the pull and before every step that writes. `dependencies` is
-# one of those: a checkout with a `.venv` and a moved dependency manifest gets `pip install -e`,
-# which mutates the checkout being installed. Rejecting a malformed manifest, overlay or head canon
-# after that has already left a host part-way onto a version it never finished installing.
+# Validate registries before any mutating materialization step.
 STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
     step_registries,
@@ -907,19 +889,14 @@ def run_upgrade(args) -> int:
             print(f"  {error}")
         return 2
     product_root = Path(args.product_root).expanduser() if args.product_root else default_product_root()
-    # `validate_instance` accepts either a checkout or instance.yaml; the owner is a property of
-    # the checkout. Resolving it here rather than inside the host step is what makes every
-    # home-relative path an upgrade materializes agree with the units it renders.
+    # Resolve the checkout owner before materializing home-relative paths.
     instance_path = report.instance_path.parent
     try:
         runtime_user, runtime_home = resolve_runtime_owner(instance_path, getattr(args, "runtime_user", None))
     except ValueError as exc:
         print(f"secretary upgrade: {exc}")
         return 2
-    # Both Orca clients run as the runtime user, the way install and recover build them: root
-    # has no Orca runtime of its own, so a root-run upgrade that called the CLI directly failed
-    # its automations step. An unprivileged run is already that account, and `runuser` is root's
-    # tool, so it stays unwrapped.
+    # Run Orca as the runtime user; root has no Orca runtime.
     orca_user = runtime_user if os.geteuid() == 0 else None
     context = UpgradeContext(
         instance_path=instance_path,

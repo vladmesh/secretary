@@ -30,16 +30,11 @@ from typing import Any
 from .. import role_env
 from ..codex_preflight import codex_home, codex_trust_paths
 
-# The two backend names a profile may choose between. They live beside the backends themselves
-# rather than here, because this package names no session manager and one of them is an Orca
-# backend's name; what this module owns is the *rule* that a profile names one of them.
+# Valid backend names; this renderer validates the profile's choice.
 from ..head_runtimes import DEFAULT_HEAD_RUNTIME, HEAD_RUNTIMES
 from ..launch_prefix import pythonpath_prefix
 
-# Efforts each adapter accepts, and what its command line calls them. They live here rather than
-# with the registry because the renderer is what has to refuse an effort it cannot spell, and a
-# registry validated against a second copy of these tables is a registry that can load and then
-# fail at bring-up. `validate_launch_shape` below is how a whole table is held to them.
+# Efforts each adapter accepts and their command-line spelling.
 CODEX_EFFORTS = {
     "default": None,
     "low": "low",
@@ -53,29 +48,16 @@ CODEX_EFFORTS = {
 
 CLAUDE_EFFORTS = {"default", "low", "medium", "high", "xhigh", "max"}
 
-# Adapters whose command never carries a prompt, whatever the caller passed: the head is an
-# interactive session and its prompt is delivered into the live pane.
+# Interactive adapters receive prompts through their live pane.
 PROMPT_AFTER_START_ADAPTERS = {"codex"}
 
-# Every Codex head is an interactive TUI session; `exec` is gone from the product. A profile that
-# says nothing means this, and a registry that still names another mode is refused rather than
-# quietly launched as something no renderer here can produce.
+# Codex heads are TUI sessions; unsupported modes are refused.
 CODEX_TUI_MODE = "tui"
 CODEX_LAUNCH_MODES = {CODEX_TUI_MODE}
 
 PYTHON_SAFE_PATH_FLAG = "-P"
 
-# The two role-env entry points a head can be bound by, named by the module the command execs.
-#
-# They are the same implementation reached under two names — `secretary.role_env` re-exports
-# `triggered_agents.runtime.role_env` and both `main`s route into the same `exec` — but they render
-# two different commands: the secretary entry point resolves the head's PYTHONPATH from the
-# configured product checkout and appends any the pane already has, and it is the only one that
-# renders a head's identity, while the runtime entry point resolves PYTHONPATH from
-# `TA_RUNTIME_PYTHONPATH` with this checkout as its last resort. Which of the two a head is bound by
-# is therefore still its launcher's fact and is passed in, not decided here. Collapsing them would
-# change the command every background agent is launched with, which this card does not do; it is
-# the one divergence between the old renderers left standing, and it is standing in one file.
+# The launcher chooses this binding: each entry point resolves a different PYTHONPATH.
 SECRETARY_ROLE_ENV = "secretary.role_env"
 RUNTIME_ROLE_ENV = "triggered_agents.runtime.role_env"
 ROLE_ENV_ENTRY_POINTS = (SECRETARY_ROLE_ENV, RUNTIME_ROLE_ENV)
@@ -132,10 +114,7 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
             raise HeadCommandError(
                 f"profile {profile_id!r} has unknown claude effort {effort!r} (known: {known})"
             )
-    # The backend, checked here and nowhere else, and checked for *every* adapter rather than
-    # inside one of the branches above: which backend holds a head is independent of which CLI the
-    # head runs, so there is no combination of the two this rule may accept for one adapter and
-    # refuse for another.
+    # Backend validity is independent of the CLI adapter.
     runtime = _named(profile.get("runtime", DEFAULT_HEAD_RUNTIME), f"profile {profile_id!r} runtime")
     if runtime not in HEAD_RUNTIMES:
         known = ", ".join(HEAD_RUNTIMES)
@@ -240,12 +219,8 @@ def with_pid_heartbeat(command: str, pid_file: str, *, identity: Mapping[str, st
     assignments before it execs the real program in place, so the captured pid still belongs to the
     head.
     """
-    # The terminal already puts its foreground head in a process group. Keeping that terminal
-    # session matters for interactive heads: they need /dev/tty, resize signals and normal pane
-    # teardown. The runtime signals that existing group when it is safe to do so.
-    # This small stdlib-only writer runs while the shell still has the PID which ``exec`` will keep
-    # for the head.  It gets boot id and start ticks from that exact process and replaces the file
-    # atomically, so a reader never mistakes a half-written JSON record for an exited head.
+    # Keep the terminal process group for TTY semantics and safe group signalling.
+    # Write the PID identity before exec and replace its record atomically.
     writer = """import json
 import os
 import sys
@@ -349,10 +324,7 @@ def _render_codex_tui(profile: Mapping[str, Any], *, prompt: str | None, workspa
     del prompt
     if not workspace:
         raise HeadCommandError("codex TUI launch requires workspace for directory trust override")
-    # Best-effort fan-out suppression. Codex does not expose the submitted provider tool schema,
-    # so this is deliberately an operational preference rather than a capability boundary. The
-    # companion journal monitor records collaboration events without stopping the run; prompts
-    # independently tell every role not to delegate.
+    # Best-effort preference, never provider capability evidence.
     args = [
         "codex",
         "--dangerously-bypass-approvals-and-sandbox",
@@ -374,8 +346,7 @@ def _render_codex_tui(profile: Mapping[str, Any], *, prompt: str | None, workspa
     if effort:
         args += ["-c", f'model_reasoning_effort="{effort}"']
     for path in codex_trust_paths(workspace):
-        # The `projects` overrides state the intent on the command line; what the TUI actually
-        # checks before it asks about trust is `config.toml`, written by the preflight.
+        # TUI trust comes from preflight's config.toml, not these command overrides.
         args += ["-c", f'projects.{json.dumps(path)}.trust_level="trusted"']
     return f"CODEX_HOME={shlex.quote(codex_home(profile))} {shlex.join(args)}"
 

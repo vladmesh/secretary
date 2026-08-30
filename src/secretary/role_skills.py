@@ -31,33 +31,22 @@ from secretary.onboarding import DEFAULT_INSTANCE
 from triggered_agents.runtime.paths import configured_product_root
 
 ROOT = Path(__file__).resolve().parents[2]
-# The manifest of the checkout this module was imported from. It is what the product ships and what
-# tests about the shipped canon read, and it is deliberately *not* the fallback any caller lands on:
-# the registry a host is audited or synced against belongs to the configured product checkout, which
-# is a different path exactly when an alternate checkout is running the command.
+# Manifest shipped by this checkout; hosts use their configured product checkout instead.
 MANIFEST = ROOT / "skills" / "manifest.toml"
 # Where an installation keeps its own manifest, relative to the instance directory.
 INSTANCE_MANIFEST_RELATIVE = Path("skills") / "manifest.toml"
-# Where a product checkout keeps its manifest, relative to the checkout root. The same spelling as
-# the instance overlay by coincidence, not by contract: the two are named separately so one can
-# move without dragging the other.
+# Product manifest path, separate from the instance overlay path.
 PRODUCT_MANIFEST_RELATIVE = Path("skills") / "manifest.toml"
-# Points the registry at another product manifest, and with it at another `roles/` tree beside that
-# file. The delivery check below runs inside the dispatcher tick, so a test needs a registry it can
-# own without writing into the shells of the live installation.
+# Registry override selects both its manifest and adjacent roles tree.
 MANIFEST_ENV = "SECRETARY_ROLE_SKILLS_MANIFEST"
 INSTANCE_ENV = "SECRETARY_INSTANCE"
-# Where a skill's command lands. The default is the operator's own bin directory; a test needs a
-# directory it can own without writing into the PATH of the live installation.
+# Default command destination; callers may use an isolated destination.
 BIN_DIR_ENV = "SECRETARY_BIN_DIR"
 
 PRODUCT_ORIGIN = "product"
 INSTANCE_ORIGIN = "instance"
 
-# A role and a skill are directory names, and both halves of the registry join them onto a root:
-# onto a `roles/` tree to read a skill and onto a shell root to write one. Anything with a
-# separator or a parent reference in it would move that join somewhere the operator did not name,
-# so a name is one plain path component or the manifest is refused.
+# Role and skill names are one path component to contain every root join.
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -120,7 +109,7 @@ def _expand_home(value: Path | str, home: Path | str | None) -> Path:
         return Path(home)
     if text.startswith("~/"):
         return Path(home) / text[2:]
-    # ``~other`` names a different account outright; the caller does not get to redirect that.
+    # Never expand another account's home directory.
     return Path(os.path.expanduser(text))
 
 
@@ -180,9 +169,9 @@ class SkillRegistry:
     """The product manifest with an optional instance manifest layered over it."""
 
     sources: tuple[ManifestSource, ...]
-    # role -> ordered list of (skill name, the source that declared it)
+    # role -> ordered (skill name, declaring source)
     roles: dict[str, list[tuple[str, ManifestSource]]] = field(default_factory=dict)
-    # target name -> (target table, the source that declared it)
+    # target name -> (target table, declaring source)
     targets: dict[str, tuple[dict[str, Any], ManifestSource]] = field(default_factory=dict)
 
     def describe_sources(self) -> list[dict[str, str]]:
@@ -624,7 +613,7 @@ def audit(
         for item in bucket:
             by_target[item["target"]][bucket_name] = int(by_target[item["target"]][bucket_name]) + 1
 
-    # A filtered audit is about named shell targets; commands do not belong to one.
+    # Filtered audits cover named shell targets, not commands.
     entry_points = (
         []
         if target_filter
@@ -768,8 +757,7 @@ def render_markdown(result: dict[str, Any]) -> str:
         if result[key]:
             lines.extend(["", f"{title}:"])
             for item in result[key]:
-                # The operator reading this has two manifests open; the finding has to say which
-                # one to edit, not only which layer it came from.
+                # Identify the manifest to edit, not just its layer.
                 lines.append(
                     f"- {item['target']} {item['role']}/{item['skill']} "
                     f"[{item.get('origin', PRODUCT_ORIGIN)} {item.get('manifest', manifest_path())}]"

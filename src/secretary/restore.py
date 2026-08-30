@@ -73,8 +73,7 @@ class RestoreError(RuntimeError):
 
 RESTORE_STATE_FILE = "restore-state.json"
 MEMORY_REINDEX_TIMEOUT_SECONDS = 300
-# Every card carries its kind; a card without one cannot be placed on the current board, so a
-# checkpoint holding one is refused instead of being restored into an unreadable row.
+# Every card needs a kind; refuse rows the current board cannot place.
 _RECORD_TYPES = {"task", "issue", "product"}
 _PRODUCT_ISSUE_METADATA = (
     "record_type",
@@ -103,21 +102,14 @@ def import_normalized_board(
     from secretary.sprints import sprint_admission_lock
 
     data_dir = data_dir.expanduser().resolve()
-    # Recovery publishes open sprints, so it is an admission of a set even though it
-    # never asks admission row by row.  Judging the export, reading what the target
-    # already holds and writing the rows have to be one transition against `create` and
-    # `reopen`, or a create that slipped between the read and the write leaves this
-    # installation over its limit with resources two sprints both claim.
+    # Restoring open sprints is set admission against create and reopen.
     with file_lock(data_dir / "board" / ".restore.lock"), sprint_admission_lock(data_dir):
         try:
             cards = _normalized_cards(
                 data_dir, registered_project_ids=(registered_projects(instance) if instance else None)
             )
             sprints = _normalized_sprints(data_dir)
-            # Before the first backend write of either set. A recovery that cannot produce a valid
-            # installation must not produce half of one, and the sprint entities are written after
-            # every Pipeline card: validating them at their own step would leave the whole card
-            # board already restored behind a refusal.
+            # Validate both sets before the first backend write.
             _check_restored_observers(sprints, instance)
             _check_restored_admission(sprints, instance)
             if client is None:
@@ -133,9 +125,7 @@ def import_normalized_board(
             unexpected = set(existing) - {card["reference"] for card in cards}
             if unexpected:
                 raise RestoreError("board is not empty or does not match normalized restore data")
-            # One read of the sprint board before any write: it decides what already exists,
-            # which records a retry must not append twice, and whether the audit this data dir
-            # carries was written against this backend or an earlier one.
+            # Read once before writes for idempotency and backend-audit binding.
             existing_sprints = _existing_sprints(data_dir, client, sprints)
             prefix = _restore_request_prefix(data_dir, writer.audit, set(existing) | set(existing_sprints))
             for card in sorted(cards, key=_restore_card_order):
@@ -230,8 +220,7 @@ def _import_sprints(
 ) -> None:
     """Recreate the sprint entities and prove they match the export."""
     if not sprints:
-        # An installation that never opened a sprint has no board to create and
-        # nothing to compare; creating an empty one would be recovery inventing state.
+        # Do not invent an empty sprint board.
         return
     from secretary.data import normalize_sprint_entity
     from secretary.sprints import SprintReader, SprintWriter, ensure_sprint_board
@@ -251,9 +240,7 @@ def _import_sprints(
                 repositories=list(sprint["repositories"]),
                 reference=reference,
                 request_id=f"{prefix}sprint-create:{reference}",
-                # Status and observer land with the fields, before the reference makes the row
-                # readable: recovery must not publish an open sprint that momentarily declares
-                # no observer, which is the one shape the reader calls corrupt.
+                # Publish status and observer before a readable reference.
                 observer=sprint.get("observer"),
                 status=str(sprint["status"]),
             )
@@ -309,9 +296,7 @@ def _check_restored_observers(sprints: list[dict[str, Any]], instance: Path | No
     """
     profiles: set[str] = set()
     if any(str(sprint.get("status") or "") == "open" for sprint in sprints):
-        # Only an open row is ever executed, so only an open row needs a head the registry has.
-        # A recovery of nothing but closed rows must not be refused because this host has no
-        # registry yet — that is the ordinary shape of restoring an archive of finished work.
+        # Only open rows need a registered head; closed archives remain restorable.
         try:
             profiles = installed_observer_profiles(instance)
         except ObserverMetadataError as exc:
@@ -339,9 +324,7 @@ def _check_restored_observers(sprints: list[dict[str, Any]], instance: Path | No
             )
             continue
         if status == "open":
-            # A declared head has to exist here too: a checkpoint can name a profile the
-            # registry has since lost, and republishing it would open a sprint the fence
-            # stops on its first tick.
+            # An open row's declared head must still exist.
             try:
                 check_observer_profile(value, profiles, subject=reference)
             except ObserverMetadataError as exc:
@@ -379,10 +362,7 @@ def _check_restored_admission(sprints: list[dict[str, Any]], instance: Path | No
         raise RestoreError(f"restored open sprints are not admissible on this installation: {problem}")
 
 
-# A checkpoint written before a sprint owned a product carries none of the ownership
-# keys, and the restored entity has to read back with none of them either.  Absence is
-# its own value here: a target that gained an empty `product` the source never had is a
-# lossy metadata write, not a match.
+# Preserve absent ownership keys; empty replacement is lossy.
 _ABSENT = object()
 
 
@@ -409,8 +389,7 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
                 json.dumps(list(sprint.get("reservations") or []), separators=(",", ":")),
             ),
         )
-        # An export without ownership restores a row without those keys rather than
-        # with empty ones an operator never wrote.
+        # Preserve absent ownership fields rather than invent empty values.
         if value not in {"", "[]"}
     }
     return ownership | {
@@ -537,10 +516,7 @@ def restore_findings(data_dir: Path) -> list[str]:
     if state.get("sprint_parity") == "failed":
         findings.append("sprint restore parity failed")
     elif "sprints" in state and state.get("sprints") != "complete":
-        # A recovery staged before sprint entities joined the checkpoint records no
-        # sprint state at all. Its board restore already finished against an export
-        # that had none, so demanding the field now would only turn doctor red on an
-        # instance that has nothing left to restore.
+        # Older recovery state without sprints has no sprint step to diagnose.
         findings.append("sprint restore is incomplete")
     if state.get("memory_index") != "complete":
         findings.append("memory index has not been rebuilt")
@@ -633,7 +609,7 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
             not isinstance(repo, str) for repo in sprint["repositories"]
         ):
             raise RestoreError("normalized sprint export has invalid repositories")
-        # Ownership is absent in a pre-ownership export and is never filled in here.
+        # Pre-ownership exports retain absent ownership.
         if not isinstance(sprint.get("product", ""), str):
             raise RestoreError("normalized sprint export has an invalid product")
         for field in ("issues", "reservations"):
@@ -647,8 +623,7 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
             or any(not isinstance(count, int) for count in budget["by_type"].values())
         ):
             raise RestoreError("normalized sprint export has an invalid budget")
-        # A pre-uncharged export carries no such key at all, and restores a sprint whose uncharged
-        # counts read as zero.
+        # Missing legacy uncharged counts restore as zero.
         uncharged = budget.get("uncharged", {})
         if not isinstance(uncharged, dict) or any(
             not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in uncharged.values()
@@ -680,9 +655,7 @@ def _restore_request_prefix(data_dir: Path, audit: TaskAudit, live_refs: set[str
     token = state.get("restore_namespace")
     if not isinstance(token, str) or not token or not _namespace_is_local(audit, token, live_refs):
         token = uuid.uuid4().hex
-        # `sprints` is also what marks a restore state as one that tracks the sprint step
-        # at all; a recovery staged before sprint entities joined the checkpoint has no
-        # such key, and doctor reads its absence as nothing left to restore.
+        # Missing `sprints` means this recovery never tracked that step.
         _update_restore_state(data_dir, restore_namespace=token, sprints=state.get("sprints", "pending"))
     return f"restore:{token}:"
 
@@ -739,20 +712,14 @@ def _create_restored_non_task(writer: TaskWriter, card: dict[str, Any]) -> None:
         "description": card["description"],
         "column_id": column_id,
     }
-    # Свимлейн берётся из экспорта, как и на пути обычных карточек: восстановление
-    # возвращает запись туда, где она была, и ничего не переносит. Дорожка продукта на
-    # чистом борде ещё не заведена, поэтому недостающая создаётся по имени из экспорта —
-    # иначе запись, созданную по продуктовому правилу, восстановление уронило бы в чужую
-    # дорожку. Kanboard отвергает swimlane_id=0 (createTask возвращает false), поэтому
-    # безымянный свимлейн экспорта параметром не передаётся вовсе.
+    # Restore the exported lane; create named lanes and omit Kanboard-invalid id 0.
     exported_lane = str(card.get("swimlane") or "")
     swimlane_id = _matching_swimlane(swimlanes, exported_lane)
     if swimlane_id is None and exported_lane.strip():
         swimlane_id = ensure_swimlane(writer.client, board_id, exported_lane)
     if swimlane_id is not None:
         payload["swimlane_id"] = swimlane_id
-    # _positive_int, а не isinstance(..., int): bool наследует int, поэтому false от
-    # Kanboard проходил проверку и падение приписывалось следующему шагу, reference.
+    # Reject bool: it is an int subclass but not a valid Kanboard id.
     task_id = _positive_int(writer.client.call("createTask", **payload))
     if task_id is None:
         raise RestoreError("could not create restored Product or Issue record")
@@ -790,7 +757,7 @@ def _restored_order_mismatch(cards: list[dict[str, Any]], actual: dict[str, dict
             continue
         groups.setdefault((str(card["column"]), str(card.get("swimlane") or "")), []).append(card)
     for group in groups.values():
-        # тот же порядок и тот же тайбрейк, которым карточки раскладывались
+        # Match the creation ordering and tie-breaker.
         expected = [card["reference"] for card in sorted(group, key=_restore_card_order)]
         live = sorted(
             group,
@@ -831,10 +798,7 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
         "family_preference": _enum_or_default(
             value("family_preference"), {"auto", "claude", "codex"}, "auto"
         ),
-        # A checkpoint older than the TUI-only rule still carries `exec` here. It is read without
-        # failing and restored as no mode at all: recreating the card with it would put a launch
-        # shape the product removed back on a live board, and `TaskWriter.create` refuses it
-        # anyway. Every mode the product still has round-trips unchanged.
+        # Legacy `exec` reads as no mode; live modes round-trip unchanged.
         "codex_launch_mode": _enum_or_default(value("codex_launch_mode"), {"", *CODEX_LAUNCH_MODES}, ""),
     }
 
@@ -869,7 +833,7 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
             "slug": metadata.get("slug") or None,
             "base_branch": metadata.get("base_branch") or None,
         },
-        # position здесь не сравнивается: см. _restored_order_mismatch
+        # Absolute position is intentionally not compared; see _restored_order_mismatch.
         "swimlane": str(card.get("swimlane") or "") or None,
         "comments": [{"body": body} for body in _restore_comments(card)],
         "product_issue_metadata": _product_issue_metadata(card["metadata"]),
@@ -1099,8 +1063,7 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
                 sprints="pending",
                 memory_index="pending",
                 reconcile="pending",
-                # The archive carries the audit and the restore progress of whatever
-                # recovery produced it; this data dir restores into its own backend.
+                # Archive audit and progress belong to this data directory's backend.
                 restore_namespace=uuid.uuid4().hex,
             )
             _reject_existing_target(target)

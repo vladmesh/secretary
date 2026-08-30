@@ -30,10 +30,7 @@ from .task_ref import TaskRef
 
 # A head that has a pane and has not been given its task yet.
 SPAWNED = "spawned"
-# A head its task has been delivered to. A historical fact and only that: it says a delivery
-# happened, never that a turn is running now. Whether a head is busy this second is a `TurnLease`
-# and an activity epoch on the runtime (`runtime.HeadActivity`), because a record read back from
-# disk a tick later cannot answer a question about the present.
+# Delivery is historical; current activity comes from the runtime lease and epoch.
 WORKING = "working"
 # A head somebody has asked to stop; its initiator is on the run from this state on.
 FINISHING = "finishing"
@@ -41,15 +38,12 @@ FINISHING = "finishing"
 EXITED = "exited"
 LIFECYCLE = (SPAWNED, WORKING, FINISHING, EXITED)
 
-# This is deliberately a small, transport-neutral vocabulary.  The Codex preflight owns the
-# evidence that can enter ``allowed``; HeadRun owns the durable rule that a historical or damaged
-# record is never accidentally read back as that state.
+# Preflight admits evidence; malformed or historic state is never read as allowed.
 FANOUT_POLICY_VERSION = 1
 FANOUT_ALLOWED = "allowed"
 FANOUT_UNKNOWN = "unknown"
 FANOUT_VIOLATION = "violation"
-# ``schema_absent`` and ``schema_unknown`` are separately durable so an operator can tell an
-# omitted capture from an unreadable one.  Neither is a terminal clean state.
+# Absent and unknown schema evidence stay distinct and non-clean.
 FANOUT_SCHEMA_ABSENT = "schema_absent"
 FANOUT_SCHEMA_UNKNOWN = "schema_unknown"
 FANOUT_POLICY_STATES = (
@@ -106,18 +100,14 @@ class HeadRun:
     spec: HeadSpec
     workspace: str
     task_ref: TaskRef
-    # Role is part of the provider attestation, not inferred from a profile id.  The empty value
-    # remains readable for records produced before this field existed, but it is not usable as
-    # allow evidence.
+    # Role is attested, never inferred; legacy emptiness cannot allow.
     role: str = ""
     handle: str = ""
     leaf: str = ""
     pid_file: str = ""
     lifecycle: str = SPAWNED
     stopped_by: StopInitiator | None = None
-    # A versioned Codex provider fan-out policy record.  ``to_json`` and ``from_json`` both pass
-    # it through ``_fanout_policy_json`` so malformed or historical state stays explicitly
-    # unknown rather than being silently omitted by a later lifecycle write.
+    # Round-trip policy state so malformed or historic values remain unknown.
     fanout_policy: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -129,9 +119,7 @@ class HeadRun:
             )
         if self.lifecycle in (FINISHING, EXITED) and self.stopped_by is None:
             raise HeadRunError(f"a head run in {self.lifecycle} carries the initiator that ended it")
-        # Frozen records still need a canonical value on their first serialisation.  Without this
-        # a fresh historical-shaped run and the same run read back from JSON compare differently,
-        # inviting callers to treat the latter normalisation as a lifecycle change.
+        # Canonicalize first serialization so read-back is not a lifecycle change.
         policy = _fanout_policy_json(self.fanout_policy)
         if policy.get("state") == FANOUT_ALLOWED and (
             policy.get("run_id") != self.run_id
@@ -223,13 +211,7 @@ class HeadRun:
         return {
             "run_id": self.run_id,
             "spec": _spec_json(self.spec),
-            # Beside the spec block rather than inside it, deliberately. That block is hashed whole
-            # as this head's launch identity in two places — `head_run_binding` and the Codex
-            # provider source's own fingerprint — so a value added inside it would change the
-            # identity of every head already running and turn every persisted provider source into
-            # a foreign one at the next upgrade. Which backend holds a head is not part of what
-            # identifies a provider session; it is a launch fact of the run, and it is recorded as
-            # one.
+            # Backend is a launch fact, outside the hashed provider-session identity.
             "head_runtime": self.spec.runtime,
             "workspace": self.workspace,
             "task_ref": self.task_ref.to_json(),
@@ -300,8 +282,7 @@ def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
     profile_id = str(payload.get("profile_id") or "")
     adapter = str(payload.get("adapter") or "")
     if not profile_id or not adapter:
-        # The same rule the spec itself holds: there is no state in which a head exists with its
-        # adapter guessed, and a record that lost it is not repaired by picking one here.
+        # Never infer a missing adapter from a damaged record.
         raise HeadRunError("a recorded head run names its profile and its adapter")
     fallback = payload.get("fallback")
     return HeadSpec(
@@ -414,8 +395,7 @@ def _fanout_policy_json(payload: Any) -> dict[str, Any]:
             )
     if state == FANOUT_ALLOWED and terminal_state == "clean" and result["events"]:
         return _unknown_fanout_policy("a clean fan-out policy record carries provider events")
-    # The only shape that could be read as clean needs its complete binding.  A damaged historic
-    # record consequently stays visible and safely non-clean after the next ordinary write.
+    # Only complete binding is clean; damaged history remains non-clean.
     if state == FANOUT_ALLOWED and (
         not str(result.get("run_id") or "")
         or not str(result.get("role") or "")
@@ -444,8 +424,7 @@ def _unknown_fanout_policy(reason: str, *, provider_source_required: bool = Fals
         "events": [],
     }
     if provider_source_required:
-        # Keep enough typed provenance for the runtime to route the damaged binding through the
-        # exact run's ingress.  Replacing it with absence would let recovery skip the fence.
+        # Preserve provenance so recovery cannot skip the exact-run fence.
         result["provider_source_required"] = True
         result["provider_source"] = {}
     return result
