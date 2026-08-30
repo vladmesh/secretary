@@ -7,13 +7,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  test_shards:
-    name: test / ${{ matrix.shard }}
+  test_suites:
+    name: test / ${{ matrix.suite }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [core, dispatcher, runtime, component]
+        suite: [unit, component, runtime-component, integration-recovery, integration-memory, integration-board, packaging]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,15 +21,15 @@ jobs:
           python-version: "3.12"
       - run: python3 -m pip install --upgrade pip
       - run: python3 -m pip install -e '.[memory]'
-      - run: python3 scripts/ci_test_shards.py --shard "${{ matrix.shard }}"
+      - run: python3 scripts/ci_test_shards.py --suite "${{ matrix.suite }}"
 
   test:
     name: test
     if: ${{ always() }}
-    needs: test_shards
+    needs: test_suites
     runs-on: ubuntu-latest
     steps:
-      - name: Require every test shard
+      - name: Require every test suite
         env:
-          SHARDS_RESULT: ${{ needs.test_shards.result }}
-        run: test "$SHARDS_RESULT" = success
+          SUITES_RESULT: ${{ needs.test_suites.result }}
+        run: test "$SUITES_RESULT" = success
