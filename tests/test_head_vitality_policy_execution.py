@@ -28,11 +28,7 @@ from secretary.dispatcher_watchdog import (
     head_process_status,
     suspension_response_window_seconds,
 )
-from tests.test_dispatcher import CARD_REF, DispatcherRuntimeFixture
-from tests.test_head_vitality_wait_decisions import (
-    RUNNING_STATUS,
-    STOPPED_STATUS,
-)
+from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
 from triggered_agents.runtime.head import with_pid_heartbeat
 
 

@@ -23,6 +23,7 @@ integration-memory tests/test_curator_harvest.py
 unit tests/test_curator_operator_contract.py
 component tests/test_data.py
 integration-board tests/test_dispatcher.py
+integration-board tests/test_dispatcher_review_lifecycle.py
 integration-board tests/test_dispatcher_contracts.py
 integration-board tests/test_dispatcher_gate_receipt.py
 integration-board tests/test_dispatcher_launch_intent.py

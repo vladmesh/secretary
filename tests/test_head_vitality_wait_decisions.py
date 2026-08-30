@@ -21,22 +21,7 @@ os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary.dispatcher_types import HostError
 from secretary.dispatcher_worker_lifecycle import head_run_binding
-from tests.test_dispatcher import CARD_REF, DispatcherRuntimeFixture
-
-#: A live pid whose /proc state says it is parked on a stop signal (state `T`).
-STOPPED_STATUS = {
-    "known": True,
-    "live": True,
-    "reason": "live",
-    "pid_status": {"known": True, "alive": True, "match": True, "state": "live-match", "stopped": True},
-}
-#: The same process after it was resumed (SIGCONT territory, not this card's).
-RUNNING_STATUS = {
-    "known": True,
-    "live": True,
-    "reason": "live",
-    "pid_status": {"known": True, "alive": True, "match": True, "state": "live-match", "stopped": False},
-}
+from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
 
 
 def _suspension_comments(case) -> list[str]:

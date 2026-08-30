@@ -11,8 +11,8 @@ from secretary._fsutil import sha256_file
 from secretary.backup import BackupResult, create_backups
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
-from tests.test_sprints import SprintKanboard
-from tests.test_tasks import WriteKanboard
+from tests.fakes.sprints import SprintKanboard
+from tests.fakes.tasks import WriteKanboard
 
 
 def create_backup(instance_path: Path, *, backup_kind: str = "full", **kwargs) -> BackupResult:

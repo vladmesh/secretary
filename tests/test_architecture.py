@@ -50,6 +50,17 @@ LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset(
 
 
 class SourceLayoutTests(unittest.TestCase):
+    def test_test_support_never_imports_a_test_module(self) -> None:
+        """Shared fakes are a one-way dependency, not bridges between test modules."""
+        offenders: list[str] = []
+        for path in (ROOT / "tests").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                module = node.module if isinstance(node, ast.ImportFrom) else None
+                if module and (module == "tests.test" or module.startswith("tests.test_")):
+                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
+        self.assertEqual(offenders, [])
+
     def test_new_secretary_modules_do_not_widen_the_flat_root(self) -> None:
         current = {path.name for path in (ROOT / "src" / "secretary").glob("*.py")}
         self.assertEqual(current - LEGACY_FLAT_MODULES, set())
