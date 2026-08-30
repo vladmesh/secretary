@@ -62,6 +62,13 @@ CHILD = REPO / "tests" / "fixtures" / "local_pty_child.py"
 LAUNCHER = REPO / "tests" / "fixtures" / "local_pty_launcher.py"
 SLOW_READER = REPO / "tests" / "fixtures" / "local_pty_slow_reader.py"
 CHILD_COMMAND = f"{sys.executable} -u {CHILD}"
+# These are test-only bounds.  The shipped values belong to
+# ShippedRuntimeDeadlineContractTests; expiry behaviour must not make ordinary runtime feedback
+# wait for them.
+TEST_DELIVERY_SECONDS = 1.0
+TEST_DELIVERY_WAIT_SECONDS = 3.0
+TEST_RESPONSE_SECONDS = 0.5
+TEST_BYSTANDER_DELIVERY_SECONDS = 3.0
 
 
 def _identity_of(pid: int, run_id: str) -> dict[str, object]:
@@ -374,17 +381,24 @@ class LocalPtySubstrateTests(unittest.TestCase):
         return int(reports[index])
 
     # -- a delivery is admitted, and never something a caller waits through --------------
-    #
-    # Every test below runs on the shipped defaults. `delivery_seconds` is not overridden by any
-    # of them on purpose: the previous round's stalled-delivery test lowered it to 1.0s, under the
-    # client's own 5s socket timeout, and so could not see what a delivery at the real bound did
-    # to the connection that made it or to anybody else's.
 
-    def _slow_head(self, run_id: str, *, chunk: int, pause: float, total: int = 0) -> HeadHandle:
+    def _slow_head(
+        self,
+        run_id: str,
+        *,
+        chunk: int,
+        pause: float,
+        delivery_seconds: float,
+        total: int = 0,
+    ) -> HeadHandle:
         command = f"{sys.executable} -u {SLOW_READER} --chunk {chunk} --pause {pause}"
         if total:
             command += f" --total {total}"
-        return self._start(run_id=run_id, command=command)
+        return self._start(
+            run_id=run_id,
+            command=command,
+            delivery_seconds=delivery_seconds,
+        )
 
     def _prompt(self, call, *, within: float, what: str):
         """Call something on the socket and fail if it did not answer well inside `within`."""
@@ -403,13 +417,20 @@ class LocalPtySubstrateTests(unittest.TestCase):
         question it asks while the delivery is stuck — *its own* answer, with `alive` in it, about
         a head that really is alive — and the stall itself as state, at the moment it happens.
         """
-        handle = self._slow_head("stalled", chunk=4096, pause=600.0)
+        handle = self._slow_head(
+            "stalled",
+            chunk=4096,
+            pause=600.0,
+            delivery_seconds=TEST_DELIVERY_SECONDS,
+        )
         client = self._client(handle)
         self._await_output(client, b"UP")
 
         payload = b"z" * protocol.INPUT_MAX_BYTES
         answer = self._prompt(
-            lambda: client.send_input(payload, subject="nudge"), within=2.0, what="send_input"
+            lambda: client.send_input(payload, subject="nudge"),
+            within=TEST_RESPONSE_SECONDS,
+            what="send_input",
         )
         self.assertTrue(answer["ok"], answer)
         self.assertTrue(answer["accepted"], answer)
@@ -417,13 +438,16 @@ class LocalPtySubstrateTests(unittest.TestCase):
         delivery_id = answer["delivery"]["id"]
         self.assertEqual(answer["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT)
 
-        # The whole time the delivery is stuck — longer than the client's own 5s socket timeout —
-        # this connection keeps being answered, and every answer is the answer to the question that
-        # was asked. `alive` is the key that went missing when frames slid by one, and it is here.
-        deadline = time.monotonic() + protocol.INPUT_DELIVERY_SECONDS + 5.0
+        # The injected substrate bound is enough to make the delivery expire.  This connection
+        # must still answer throughout it, and every answer must be the answer that was asked.
+        deadline = time.monotonic() + TEST_DELIVERY_WAIT_SECONDS
         seen_in_flight = False
         while time.monotonic() < deadline:
-            status = self._prompt(client.status, within=2.0, what="status during a stuck delivery")
+            status = self._prompt(
+                client.status,
+                within=TEST_RESPONSE_SECONDS,
+                what="status during a stuck delivery",
+            )
             self.assertTrue(status["ok"], status)
             self.assertIn("alive", status)
             self.assertTrue(status["alive"], "a live head was reported dead")
@@ -467,20 +491,28 @@ class LocalPtySubstrateTests(unittest.TestCase):
         payload's own size as the count. Not an exception, and never a stale frame in place of the
         next answer.
         """
-        handle = self._slow_head("slow-reader", chunk=8192, pause=0.8, total=40000)
+        handle = self._slow_head(
+            "slow-reader",
+            chunk=8192,
+            pause=0.12,
+            total=40000,
+            delivery_seconds=1.5,
+        )
         client = self._client(handle)
         self._await_output(client, b"UP")
 
         payload = b"s" * 40000
-        answer = self._prompt(lambda: client.send_input(payload), within=2.0, what="send_input")
+        answer = self._prompt(
+            lambda: client.send_input(payload), within=TEST_RESPONSE_SECONDS, what="send_input"
+        )
         self.assertTrue(answer["ok"], answer)
         delivery_id = answer["delivery"]["id"]
 
-        status = self._prompt(client.status, within=2.0, what="status mid-delivery")
+        status = self._prompt(client.status, within=TEST_RESPONSE_SECONDS, what="status mid-delivery")
         self.assertTrue(status["alive"], "a live head was reported dead")
         self.assertEqual(status["delivery"]["id"], delivery_id)
 
-        delivered = client.wait_for_delivery(delivery_id, timeout=protocol.INPUT_DELIVERY_SECONDS)
+        delivered = client.wait_for_delivery(delivery_id, timeout=TEST_DELIVERY_WAIT_SECONDS)
         self.assertEqual(delivered["state"], protocol.DELIVERY_COMPLETE, delivered)
         self.assertTrue(delivered["complete"])
         self.assertEqual(delivered["written_bytes"], len(payload))
@@ -491,7 +523,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertEqual(accepted["offered_bytes"], len(payload))
         self.assertTrue(accepted["complete"])
         # The head, not the supervisor, confirms it: every byte was read off the terminal.
-        self._await_output(client, b"READ 40000", timeout=20.0)
+        self._await_output(client, b"READ 40000", timeout=TEST_DELIVERY_WAIT_SECONDS)
 
     def test_a_bystander_is_answered_and_the_loop_keeps_ticking_during_a_delivery(self) -> None:
         """A second caller who had nothing to do with the delivery, and the tick behind it.
@@ -502,28 +534,48 @@ class LocalPtySubstrateTests(unittest.TestCase):
         asks repeatedly while a 64 KiB payload is stuck, and then asks the supervisor to stop the
         head, which is a thing only a loop that is still ticking can do.
         """
-        handle = self._slow_head("bystander", chunk=4096, pause=600.0)
+        handle = self._slow_head(
+            "bystander",
+            chunk=4096,
+            pause=600.0,
+            delivery_seconds=TEST_BYSTANDER_DELIVERY_SECONDS,
+        )
         deliverer = self._client(handle)
         bystander = self._client(handle)
         self._await_output(deliverer, b"UP")
 
         accepted = deliverer.send_input(b"z" * protocol.INPUT_MAX_BYTES)
         self.assertTrue(accepted["ok"], accepted)
+        self.assertEqual(accepted["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT)
 
         for _ in range(10):
-            status = self._prompt(bystander.status, within=2.0, what="a bystander's status during a delivery")
+            status = self._prompt(
+                bystander.status,
+                within=TEST_RESPONSE_SECONDS,
+                what="a bystander's status during a delivery",
+            )
             self.assertTrue(status["ok"], status)
             self.assertTrue(status["alive"])
+            self.assertEqual(status["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT)
             time.sleep(0.1)
         self.assertEqual(bystander.stale_frames, 0)
 
         # The delivering connection is not out of step either: its next question is its own.
-        own = self._prompt(deliverer.status, within=2.0, what="the deliverer's next status")
+        own = self._prompt(
+            deliverer.status,
+            within=TEST_RESPONSE_SECONDS,
+            what="the deliverer's next status",
+        )
         self.assertTrue(own["alive"])
+        self.assertEqual(own["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT)
         self.assertEqual(deliverer.stale_frames, 0)
 
         # And the loop is still doing its own work: a stop, asked for by the bystander mid-delivery.
-        stop = self._prompt(lambda: bystander.stop(initiator="test"), within=2.0, what="stop mid-delivery")
+        stop = self._prompt(
+            lambda: bystander.stop(initiator="test"),
+            within=TEST_RESPONSE_SECONDS,
+            what="stop mid-delivery",
+        )
         self.assertTrue(stop["ok"], stop)
         self._await(
             lambda: not _alive(handle.head_pid),
@@ -537,13 +589,22 @@ class LocalPtySubstrateTests(unittest.TestCase):
         Two payloads in flight would interleave on the one terminal, and neither caller could be
         told what the head received. Refusing is immediate, like every other answer here.
         """
-        handle = self._slow_head("one-at-a-time", chunk=4096, pause=600.0)
+        handle = self._slow_head(
+            "one-at-a-time",
+            chunk=4096,
+            pause=600.0,
+            delivery_seconds=TEST_DELIVERY_SECONDS,
+        )
         client = self._client(handle)
         self._await_output(client, b"UP")
 
         first = client.send_input(b"z" * protocol.INPUT_MAX_BYTES)
         self.assertTrue(first["ok"], first)
-        second = self._prompt(lambda: client.send_input(b"second\n"), within=2.0, what="a second delivery")
+        second = self._prompt(
+            lambda: client.send_input(b"second\n"),
+            within=TEST_RESPONSE_SECONDS,
+            what="a second delivery",
+        )
         self.assertFalse(second["ok"], second)
         self.assertEqual(second["error"], protocol.ERROR_INPUT_IN_FLIGHT)
         self.assertEqual(second["delivery"]["id"], first["delivery"]["id"])

@@ -189,6 +189,19 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             ),
         )
 
+        runtime_component_modules = {
+            "tests/test_local_pty_supervisor.py",
+            "tests/test_local_pty_head_runtime.py",
+            "tests/test_triggered_dispatch_local_pty.py",
+            "tests/test_runtime_deadline_contract.py",
+        }
+        grouped = load_manifest(root)
+        self.assertTrue(runtime_component_modules.issubset(grouped["runtime-component"]))
+        self.assertFalse(
+            set(FAST_MODULES) & set(modules(sorted(runtime_component_modules))),
+            "the fast profile must never run real local-PTY or runtime-deadline proofs",
+        )
+
     def test_fast_profile_rejects_a_missing_declared_module_before_launch(self) -> None:
         root = Path(__file__).resolve().parents[1]
 

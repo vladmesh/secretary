@@ -1291,11 +1291,9 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         would let the next payload be written straight behind a fragment.
         """
         self._rebuild_runtime(connect_timeout=1.0)
-        # A head whose delivery bound is far longer than this test: the supervisor is stopped
-        # while the delivery is genuinely in flight, so the wait derived from that bound is still
-        # running when the socket goes silent. The report is what the witnesses can say then, not
-        # what a wait of this runtime's own ran out on.
-        run = self._stuck_head(delivery_seconds=60.0)
+        # The supervisor is stopped while this injected bound is still in flight. The report is
+        # what the witnesses can say then, not what a runtime-owned timeout ran out on.
+        run = self._stuck_head(delivery_seconds=2.0)
         text = "x" * (protocol.INPUT_MAX_BYTES - 1)
         self._stop_supervisor_once(run, self._delivery_in_flight(run, len(text) + 1))
 
@@ -1400,10 +1398,10 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         as anything but the arrival it became. The receipt is `ok`, the two byte counts are equal
         and they are the whole payload, and the head's own journal says the same.
         """
-        bound = 30.0
+        bound = 2.0
         text = "x" * (protocol.INPUT_MAX_BYTES - 1)
         run = self.live_run(
-            command=f"{sys.executable} -u {SLOW_READER} --chunk 4096 --pause 0.2",
+            command=f"{sys.executable} -u {SLOW_READER} --chunk 4096 --pause 0.05",
             delivery_seconds=bound,
         )
         self.assertGreater(
@@ -1421,7 +1419,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         self.assertEqual(receipt.delivery_state, protocol.DELIVERY_COMPLETE)
         self.assertEqual(receipt.delivered_bytes, len(text) + 1)
         self.assertEqual(receipt.delivered_bytes, receipt.offered_bytes)
-        self.assertGreater(took, 1.0, "the head read this instantly, so nothing was waited out")
+        self.assertGreater(took, 0.1, "the head read this instantly, so nothing was waited out")
         accepted = self.events(run).of_kind(INPUT_ACCEPTED)[-1]
         self.assertTrue(accepted["complete"])
         self.assertEqual(accepted["bytes"], len(text) + 1)
