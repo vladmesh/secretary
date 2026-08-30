@@ -300,9 +300,7 @@ def command_terminal_status(
             task=f"card:{task['ref']}",
             leaf=leaf,
         )
-        # A disconnected pane is otherwise terminal evidence for a relaunch.  Classify the
-        # expected HeadRun first: its old heartbeat path can now name a live foreign process,
-        # which has to remain fenced even when Orca no longer considers the pane connected.
+        # Fence a live foreign heartbeat before treating a disconnected pane as terminal.
         if _heartbeat_is_mismatch(pid_status):
             return {
                 "known": True,
@@ -312,9 +310,7 @@ def command_terminal_status(
                 "pid_confirmed": False,
             }
         if not terminal.connected:
-            # The classification rides along: the vitality reduction must see a suspended
-            # or dead process behind a dropped pane within the same tick, instead of
-            # reading the disconnect as an unobservable head.
+            # Pass classification to vitality reduction with the dropped-pane observation.
             return {
                 "known": True,
                 "live": False,
@@ -330,15 +326,8 @@ def command_terminal_status(
                 "reason": "process-exited",
                 "pid_status": dict(pid_status),
             }
-        # The host already read Orca's milliseconds into epoch seconds, and 0.0 is its answer for a
-        # session manager that named no clock at all — which is not the same as "printed at the
-        # epoch" and must stay `None` here, where the watchdog reads it as "no activity known".
         activity = terminal.last_output_at or None
-        # Provider progress is independent from `tui-idle`.  In particular, a long Codex tool
-        # call can advance rollout JSONL while the pane has no new terminal output.  Keep the
-        # typed source result for watchdog callers, but only an observed cursor may refresh
-        # liveness; unavailable transport, stale handles and identity mismatches remain separate
-        # from both activity and a busy pane.
+        # Only observed provider cursors refresh liveness; tui-idle is independent.
         try:
             provider_progress = getattr(
                 host, "provider_progress", lambda _task, _record, _kind: {"state": "unavailable"}
@@ -384,19 +373,7 @@ def command_terminal_status(
                 status["idle"] = work != "working"
                 status["idle_reason"] = work
         return status
-    # No pane in the inventory answers to this head. Two ways to get here, one verdict:
-    #
-    #   * no identity was ever persisted — a head adopted from a launch intent (secretary-820)
-    #     whose bring-up outlived the tick that started it;
-    #   * an identity was persisted and matches nothing. `orca terminal create` returns a handle
-    #     the inventory does not always list back (measured 2026-08-04: 0/3 on one worktree, 3/3
-    #     on another, stable across a 2s re-read), and `worker_leaf` is empty whenever the leaf
-    #     lookup that keys on that same handle came back empty. `dispatcher_state` already calls
-    #     this the handle-alias problem.
-    #
-    # In both the pid heartbeat is the stronger evidence: it proves this exact process runs. A
-    # pane we cannot name is not a dead head, and respawning over a live one is the second head
-    # the intent contour exists to prevent.
+    # Missing inventory does not beat an exact live heartbeat; never respawn beside it.
     run = record.review_head_run if kind == "review" else record.worker_head_run
     leaf = record.review_leaf if kind == "review" else record.worker_leaf
     pid_status = _head_run_process_status(
@@ -446,11 +423,7 @@ def command_terminal_status(
         started_at = record.review_started_at if kind == "review" else record.worker_started_at
         if started_at and time.time() - started_at <= _initial_output_stall_seconds():
             return {"known": True, "live": True, "reason": "pid-not-written-yet", "pid_confirmed": False}
-    # A lost pane over a heartbeat that still names a live process is an observation
-    # failure, not a death: the classification rides along so the vitality reduction can
-    # keep aging such a head conservatively (the pid-only arm) instead of reading the
-    # inventory's blindness as a kill authorisation. An unreadable heartbeat stays the
-    # old not-live shape: nobody can vouch for that head at all.
+    # A lost pane plus live heartbeat is observation failure, not death.
     return {
         "known": True,
         "live": bool(pid_status.get("alive")) if pid_status.get("known") else False,
@@ -759,10 +732,7 @@ def retry_busy_reviewer_launch_delivery(
         raise HostError("reviewer delivery retry returned no durable result")
     evidence = retried.get("delivery_evidence")
     head_run = retried.get("head_run")
-    # A readiness transition can confirm that a turn began while the transport's final composer
-    # read still proves the document remained in the input buffer.  That is not a reviewer
-    # receipt: adopting it strands the card behind a live pane which never saw the review task.
-    # Keep the exact launch intent and retry the same pane instead.
+    # A started turn with document still in composer is not a reviewer receipt.
     if (
         isinstance(evidence, dict)
         and bool(evidence.get("turn_confirmed"))
@@ -792,9 +762,7 @@ def retry_busy_reviewer_launch_delivery(
         raise HostError("reviewer delivery retry returned without the launched head run")
     if evidence:
         record.review_delivery_evidence = dict(evidence)
-    # One intent write makes both the accepted delivery and the exact run durable.  Only after this
-    # point can `resolve_launch_intent` enter ordinary reviewer adoption, which crosses the freeze,
-    # routing and clear-intent boundary exactly once.
+    # Persist accepted delivery with exact run before reviewer adoption.
     confirmed = {
         **delivery,
         "state": "confirmed",
@@ -829,9 +797,7 @@ def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) ->
     if not isinstance(evidence, dict) or not evidence:
         return
     record.review_delivery_evidence = dict(evidence)
-    # The reviewer can receive its prompt before a later launch step, such as freezing the
-    # retained worker, fails.  That successful receipt still has to survive recovery, but it is
-    # not a delivery failure merely because the enclosing reviewer bring-up later aborted.
+    # Preserve a successful receipt when a later reviewer-launch step aborts.
     if not bool(evidence.get("turn_confirmed")) and delivery_readiness_state(evidence) != READINESS_BUSY:
         record.review_delivery_failures += 1
 
@@ -852,13 +818,7 @@ def _escalate_stuck_review_launch(
     if record.review_launch_aborts < ceiling:
         return
     ref = task["ref"]
-    # The body is fixed for the episode on purpose: TaskWriter answers a repeated request id only
-    # when its payload is unchanged, and a re-post that differed would raise instead. So nothing
-    # that can vary tick to tick goes in — not the live count, and not the abort reason, which the
-    # bring-up can word differently across ticks (a freeze that would not confirm, a nudge whose
-    # delivery was never confirmed, a pane identity that would not read). The ceiling is the whole
-    # stable body; the per-tick reason stays where it already is, on the degraded tick the steward
-    # reads.
+    # Keep idempotent abort-comment bodies stable across ticks.
     runtime.writer.comment(
         role="dispatcher",
         actor=runtime.owner,
@@ -928,10 +888,7 @@ def start_review(
             "readiness": readiness.to_json(),
             "reason": readiness.reason,
         }
-    # The reviewer's own durable launch intent (secretary-820). It goes to disk before the pane is
-    # split, because the record does not learn the reviewer's handle until this function returns
-    # and the caller saves: a tick that dies in between would otherwise leave a live reviewer that
-    # the next tick cannot see, and would launch a second one beside.
+    # Persist reviewer intent before pane split to prevent a crash-era duplicate.
     intent_kwargs: dict[str, Any] = {}
     prompt_document_path = getattr(runtime.host, "_prompt_document_path", None)
     if callable(prompt_document_path):
@@ -990,32 +947,21 @@ def start_review(
             role=REVIEW_ROLE,
             reason=failure,
         )
-    # The durable intent owns the exact pre-pane HeadRun.  The host's transport binds the new
-    # provider session and cursor from this entry before it can send REVIEW.md.
+    # The durable intent owns the exact pre-pane HeadRun and provider binding.
     bind_ingress = getattr(runtime, "bind_codex_provider_ingress", None)
     if callable(bind_ingress):
         bind_ingress(record, records, payload, role=REVIEW_ROLE, reference=ref)
     try:
         launch = runtime.host.start_review(task, record)
     except Exception as exc:
-        # One sink for every way a reviewer bring-up can fail, and the reason it is one: whatever
-        # the shared delivery boundary saw of this reviewer's prompt is normalised and persisted
-        # here, exactly once, before any branch takes a transition, writes a launch intent, decides
-        # a retry or returns an outcome. The branches below are unchanged and still decide all of
-        # that; none of them can now be the one that forgets, and none of them can count twice.
-        #
-        # A failure that carries no evidence records none: a split that would not open or an
-        # inventory that would not answer is an infrastructure failure, which has its own counter,
-        # and must never be tallied as a prompt that was refused.
+        # Normalize and persist prompt evidence once; infrastructure failures carry none.
         _record_review_delivery_failure(record, exc)
         if isinstance(exc, HeadLaunchAborted):
             return _reviewer_launch_aborted(
                 runtime, task, records, ref, record, attempt_id, exc, payload=payload
             )
         if launch_left_a_head(record):
-            # The host reported an ordinary failure, and the reviewer's own heartbeat says a process
-            # of this bring-up is running anyway. The heartbeat wins: the intent stays, and the next
-            # tick adopts that reviewer or stops it rather than the card being blocked over it.
+            # A live exact heartbeat preserves intent for adoption or fenced stop.
             mark_launch_aborted(
                 runtime,
                 payload,
@@ -1034,12 +980,7 @@ def start_review(
             )
         clear_launch_intent(record)
         if record.gate_state == "green":
-            # Nothing came up and nothing is running, so there is no head to settle and no claim to
-            # make about the code. Every such failure goes through the one transition, whatever the
-            # bring-up failed on: a split that would not open, an inventory that would not answer,
-            # a pane held in a dialog, or a ready pane that never took the prompt and ended in
-            # `pane-stayed-ready`. Green candidates use only this infrastructure counter; the old
-            # pane deferral counter must not create a second ceiling or overwrite this action.
+            # No-head reviewer failures share one infrastructure transition and counter.
             return review_infrastructure_failure(
                 runtime,
                 task,
@@ -1102,13 +1043,7 @@ def start_review(
             "reason": "host review failed",
             **failure.outcome_fields(blocked_reason),
         }
-    # The reviewer is up: its pane and its launch configuration go into the intent on disk before
-    # the record is told anything about it, so a tick that dies from here on is adopted with the
-    # routing history of the head that actually ran.
-    # The reviewer's own run goes in with them (secretary-1414). It is what every later stop of this
-    # head continues — the pane pointers beside it are re-addressed by reconciliation, while the
-    # identity, the lifecycle and, once a stop begins, its initiator live there — and it is written
-    # by that one call rather than here, so no durable save separates the head from its run.
+    # Persist reviewer pane, launch snapshot, and HeadRun together before record adoption.
     confirm_launch_intent(
         runtime,
         payload,

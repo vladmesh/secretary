@@ -45,42 +45,13 @@ from secretary.dispatcher_types import STOPPED_BY_RECONCILIATION, HostError
 from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, SprintWriter, budget_thresholds
 from secretary.tasks import ACTIVE_STATES, TaskError
 
-# Durable telemetry of terminal production ticks, written into production-state.json under
-# `tick_telemetry` (secretary-833). It is the only current record of how a tick ENDED: the
-# `last_tick_*` timestamps say when one ran, not whether it did any good, so a dispatcher failing
-# every minute looks exactly like a healthy one to anything reading them.
-#
-# Two readers outside this module consume it, both through
-# `triggered_agents.runtime.production_telemetry`:
-#   * `python3 -m triggered_agents health` builds the pipeline line from `last`/`last_healthy_at`,
-#     so a fresh failing tick can never read as a healthy one.
-#   * the steward's `scan` reports one signal per INCIDENT — a continuous run of unhealthy ticks —
-#     against its own watermark, keyed on the monotonic `incident_total`/`recovery_total` counters,
-#     so an ordinary healthy tick in between never consumes an incident the steward has not looked
-#     at yet, and a second failing tick of the same outage does not open a second one. `generation`
-#     says which history those counters belong to.
-# Keep the shape and the meaning of those fields in step with that reader.
+# Tick telemetry records terminal health for pipeline and steward readers.
 TICK_TELEMETRY_UNHEALTHY_KEPT = 50
 TICK_TELEMETRY_ERRORS_KEPT = 5
 TICK_TELEMETRY_DEGRADATIONS_KEPT = 5
-# A frozen tick moves no card on purpose, and the probe already reports a freeze as ok rather than
-# as a dispatcher that cannot work — telemetry says the same, otherwise every freeze would read as
-# an outage for as long as it lasts.
+# Frozen ticks are deliberately healthy, not outages.
 HEALTHY_TICK_STATUSES = frozenset({"ok", "skipped"})
-# An action outcome saying the dispatcher could not finish the operation it started: a head of an
-# unresolved launch that would not stop (`launch-intent-stop-unconfirmed`), a runtime it could not
-# reach. Nothing raises on those paths, so `errors` stays empty and the tick used to return `ok`
-# and record itself healthy right over the degradation (secretary-833 review, round 3).
-#
-# `critical` is here for the opposite reason to `blocked`. An observer fence stops a sprint's whole
-# project because the role that was supposed to be watching it is not there, which is the state the
-# pipeline health line exists to show. A tick that fenced a sprint and still reported `ok` would put
-# the sprint's cards on hold with nothing anywhere saying so.
-#
-# `blocked` is deliberately not here. A card parked in Blocked is the dispatcher doing its job:
-# the board carries the reason, the steward already reports it as a `new_blocked` signal, and the
-# tick's exit code drives the systemd unit's result — a correctly blocked card must not put the
-# production unit into `failed` and the pipeline health line into RED.
+# Unfinished actions and observer fences degrade telemetry; ordinary blocked cards do not.
 DEGRADED_ACTION_STATUSES = frozenset({"degraded", "failed", "critical"})
 
 
@@ -111,21 +82,13 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
     """
     telemetry = payload.get("tick_telemetry")
     telemetry = dict(telemetry) if isinstance(telemetry, dict) else {}
-    # Identity of this telemetry history, minted once and then carried forever. `unhealthy_total`
-    # alone cannot tell a reader that the state file was replaced: a restore or a rebuilt
-    # installation starts a different history whose counter may land on the same number the
-    # steward's watermark already holds, and every failure after it would be deduped away against
-    # a count from a history that no longer exists (secretary-833 review, round 4). The generation
-    # changes exactly when the history does, which is what the reader keys its reset on.
+    # Generation distinguishes telemetry histories after state replacement.
     if not str(telemetry.get("generation") or ""):
         telemetry["generation"] = uuid.uuid4().hex
     seq = _counter(telemetry.get("tick_seq")) + 1
     status = str(result.get("status") or "")
     errors = [error for error in (result.get("errors") or []) if isinstance(error, dict)]
-    # Health is read off the action outcomes as well as the top-level status, not off the status
-    # alone: a caller that builds `ok` while one of its actions reports a failed operation would
-    # otherwise store a healthy tick over it, and health, the unhealthy ring and the steward's
-    # counter would all keep reading green through the degradation.
+    # Health includes action outcomes, not only top-level status.
     degradations = degraded_actions(result.get("actions"))
     entry = {
         "seq": seq,
@@ -137,14 +100,8 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         "actions": len(result.get("actions") or []),
         "error_count": len(errors),
         "degraded_count": len(degradations),
-        # The diagnostic, not just the count: what the steward and an operator need is which
-        # operation could not finish and on which card, and the outcome is gone once the tick
-        # returns. Bounded for the same reason as `errors`.
         "degradations": [
             {
-                # Observer outcomes name their subject `sprint`, card ones `ref`/`pilot_ref`.
-                # All three land in the same field, or a degraded observer action would be
-                # recorded without the one thing an operator needs to find the head.
                 "ref": str(outcome.get("ref") or outcome.get("pilot_ref") or outcome.get("sprint") or ""),
                 "step": str(outcome.get("step") or ""),
                 "status": str(outcome.get("status") or ""),
@@ -153,9 +110,6 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
             }
             for outcome in degradations[:TICK_TELEMETRY_DEGRADATIONS_KEPT]
         ],
-        # Bounded on purpose: the diagnostic value is in what failed and why, and an unbounded
-        # copy of every error of every tick would grow the state file the whole pipeline reads
-        # and writes each minute.
         "errors": [
             {
                 "ref": str(error.get("ref") or ""),
@@ -344,10 +298,7 @@ def production_tick(runtime: Any) -> dict[str, Any]:
         if guard is not None:
             return guard
 
-        # Past the guard the state is this dispatcher's to write, so every way out of the tick
-        # from here on leaves a durable record, including the ways that raise. A Kanboard outage
-        # makes the first board read inside raise TaskError; without this the preceding healthy
-        # tick would keep answering for the pipeline until it aged out of the freshness window.
+        # After this guard every exit, including raises, records durable tick health.
         try:
             return _production_tick_body(runtime, payload, pause, auto_resume)
         except Exception as exc:
@@ -396,26 +347,18 @@ def _production_tick_work(
     payload["last_tick_started_at"] = now_rfc3339()
 
     observer_errors: list[dict[str, str]] = []
-    # Before anything moves. A sprint whose declared observer is corrupt, dead or unresolvable
-    # holds its own reservations, and the cards in them are not advanced, reconciled or claimed
-    # this tick. Pure: it reads the board and the records, and launches nothing.
+    # Fence unhealthy sprint observers before advancing any reserved cards.
     try:
         fence = observer_fence(runtime, payload)
     except Exception as exc:
-        # The fence is the thing that decides what may move, so a fence that could not finish
-        # decides nothing — and an empty fence is not "nothing", it is "everything may move". The
-        # tick ends here instead, before reconciliation, advancement, budget accounting, observer
-        # reconciliation and Ready claims. A sprint whose critical outcome could not be staged
-        # (an unwritable audit, a full volume) is exactly the sprint whose cards must not advance.
+        # An unfinished fence authorizes no downstream work.
         return _fence_failed_tick(runtime, payload, exc)
     fence_outcomes = list(fence.get("outcomes") or [])
 
     cycle = _production_tasks(runtime, set(ACTIVE_STATES))
     active_tasks = [task for task in cycle if not fenced_task(fence, task)]
     active_refs = {str(task.get("ref") or "") for task in active_tasks}
-    # A fenced card drops out of `active_refs`, which is exactly the shape reconciliation reads as
-    # an orphaned record and settles. Its refs are handed over separately so the record survives
-    # the fence untouched instead of being cleaned up as work that left the cycle.
+    # Preserve fenced records from orphan reconciliation.
     fenced_refs = set(fence.get("refs") or ()) | {
         str(task.get("ref") or "") for task in cycle if fenced_task(fence, task)
     }
@@ -433,14 +376,12 @@ def _production_tick_work(
         outcomes += _reconcile_sprint_budget(runtime)
     except Exception as exc:
         errors.append(_unexpected_error("", exc))
-    # Reconcile after budget accounting. A hard limit reached by the card work above then
-    # stops an already-live observer in this tick and prevents a replacement launch.
+    # Reconcile after budget accounting so hard stops prevent replacement launches.
     try:
         outcomes += reconcile_observers(runtime, payload, pause_mode=str(pause.get("mode") or ""))
     except Exception as exc:
         observer_errors.append(_unexpected_error("", exc))
     errors = observer_errors + errors
-    # Drain: the cards already in flight keep riding their cycle above, nothing new is claimed.
     claims_allowed = pause.get("mode") != "drain"
     if claims_allowed:
         try:
@@ -461,13 +402,7 @@ def _production_tick_work(
     if push is not None:
         payload["checkpoint_push"] = push
     payload["last_tick_finished_at"] = now_rfc3339()
-    # The tick ends degraded on a failed operation it caught as well as on one that raised:
-    # reconciliation and the active pass both return `degraded` outcomes without adding an error
-    # (a launch head that would not stop), and reporting that tick as `ok` told the unit, the
-    # health line and the steward alike that nothing had happened.
-    # A checkpoint gate protects the only recoverable copy of the live board.
-    # The card work may continue for this tick, but reporting it as healthy hid
-    # an active durability incident from the unit health line and steward.
+    # Caught degraded actions and checkpoint failures degrade the terminal tick.
     checkpoint_blocked = bool(checkpoint and checkpoint.get("status") == "blocked")
     if checkpoint_blocked:
         outcomes.append(_checkpoint_degradation(checkpoint))
@@ -488,8 +423,7 @@ def _production_tick_work(
         result["checkpoint"] = checkpoint
     if push is not None:
         result["checkpoint_push"] = push
-    # Recorded before the save, off the result this call is about to return: the durable
-    # record of how the tick ended and the answer its caller gets are the same object.
+    # Persist telemetry from the result returned to the caller.
     record_tick_telemetry(payload, result)
     runtime.production_state.save(payload)
     return result

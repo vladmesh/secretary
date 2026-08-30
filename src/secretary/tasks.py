@@ -140,10 +140,7 @@ _KNOWN_METADATA = {
 _TASK_TYPES = {"code", "research"}
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
 _FAMILY_PREFERENCES = {"auto", "claude", "codex"}
-# The launch modes a card may carry. It is the registry's own set, so a card can never ask for a
-# mode no head can be launched in. Cards written before Codex became TUI-only still hold the
-# retired `exec`; it is outside this set, so `_normalize` reads such a card as carrying no mode at
-# all rather than as a card that asked for a launch shape the product no longer has.
+# Retired launch modes normalize away rather than silently changing a requested shape.
 _CODEX_LAUNCH_MODES = CODEX_LAUNCH_MODES
 _ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"}
 _COMMENT_ROLES = _ROLES
@@ -162,30 +159,15 @@ _READY_RESET_METADATA = {
     "retry_heads": "",
 }
 _ROUTING_PHASES = {"worker", "review", "verdict"}
-# What kind of blocker a worker ran into, in the worker's own view. Two values and no more:
-# an external fact is repaired outside the card, a wrong task definition is repaired by
-# rewriting or reslicing the card, and the observer's next move differs between the two. The
-# worker's view is not the verdict, it is the cheapest evidence the observer has to start from.
+# Worker blocker classification is evidence for, not the observer's final verdict.
 _BLOCK_CLASSIFICATIONS = ("external_fact", "wrong_task_definition")
-# What the observer may decide about a parked card, and where each decision sends it. The
-# decision is recorded on the card before anything acts on it: the effect belongs to the
-# dispatcher and can fail, and a failed effect blocks the card rather than half releasing it.
-# `blocked` takes no decision requirement: it is the escape hatch the steward's stale
-# escalation and every dispatcher failure path already use, and refusing it would strand cards.
+# Persist a parked-card decision before effects; blocked remains the failure escape hatch.
 _DECISION_TARGETS = {"release": "done", "rework": "in_progress", "reslice": "blocked"}
 _DECISIONS = set(_DECISION_TARGETS)
 _DECIDED_TARGETS = {"done", "in_progress"}
-# The other three ways out of Assessment. Each of them leaves the column with nothing decided,
-# and Ready additionally clears the claim and lets a second worker start on the reviewed
-# checkout, so the dispatcher does not take them. The PO still can: it is the human operator,
-# and on a reserved project that move is a recorded sprint override. The observer needs no entry
-# here: it leaves Assessment by no exit at all.
+# Only the PO may use these Assessment exits; the dispatcher must record a decision.
 _UNDECIDED_EXITS = {"ready", "validate", "issues"}
-# Who the decision rules bind: the dispatcher, and only it. It is what performs a decision, so a
-# move it makes out of Assessment either carries one or is not its move to make. The PO's move is
-# the escape hatch out of a seam that is stuck, and a hatch that needs the thing it is escaping is
-# not one. A decision that is passed is still checked against the card and its destination for
-# every role.
+# Dispatcher Assessment moves require decisions; human escape-hatch moves do not.
 _DECISION_BOUND_ROLES = {"dispatcher"}
 # States in which a card holds a workspace, a suspended worker or a running head. `assessment`
 # is one of them: the reviewer is gone, but the worker and its checkout are retained for a
@@ -329,15 +311,10 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         source = str(payload.get("from") or "")
         target = str(payload.get("to") or "")
-    # Assessment needs an observer decision; Blocked needs classification; Done is the semantic
-    # post-release edge where the observer can choose the next cut or close the sprint.
+    # Assessment requires a decision; Blocked requires classification.
     if target in {"assessment", "blocked", "done"}:
         return True
-    # A human control-plane move which removes a live or parked card back to Issues also changes
-    # the observer's next-cut decision.  Do not turn every Issues transition into a wake: routine
-    # dispatcher/routing moves are deliberately excluded, and the old state must have held work.
-    # `steward` has no such transition today, but keeping both human control-plane roles here
-    # makes a future permitted equivalent retain the same semantic contract.
+    # Only human control-plane removal of work wakes the observer.
     return (
         str(actor.get("role") or "") in {"po", "steward"} and source in ACTIVE_STATES and target == "issues"
     )
@@ -366,8 +343,6 @@ def is_significant_observer_event(
     return kind == "commented" and str(actor.get("role") or "") == "po"
 
 
-# How many calls travel in one batched JSON-RPC request, so a large board does not turn a bulk read
-# into a single oversized one.
 _BATCH_CHUNK = 200
 
 
@@ -663,12 +638,7 @@ class TaskReader:
 class TaskAudit:
     """Durable, append-only audit log with retry-safe pending records."""
 
-    # Generic journal records intentionally have no discriminator.  This explicit value is
-    # the only distinction the released audit substrate needs to make: a protocol pending
-    # record may describe an effect that has already reached the backend, while a generic
-    # record retains its released same-writer restaging behaviour.  It is taken from the
-    # typed record itself: recovery now routes on this discriminator, so the two spellings
-    # must not be able to drift apart.
+    # Recovery distinguishes protocol effects from generic audit records by this typed value.
     _PROTOCOL_EVENT_RECORD_TYPE = Event.RECORD_TYPE
 
     def __init__(self, data_dir: str | os.PathLike[str]) -> None:
@@ -676,13 +646,9 @@ class TaskAudit:
         self.events_path = os.path.join(self.board_dir, "events.ndjson")
         self.pending_dir = os.path.join(self.board_dir, "pending-audit")
         self.lock_path = os.path.join(self.board_dir, ".audit.lock")
-        # Индекс request_id -> смещение строки в журнале. Дочитывается инкрементально,
-        # только новые байты. Без него committed_event разбирал весь events.ndjson на
-        # каждой записи, а append/stage зовут его на каждое событие: прогон получался
-        # квадратичным по числу событий.
+        # Incremental request index avoids rescanning the journal on every write.
         self._committed_offsets: dict[str, int] = {}
-        # event_id -> request_id, заполняется тем же проходом: владельца идентификатора
-        # надо уметь спросить под замком, не разбирая журнал заново.
+        # Event ownership is indexed under the same lock.
         self._committed_event_ids: dict[str, str] = {}
         self._committed_read = 0
         self._committed_ident: tuple[int, int] | None = None
@@ -820,9 +786,7 @@ class TaskAudit:
         pending = self.pending_event(request_id)
         if pending is None:
             return None, None, False
-        # TaskAudit's released reconciler can repair generic rows, but it cannot attest a
-        # protocol backend effect.  That recovery belongs to MutationEventTransaction, which
-        # supplies the exact typed event through BoardEventCanon.commit().
+        # Only MutationEventTransaction can attest a protocol backend effect.
         if operation == "reconcile" and self._is_protocol_event(pending):
             self._require_same_event(pending, {})
         if event is not None and pending == event:
@@ -1235,9 +1199,7 @@ class TaskWriter:
         text. An explicit role-env override selects its external file, so ``SECRETARY_RUNTIME_ENV_FILE``
         and ``TA_RUNTIME_ENV_FILE`` are scrubbed too.
         """
-        # Keep TaskWriter importable while config is loading sprints.  The
-        # store depends on that same config module and is needed only at a real
-        # protocol write, long after startup imports have settled.
+        # Delay this import to avoid the config/sprints import cycle.
         return redact(
             text,
             env_files=[
@@ -1275,9 +1237,7 @@ class TaskWriter:
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
-        # `restoring` is the restore path recreating a card that already existed: sprint
-        # admission decides what new work may start, and history is not new work.  Every
-        # other guard here still applies to it.
+        # Restore bypasses new-work admission only; all other guards still apply.
         self._role(role, _CREATE_ROLES)
         project = project.strip()
         task_type = task_type.strip()
@@ -1322,10 +1282,7 @@ class TaskWriter:
                 "validation", "family preference must be one of: " + ", ".join(sorted(_FAMILY_PREFERENCES)), 2
             )
         if codex_launch_mode and codex_launch_mode not in _CODEX_LAUNCH_MODES:
-            # Refused here, before any board call: a card must not be able to carry a launch mode
-            # the product cannot launch. `exec` is the one this rejects in practice, and it is
-            # rejected rather than downgraded, so nobody is left believing the card asked for
-            # something that then quietly ran as something else.
+            # Refuse unknown launch modes before any board call.
             known = ", ".join(sorted(_CODEX_LAUNCH_MODES))
             raise TaskError("validation", f"codex launch mode must be {known}", 2)
         if priority:
@@ -1362,10 +1319,7 @@ class TaskWriter:
             request_id=request_id,
             reference=reference,
         )
-        # After the ownership guard: a project another sprint holds is refused by that sprint,
-        # not by the admission rule.  A proposal in Issues is not yet admitted work, so only a
-        # Ready card needs a sprint of its own; an audited PO override is the hotfix path around
-        # it, and restore recreates cards that were admitted once already.
+        # Admission follows ownership; Issues proposals and restores are not new work.
         if target == "ready" and not sprint and not restoring and not override_payload:
             raise TaskError("validation", "task creation requires an open sprint", 2)
         payload: dict[str, Any] = {
@@ -1387,9 +1341,7 @@ class TaskWriter:
             "title_sha256": _digest(title),
             "description_sha256": _digest(description),
         }
-        # A create claims its request id the same way every other write does. Its reference is
-        # allocated under the board lock for automatic creates, and only becomes part of the
-        # staged event immediately before the atomic backend write.
+        # Allocate and stage automatic references under the board lock.
         committed = self.audit.committed_event(request_id)
         if committed is not None:
             self.audit.require_claim(committed, kind="created", reference=None, identity=payload)
@@ -1713,11 +1665,7 @@ class TaskWriter:
             raise TaskError("validation", "a decision requires a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
         with assessment_decision_lock(self.data_dir, reference):
-            # Resolve immutable request ownership while holding the complete
-            # decision lock, before inspecting a mutable Assessment visit or
-            # admitting another decision.  A concurrent same-id mismatch must
-            # therefore reach the host comparison rather than borrow the
-            # current visit's canonical-decision shortcut.
+            # Resolve immutable request ownership before mutable decision state.
             try:
                 owned = self.board_host.canon.event(request_id)
             except ValueError as exc:
@@ -1877,11 +1825,7 @@ class TaskWriter:
             raise TaskError("validation", "claim cap must be positive", 2)
         request_id = request_id or str(uuid.uuid4())
         if self._legacy_record(request_id) is not None:
-            # Claims written before Card transitions migrated remain generic audit
-            # operations.  They retain their released replay/reconciliation path;
-            # in particular, do not reinterpret a legacy pending record as a new
-            # typed transition or let it move a record that has since become a
-            # Product or Issue.
+            # Legacy generic claims retain their replay path and cannot move non-Cards.
             _check_execution_record(self.reader.show(reference))
             payload = {
                 "worker": worker,
@@ -1950,9 +1894,7 @@ class TaskWriter:
             values["slug"] = slug
         if base_branch:
             values["base_branch"] = base_branch
-        # The claim metadata is written inside the transition, once the column effect is proven.
-        # A refused or failed move therefore leaves no claimed-but-Ready card behind, and a
-        # metadata write that does not land keeps the pending event instead of a clean journal.
+        # Write claim metadata only after the transition effect is proven.
         result = self._transition_card(
             reference=reference,
             target=CardState.IN_PROGRESS,
@@ -2008,9 +1950,7 @@ class TaskWriter:
                 task=task,
             )
         existing = self._typed_event(request_id)
-        # The replay is answered before the sprint guard, not after it: this request id already
-        # owns a typed event, and a denial would have to be written under the same id. A retry of
-        # a transition that already happened cannot be turned into a guard record.
+        # Resolve replays before guards: their request id already owns a typed event.
         if existing is not None:
             try:
                 target_state = CardState(target)
@@ -2073,10 +2013,7 @@ class TaskWriter:
             and not reason.strip()
         ):
             raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
-        # The observer's disposition of a Blocked card is the other half of the worker's
-        # classification: the card says why it stopped, and the move out says what was done
-        # about it. Without this a card leaves Blocked with nothing recorded, and a head that
-        # blocks without cause repeatedly is invisible.
+        # A Blocked exit records the observer's disposition of its classification.
         if role == "observer" and source == "blocked" and not reason.strip():
             raise TaskError("validation", "moving a card out of Blocked requires a non-empty reason", 2)
         self._check_decision(task, source, target, decision, role)
@@ -2400,9 +2337,7 @@ class TaskWriter:
                         raise _CommittedWriteError() from exc
                     raise
 
-        # The `_was` digests describe the text this edit replaced, which a retry after the write
-        # can no longer read off the card. The new spec, the heads and the override reason are
-        # what the caller asked for, and they are compared.
+        # Replay compares both replaced-text digests and requested values.
         identity = {key: value for key, value in payload.items() if not key.endswith("_was")}
         return self._write("edited", role, actor, reference, request_id, payload, mutation, identity=identity)
 
@@ -2836,8 +2771,7 @@ class TaskWriter:
         identity: dict[str, Any],
         retry_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        # `identity` has no default: what a request id claims is part of declaring an operation,
-        # and a write that never says it would replay another caller's payload as its own.
+        # Every request id explicitly declares the operation identity it owns.
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
         if committed is not None:
@@ -3201,9 +3135,7 @@ class TaskWriter:
             backend = event.get("backend")
             if isinstance(backend, dict) and backend.get("reference_assignment") == "atomic":
                 raise TaskError("backend_error", "pending atomic create reference remains incomplete", 1)
-            # A pending event written by the pre-atomic create path can still name a row
-            # without its reference. Repair that one recorded row only when no other row
-            # acquired the reference while the writer was down.
+            # Repair a pre-atomic create only if no other row acquired its reference.
             if task["ref"]:
                 raise TaskError("backend_error", "pending create task reference does not match", 1)
             board_id, _, _ = self.reader._board()
@@ -3405,10 +3337,7 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
     ):
         value = _text(payload.get(payload_key))
         if metadata_key == "codex_launch_mode" and value not in _CODEX_LAUNCH_MODES:
-            # A create recorded before Codex became TUI-only can still be replayed by the repair
-            # path. Its retired launch mode is dropped rather than written back: the reader no
-            # longer accepts it, so writing it would leave the repair unable to confirm the
-            # metadata it just wrote, and the card is launched interactively either way.
+            # Drop retired launch modes when repairing legacy creates.
             continue
         if value:
             values[metadata_key] = value

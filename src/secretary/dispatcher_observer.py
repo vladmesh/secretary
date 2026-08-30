@@ -91,49 +91,29 @@ from triggered_agents.runtime.codex_preflight import CodexFanoutRecordingError
 
 OBSERVER_ROLE = "observer"
 OBSERVER_PID_KIND = "observer"
-# Used only when the head registry carries no `role_defaults.observer` key. Named here rather than
-# resolved to the worker's default: an observer must never silently inherit another role's head.
+# Observers never silently inherit another role's head.
 OBSERVER_HEAD_FALLBACK = "codex-observer"
 OBSERVER_PROMPT_FILE = "SPRINT.md"
-# The role skill the head opens once it is up, owned by the `observer` role in
-# `skills/manifest.toml`. What the observer does inside its session is the skill's business, not
-# the dispatcher's: the prompt points at the file and never restates it.
 OBSERVER_SKILL = "observe-sprint"
 
-# A head that has finished its turn keeps its wrapper process alive. Orca reporting the pane ready
-# for input is the positive signal needed to nudge it for a new durable card event. A card in
-# Ready, In progress or Validate is always an ordinary wait, never an idle head.
-#
-# How long one delivery may stay unacknowledged before it is sent again. Armed by the delivery, so
-# it measures the silence of this head on this batch and nothing else.
+# Pane readiness is the positive signal for the next durable event delivery.
 OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS = 30 * 60
-# Compatibility ceiling for observers without an attested provider-progress source.  A HeadRun
-# whose exact provider cursor is admitted never consults it: that cursor drives the durable
-# no-progress ladder.  Keep this for historical non-Codex/no-source records until they leave the
-# fleet.
+# Compatibility ceiling for records without an attested provider-progress source.
 OBSERVER_TURN_CEILING_DEFAULT_SECONDS = 3 * 60 * 60
-# The ceiling for a head which does carry a provider source but never got it admitted — unbound,
-# rejected or unreadable.  Nothing about that head is provable, so the compatibility ceiling is the
-# wrong bound: it was chosen to sit below the longest legitimate turn of a head nobody can watch,
-# and applying it here parks a live sprint for hours behind telemetry that is never coming
-# (sprint:1407, 2026-08-26).  Well above a normal observer turn, far below the legacy ceiling.
+# Unadmitted provider sources use a separate ceiling from no-source compatibility records.
 OBSERVER_UNPROVEN_TURN_CEILING_DEFAULT_SECONDS = 15 * 60
 OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
 OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
-# How many refused deliveries of one batch are retried on the live head before the sprint pays for
-# a replacement instead. Backoff alone would keep an unreachable head forever.
+# Bounded refused deliveries prevent an unreachable head from retrying forever.
 OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT = 3
 
-# Audit event kinds. Launch and relaunch are distinct kinds rather than one kind with a counter,
-# so a respawn after a dead pid is readable in the log without joining it against the record.
 EVENT_LAUNCHED = "observer_launched"
 EVENT_RELAUNCHED = "observer_relaunched"
 EVENT_STOPPED = "observer_stopped"
 EVENT_DEFERRED = "observer_launch_deferred"
 EVENT_PROVIDER_FANOUT_BLOCKED = "observer_codex_provider_fanout_blocked"
 
-# A stop that the host refused. The head may still be running, so the record survives with its
-# handle and the tick keeps retrying until the terminal is gone.
+# A refused stop preserves the record until the terminal is confirmed gone.
 STATE_STOP_PENDING = "stop-pending"
 STATE_PAUSE_STOP_PENDING = "pause-stop-pending"
 STATE_STOPPED_BY_PAUSE = "stopped-by-pause"
@@ -169,8 +149,6 @@ class ObserverLaunchAborted(HostError):
         self.workspace = workspace
         self.pid_file = pid_file
         self.run = dict(run or {})
-        # What the delivery boundary saw of the prompt this bring-up failed to hand over, so the
-        # sprint keeps the evidence of a launch delivery exactly as it keeps a wake's.
         self.evidence = dict(evidence or {})
 
 
@@ -231,32 +209,17 @@ class ObserverDelivery:
     delivery_id: str = ""
     method: str = ""
     through_event: str = ""
-    # The newest resume event known when the intent was persisted.  An empty cursor is meaningful:
-    # it says there was no resume yet, so the first one appended afterwards can acknowledge this
-    # delivery.  Legacy records set `resume_cursor_known` false and fail closed until the
-    # acknowledgement deadline.
+    # Legacy resume cursors fail closed until the acknowledgement deadline.
     resume_cursor: str = ""
     resume_cursor_known: bool = True
     sent_at: float = 0.0
-    # When this batch started being held by a head that has not been seen ready for input.  The
-    # turn ceiling is measured from here, so a batch waiting on a head that never goes idle is
-    # bounded whether or not the prompt was ever delivered.
+    # Busy-head holds are bounded even before a prompt is delivered.
     held_since: float = 0.0
     deadline: float = 0.0
     attempts: int = 0
     next_at: float = 0.0
     reason: str = ""
-    # Everything below is sprint evidence rather than delivery state, and that is the difference
-    # that matters: `attempts` is the current batch's bounded retry counter and is reset by an
-    # acknowledgement, by a replacement head and by the next batch, while these are cumulative
-    # over the whole sprint and are never cleared. Without them a sprint whose wakes were refused
-    # three times and then acknowledged reads, at closeout, exactly like one where every wake
-    # landed first time — which is what sprint:1402 reported.
-    #
-    # They are scoped to the observer's own wakes on purpose. A reviewer that failed to come up on
-    # a card is a different subject with its own counters on the card's record, and the two were
-    # being read as one: "the reviewer launched fine" is not an answer about whether the observer
-    # was ever reached.
+    # Cumulative observer-wake evidence is distinct from per-batch retries and card-head counters.
     wake_attempts: int = 0
     wake_failures: int = 0
     launch_delivery_attempts: int = 0
@@ -264,9 +227,7 @@ class ObserverDelivery:
     last_failure_reason: str = ""
     last_failure_at: float = 0.0
     last_failure_method: str = ""
-    # The bounded, content-free evidence of the last wake that was attempted: terminal identity,
-    # payload size and hash, the stage it reached, the composer and output fingerprints around it
-    # and why it stopped. Never the prompt.
+    # Store content-free evidence for the last attempted wake, never its prompt.
     last_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -340,40 +301,24 @@ class ObserverRecord:
     """One observer head as the dispatcher last left it."""
 
     sprint: str
-    # Identifies this record, not this sprint. A record is dropped when its sprint closes or
-    # vanishes, and the same reference can come back to the board later; without a per-record token
-    # the second lifecycle would rebuild the request ids of the first one and its real launch and
-    # stop would be deduplicated away as retries.
+    # Per-record identity prevents a recreated sprint from replaying its predecessor's requests.
     generation: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     head: str = ""
     workspace: str = ""
     handle: str = ""
-    # Orca can reissue a handle for the same PTY.  Its leafId remains stable, so keep it beside
-    # the launch handle and use it to find the observer's current handle on later ticks.
+    # Orca may reissue handles; leafId remains the stable PTY identity.
     leaf: str = ""
     pid_file: str = ""
-    # How many times a head has been brought up for this sprint. 1 is the first launch, every
-    # value above it is a respawn after a dead pid, which is what tells the two apart in the record.
     launches: int = 0
-    # The attempt number of a launch that is on disk but whose outcome is not. Non-zero only in
-    # `launching` state: the tick writes it before it calls the host and clears it when the host
-    # has answered, so a record found with it set is a bring-up whose tick did not survive.
+    # A nonzero launch attempt marks a bring-up whose tick did not survive.
     pending_launch: int = 0
-    # A terminal of this head may still be up. True from the launch intent until a stop confirms
-    # the head is gone, so the head is never left running with nothing willing to close it.
+    # Keep possible terminals until a stop confirms they are gone.
     head_possible: bool = False
-    # The bring-up may have registered this record's workspace with Orca. Tracked apart from
-    # `head_possible` because a bring-up that dies after `worktree create` leaves a workspace and
-    # no head: the process is gone, the registration is not, and only the stop gives it back.
+    # Workspace registration can outlive a failed bring-up without a head.
     workspace_live: bool = False
-    # The recorded terminal is the leftover of a bring-up that failed and could not be closed. Its
-    # head never got its prompt, so a live pid there is not a working observer: the terminal has to
-    # be closed before this sprint counts as headed again.
+    # An aborted launch terminal is not a working observer and must be closed.
     abandoned_handle: bool = False
-    # This record's bring-up rendered the sprint binding into its head's command line. False on a
-    # record written before the binding existed, which is the only fact that tells a head able to
-    # write from one whose every write is refused as `observer_identity_unbound`: the process
-    # carries the binding or it does not, and no probe of a running head can ask it.
+    # Only launch-time binding proves an observer may write for its sprint.
     bound: bool = False
     state: str = "pending"
     launched_at: float = 0.0

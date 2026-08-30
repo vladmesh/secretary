@@ -70,21 +70,13 @@ from triggered_agents.runtime.head import operations as head_ops
 
 WORKER_ROLE = "worker"
 REVIEW_ROLE = "review"
-# What each readiness state reads as in a line an operator has to act on. Orca's own words for the
-# two are `busy` and `blocked`, and "blocked" is already the name of a board column here.
 PANE_STATE_LABELS = {READINESS_BUSY: "busy", READINESS_BLOCKED: "held in a dialog"}
 
-# A review launch whose document nudge met a working pane is not a failed launch.  The existing
-# reviewer is still the exact run the intent names, so retry the nudge through that run rather than
-# adopting it as though it had already received its task.  The delay is capped to keep the durable
-# schedule finite even when a reviewer spends a long time in a real turn.
+# A busy review nudge retries through its exact existing run on a bounded schedule.
 REVIEW_BUSY_RETRY_INITIAL_SECONDS = 30
 REVIEW_BUSY_RETRY_MAX_SECONDS = 5 * 60
 
-# What "the data plane refused this write" looks like. Deliberately not bare `Exception`: a launch
-# that cannot be recorded is answered by not launching, and anything that is not a storage failure
-# (a bug in the record, the health probe's own abort signal) has to keep travelling instead of
-# being reported to the operator as a full disk.
+# Catch only storage failures: other errors must not masquerade as unwritable state.
 STORAGE_ERRORS = (OSError, ValueError, TypeError, UnicodeError)
 
 
@@ -159,10 +151,6 @@ def write_launch_intent(
     previous_workspace_settled = record.workspace_settled
     reserved = record.attempt_round if round_number is None else round_number
     run_id = uuid.uuid4().hex
-    # The production host can attest a fully-shaped HeadRun before the intent is saved and before
-    # its pane exists.  Test doubles intentionally do not implement this hook: they model a host
-    # which has already crossed the boundary, while this module's real host path remains the only
-    # path allowed to open a terminal.
     preflight_run: dict[str, Any] | None = None
     attest = getattr(getattr(runtime, "host", None), "preflight_codex_run", None)
     if callable(attest):
@@ -187,9 +175,7 @@ def write_launch_intent(
         "head": head,
         "workspace": workspace,
         "pid_file": launch_pid_file(role, ref),
-        # The run id is fixed before the host is touched.  A dispatcher that dies while Orca is
-        # creating the pane can therefore still prove that a heartbeat belongs to this intent,
-        # rather than adopting whichever later process happened to reuse its pid path.
+        # Fix run id before host interaction to fence crash-era heartbeat recovery.
         "run_id": run_id,
         "task": f"card:{ref}",
         "attempt_id": record.attempt_id,
@@ -247,26 +233,16 @@ def confirm_launch_intent(
     if run:
         intent["run"] = dict(run)
     if head_run is not None:
-        # `None` is a caller with nothing to say about the run; an empty dict is a bring-up that
-        # answered without one — noop mode, or a host seam that reports none — and that answer
-        # replaces whatever run the previous head of this role left on the record.
         if head_run:
-            # The pre-send ingress can have durably bound a provider source before this caller
-            # receives its launcher result.  Reconcile every copy that belongs to this launch
-            # before writing: pane/lifecycle evidence may move forward, but a stale result cannot
-            # write an unbound or conflicting source back over the handoff recovery will read.
+            # Preserve provider source binding against stale launcher results.
             canonical = _canonical_launch_head_run(record, str(intent.get("role") or ""), intent, head_run)
             intent["head_run"] = canonical
-            # The launcher writes this id into its heartbeat before Orca opens the pane. Keeping
-            # the same value in the recovered intent makes the HeadRun, intent and file one
-            # identity even if the ordinary record save lands later.
+            # Intent, HeadRun, and heartbeat share the pre-pane run identity.
             intent["run_id"] = str(canonical.get("run_id") or intent.get("run_id") or "")
             head_run = canonical
         _remember_head_run(record, str(intent.get("role") or ""), head_run)
     if delivery is not None:
-        # Delivery confirmation shares the intent write with the run it confirms.  A recovery
-        # therefore either sees a pending busy nudge and retries it, or sees this exact run with
-        # a confirmed nudge and may finish adoption; it never invents success from a heartbeat.
+        # Persist delivery confirmation with its run; recovery never infers it from a heartbeat.
         intent["delivery"] = dict(delivery)
     intent["launched"] = True
     record.launch_intent = intent
@@ -301,10 +277,7 @@ def _canonical_launch_head_run(
     if isinstance(record_run, dict) and record_run.get("run_id"):
         values.append(record_run)
     values.append(reported)
-    # The ordinary adapter paths predate provider source binding and intentionally retain their
-    # old launcher-result behavior.  The canonical merge is the Codex source-bearing contour;
-    # applying it to a generic snapshot would turn harmless fixture/registry differences into a
-    # new lifecycle fence without any source to protect.
+    # Apply canonical merge only to source-bearing Codex runs.
     if not any(_has_provider_source(value) for value in values):
         return dict(reported)
     try:
@@ -342,8 +315,7 @@ def _merge_launch_head_runs(current: head_ops.HeadRun, later: head_ops.HeadRun) 
     else:
         lifecycle = later.lifecycle
         stopped_by = later.stopped_by
-    # The latest writer may know a newly returned pane identity; its empty fields never erase a
-    # retained address, because that address is also what a fenced adoption must use after a crash.
+    # Empty newer fields never erase a retained crash-recovery address.
     return replace(
         later,
         handle=later.handle or current.handle,
@@ -477,8 +449,6 @@ def forget_role_head(record: DispatcherRecord, role: str) -> None:
     record.handle = ""
     record.worker_leaf = ""
     record.worker_pid_file = ""
-    # Nothing is left to resume, but a red transition already opened over that head still owes the
-    # card its replacement and outlives the pointers.
     record.worker_continuation.drop_session()
 
 
@@ -505,9 +475,7 @@ def mark_launch_aborted(
     if exc.leaf:
         intent["leaf"] = exc.leaf
     if exc.head_run:
-        # A bring-up that spawned its head and then failed over it knows that head's run, and the
-        # pane it left is live. Carrying it here is what lets the adoption continue that run rather
-        # than reconstruct one for a head this dispatcher did in fact start (secretary-1414).
+        # Preserve the live spawned run for adoption rather than reconstructing it.
         intent["head_run"] = dict(exc.head_run)
         _remember_head_run(record, str(intent.get("role") or ""), exc.head_run)
     intent["aborted"] = True
@@ -587,58 +555,28 @@ def launch_deferred(
     }
 
 
-# --- One classification of a bring-up that did not produce a head -------------------------------
-#
-# Both bring-up paths — the worker's (claim, respawn, rework) and the reviewer's (`start_review`) —
-# used to answer this question with their own copy of the rules: the worker turned every `HostError`
-# into a defect of the card, while the reviewer had a second class name, a second counter and a
-# second ceiling for the same failure. An observer reading a Blocked card could not tell "the host
-# never opened a pane" from "this card cannot be brought up as written". One classifier answers it
-# for both, and both call it: nothing below decides a class from a message, a role or a caller.
-#
-# The rule is what the failure says about the card, and a bring-up says almost nothing: at this
-# point no line of the card's work has been read, let alone judged. So a failure of the host —
-# a pane that would not open, an inventory that would not answer, a pane that never took its
-# prompt — is `infrastructure`, and the card carries no verdict out of it. The one family that is
-# not is a failure of this card's own bring-up contract: the checkout it was requeued onto is gone,
-# or is not the worktree on the branch this card's claim recorded. No healthy host survives that
-# and no later tick repairs it, so it stays what it already was — a `task` outcome that blocks the
-# card for a person.
+# Classify shared worker/reviewer bring-up failures as infrastructure unless the card contract failed.
 FAILURE_CLASS_INFRASTRUCTURE = "infrastructure"
 FAILURE_CLASS_TASK = "task"
-# The mechanical gate reached the same two classes first and named the second one `substantive`
-# (`DispatcherRecord.rejected_failure_class`, `GateResult.failure_class`). That field is not renamed
-# here and this is not a third name for it: `task` is the sprint's word for a bring-up outcome, and
-# this constant is the whole of the correspondence, so a reader of either side can find the other.
 GATE_NAME_FOR_TASK_CLASS = "substantive"
 
-# The enumerated causes. A bring-up outcome carries one of these, never free text: the free text is
-# the evidence beside it, and an observer (and the budget card after this one) reads the cause.
 CAUSE_PANE_NEVER_READY = "pane_never_ready"
 CAUSE_LAUNCH_ABORTED = "launch_aborted"
 CAUSE_HOST_UNAVAILABLE = "host_unavailable"
 CAUSE_WORKSPACE_CONTRACT = "workspace_contract"
-# The cause decides the class, so no caller and no raise site can pair them freely.
 BRING_UP_CAUSE_CLASSES = {
     CAUSE_PANE_NEVER_READY: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_LAUNCH_ABORTED: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_HOST_UNAVAILABLE: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_WORKSPACE_CONTRACT: FAILURE_CLASS_TASK,
 }
-# Where in a card's life the bring-up was. `rework` is the same worker relaunch as `respawn` from a
-# red round rather than a stall, and it is named apart because that is what the evidence has to say.
 STAGE_CLAIM = "claim"
 STAGE_RESPAWN = "respawn"
 STAGE_REWORK = "rework"
 STAGE_REVIEW = "review"
 BRING_UP_STAGES = (STAGE_CLAIM, STAGE_RESPAWN, STAGE_REWORK, STAGE_REVIEW)
 
-# The durable token. A blocked bring-up already wrote its action into the transition's request id,
-# and the reviewer path already spelled one of these `review-infrastructure-blocked`, so the class
-# goes where that token is: an infrastructure outcome gets `-infrastructure-` in front of `-blocked`
-# and a task outcome keeps the action it always had. That keeps every existing task-class request id
-# byte-identical, and gives the class a reading that survives the tick, the pane and the log — which
-# is what the budget card downstream needs from `_budget_event_type`.
+# Durable action tokens retain task-class spelling and mark infrastructure failures.
 INFRASTRUCTURE_ACTION_TOKEN = "infrastructure"
 
 
@@ -829,11 +767,7 @@ def launch_intent_liveness(intent: dict[str, Any], *, now: float | None = None) 
     pid_file = str(intent.get("pid_file") or "")
     expected = intent_heartbeat_identity(intent)
     status = head_process_status(pid_file, expected=expected)
-    # A prompt-after-start launch can return ``pane busy`` after Orca created the pane but before
-    # the caller reaches its ordinary post-spawn leaf bind.  The heartbeat writer has already
-    # published the exact run/role/task/PID identity in that ordering, with an empty leaf.  Heal
-    # only that one incomplete shape through the existing compare-and-preserve handoff; a
-    # non-empty foreign leaf remains an identity mismatch and is never overwritten.
+    # Heal only empty-leaf pre-bind heartbeats; never overwrite a foreign leaf.
     record = status.get("record") if isinstance(status.get("record"), dict) else {}
     leaf = str(expected.get("leaf") or "")
     if status.get("state") == "identity-mismatch" and leaf and not str(record.get("leaf") or ""):
@@ -884,9 +818,7 @@ def resolve_launch_intent(
             "reason": "launch heartbeat names a live process with a mismatching launch identity",
         }
     if liveness["alive"] and not liveness["pid_known"]:
-        # Left exactly as it is: the next tick asks again, once the grace window has either
-        # produced a heartbeat or run out. Killing a head that is still starting would cost the
-        # card its session for no evidence at all.
+        # Leave a starting head alone until its heartbeat grace resolves.
         return {
             "status": "skipped",
             "step": step,
@@ -911,10 +843,7 @@ def resolve_launch_intent(
             )
         return None
     if role == REVIEW_ROLE and busy_launch_delivery(intent):
-        # `dispatcher_review` owns the review document and its confirmation rule.  Importing it
-        # only here avoids its normal dependency on this launch-intent module becoming a cycle at
-        # import time.  A busy result takes the tick; a confirmed retry falls through to the same
-        # adoption boundary every completed reviewer launch uses.
+        # Delayed import avoids the dispatcher_review launch-intent cycle.
         from secretary.dispatcher_review import retry_busy_reviewer_launch_delivery
 
         deferred = retry_busy_reviewer_launch_delivery(runtime, task, records, payload, record, intent, step)
@@ -957,8 +886,7 @@ def stop_launch_intent(
     handle = getattr(record, "review_handle" if role == REVIEW_ROLE else "handle", "")
     leaf = getattr(record, "review_leaf" if role == REVIEW_ROLE else "worker_leaf", "")
     pid_file = getattr(record, role_field(role, "pid_file"), "")
-    # The path is known before the head exists, so it says nothing on its own; a heartbeat that can
-    # be read is what proves this launch left something a role-scoped stop can address.
+    # Workspace alone proves no head; a readable heartbeat is required.
     status = head_process_status(pid_file, expected=intent_heartbeat_identity(intent))
     if status.get("state") == "identity-mismatch":
         return "launch heartbeat names a live process with a mismatching launch identity"
@@ -1003,9 +931,7 @@ def _remember_launch_identity(record: DispatcherRecord, intent: dict[str, Any], 
         record.worker_leaf = record.worker_leaf or leaf
     stored_run = intent.get("head_run")
     if not isinstance(stored_run, dict) or not stored_run.get("run_id"):
-        # An interrupted create can leave only the pre-launch intent and a heartbeat.  Rebuild the
-        # same HeadRun identity from that intent before routing it through a fenced stop; minting
-        # a new run here would turn our own live head into an apparent foreign process.
+        # Rebuild the intent's exact HeadRun before a fenced recovery stop.
         run_id = str(intent.get("run_id") or "")
         task = str(intent.get("task") or "")
         task_kind, separator, task_ref = task.partition(":")
@@ -1045,9 +971,7 @@ def _adopt_launch_intent(
     leaf = str(intent.get("leaf") or "")
     stored_run = intent.get("head_run")
     if not isinstance(stored_run, dict) or not stored_run.get("run_id"):
-        # A launch can fail after its process wrote the pre-pane heartbeat but before the host can
-        # return a HeadRun.  The intent's run id was fixed before that process existed, so it is
-        # enough to recover the same durable run rather than minting a new identity over it.
+        # Recover a pre-pane failure with its intent's fixed run identity.
         run_id = str(intent.get("run_id") or "")
         if run_id:
             stored_run = head_ops.HeadRun(
@@ -1061,10 +985,7 @@ def _adopt_launch_intent(
             ).to_json()
     _remember_head_run(record, role, stored_run if isinstance(stored_run, dict) else None)
     if role == REVIEW_ROLE:
-        # A reviewer bring-up shuts the worker head down before it hands the pane back, and an
-        # adopted one has to do the same: a worker still editing the checkout would leave the
-        # verdict describing a tree that no longer exists. It goes through the same confirmed stop,
-        # so a worker that will not die keeps the intent instead of being assumed gone.
+        # Stop the worker before reviewer adoption; refusal preserves the intent.
         record.review_handle = handle
         record.review_leaf = leaf
         record.review_pid_file = str(intent.get("pid_file") or "")
