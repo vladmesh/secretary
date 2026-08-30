@@ -217,6 +217,7 @@ def wrap_role_command(
         raise HeadCommandError(f"role {role!r} carries no binding named {', '.join(unknown)}")
     rendered = [f"{name}={shlex.quote(value)}" for name, value in sorted((identity or {}).items())]
     prefix = " ".join([*role_env.launch_binding(), *rendered])
+    command = role_env.role_shell_command(role, command)
     return (
         f"{prefix} {pythonpath_prefix(os.environ)} python3 {PYTHON_SAFE_PATH_FLAG} "
         f"-m {SECRETARY_ROLE_ENV} exec --role {shlex.quote(role)} -- /bin/sh -lc "

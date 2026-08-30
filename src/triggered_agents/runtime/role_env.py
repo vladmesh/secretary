@@ -14,7 +14,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .paths import PRODUCT_ENV, default_instance_path
+from .paths import PRODUCT_ENV, configured_product_root, default_instance_path
 
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
 SECRETARY_RUNTIME_ENV_FILE_ENV = "SECRETARY_RUNTIME_ENV_FILE"
@@ -97,6 +97,7 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "retro": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
     "curator": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
 }
+RUFF_ROLES = frozenset(("worker", "reviewer"))
 
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
 # are rejected before reaching this gate; they remain here as the board's declared roles.
@@ -201,11 +202,29 @@ def runtime_env(
         elif key in base:
             env[key] = base[key]
 
+    if role in RUFF_ROLES:
+        venv_bin = configured_product_root(base) / ".venv" / "bin"
+        env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
+
     if role in BOARD_ROLES:
         env["BOARD_ROLE"] = role
     else:
         env.pop("BOARD_ROLE", None)
     return env
+
+
+def role_shell_command(role: str, command: str, *, environ: dict[str, str] | None = None) -> str:
+    """Make product-provisioned tools available inside a role's login shell.
+
+    The role wrapper starts ``/bin/sh -lc`` so a head gets its normal login environment. Some
+    shell profiles replace ``PATH`` there, after ``runtime_env()`` has already supplied it. Keep
+    the product venv prefix in the command itself for the two roles that use the pinned linter.
+    """
+    if role not in RUFF_ROLES:
+        return command
+    env = os.environ if environ is None else environ
+    venv_bin = configured_product_root(env) / ".venv" / "bin"
+    return f"PATH={shlex.quote(str(venv_bin))}${{PATH:+:$PATH}}; export PATH; {command}"
 
 
 def observer_binding(sprint: str, generation: str) -> dict[str, str]:
@@ -255,7 +274,7 @@ def wrap_shell_command(
     ]
     if env_file is not None:
         parts += ["--env-file", shlex.quote(str(env_file))]
-    parts += ["--", "/bin/sh", "-lc", shlex.quote(command)]
+    parts += ["--", "/bin/sh", "-lc", shlex.quote(role_shell_command(role, command))]
     return " ".join(parts)
 
 

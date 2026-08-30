@@ -15,8 +15,10 @@ import argparse
 import json
 import os
 import pwd
+import re
 import stat
 import subprocess
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -77,6 +79,7 @@ MEMORY_COMPONENT = "memory"
 # the previous release's code, which is the opposite of re-materializing.
 MEMORY_CODE_PATHS = ("secretary/", "pyproject.toml", "uv.lock", "requirements.txt")
 DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock", "requirements.txt")
+RUFF_VERSION_RE = re.compile(r"^ruff==([^;\s]+)$")
 
 
 @dataclass
@@ -229,19 +232,74 @@ def _snapshot_install(venv_python: Path) -> bool:
     return True
 
 
+def _declared_ruff_version(product_root: Path) -> str:
+    """Read the exact Ruff version the product's ``dev`` extra promises."""
+    try:
+        pyproject = tomllib.loads((product_root / "pyproject.toml").read_text(encoding="utf-8"))
+        dependencies = pyproject["project"]["optional-dependencies"]["dev"]
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"cannot read the dev Ruff pin: {exc}") from None
+    if not isinstance(dependencies, list):
+        raise ValueError("the dev extra is not a dependency list")
+    for dependency in dependencies:
+        if isinstance(dependency, str) and (match := RUFF_VERSION_RE.fullmatch(dependency)):
+            return match.group(1)
+    raise ValueError("the dev extra declares no exact Ruff pin")
+
+
+def _ruff_runtime_problem(product_root: Path, venv_python: Path) -> str:
+    """Why this venv cannot run the Ruff version its checkout declares, if any."""
+    try:
+        expected = _declared_ruff_version(product_root)
+    except ValueError as exc:
+        return str(exc)
+    executable = venv_python.parent / "ruff"
+    if not executable.is_file():
+        return f"the pinned Ruff {expected} is missing"
+    try:
+        result = _proc.run([str(executable), "--version"], timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return f"the pinned Ruff {expected} cannot run"
+    if result.returncode != 0:
+        return f"the pinned Ruff {expected} cannot run"
+    actual = (result.stdout or result.stderr).strip()
+    if actual != f"ruff {expected}":
+        return f"the installed Ruff reports {actual or 'no version'}, not {expected}"
+    return ""
+
+
 def step_dependencies(context: UpgradeContext) -> StepResult:
     venv_python = context.product_root / ".venv" / "bin" / "python"
     if not venv_python.is_file():
         return StepResult("dependencies", "skipped", "no .venv in the product checkout")
     snapshot = _snapshot_install(venv_python)
-    if not snapshot and not _touches(context.changed_paths, DEPENDENCY_PATHS):
+    manifest_moved = _touches(context.changed_paths, DEPENDENCY_PATHS)
+    ruff_problem = _ruff_runtime_problem(context.product_root, venv_python)
+    if not snapshot and not manifest_moved and not ruff_problem:
         return StepResult("dependencies", "unchanged", "no dependency manifest moved")
-    reason = "the venv holds a snapshot install" if snapshot else "a dependency manifest moved"
+    reasons = []
+    if snapshot:
+        reasons.append("the venv holds a snapshot install")
+    if manifest_moved:
+        reasons.append("a dependency manifest moved")
+    if ruff_problem:
+        reasons.append(ruff_problem)
+    reason = "; ".join(reasons)
     if context.dry_run:
-        return StepResult("dependencies", "changed", f"would reinstall the product into .venv: {reason}")
+        return StepResult(
+            "dependencies", "changed", f"would install the product dev extra into .venv: {reason}"
+        )
     try:
         _proc.run(
-            [str(venv_python), "-m", "pip", "install", "--quiet", "-e", str(context.product_root)],
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "-e",
+                f"{context.product_root}[dev]",
+            ],
             timeout=900,
             check=True,
         )
@@ -250,7 +308,7 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
     except (OSError, subprocess.TimeoutExpired):
         return StepResult("dependencies", "failed", "pip install could not run")
     context.code_changed = True
-    return StepResult("dependencies", "changed", f"reinstalled the product into .venv: {reason}")
+    return StepResult("dependencies", "changed", f"installed the product dev extra into .venv: {reason}")
 
 
 def _role_skills_manifest(context: UpgradeContext) -> Path:
