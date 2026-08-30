@@ -24,12 +24,12 @@ python3 -m pip install .
 python3 -m pip install '.[memory]'
 python3 -m pip install '.[dev]'
 python3 -m unittest
-ruff check .
 ```
 
 The first form installs the CLI, the second adds the memory runtime, and the third the pinned
 linter. `ruff` is pinned to one version in `pyproject.toml`, and any other version refuses to run
-rather than report a different set of findings, so `ruff check .` means the same thing everywhere. Host bootstrap currently
+rather than report a different set of findings. Run it only on the changed Python paths using the
+canonical command in [Testing](TESTING.md#changed-python-lint). Host bootstrap currently
 supports Ubuntu 24.04. It installs the pinned board and session-manager runtimes; `secretary install`
 or `secretary recover` then applies the instance, as described in [Recovery](RECOVERY.md).
 

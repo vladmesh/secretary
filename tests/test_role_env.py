@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -11,6 +13,7 @@ from unittest import mock
 from secretary import role_env as secretary_role_env
 from secretary.board_transport import ensure as ensure_board_transport
 from triggered_agents.runtime import kanboard, role_env
+from triggered_agents.runtime.head.command import wrap_role_command
 
 
 class RuntimeEnvPathTests(unittest.TestCase):
@@ -38,6 +41,70 @@ class RuntimeEnvPathTests(unittest.TestCase):
 
 
 class RuntimeEnvRoleTests(unittest.TestCase):
+    @staticmethod
+    def _ruff_version(root: Path) -> str:
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        dependency = next(
+            item for item in pyproject["project"]["optional-dependencies"]["dev"] if item.startswith("ruff==")
+        )
+        return dependency.removeprefix("ruff==")
+
+    def test_worker_and_reviewer_role_paths_expose_the_product_pinned_ruff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = self._ruff_version(Path(__file__).resolve().parents[1])
+            (root / "src").symlink_to(Path(__file__).resolve().parents[1] / "src", target_is_directory=True)
+            ruff = root / ".venv" / "bin" / "ruff"
+            ruff.parent.mkdir(parents=True)
+            ruff.write_text(
+                "#!/bin/sh\n"
+                'case "$1" in\n'
+                f"  --version) echo 'ruff {expected}' ;;\n"
+                '  check) test "$2" = changed.py ;;\n'
+                '  format) test "$2" = --check && test "$3" = changed.py ;;\n'
+                "  *) exit 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            ruff.chmod(0o755)
+            ensure_board_transport(root, allow_default=True)
+            base_env = {
+                "PATH": os.environ["PATH"],
+                "SECRETARY_INSTANCE": str(root),
+                "SECRETARY_RUNTIME_ENV_FILE": str(root / "runtime.env"),
+                "TA_SECRETARY_REPO": str(root),
+            }
+            for role in ("worker", "reviewer"):
+                with self.subTest(role=role):
+                    with mock.patch.dict(os.environ, base_env, clear=True):
+                        version_command = wrap_role_command(role, "ruff --version")
+                        lint_commands = (
+                            wrap_role_command(role, "printf '%s\\0' changed.py | xargs -0r ruff check"),
+                            wrap_role_command(
+                                role, "printf '%s\\0' changed.py | xargs -0r ruff format --check"
+                            ),
+                        )
+                    version = subprocess.run(
+                        ["/bin/sh", "-c", version_command],
+                        cwd=root,
+                        env=base_env,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(version.returncode, 0, version.stderr)
+                    self.assertEqual(version.stdout.strip(), f"ruff {expected}")
+                    for command in lint_commands:
+                        completed = subprocess.run(
+                            ["/bin/sh", "-c", command],
+                            cwd=root,
+                            env=base_env,
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_launcher_only_observer_identity_cannot_come_from_runtime_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "runtime.env"

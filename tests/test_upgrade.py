@@ -756,10 +756,18 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertIn(result.status, {"unchanged", "skipped"})
 
     @staticmethod
-    def _venv(root: Path, direct_url: dict | None) -> Path:
+    def _venv(root: Path, direct_url: dict | None, ruff_version: str | None = "0.16.4") -> Path:
         """A product checkout whose .venv holds the product installed the given way."""
         (root / ".venv" / "bin").mkdir(parents=True)
         (root / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+        (root / "pyproject.toml").write_text(
+            "[project]\n[project.optional-dependencies]\ndev = ['ruff==0.16.4']\n",
+            encoding="utf-8",
+        )
+        if ruff_version is not None:
+            ruff = root / ".venv" / "bin" / "ruff"
+            ruff.write_text(f"#!/bin/sh\necho 'ruff {ruff_version}'\n", encoding="utf-8")
+            ruff.chmod(0o755)
         dist_info = root / ".venv" / "lib" / "python3.12" / "site-packages" / "secretary-0.1.0.dist-info"
         dist_info.mkdir(parents=True)
         if direct_url is not None:
@@ -774,6 +782,60 @@ class UpgradeStepTests(unittest.TestCase):
             result = upgrade.step_dependencies(context)
 
         self.assertEqual(result.status, "unchanged")
+
+    def test_an_editable_install_with_missing_pinned_ruff_is_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, None)
+            context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)
+
+            result = upgrade.step_dependencies(context)
+
+        self.assertEqual(result.status, "changed")
+        self.assertIn("pinned Ruff 0.16.4 is missing", result.detail)
+
+    def test_an_editable_install_with_the_wrong_ruff_version_is_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, "0.15.0")
+            context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)
+
+            result = upgrade.step_dependencies(context)
+
+        self.assertEqual(result.status, "changed")
+        self.assertIn("not 0.16.4", result.detail)
+
+    def test_an_editable_install_with_an_unrunnable_ruff_is_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}})
+            (root / ".venv" / "bin" / "ruff").chmod(0o644)
+            context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)
+
+            result = upgrade.step_dependencies(context)
+
+        self.assertEqual(result.status, "changed")
+        self.assertIn("cannot run", result.detail)
+
+    def test_ruff_repair_installs_the_declared_dev_extra(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, None)
+            context = self.context(FakeUnitInstaller(), product_root=root)
+            with mock.patch(
+                "secretary.upgrade._proc.run", return_value=subprocess.CompletedProcess([], 0)
+            ) as run:
+                result = upgrade.step_dependencies(context)
+
+        self.assertEqual(result.status, "changed")
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                str(root / ".venv" / "bin" / "python"),
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "-e",
+                f"{root}[dev]",
+            ],
+        )
 
     def test_a_snapshot_install_is_reinstalled_even_with_no_manifest_move(self):
         """The 2026-08-05 outage: `step_board_transport` retired the legacy KANBOARD_* tuple while

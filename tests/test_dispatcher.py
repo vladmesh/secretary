@@ -12406,14 +12406,18 @@ class DispatcherLauncherTests(unittest.TestCase):
 
             env = role_env.runtime_env(
                 "worker",
-                base_env={"GITHUB_TOKEN": "github-token", "PATH": "/usr/bin"},
+                base_env={
+                    "GITHUB_TOKEN": "github-token",
+                    "PATH": "/usr/bin",
+                    "TA_SECRETARY_REPO": "/srv/secretary",
+                },
                 env_file=env_file,
             )
 
         self.assertEqual(env["BOARD_ROLE"], "worker")
         self.assertNotIn("KANBOARD_API_TOKEN", env)
         self.assertNotIn("TA_CODEX_MODE", env)
-        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertEqual(env["PATH"], "/srv/secretary/.venv/bin:/usr/bin")
         self.assertNotIn("PANELMEM_KB_PAT", env)
         self.assertNotIn("GITHUB_TOKEN", env)
 

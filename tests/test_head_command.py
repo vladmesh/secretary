@@ -206,7 +206,8 @@ class RoleEnvWrapperTests(unittest.TestCase):
                 ).command,
                 f'{BINDING} PYTHONPATH=/opt/checkout/src"${{PYTHONPATH:+:$PYTHONPATH}}" '
                 "python3 -P -m secretary.role_env exec --role worker -- /bin/sh -lc "
-                "'claude --dangerously-skip-permissions'",
+                "'PATH=/opt/checkout/.venv/bin${PATH:+:$PATH}; export PATH; "
+                "claude --dangerously-skip-permissions'",
             )
 
     def test_the_runtime_entry_point_is_what_a_background_agent_is_launched_under(self) -> None:

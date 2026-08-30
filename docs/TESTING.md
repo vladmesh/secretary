@@ -26,3 +26,26 @@ Use a focused local check while changing the runner or its manifest:
 The control host intentionally uses focused checks only. Complete validation belongs to GitHub CI
 for the exact candidate SHA. Fast profiles, artifacts, coverage, timings and integration fixtures
 are later-card work.
+
+## Changed Python lint
+
+The product checkout's `.venv` supplies the same pinned Ruff that worker and reviewer role commands
+receive on `PATH`. Never lint the repository as a whole. Against the task base, build the non-deleted
+changed and untracked Python path set, then pass only that set explicitly to both checks:
+
+```bash
+base=$(git merge-base main HEAD)
+{
+  git diff --name-only -z --diff-filter=d "$base" -- '*.py'
+  git ls-files --others --exclude-standard -z -- '*.py'
+} | sort -zu | xargs -0r ruff check
+
+base=$(git merge-base main HEAD)
+{
+  git diff --name-only -z --diff-filter=d "$base" -- '*.py'
+  git ls-files --others --exclude-standard -z -- '*.py'
+} | sort -zu | xargs -0r ruff format --check
+```
+
+Use both commands whenever the set contains Python files. The `xargs -r` guard leaves an empty set
+as a no-op, rather than making Ruff choose a repository-wide default.
