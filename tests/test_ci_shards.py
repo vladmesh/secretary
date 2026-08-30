@@ -6,23 +6,36 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
 
 from scripts.ci_test_shards import (
+    EVIDENCE_FILES,
     FAST_MODULES,
     SUITES,
+    BoundedTee,
     ManifestError,
+    SuiteEvidence,
+    TestRecord,
+    _read_evidence,
+    _write_evidence,
+    aggregate_evidence,
     fast_environment,
     load_manifest,
     main,
     modules,
+    report_summary,
     run_bounded,
     run_fast,
+    run_reported_suite,
+    run_suite_with_evidence,
     validate_fast_profile,
 )
+
+CANDIDATE_SHA = "a" * 40
 
 
 class CiTestSuiteManifestTests(unittest.TestCase):
@@ -234,16 +247,253 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertLess(elapsed, 2)
         self.assertIn("timed out after 0.5 seconds; test child was stopped", stderr.getvalue())
 
-    def test_workflow_keeps_a_test_aggregator_after_all_suites(self) -> None:
+    def test_workflow_publishes_and_preserves_reported_suite_evidence(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(
             encoding="utf-8"
         )
 
         for suite in SUITES:
             self.assertIn(suite, workflow)
-        self.assertIn("python3 scripts/ci_test_shards.py --suite", workflow)
-        self.assertIn("needs: test_suites", workflow)
-        self.assertIn("name: test", workflow)
+        candidate_sha = "${{ github.event.pull_request.head.sha || github.sha }}"
+        self.assertIn(f'--candidate-sha "{candidate_sha}"', workflow)
+        self.assertNotIn('--candidate-sha "$GITHUB_SHA"', workflow)
+        self.assertIn(
+            f"name: ci-evidence-${{{{ matrix.suite }}}}-{candidate_sha}",
+            workflow,
+        )
+        self.assertIn(
+            f"""      - name: Run reported suite
+        id: run_suite
+        continue-on-error: true
+        run: >-
+          python3 scripts/ci_test_shards.py --suite "${{{{ matrix.suite }}}}"
+          --report-dir "$RUNNER_TEMP/ci-evidence/${{{{ matrix.suite }}}}"
+          --candidate-sha "{candidate_sha}""",
+            workflow,
+        )
+        self.assertIn(
+            """      - name: Write suite evidence summary
+        if: ${{ always() }}
+        continue-on-error: true
+        run: >-
+          python3 scripts/ci_test_shards.py --summary
+          --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
+          >> "$GITHUB_STEP_SUMMARY""",
+            workflow,
+        )
+        self.assertIn(
+            f"""      - name: Upload suite JUnit and bounded log
+        if: ${{{{ always() }}}}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-${{{{ matrix.suite }}}}-{candidate_sha}
+          path: ${{{{ runner.temp }}}}/ci-evidence/${{{{ matrix.suite }}}}
+          if-no-files-found: error
+          retention-days: 14""",
+            workflow,
+        )
+        self.assertIn(
+            """      - name: Preserve suite result
+        if: ${{ always() }}
+        run: >-
+          python3 scripts/ci_test_shards.py --summary
+          --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
+          > /dev/null""",
+            workflow,
+        )
+
+    def test_workflow_aggregate_downloads_and_classifies_all_suite_evidence(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            """  test:
+    name: test
+    if: ${{ always() }}
+    needs: test_suites""",
+            workflow,
+        )
+        self.assertIn(
+            """      - name: Download suite evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ci-evidence-*
+          path: ${{ runner.temp }}/ci-evidence
+          merge-multiple: false""",
+            workflow,
+        )
+        self.assertIn(
+            """      - name: Require and classify every test suite
+        env:
+          SUITES_RESULT: ${{ needs.test_suites.result }}
+        run: >-
+          python3 scripts/ci_test_shards.py --aggregate
+          --evidence-dir "$RUNNER_TEMP/ci-evidence"
+          --needs-result "$SUITES_RESULT"
+          >> "$GITHUB_STEP_SUMMARY""",
+            workflow,
+        )
+
+    def _write_report(self, directory: Path, evidence: SuiteEvidence) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        log = BoundedTee(StringIO(), directory / "test-output.log")
+        log.write("test output\n")
+        _write_evidence(directory, evidence, log)
+
+    def _evidence(self, suite: str, outcome: str = "success") -> SuiteEvidence:
+        return SuiteEvidence(
+            suite,
+            CANDIDATE_SHA,
+            outcome,
+            {
+                "collected": 3,
+                "passed": 2,
+                "failed": 1 if outcome == "product_failure" else 0,
+                "error": 0,
+                "skipped": 0,
+            },
+            1.25,
+            [TestRecord("tests.example.Case.test_slow", "tests.example.Case", "test_slow", 1.0)],
+            ["tests.example.Case.test_slow: tests/example.py:12"] if outcome == "product_failure" else [],
+        )
+
+    def test_reported_runner_writes_exact_paths_and_product_failure_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            module = root / "sample_suite.py"
+            module.write_text(
+                "import unittest\n"
+                "class Sample(unittest.TestCase):\n"
+                "    def test_pass(self): self.assertTrue(True)\n"
+                "    def test_fail(self): self.fail('broken')\n",
+                encoding="utf-8",
+            )
+            report_dir = root / "artifacts" / "unit"
+            report_dir.mkdir(parents=True)
+            sys.path.insert(0, str(root))
+            try:
+                with patch("scripts.ci_test_shards.modules", return_value=["sample_suite"]):
+                    log = BoundedTee(StringIO(), report_dir / "test-output.log")
+                    evidence = run_reported_suite("unit", ["ignored"], CANDIDATE_SHA, log)
+                    _write_evidence(report_dir, evidence, log)
+            finally:
+                sys.path.remove(str(root))
+                sys.modules.pop("sample_suite", None)
+
+            self.assertEqual(evidence.outcome, "product_failure")
+            self.assertEqual(
+                evidence.counts, {"collected": 2, "passed": 1, "failed": 1, "error": 0, "skipped": 0}
+            )
+            self.assertEqual({path.name for path in report_dir.iterdir()}, set(EVIDENCE_FILES))
+            self.assertEqual(_read_evidence(report_dir).candidate_sha, CANDIDATE_SHA)
+            junit = ElementTree.parse(report_dir / "junit.xml").getroot()
+            self.assertEqual(junit.attrib["failures"], "1")
+            self.assertEqual(len(junit.findall("testcase")), 2)
+            self.assertIn("sample_suite.Sample.test_fail", evidence.failure_locations[0])
+
+    def test_reported_runner_writes_success_evidence_and_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "__init__.py").write_text("", encoding="utf-8")
+            (tests / "test_passing.py").write_text(
+                "import unittest\n"
+                "class Passing(unittest.TestCase):\n"
+                "    def test_pass(self): self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            report_dir = root / "artifacts" / "unit"
+            grouped = {suite: ["tests/test_passing.py"] for suite in SUITES}
+            loaded_tests = {
+                name: module
+                for name, module in list(sys.modules.items())
+                if name == "tests" or name.startswith("tests.")
+            }
+            for name in loaded_tests:
+                del sys.modules[name]
+            try:
+                with (
+                    redirect_stdout(StringIO()),
+                    patch("scripts.ci_test_shards.load_manifest", return_value=grouped),
+                ):
+                    self.assertEqual(run_suite_with_evidence(root, "unit", report_dir, CANDIDATE_SHA), 0)
+            finally:
+                for name in list(sys.modules):
+                    if name == "tests" or name.startswith("tests."):
+                        del sys.modules[name]
+                sys.modules.update(loaded_tests)
+
+            summary = StringIO()
+            with redirect_stdout(summary):
+                self.assertEqual(report_summary(report_dir), 0)
+            evidence = _read_evidence(report_dir)
+
+        self.assertEqual(evidence.outcome, "success")
+        self.assertIn("Candidate SHA", summary.getvalue())
+        self.assertIn("collected 1, passed 1", summary.getvalue())
+
+    def test_bounded_log_keeps_a_marker_after_its_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test-output.log"
+            log = BoundedTee(StringIO(), path, maximum_bytes=5)
+            log.write("abcdefgh")
+            log.close()
+            content = path.read_text(encoding="utf-8")
+
+        self.assertTrue(log.truncated)
+        self.assertTrue(content.startswith("abcde"))
+        self.assertIn("truncated at 1000000 bytes", content)
+
+    def test_reported_manifest_or_report_failure_is_infrastructure_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "report"
+            with (
+                redirect_stdout(StringIO()),
+                patch("scripts.ci_test_shards.load_manifest", side_effect=ManifestError("bad manifest")),
+            ):
+                self.assertEqual(run_suite_with_evidence(Path(tmp), "unit", report_dir, CANDIDATE_SHA), 3)
+
+            evidence = _read_evidence(report_dir)
+            self.assertEqual(evidence.outcome, "infrastructure_failure")
+            (report_dir / "junit.xml").unlink()
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(report_summary(report_dir), 3)
+
+    def test_cancelled_run_is_recorded_as_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = BoundedTee(StringIO(), Path(tmp) / "test-output.log")
+            with patch("scripts.ci_test_shards.unittest.TextTestRunner.run", side_effect=KeyboardInterrupt):
+                evidence = run_reported_suite("unit", ["tests/test_any.py"], CANDIDATE_SHA, log)
+            log.close()
+
+        self.assertEqual(evidence.outcome, "cancelled")
+
+    def test_aggregate_separates_product_infrastructure_cancellation_and_not_applicable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for suite in SUITES:
+                self._write_report(root / suite, self._evidence(suite))
+            self._write_report(root / "unit", self._evidence("unit", "product_failure"))
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(aggregate_evidence(root, "failure"), 1)
+
+            (root / "component" / "report.json").unlink()
+            with redirect_stdout(StringIO()):
+                self.assertEqual(aggregate_evidence(root, "failure"), 3)
+            for suite in SUITES:
+                report = root / suite / "report.json"
+                if report.exists():
+                    report.unlink()
+            with redirect_stdout(StringIO()):
+                self.assertEqual(aggregate_evidence(root, "cancelled"), 130)
+
+            with redirect_stdout(StringIO()):
+                self.assertEqual(aggregate_evidence(root, "skipped"), 0)
 
 
 if __name__ == "__main__":
