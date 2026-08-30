@@ -1616,11 +1616,13 @@ name never invents a workspace route.
 Directory boundaries are exact after path normalization, so a prefix, relative alias, unreadable binding, missing checkout,
 ambiguous match or unregistered cwd is `unknown`, never guessed. Dispatcher tokens a reference such as
 `sprint:1412` as `sprint-1412`, so observer workspaces under `workspaces/observers/sprint-<token>` restore the
-canonical `sprint:` prefix and route only when that readable sprint has exactly one structured reservation;
-installation-wide sources are explicitly `global`. `curator harvest --project <canonical-id>` filters those routes
+canonical `sprint:` prefix. A readable sprint with one registered reservation routes to that project; two or more
+distinct registered reservations route to the explicit `review:po` triage selector. Malformed, duplicate, empty or
+unregistered reservations remain `unknown`. Installation-wide sources are explicitly `global`.
+`curator harvest --project <canonical-id|review:po>` filters those routes
 before budget selection; no selector is the explicit all-backlog mode. Its pending record signs that selector, so
 neither replay nor advance can cross from a selected project to another project or all-backlog invocation.
-`curator backlog [--project <canonical-id>] [--json]` is read-only metadata: deterministic route/head groups with
+`curator backlog [--project <canonical-id|review:po>] [--json]` is read-only metadata: deterministic route/head groups with
 source counts and timestamp bounds, never transcript or personal-memory text. Harvest, precheck and advance share
 one cursor-settlement transaction: a curator-local advisory flock serializes watermark.json and pending.json without
 taking the agent lifecycle lock. A selected fact-bearing batch is stored as versioned, identity-bound pending.json
@@ -1888,12 +1890,14 @@ resulting instance snapshot. Do not delete the profile or alter scheduler owners
 
 The role route does not widen the curator protocol. Selection is still bounded before content is read: normalized
 descendants of exactly one registered canonical project `repo`, or the matching safe Orca workspace binding, route to
-that project; ambiguous, malformed, unreadable, unregistered and prefix-only paths are `unknown`, while
-installation-wide sources are `global`. A fact-bearing pending batch remains bound to its curator workspace, run and
+that project; multi-reservation observers route only to the reserved `review:po` selector; ambiguous, malformed,
+unreadable, unregistered and prefix-only paths are `unknown`, while installation-wide sources are `global`. A
+fact-bearing pending batch remains bound to its curator workspace, run and
 session identity, its selected-project or all-backlog selector, and its starting cursors. Replay or advance with a
 different identity or selector fails closed.
 
-Likewise, a later intentional baseline is a separate manual operation. It requires one registered canonical project,
+Likewise, a later intentional baseline is a separate manual operation. It requires one registered canonical project
+or the reserved `review:po` selector,
 an explicit actor, a non-empty reason, and exactly one current opaque cutoff or pending-batch identity. It cannot
 bypass a pending record or use all-backlog mode. The baseline audit records the project, actor, redacted reason,
 evidence identity, outcome, and hashed cursor identities/count only. It contains no transcript, personal-memory,

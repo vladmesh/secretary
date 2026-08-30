@@ -49,6 +49,7 @@ CODEX_SESSIONS = Path(
 
 ROUTE_UNKNOWN = "unknown"
 ROUTE_GLOBAL = "global"
+ROUTE_PO_REVIEW = "review:po"
 _PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 
 
@@ -165,7 +166,7 @@ def _observer_reference(cwd: Path) -> str | None:
 
 
 def _observer_route(reference: str, instance: Path, known_ids: set[str]) -> str:
-    """Resolve an observer only from its sprint's single structured reservation."""
+    """Resolve an observer from its sprint's complete structured reservation set."""
     try:
         sprint = SprintReader(KanboardClient.for_instance(instance)).show(
             reference, include_cards=False, include_resume_freshness=False
@@ -175,13 +176,18 @@ def _observer_route(reference: str, instance: Path, known_ids: set[str]) -> str:
     except Exception:  # noqa: BLE001 - every board transport/schema failure is an unknown route
         return ROUTE_UNKNOWN
     reservations = sprint.get("reservations") if isinstance(sprint, dict) else None
-    if not isinstance(reservations, list) or len(reservations) != 1 or not isinstance(reservations[0], str):
+    if (
+        not isinstance(reservations, list)
+        or not reservations
+        or not all(isinstance(project, str) and project in known_ids for project in reservations)
+        or len(set(reservations)) != len(reservations)
+    ):
         return ROUTE_UNKNOWN
-    return reservations[0] if reservations[0] in known_ids else ROUTE_UNKNOWN
+    return reservations[0] if len(reservations) == 1 else ROUTE_PO_REVIEW
 
 
 def resolve_route(cwd: str, *, instance: Path | None = None, global_source: bool = False) -> str:
-    """Return a canonical project id, or the explicit `unknown`/`global` route.
+    """Return a canonical project id, or an explicit review/global/unknown route.
 
     Registered checkout descendants and the corresponding Orca workspace descendants are valid
     routes.  The candidate must match exactly one resolved boundary, so prefixes, duplicate

@@ -209,6 +209,27 @@ class CuratorProjectRoutingTests(unittest.TestCase):
             reader.return_value.show.side_effect = OSError("board unavailable")
             self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "unknown")
 
+    def test_multi_project_observer_routes_to_po_review_when_every_reservation_is_registered(self) -> None:
+        alpha, beta = self.root / "alpha", self.root / "beta"
+        alpha.mkdir()
+        beta.mkdir()
+        self._binding("alpha", alpha)
+        self._binding("beta", beta)
+        observer = self.workspaces / "observers" / request_token("sprint:1412") / "head"
+        observer.mkdir(parents=True)
+        with (
+            mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}),
+            mock.patch.object(discover, "SprintReader") as reader,
+            mock.patch.object(discover.KanboardClient, "for_instance"),
+        ):
+            reader.return_value.show.return_value = {"reservations": ["alpha", "beta"]}
+            self.assertEqual(
+                discover.resolve_route(str(observer), instance=self.instance),
+                discover.ROUTE_PO_REVIEW,
+            )
+            reader.return_value.show.return_value = {"reservations": ["alpha", "alpha"]}
+            self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "unknown")
+
     def test_removed_observer_workspace_still_uses_its_sprint_reservation(self) -> None:
         repo = self.root / "repo"
         repo.mkdir()

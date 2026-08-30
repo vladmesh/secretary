@@ -292,6 +292,30 @@ class CuratorHarvestTests(unittest.TestCase):
             harvest.advance(self.state, record, self.identity, project="alpha")
         self.assertIn(str(path), self.state.load_watermark())
 
+    def test_po_review_selector_is_reserved_and_isolated_from_projects(self) -> None:
+        review, alpha = self.root / "review.jsonl", self.root / "alpha.jsonl"
+        review.write_text(claude("cross-project conclusion"), encoding="utf-8")
+        alpha.write_text(claude("alpha conclusion"), encoding="utf-8")
+        sessions = [
+            {
+                "head": "claude",
+                "path": str(review),
+                "session_id": "review",
+                "cwd": "/observer",
+                "route": "review:po",
+            },
+            {"head": "claude", "path": str(alpha), "session_id": "alpha", "cwd": "/alpha", "route": "alpha"},
+        ]
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions), mock.patch(
+            "triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha"}
+        ):
+            batch = harvest.harvest(self.state, self.identity, self.limits, project="review:po")
+            cutoff = harvest.baseline_cutoff(self.state, "review:po", self.limits)
+
+        self.assertEqual(batch["project"], "review:po")
+        self.assertEqual([entry["session_id"] for entry in batch["sessions"]], ["review"])
+        self.assertEqual(set(cutoff["pending"]), {str(review)})
+
     def test_backlog_summary_is_metadata_only_and_state_free(self) -> None:
         transcript, beta, memory = self.root / "alpha.jsonl", self.root / "beta.jsonl", self.root / "memory.md"
         transcript.write_text(claude("a secret transcript"), encoding="utf-8")
@@ -361,6 +385,34 @@ class CuratorBaselineTests(unittest.TestCase):
     def _audit_rows(self) -> list[dict]:
         path = self.state.dir / "baseline-audit.ndjson"
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_po_review_cutoff_settles_only_multi_project_observer_sources(self) -> None:
+        review, alpha = self.root / "review.jsonl", self.root / "alpha.jsonl"
+        review.write_text(claude("already reviewed cross-project history"), encoding="utf-8")
+        alpha.write_text(claude("unreviewed alpha history"), encoding="utf-8")
+        sessions = [
+            {
+                "head": "claude",
+                "path": str(review),
+                "session_id": "review",
+                "cwd": "/observer",
+                "route": "review:po",
+            },
+            {"head": "claude", "path": str(alpha), "session_id": "alpha", "cwd": "/alpha", "route": "alpha"},
+        ]
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions):
+            cutoff = harvest.baseline_cutoff(self.state, "review:po")
+            audit = cli.baseline_settlement(
+                project="review:po",
+                actor="operator:alice",
+                reason="reviewed multi-project observer backlog",
+                cutoff_id=cutoff["cutoff_id"],
+            )
+
+        self.assertEqual(set(self.state.load_watermark()), {str(review)})
+        self.assertEqual(audit["project"], "review:po")
+        self.assertEqual(audit["affected_cursor_count"], 1)
+        self.assertEqual(self._audit_rows()[0]["project"], "review:po")
 
     def test_cutoff_cli_is_project_isolated_and_audits_redacted_metadata_only(self) -> None:
         secret = "sk-proj-abcdefghijklmnopqrstuvwx"
