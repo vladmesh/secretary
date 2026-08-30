@@ -54,6 +54,7 @@ unit tests/test_knowledge_write.py
 integration-board tests/test_live_telemetry.py
 runtime-component tests/test_local_pty_head_runtime.py
 runtime-component tests/test_local_pty_supervisor.py
+runtime-component tests/test_runtime_deadline_contract.py
 integration-memory tests/test_memory_acceptance.py
 integration-memory tests/test_memory_access.py
 integration-memory tests/test_memory_flatten.py

@@ -84,6 +84,21 @@ contours remain in their named CI suites or explicit operator checks. The contro
 uses focused checks and `--fast` only. Complete validation remains dispatcher-owned exact-SHA GitHub
 CI; do not run a local broad suite.
 
+## Runtime deadline boundary
+
+`runtime-component` owns the real local-PTY, process-group, socket and lifecycle tests. It is not
+part of `--fast`, and the fixed-fast-profile regression rejects any expansion into those modules.
+Expiry, retry, termination and recovery tests in that suite inject short bounds where the production
+semantic is unchanged, so they do not wait for a shipped production deadline merely to prove its
+ordering or cleanup.
+
+`tests.test_runtime_deadline_contract.ShippedRuntimeDeadlineContractTests` is the deliberately
+small exception: it starts the production local-PTY substrate and runtime without deadline
+overrides, reads back the admitted shipped delivery deadline, and checks the runtime's shipped
+grace and stop-confirmation wiring. It belongs only to `runtime-component`. Do not move it, or any
+real PTY/process lifecycle test, into `--fast`; do not replace focused worker checks with a full or
+broad local run. The dispatcher-owned exact-SHA GitHub gate remains the complete required suite.
+
 ## Changed Python lint
 
 The product checkout's `.venv` supplies the same pinned Ruff that worker and reviewer role commands
