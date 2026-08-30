@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 from scripts.ci_test_shards import (
     FAST_MODULES,
-    ManifestError,
     SUITES,
+    ManifestError,
     fast_environment,
     load_manifest,
     main,
@@ -138,9 +138,11 @@ class CiTestSuiteManifestTests(unittest.TestCase):
     def test_fast_profile_rejects_a_missing_declared_module_before_launch(self) -> None:
         root = Path(__file__).resolve().parents[1]
 
-        with patch("scripts.ci_test_shards.FAST_MODULES", ("tests.test_missing",)):
-            with self.assertRaisesRegex(ManifestError, "missing test module"):
-                validate_fast_profile(root)
+        with (
+            patch("scripts.ci_test_shards.FAST_MODULES", ("tests.test_missing",)),
+            self.assertRaisesRegex(ManifestError, "missing test module"),
+        ):
+            validate_fast_profile(root)
 
     def test_fast_action_skips_the_seven_suite_manifest(self) -> None:
         with (
@@ -187,6 +189,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                 env=environment,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             command = subprocess.run(
                 [sys.executable, "-c", "import subprocess; subprocess.run(['docker', 'info'])"],
@@ -194,6 +197,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                 env=environment,
                 capture_output=True,
                 text=True,
+                check=False,
             )
 
         self.assertNotEqual(network.returncode, 0)
@@ -207,8 +211,10 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             command = [
                 sys.executable,
                 "-c",
-                "import os, time; from pathlib import Path; "
-                f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)",
+                (
+                    "import os, time; from pathlib import Path; "
+                    f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)"
+                ),
             ]
             started = time.monotonic()
             with redirect_stderr(StringIO()) as stderr:

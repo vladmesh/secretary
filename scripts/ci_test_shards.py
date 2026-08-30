@@ -34,7 +34,7 @@ _FAST_TERMINATE_GRACE_SECONDS = 5
 # tests still exercise their normal seams, while this makes an accidental new
 # network or host-tool dependency fail at its boundary rather than consulting
 # a control host's operational state.
-_FAST_GUARD = '''\
+_FAST_GUARD = """\
 import os
 import socket
 import subprocess
@@ -72,7 +72,7 @@ def _guarded_popen(args, *positional, **keyword):
 
 subprocess.Popen = _guarded_popen
 os.system = lambda *args, **kwargs: _deny("external command execution")
-'''
+"""
 
 
 class ManifestError(ValueError):
