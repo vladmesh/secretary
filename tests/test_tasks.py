@@ -43,7 +43,6 @@ from secretary.tasks import (
     specification_revision,
     standing_decision,
 )
-from tests.fakes.board import BatchedCalls
 from tests.fakes.tasks import FakeKanboard, WriteKanboard
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 
@@ -242,15 +241,7 @@ class TaskCliTests(unittest.TestCase):
                 "version: 1\nname: test\ndata_dir: /tmp/data\n", encoding="utf-8"
             )
             (root / "heads" / "heads.yaml").write_text(
-                "\n".join(
-                    [
-                        "profiles:",
-                        "  claude-opus:",
-                        "    adapter: claude",
-                        "role_defaults:",
-                        "  new_card: claude-opus",
-                    ]
-                ),
+                "profiles:\n  claude-opus:\n    adapter: claude\nrole_defaults:\n  new_card: claude-opus",
                 encoding="utf-8",
             )
             output, errors = io.StringIO(), io.StringIO()

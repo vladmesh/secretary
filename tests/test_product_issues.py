@@ -15,7 +15,6 @@ from secretary.board.transitions import BoardProtocolError
 from secretary.cli import main
 from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskAudit, TaskError, TaskWriter
-from tests.fakes.tasks import WriteKanboard
 from tests.fakes.product_issues import ProductBoard
 from tests.observer_identity import as_observer
 
@@ -1143,13 +1142,13 @@ class ProductIssueStoreTests(unittest.TestCase):
                 self.client.tasks[0]["column_id"] = 2
                 self.client.metadata[12] = {"project": "secretary", "task_type": "code", "claim": ""}
                 request_id = f"pending-claim-{record_type}"
-                claim = dict(
-                    role="dispatcher",
-                    actor="d",
-                    reference="secretary-468",
-                    worker="replayed-worker",
-                    request_id=request_id,
-                )
+                claim = {
+                    "role": "dispatcher",
+                    "actor": "d",
+                    "reference": "secretary-468",
+                    "worker": "replayed-worker",
+                    "request_id": request_id,
+                }
                 writer.audit.stage(
                     request_id,
                     {

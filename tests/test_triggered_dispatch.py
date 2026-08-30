@@ -12,16 +12,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes.triggered_dispatch import FakeSessionHost
 from triggered_agents.runtime import codex_preflight, dispatch, tui_delivery
 from triggered_agents.runtime import state as runtime_state
-from triggered_agents.runtime.head import HeadSpec
 from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
 from triggered_agents.runtime.claude_sessions import claude_project_dir_name
+from triggered_agents.runtime.head import HeadSpec
 from triggered_agents.runtime.pane_host import Pane, PaneHostError
-from tests.fakes.triggered_dispatch import FakeSessionHost
 
 
 class TriggeredDispatchReuseTests(unittest.TestCase):
@@ -243,7 +243,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         self.assertEqual(host.reads, [("term-live", 200)])
 
     def test_shell_output_above_the_repl_prompt_does_not_restart_a_live_agent(self) -> None:
-        screen = "\n".join(["Claude Code", "dev@host:~/workspace$ from Bash output", "❯"])
+        screen = "Claude Code\ndev@host:~/workspace$ from Bash output\n❯"
         self.assertTrue(dispatch._agent_repl_visible("term-live", host=FakeSessionHost(screens=(screen,))))
 
     def test_claude_user_turn_after_reads_the_workspace_session_log(self) -> None:

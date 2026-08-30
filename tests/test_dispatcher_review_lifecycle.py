@@ -128,6 +128,7 @@ class PidHeartbeatTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 timeout=10,
+                check=False,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -159,9 +160,11 @@ class PidHeartbeatTests(unittest.TestCase):
         )
 
     def test_pid_file_path_honours_the_body_dir_override(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": tmp}):
-                self.assertTrue(pid_file_path("worker", "secretary-751").startswith(tmp))
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": tmp}),
+        ):
+            self.assertTrue(pid_file_path("worker", "secretary-751").startswith(tmp))
 
     def test_a_process_that_has_exited_is_not_alive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -869,10 +872,12 @@ class WorkerLifecycleTests(unittest.TestCase):
         record = self._record(worker_leaf="leaf-worker", worker_pid_file=str(self.root / "w.pid"))
         Path(record.worker_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
 
-        with mock.patch.object(dispatcher_module, "HEAD_STOP_GRACE_SECONDS", 0.05):
-            with mock.patch.object(host, "_signal_head", lambda *a: None):
-                with self.assertRaises(HostError):
-                    host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
+        with (
+            mock.patch.object(dispatcher_module, "HEAD_STOP_GRACE_SECONDS", 0.05),
+            mock.patch.object(host, "_signal_head", lambda *a: None),
+            self.assertRaises(HostError),
+        ):
+            host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
 
         self.assertEqual(record.worker_head_run["lifecycle"], "finishing")
         self.assertEqual(record.worker_head_run["stopped_by"]["actor"], STOPPED_BY_OPERATOR)
@@ -910,9 +915,11 @@ class WorkerLifecycleTests(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(host, "_signal_head") as signal_head:
-            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
-                host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
+        with (
+            mock.patch.object(host, "_signal_head") as signal_head,
+            self.assertRaisesRegex(HostError, "mismatching launch identity"),
+        ):
+            host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
 
         self.assertNotIn("list", host.ops(), "the leaf is not looked up after a mismatch")
         self.assertNotIn("close", host.ops())
@@ -1078,10 +1085,12 @@ class ReviewerLifecycleTests(unittest.TestCase):
         # the head is gone, which is the stop that has to survive to the next tick.
         Path(record.review_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
 
-        with mock.patch.object(dispatcher_module, "HEAD_STOP_GRACE_SECONDS", 0.05):
-            with mock.patch.object(host, "_signal_head", lambda *a: None):
-                with self.assertRaises(HostError):
-                    host.stop_review(record, STOPPED_BY_WATCHDOG)
+        with (
+            mock.patch.object(dispatcher_module, "HEAD_STOP_GRACE_SECONDS", 0.05),
+            mock.patch.object(host, "_signal_head", lambda *a: None),
+            self.assertRaises(HostError),
+        ):
+            host.stop_review(record, STOPPED_BY_WATCHDOG)
 
         self.assertEqual(record.review_head_run["lifecycle"], "finishing")
         self.assertEqual(record.review_head_run["stopped_by"]["actor"], STOPPED_BY_WATCHDOG)
@@ -1130,9 +1139,11 @@ class ReviewerLifecycleTests(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(host, "_signal_head") as signal_head:
-            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
-                host.stop_review(record, STOPPED_BY_WATCHDOG)
+        with (
+            mock.patch.object(host, "_signal_head") as signal_head,
+            self.assertRaisesRegex(HostError, "mismatching launch identity"),
+        ):
+            host.stop_review(record, STOPPED_BY_WATCHDOG)
 
         self.assertNotIn("list", host.ops(), "the leaf is not looked up after a mismatch")
         self.assertNotIn("close", host.ops())
@@ -2203,10 +2214,12 @@ class ProductionPauseTests(unittest.TestCase):
             launched["yet"] = True
             return result
 
-        with mock.patch.object(self.runtime.production_state, "save", save):
-            with mock.patch.object(self.host, "restart_worker", restart):
-                with self.assertRaises(OSError):
-                    self.runtime.resume_pipeline(actor="operator")
+        with (
+            mock.patch.object(self.runtime.production_state, "save", save),
+            mock.patch.object(self.host, "restart_worker", restart),
+            self.assertRaises(OSError),
+        ):
+            self.runtime.resume_pipeline(actor="operator")
 
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
         self.assertEqual(self.record().launch_intent["action"], "worker-resume")
@@ -2563,13 +2576,17 @@ class CommandHostStopWorkspaceTests(unittest.TestCase):
             ),
         )
 
-        with mock.patch.object(host, "_signal_head") as signal_head:
-            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
-                host.stop_workspace(self.record)
+        with (
+            mock.patch.object(host, "_signal_head") as signal_head,
+            self.assertRaisesRegex(HostError, "mismatching launch identity"),
+        ):
+            host.stop_workspace(self.record)
 
         self.assertFalse(host.calls, "the workspace stop is fenced before Orca is called")
         signal_head.assert_not_called()
         self.assertIsNone(foreign.poll())
+
+
 class ReviewPaneTests(unittest.TestCase):
     """secretary-651: the reviewer runs in a visible split pane of the worker's own worktree."""
 
@@ -2781,5 +2798,3 @@ class ReviewPaneTests(unittest.TestCase):
         self.assertEqual(
             host.call_for("close")[host.call_for("close").index("--terminal") + 1], "term-review"
         )
-
-

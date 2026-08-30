@@ -48,9 +48,7 @@ from secretary.sprints import (
     sprint_admission_lock,
 )
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
-from tests.fakes.board import BatchedCalls
-from tests.fakes.sprints import ProductSprintKanboard, SprintFixture, SprintKanboard, _write_project_registry
-from tests.head_registry import write_installed_pair
+from tests.fakes.sprints import SprintFixture, SprintKanboard
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON, close_decisions
 
@@ -2939,7 +2937,7 @@ class SprintTests(SprintFixture):
             reason="",
             request_id="repair-done-move",
         )
-        done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
+        next(task for task in self.client.tasks if task["reference"] == done["ref"])
         original_call = self.client.call
         lost = False
 
@@ -4138,12 +4136,12 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
 
     def test_pending_sprint_recovery_rebuilds_its_project_index(self) -> None:
         """A create that could not commit its audit is finished by its own request id."""
-        create = dict(
-            goal="recovered",
-            repositories=["recovered"],
-            reference="sprint:recovered",
-            request_id="recover-sprint-index",
-        )
+        create = {
+            "goal": "recovered",
+            "repositories": ["recovered"],
+            "reference": "sprint:recovered",
+            "request_id": "recover-sprint-index",
+        }
         with mock.patch.object(self.sprints.audit, "append", side_effect=OSError("disk full")):
             with self.assertRaisesRegex(TaskError, "pending repair") as pending:
                 self.sprints.restore_create(**create)

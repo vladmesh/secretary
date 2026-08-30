@@ -270,27 +270,7 @@ def _write_project_registry(root: Path, *projects: str) -> Path:
 # Opening a sprint resolves its declared observer against this installation's head snapshot, the
 # same file the dispatcher launches from, so the fixture instance owns a real one. `retired-observer`
 # is deliberately absent: it is the profile the tests declare when they want an unknown one.
-HEAD_SNAPSHOT = "\n".join(
-    [
-        "resources:",
-        "  openai-sub:",
-        "    account: openai-subscription",
-        "  claude-sub:",
-        "    account: claude-subscription",
-        "profiles:",
-        "  codex-observer:",
-        "    adapter: codex",
-        "    resource: openai-sub",
-        "  claude-observer:",
-        "    adapter: claude",
-        "    resource: claude-sub",
-        "role_defaults:",
-        "  new_card: codex-observer",
-        "  reviewer: codex-observer",
-        "  observer: codex-observer",
-        "",
-    ]
-)
+HEAD_SNAPSHOT = "resources:\n  openai-sub:\n    account: openai-subscription\n  claude-sub:\n    account: claude-subscription\nprofiles:\n  codex-observer:\n    adapter: codex\n    resource: openai-sub\n  claude-observer:\n    adapter: claude\n    resource: claude-sub\nrole_defaults:\n  new_card: codex-observer\n  reviewer: codex-observer\n  observer: codex-observer\n"
 
 
 def _write_head_registry(instance: Path) -> Path:

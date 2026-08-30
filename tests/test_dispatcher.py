@@ -6,7 +6,6 @@ import inspect
 import json
 import os
 import shlex
-import signal
 import subprocess
 import sys
 import tempfile
@@ -20,7 +19,7 @@ from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
 from secretary import role_env
-from secretary._fsutil import file_lock, try_file_lock
+from secretary._fsutil import try_file_lock
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
@@ -30,10 +29,6 @@ from secretary.dispatch.head_vitality_episode import (
     VitalityVerdict,
 )
 from secretary.dispatcher import (
-    STOPPED_BY_OPERATOR,
-    STOPPED_BY_RECONCILIATION,
-    STOPPED_BY_REPLACEMENT,
-    STOPPED_BY_REVIEW_FREEZE,
     STOPPED_BY_REVIEW_VERDICT,
     STOPPED_BY_WATCHDOG,
     CommandHostRuntime,
@@ -56,7 +51,7 @@ from secretary.dispatcher_gate import (
     _backend_call,
     _pr_digest,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
+from secretary.dispatcher_heartbeat import run_heartbeat_identity
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
     _decision_record_line,
@@ -81,14 +76,10 @@ from secretary.dispatcher_launcher import (
 )
 from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_review import (
-    recover_review_launch,
-)
-from secretary.dispatcher_review import (
     start_review as start_reviewer,
 )
 from secretary.dispatcher_state import (
     DispatcherRecord,
-    now_rfc3339,
 )
 from secretary.projects.contract import (
     CANNOT_ATTEST_PROJECT,
@@ -110,9 +101,7 @@ from secretary.dispatcher_tui import (
 )
 from secretary.dispatcher_types import (
     GateTransportError,
-    HeadLaunchAborted,
     HeadPaneNotReady,
-    review_pane_label,
 )
 from secretary.dispatcher_watchdog import (
     BRING_UP_DEFER_ATTEMPTS_DEFAULT,
@@ -120,9 +109,7 @@ from secretary.dispatcher_watchdog import (
     INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
-    bind_head_heartbeat,
     bring_up_defer_attempts,
-    head_process_status,
     idle_stall_seconds,
     initial_output_stall_seconds,
     pid_file_path,
@@ -152,27 +139,21 @@ from tests.dispatcher_fixtures import (
     DispatcherRuntimeFixture,
     PromptAfterStartCatalog,
     RecordingReviewHost,
-    clear_env as _clear_env,
     ensure_attempt,
     write_heartbeat,
+)
+from tests.dispatcher_fixtures import (
+    clear_env as _clear_env,
 )
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeCheckpoint,
-    FakeHost,
     FakeKanboard,
     FakePusher,
-    FakeSprints,
     _configure_production_shaped_codex_relaunch,
     _legacy_unbound_v1_run,
 )
-from tests.fanout_fixtures import accepted_transport_run
 from tests.integration_setup import require_disposable_board_fixture
-from tests.observer_identity import bind_observer
-from triggered_agents.runtime.agent_prompt_transport import (
-    BRACKETED_PASTE_END,
-    BRACKETED_PASTE_START,
-)
 from triggered_agents.runtime.head import (
     HEAD_DRAINING,
     HEAD_OK,
@@ -182,17 +163,14 @@ from triggered_agents.runtime.head import (
     HeadSpec,
     TaskRef,
     render_head_command,
-    with_pid_heartbeat,
     wrap_role_command,
 )
 from triggered_agents.runtime.head import operations as head_ops
-from triggered_agents.runtime.pane_host import PaneSplitSourceMissing
 from triggered_agents.runtime.prompt_document import (
     NUDGE_FILE_MODE,
     NUDGE_MAX_BYTES,
     PromptDocumentError,
 )
-from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
 
 
 def setUpModule() -> None:
@@ -1657,7 +1635,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
         self.assertEqual(claimed["pilot_ref"], "other-1")
         self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
         self.assertEqual(self.reader.show("other-1")["state"], "in_progress")
@@ -1745,7 +1723,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             [action["status"] for action in result["actions"] if action.get("step") == "production-recovery"],
             ["blocked"],
         )
-        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
         self.assertEqual(claimed["pilot_ref"], "other-1")
         self.assertEqual(self.reader.show("other-1")["state"], "in_progress")
         self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
@@ -1769,7 +1747,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
         self.assertEqual(claimed["pilot_ref"], "other-1")
         self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
         self.assertEqual(
@@ -1790,7 +1768,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
         self.assertEqual(claimed["pilot_ref"], "other-1")
         self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "ready")
         self.assertEqual(
@@ -1822,7 +1800,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.head_readiness = readiness
         result = self.runtime.production_tick()
 
-        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
         self.assertEqual(claimed["pilot_ref"], "secretary-510-neighbor")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
         self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "in_progress")
@@ -1855,7 +1833,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.head_readiness = readiness
         result = self.runtime.production_tick()
 
-        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
         self.assertEqual(claimed["pilot_ref"], "secretary-510-neighbor")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
         self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "in_progress")
@@ -1884,7 +1862,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.head_readiness = readiness
         result = self.runtime.production_tick()
 
-        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
         self.assertEqual(claimed["pilot_ref"], "secretary-510-neighbor")
         self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "in_progress")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
@@ -1895,7 +1873,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
         self.assertEqual(claimed["pilot_ref"], "secretary-510-neighbor")
         self.assertEqual(claimed["skipped_ready"][0]["reason"], "steward report is not claimable")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
@@ -4763,7 +4741,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(first["action"], "gate-red-rework")
         self.assertNotIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
-        record = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         self.host.commit = "newc0ffee1234567"
         self.writer.report(
             role="worker",
@@ -4804,7 +4782,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(first["action"], "gate-red-rework")
         self.assertNotIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
-        record = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         self.host.commit = "newc0ffee1234567"
         self.writer.report(
             role="worker",
@@ -4833,7 +4811,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         first = self.tick()
         self.assertEqual(first["action"], "gate-red-rework")
 
-        record = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         self.host.commit = "newc0ffee1234567"
         self.writer.report(
             role="worker",
@@ -12035,15 +12013,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / ".env"
             env_file.write_text(
-                "\n".join(
-                    [
-                        "KANBOARD_URL=https://kanboard.example",
-                        "KANBOARD_API_USER=bot",
-                        "KANBOARD_API_TOKEN=board-token",
-                        "PANELMEM_KB_PAT=memory-token",
-                        "TA_CODEX_MODE=exec",
-                    ]
-                ),
+                "KANBOARD_URL=https://kanboard.example\nKANBOARD_API_USER=bot\nKANBOARD_API_TOKEN=board-token\nPANELMEM_KB_PAT=memory-token\nTA_CODEX_MODE=exec",
                 encoding="utf-8",
             )
 
@@ -12343,8 +12313,7 @@ def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
     result = subprocess.run(
         ["git", "merge-base", "--is-ancestor", ancestor, descendant],
         cwd=repo,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -12356,8 +12325,7 @@ def git(cwd: Path, *args: str) -> str:
         ["git", *args],
         cwd=cwd,
         check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     return result.stdout.strip()
@@ -14057,8 +14025,10 @@ class DispatcherGateTests(unittest.TestCase):
             "gh: Server Error (HTTP 502)",
             "gh: Service Unavailable (HTTP 503)",
             "fatal: unable to access 'https://x/y/': Could not resolve host: nonexistent.invalid",
-            "fatal: unable to access 'http://127.0.0.1:1/x/y/': Failed to connect to 127.0.0.1 "
-            "port 1 after 0 ms: Couldn't connect to server",
+            (
+                "fatal: unable to access 'http://127.0.0.1:1/x/y/': Failed to connect to 127.0.0.1 "
+                "port 1 after 0 ms: Couldn't connect to server"
+            ),
             "fatal: unable to access 'https://x/y/': The requested URL returned error: 503",
             "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502",
             # Nothing at all, and a wording nobody has captured yet: the default is silence.
@@ -14072,14 +14042,20 @@ class DispatcherGateTests(unittest.TestCase):
             "gh: Not Found (HTTP 404)",
             "gh: Must have admin rights to Repository. (HTTP 403)",
             "gh: Validation Failed (HTTP 422)",
-            "failed to get run: HTTP 404: Not Found "
-            "(https://api.github.com/repos/x/y/actions/runs/1?exclude_pull_requests=true)",
+            (
+                "failed to get run: HTTP 404: Not Found "
+                "(https://api.github.com/repos/x/y/actions/runs/1?exclude_pull_requests=true)"
+            ),
             "GraphQL: Could not resolve to a Repository with the name 'x/y'. (repository)",
             "pull request create failed: GraphQL: A pull request already exists for x:y.",
-            "To ../bare.git\n ! [rejected]        main -> main (fetch first)\n"
-            "error: failed to push some refs to '../bare.git'",
-            "remote: policy: branch is protected\nTo ../bare.git\n"
-            " ! [remote rejected] main -> main (pre-receive hook declined)",
+            (
+                "To ../bare.git\n ! [rejected]        main -> main (fetch first)\n"
+                "error: failed to push some refs to '../bare.git'"
+            ),
+            (
+                "remote: policy: branch is protected\nTo ../bare.git\n"
+                " ! [remote rejected] main -> main (pre-receive hook declined)"
+            ),
         )
         for text in answered:
             with self.subTest(text=text):
@@ -14109,15 +14085,7 @@ class DispatcherGateTests(unittest.TestCase):
         aggregates the others (`needs: [...]`) and echoes a generic summary after the real
         error. The fragment must come from the actually-failed job's own `##[error]` line,
         not a blind tail that lands on the aggregator's echo."""
-        run_log = "\n".join(
-            [
-                "tests\tRun pytest\tcollecting tests",
-                "tests\tRun pytest\t##[error]AssertionError: expected 2, got 3",
-                "tests\tRun pytest\t##[error]Process completed with exit code 1.",
-                "gate\tSummarize\tone or more jobs failed",
-                "gate\tSummarize\t##[error]Process completed with exit code 1.",
-            ]
-        )
+        run_log = "tests\tRun pytest\tcollecting tests\ntests\tRun pytest\t##[error]AssertionError: expected 2, got 3\ntests\tRun pytest\t##[error]Process completed with exit code 1.\ngate\tSummarize\tone or more jobs failed\ngate\tSummarize\t##[error]Process completed with exit code 1."
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
             host = GithubGateHost(
@@ -14145,12 +14113,7 @@ class DispatcherGateTests(unittest.TestCase):
         the actual Python exception above it usually carries no marker at all. Filtering the
         fragment down to `##[error]`-only lines then keeps just the completion echo and drops
         the real cause — reproduced here with the exact two-line log from the review."""
-        run_log = "\n".join(
-            [
-                "tests\tRun script\tFileNotFoundError: absent",
-                "tests\tRun script\t##[error]Process completed with exit code 1.",
-            ]
-        )
+        run_log = "tests\tRun script\tFileNotFoundError: absent\ntests\tRun script\t##[error]Process completed with exit code 1."
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
             host = GithubGateHost(
@@ -14347,11 +14310,7 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(result.status, "green")
 
     def test_github_gate_red_names_the_failed_required_check(self) -> None:
-        run_log = "\n".join(
-            [
-                "test\tRun unittest\t##[error]AssertionError: expected 2, got 3",
-            ]
-        )
+        run_log = "test\tRun unittest\t##[error]AssertionError: expected 2, got 3"
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
             host = GithubGateHost(
