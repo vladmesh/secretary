@@ -15,7 +15,9 @@ from secretary.config import DataDirError
 from secretary.dispatch import standing_agent
 from secretary.tasks import TaskError
 from triggered_agents import __main__ as triggered_main
+from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
+from triggered_agents.runtime.kanboard import KanboardUnreachable
 from triggered_agents.runtime.state import PRECHECK_BOARD_UNREACHABLE, AgentState
 
 
@@ -130,6 +132,49 @@ class StandingAgentEntrypointTests(unittest.TestCase):
         with mock.patch.object(triggered_main, "main", return_value=4) as main:
             self.assertEqual(standing_agent.main(argv), 4)
         main.assert_called_once_with(argv)
+
+    def test_retro_cleanup_port_is_lazy_and_only_passed_to_cleanup_commands(self) -> None:
+        with (
+            mock.patch.object(standing_agent.KanboardClient, "for_instance", side_effect=AssertionError("client")),
+            mock.patch.object(retro_cli, "main", return_value=8) as main,
+        ):
+            self.assertEqual(standing_agent.main(["retro", "harvest", "--json"]), 8)
+        board = main.call_args.kwargs["retention"]
+        self.assertIsNotNone(board)
+
+        with mock.patch.object(triggered_main, "main", return_value=9) as legacy:
+            self.assertEqual(standing_agent.main(["retro", "status"]), 9)
+        legacy.assert_called_once_with(["retro", "status"])
+
+    def test_retro_precheck_maps_canonical_backend_unavailable_to_101(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState("retro", state_dir=Path(tmp) / "state")
+            with (
+                mock.patch.object(retro_cli, "STATE", state),
+                mock.patch.object(
+                    standing_agent.KanboardClient,
+                    "for_instance",
+                    side_effect=TaskError("backend_unavailable", "transport unavailable", 1),
+                ),
+            ):
+                self.assertEqual(standing_agent.main(["retro", "precheck"]), PRECHECK_BOARD_UNREACHABLE)
+
+    def test_retro_late_canonical_error_is_mapped_by_the_lazy_port(self) -> None:
+        class Reader:
+            def done_retention_candidates(self):
+                raise TaskError("backend_unavailable", "late RPC", 1)
+
+        class Writer:
+            pass
+
+        with mock.patch.object(standing_agent.KanboardClient, "for_instance", return_value=object()):
+            port = standing_agent._done_retention_board()
+            with (
+                mock.patch.object(standing_agent, "TaskReader", return_value=Reader()),
+                mock.patch.object(standing_agent, "TaskWriter", return_value=Writer()),
+                self.assertRaises(KanboardUnreachable),
+            ):
+                port.close_old_done()
 
     def test_report_config_errors_remain_failures_when_a_report_is_needed(self) -> None:
         with (

@@ -11,10 +11,12 @@ import os
 import sys
 from pathlib import Path
 
+from secretary.board.done_retention import DoneRetentionBoard
 from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from secretary.config import instance_data_dir
 from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
 from triggered_agents import __main__ as triggered_main
+from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.runtime import dispatch
 from triggered_agents.runtime.kanboard import KanboardUnreachable
@@ -65,6 +67,17 @@ def _report_board() -> StewardReportBoard:
     return StewardReportBoard(board_factory=build)
 
 
+def _done_retention_board() -> DoneRetentionBoard:
+    """Construct no config/client/audit state until retro actually cleans Done."""
+
+    def build() -> tuple[TaskReader, TaskWriter]:
+        instance = _instance_path()
+        client = KanboardClient.for_instance(instance)
+        return TaskReader(client), TaskWriter(client, data_dir=_data_dir(instance))
+
+    return DoneRetentionBoard(board_factory=build, error_mapper=_map_signal_error)
+
+
 def _steward(argv: list[str]) -> int:
     command = argv[0] if argv else "help"
     if command != "dispatch":
@@ -82,10 +95,21 @@ def _steward(argv: list[str]) -> int:
     return dispatch.run("steward", parsed.variant, report_board=_report_board())
 
 
+def _retro(argv: list[str]) -> int:
+    command = argv[0] if argv else "help"
+    if command in {"precheck", "harvest"}:
+        return retro_cli.main(argv, retention=_done_retention_board())
+    return triggered_main.main(["retro", *argv])
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run ``<agent> <cmd> [args]`` through the alternative composition root."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] != "steward":
+    if not argv:
+        return triggered_main.main(argv)
+    if argv[0] == "retro":
+        return _retro(argv[1:])
+    if argv[0] != "steward":
         return triggered_main.main(argv)
     return _steward(argv[1:])
 
