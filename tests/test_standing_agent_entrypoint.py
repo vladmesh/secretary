@@ -167,14 +167,16 @@ class StandingAgentEntrypointTests(unittest.TestCase):
         class Writer:
             pass
 
-        with mock.patch.object(standing_agent.KanboardClient, "for_instance", return_value=object()):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": tmp}, clear=False),
+            mock.patch.object(standing_agent.KanboardClient, "for_instance", return_value=object()),
+            mock.patch.object(standing_agent, "TaskReader", return_value=Reader()),
+            mock.patch.object(standing_agent, "TaskWriter", return_value=Writer()),
+            self.assertRaises(KanboardUnreachable),
+        ):
             port = standing_agent._done_retention_board()
-            with (
-                mock.patch.object(standing_agent, "TaskReader", return_value=Reader()),
-                mock.patch.object(standing_agent, "TaskWriter", return_value=Writer()),
-                self.assertRaises(KanboardUnreachable),
-            ):
-                port.close_old_done()
+            port.close_old_done()
 
     def test_report_config_errors_remain_failures_when_a_report_is_needed(self) -> None:
         with (
