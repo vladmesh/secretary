@@ -13,7 +13,19 @@ suite, then runs these seven named jobs in parallel:
 | integration-board | test / integration-board | Board, dispatcher and Pipeline integration flows. |
 | packaging | test / packaging | Bootstrap, installation, provisioning and upgrade flows. |
 
-The test job remains the aggregate required result and succeeds only when every suite succeeds.
+Each exact-SHA suite execution writes its GitHub step summary and uploads the
+`ci-evidence-<suite>-<sha>` artifact. Its artifact root contains `report.json`, `junit.xml` and
+`test-output.log`; the log contains all output up to 1,000,000 bytes and carries an explicit
+truncation marker if it reaches that boundary. Artifacts, including the JUnit XML, are retained for
+14 days. The summary names the candidate SHA, outcome, counts, duration, slowest tests and concise
+failure locations.
+
+The test job remains the aggregate required result and succeeds only when every applicable suite
+succeeds. Its own summary lists each suite as `success`, `product_failure`,
+`infrastructure_failure`, `cancelled` or `not_applicable`. A failing test is a product failure;
+missing, malformed or unwritable JSON/JUnit/log evidence is an infrastructure failure. Cancelled
+matrix work is never treated as success, while routing that explicitly skips a suite is recorded as
+not applicable rather than a test failure.
 The manifest owns the taxonomy: every top-level tests/test_*.py file must occur once, under one
 of those names. Unknown names, missing files, stale entries, duplicate entries and empty suites
 make the manifest invalid before a selected suite starts.

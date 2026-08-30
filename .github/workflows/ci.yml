@@ -21,7 +21,35 @@ jobs:
           python-version: "3.12"
       - run: python3 -m pip install --upgrade pip
       - run: python3 -m pip install -e '.[memory]'
-      - run: python3 scripts/ci_test_shards.py --suite "${{ matrix.suite }}"
+      - name: Run reported suite
+        id: run_suite
+        continue-on-error: true
+        run: >-
+          python3 scripts/ci_test_shards.py --suite "${{ matrix.suite }}"
+          --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
+          --candidate-sha "$GITHUB_SHA"
+      - name: Write suite evidence summary
+        if: ${{ always() }}
+        continue-on-error: true
+        run: >-
+          python3 scripts/ci_test_shards.py --summary
+          --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
+          >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload suite JUnit and bounded log
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-${{ matrix.suite }}-${{ github.sha }}
+          path: ${{ runner.temp }}/ci-evidence/${{ matrix.suite }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve suite result
+        if: ${{ always() }}
+        run: >-
+          python3 scripts/ci_test_shards.py --summary
+          --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
+          > /dev/null
 
   test:
     name: test
@@ -29,7 +57,20 @@ jobs:
     needs: test_suites
     runs-on: ubuntu-latest
     steps:
-      - name: Require every test suite
+      - uses: actions/checkout@v4
+      - name: Download suite evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ci-evidence-*
+          path: ${{ runner.temp }}/ci-evidence
+          merge-multiple: false
+      - name: Require and classify every test suite
         env:
           SUITES_RESULT: ${{ needs.test_suites.result }}
-        run: test "$SUITES_RESULT" = success
+        run: >-
+          python3 scripts/ci_test_shards.py --aggregate
+          --evidence-dir "$RUNNER_TEMP/ci-evidence"
+          --needs-result "$SUITES_RESULT"
+          >> "$GITHUB_STEP_SUMMARY"

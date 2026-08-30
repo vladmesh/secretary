@@ -6,23 +6,36 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
 
 from scripts.ci_test_shards import (
+    EVIDENCE_FILES,
     FAST_MODULES,
     SUITES,
+    BoundedTee,
     ManifestError,
+    SuiteEvidence,
+    TestRecord,
+    _read_evidence,
+    _write_evidence,
+    aggregate_evidence,
     fast_environment,
     load_manifest,
     main,
     modules,
+    report_summary,
     run_bounded,
     run_fast,
+    run_reported_suite,
+    run_suite_with_evidence,
     validate_fast_profile,
 )
+
+CANDIDATE_SHA = "a" * 40
 
 
 class CiTestSuiteManifestTests(unittest.TestCase):
@@ -244,6 +257,147 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertIn("python3 scripts/ci_test_shards.py --suite", workflow)
         self.assertIn("needs: test_suites", workflow)
         self.assertIn("name: test", workflow)
+
+    def _write_report(self, directory: Path, evidence: SuiteEvidence) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        log = BoundedTee(StringIO(), directory / "test-output.log")
+        log.write("test output\n")
+        _write_evidence(directory, evidence, log)
+
+    def _evidence(self, suite: str, outcome: str = "success") -> SuiteEvidence:
+        return SuiteEvidence(
+            suite,
+            CANDIDATE_SHA,
+            outcome,
+            {
+                "collected": 3,
+                "passed": 2,
+                "failed": 1 if outcome == "product_failure" else 0,
+                "error": 0,
+                "skipped": 0,
+            },
+            1.25,
+            [TestRecord("tests.example.Case.test_slow", "tests.example.Case", "test_slow", 1.0)],
+            ["tests.example.Case.test_slow: tests/example.py:12"] if outcome == "product_failure" else [],
+        )
+
+    def test_reported_runner_writes_exact_paths_and_product_failure_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            module = root / "sample_suite.py"
+            module.write_text(
+                "import unittest\n"
+                "class Sample(unittest.TestCase):\n"
+                "    def test_pass(self): self.assertTrue(True)\n"
+                "    def test_fail(self): self.fail('broken')\n",
+                encoding="utf-8",
+            )
+            report_dir = root / "artifacts" / "unit"
+            report_dir.mkdir(parents=True)
+            sys.path.insert(0, str(root))
+            try:
+                with patch("scripts.ci_test_shards.modules", return_value=["sample_suite"]):
+                    log = BoundedTee(StringIO(), report_dir / "test-output.log")
+                    evidence = run_reported_suite("unit", ["ignored"], CANDIDATE_SHA, log)
+                    _write_evidence(report_dir, evidence, log)
+            finally:
+                sys.path.remove(str(root))
+                sys.modules.pop("sample_suite", None)
+
+            self.assertEqual(evidence.outcome, "product_failure")
+            self.assertEqual(
+                evidence.counts, {"collected": 2, "passed": 1, "failed": 1, "error": 0, "skipped": 0}
+            )
+            self.assertEqual({path.name for path in report_dir.iterdir()}, set(EVIDENCE_FILES))
+            self.assertEqual(_read_evidence(report_dir).candidate_sha, CANDIDATE_SHA)
+            junit = ElementTree.parse(report_dir / "junit.xml").getroot()
+            self.assertEqual(junit.attrib["failures"], "1")
+            self.assertEqual(len(junit.findall("testcase")), 2)
+            self.assertIn("sample_suite.Sample.test_fail", evidence.failure_locations[0])
+
+    def test_reported_runner_writes_success_evidence_and_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "passing_suite.py").write_text(
+                "import unittest\n"
+                "class Passing(unittest.TestCase):\n"
+                "    def test_pass(self): self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            report_dir = root / "artifacts" / "unit"
+            report_dir.mkdir(parents=True)
+            sys.path.insert(0, str(root))
+            try:
+                with patch("scripts.ci_test_shards.modules", return_value=["passing_suite"]):
+                    log = BoundedTee(StringIO(), report_dir / "test-output.log")
+                    evidence = run_reported_suite("unit", ["ignored"], CANDIDATE_SHA, log)
+                    _write_evidence(report_dir, evidence, log)
+            finally:
+                sys.path.remove(str(root))
+                sys.modules.pop("passing_suite", None)
+
+            summary = StringIO()
+            with redirect_stdout(summary):
+                self.assertEqual(report_summary(report_dir), 0)
+
+        self.assertEqual(evidence.outcome, "success")
+        self.assertIn("Candidate SHA", summary.getvalue())
+        self.assertIn("collected 1, passed 1", summary.getvalue())
+
+    def test_bounded_log_keeps_a_marker_after_its_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test-output.log"
+            log = BoundedTee(StringIO(), path, maximum_bytes=5)
+            log.write("abcdefgh")
+            log.close()
+            content = path.read_text(encoding="utf-8")
+
+        self.assertTrue(log.truncated)
+        self.assertTrue(content.startswith("abcde"))
+        self.assertIn("truncated at 1000000 bytes", content)
+
+    def test_reported_manifest_or_report_failure_is_infrastructure_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "report"
+            with patch("scripts.ci_test_shards.load_manifest", side_effect=ManifestError("bad manifest")):
+                self.assertEqual(run_suite_with_evidence(Path(tmp), "unit", report_dir, CANDIDATE_SHA), 3)
+
+            evidence = _read_evidence(report_dir)
+            self.assertEqual(evidence.outcome, "infrastructure_failure")
+            (report_dir / "junit.xml").unlink()
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(report_summary(report_dir), 3)
+
+    def test_cancelled_run_is_recorded_as_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = BoundedTee(StringIO(), Path(tmp) / "test-output.log")
+            with patch("scripts.ci_test_shards.unittest.TextTestRunner.run", side_effect=KeyboardInterrupt):
+                evidence = run_reported_suite("unit", ["tests/test_any.py"], CANDIDATE_SHA, log)
+            log.close()
+
+        self.assertEqual(evidence.outcome, "cancelled")
+
+    def test_aggregate_separates_product_infrastructure_cancellation_and_not_applicable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for suite in SUITES:
+                self._write_report(root / suite, self._evidence(suite))
+            self._write_report(root / "unit", self._evidence("unit", "product_failure"))
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(aggregate_evidence(root, "failure"), 1)
+
+            (root / "component" / "report.json").unlink()
+            with redirect_stdout(StringIO()):
+                self.assertEqual(aggregate_evidence(root, "failure"), 3)
+            for suite in SUITES:
+                report = root / suite / "report.json"
+                if report.exists():
+                    report.unlink()
+            with redirect_stdout(StringIO()):
+                self.assertEqual(aggregate_evidence(root, "cancelled"), 130)
+
+            with redirect_stdout(StringIO()):
+                self.assertEqual(aggregate_evidence(root, "skipped"), 0)
 
 
 if __name__ == "__main__":
