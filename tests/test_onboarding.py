@@ -23,6 +23,8 @@ def _schema_sample(spec: dict) -> object:
         return spec["enum"][0]
     kind = spec.get("type")
     if kind == "string":
+        if spec.get("pattern") == "^/":
+            return "/carried-over-value"
         return "carried-over-value"
     if kind == "integer":
         return spec.get("minimum", 0) + 1

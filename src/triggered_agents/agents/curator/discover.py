@@ -66,6 +66,23 @@ def _normalized_directory(value: str | Path, *, strict: bool) -> Path | None:
         return None
 
 
+def _normalized_absolute_path(value: str | Path) -> Path | None:
+    """Normalize an absolute recorded cwd without requiring its leaf to survive.
+
+    Curator input is historical.  Dispatcher worktrees are deliberately removed after a
+    card completes, so requiring the recorded cwd to remain a directory would erase the
+    otherwise unambiguous project boundary from old sessions.  The path is data used for
+    routing, not filesystem authority: relative and malformed values remain unknown.
+    """
+    try:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            return None
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def project_bindings(instance: Path | None = None) -> list[dict]:
     """Read usable canonical bindings from the selected instance registry.
 
@@ -101,6 +118,17 @@ def project_bindings(instance: Path | None = None) -> list[dict]:
             and orca_binding not in {".", ".."}
         ):
             route["orca_binding"] = orca_binding
+        curator_roots = binding.get("curator_roots")
+        if isinstance(curator_roots, list):
+            roots = []
+            for value in curator_roots:
+                if not isinstance(value, str):
+                    continue
+                normalized = _normalized_absolute_path(value)
+                if normalized is not None:
+                    roots.append(str(normalized))
+            if roots:
+                route["curator_roots"] = tuple(dict.fromkeys(roots))
         result.append(route)
     return result
 
@@ -124,7 +152,7 @@ def _workspace_root() -> Path:
 
 def _observer_reference(cwd: Path) -> str | None:
     """Extract an observer's sprint reference only from its canonical workspace shape."""
-    root = _normalized_directory(_workspace_root() / "observers", strict=False)
+    root = _normalized_absolute_path(_workspace_root() / "observers")
     if root is None or not _within(cwd, root):
         return None
     relative = cwd.relative_to(root)
@@ -144,7 +172,7 @@ def _observer_route(reference: str, instance: Path, known_ids: set[str]) -> str:
         )
     # Board reachability is not curator work.  A failure to read the structured record is
     # deliberately an unknown route, never an exception that suppresses other discovery.
-    except Exception:
+    except Exception:  # noqa: BLE001 - every board transport/schema failure is an unknown route
         return ROUTE_UNKNOWN
     reservations = sprint.get("reservations") if isinstance(sprint, dict) else None
     if not isinstance(reservations, list) or len(reservations) != 1 or not isinstance(reservations[0], str):
@@ -161,7 +189,7 @@ def resolve_route(cwd: str, *, instance: Path | None = None, global_source: bool
     """
     if global_source:
         return ROUTE_GLOBAL
-    candidate = _normalized_directory(cwd, strict=False) if cwd else None
+    candidate = _normalized_absolute_path(cwd) if cwd else None
     if candidate is None:
         return ROUTE_UNKNOWN
     instance = instance_dir(instance or selected_instance())
@@ -176,14 +204,20 @@ def resolve_route(cwd: str, *, instance: Path | None = None, global_source: bool
     for binding in bindings:
         repo = _normalized_directory(binding["repo"], strict=True)
         orca_binding = binding.get("orca_binding")
-        workspace = _normalized_directory(root / orca_binding, strict=False) if root and orca_binding else None
-        if (repo and _within(candidate, repo)) or (workspace and _within(candidate, workspace)):
+        workspace = _normalized_absolute_path(root / orca_binding) if root and orca_binding else None
+        curator_roots = (_normalized_absolute_path(value) for value in binding.get("curator_roots", ()))
+        if (
+            (repo and _within(candidate, repo))
+            or (workspace and _within(candidate, workspace))
+            or any(alias and _within(candidate, alias) for alias in curator_roots)
+        ):
             matches.append(binding["id"])
     return matches[0] if len(matches) == 1 else ROUTE_UNKNOWN
 
 
 def _with_route(source: dict, *, global_source: bool = False) -> dict:
     return {**source, "route": resolve_route(source.get("cwd", ""), global_source=global_source)}
+
 
 def curator_workspace() -> Path:
     """The one workspace this curator run must not feed back into itself."""
@@ -289,7 +323,11 @@ def hermes_sessions() -> list[dict]:
         cwd = cwd or ""
         if _excluded(cwd, session_id):
             continue
-        out.append(_with_route({"head": "hermes", "path": str(HERMES_STATE_DB), "session_id": session_id, "cwd": cwd}))
+        out.append(
+            _with_route(
+                {"head": "hermes", "path": str(HERMES_STATE_DB), "session_id": session_id, "cwd": cwd}
+            )
+        )
     return out
 
 
@@ -327,7 +365,9 @@ def codex_sessions() -> list[dict]:
         cwd = meta["cwd"]
         if _excluded(cwd, meta["session_id"]):
             continue
-        out.append(_with_route({"head": "codex", "path": str(f), "session_id": meta["session_id"], "cwd": cwd}))
+        out.append(
+            _with_route({"head": "codex", "path": str(f), "session_id": meta["session_id"], "cwd": cwd})
+        )
     return out
 
 

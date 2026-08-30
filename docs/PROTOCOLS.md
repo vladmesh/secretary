@@ -1689,7 +1689,7 @@ python3 -P -m secretary project gate ...
 
 A project's identity is set once by the top-level binding: `id`, `repo`, `adapter`, `default_branch`. The
 binding's mutable `plane`, `policy` and `remote` fields are not part of identity and are carried over into
-the rewritten binding by a repeat `project add`, as is `orca_binding`. The scanner and provisioning prepare
+the rewritten binding by a repeat `project add`, as are `orca_binding` and curator-only `curator_roots`. The scanner and provisioning prepare
 changes but do not enable a binding. Enabling is allowed only through a passing gate tied to verified
 revisions, a provision run and a write set. A higher-level resumable workflow is a roadmap milestone.
 
@@ -1718,8 +1718,10 @@ fact is one distilled markdown record. The curator is the writer role; every oth
 Curator input is a bounded, two-phase batch protocol. Before selection, each source receives a route from the
 selected instance's project registry: a normalized descendant of one registered `repo` is its canonical `id`; a
 safe optional `orca_binding` additionally supplies that binding's Orca workspace tree
-(`<workspaces root>/<orca_binding>/...`). Exact directory boundaries and an unambiguous route are required. Empty,
-missing, unreadable, malformed, unregistered or ambiguous paths are
+(`<workspaces root>/<orca_binding>/...`). That durable boundary still routes a recorded historical cwd after the
+per-card worktree leaf has been removed. A binding may additionally declare absolute `curator_roots` for named
+ad-hoc historical checkout trees; these roots affect curator input only and grant no execution authority. Exact
+directory boundaries and an unambiguous route are required. Empty, relative, unreadable, malformed, unregistered or ambiguous paths are
 `unknown`; installation-wide sources are `global`. An observer workspace named
 `workspaces/observers/sprint-<token>` restores the `sprint:` prefix removed by the dispatcher's token before it
 consults the board. It has no inferred owner: it is project-routed only when its readable sprint record has exactly
