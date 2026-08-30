@@ -641,6 +641,21 @@ def _suite_coverage_data(coverage_dir: Path, candidate_sha: str) -> list[Path]:
     return paths
 
 
+def _validate_coverage_datum(path: Path) -> None:
+    """Reject corrupt or incompatible coverage databases before combining."""
+    try:
+        from coverage import CoverageData
+        from coverage.exceptions import CoverageException
+    except ImportError as exc:
+        raise CoverageError("coverage.py is unavailable for aggregate validation") from exc
+    try:
+        data = CoverageData(basename=str(path))
+        data.read()
+        data.measured_files()
+    except (CoverageException, OSError, ValueError) as exc:
+        raise CoverageError(f"unreadable or incompatible raw coverage datum at {path}: {exc}") from exc
+
+
 def _run_coverage(command: list[str], root: Path) -> None:
     try:
         subprocess.run(command, cwd=root, capture_output=True, check=True, text=True)
@@ -777,34 +792,41 @@ def aggregate_coverage(
         candidate_sha = _exact_sha(candidate_sha, "candidate SHA")
         _candidate_checkout(root, candidate_sha)
         raw_data = _suite_coverage_data(coverage_dir, candidate_sha)
+        for path in raw_data:
+            _validate_coverage_datum(path)
         output_dir.mkdir(parents=True, exist_ok=True)
-        combined_data = output_dir / ".coverage.combined"
-        raw_json = output_dir / ".coverage.native.json"
-        _run_coverage(
-            [
-                sys.executable,
-                "-m",
-                "coverage",
-                "combine",
-                "--data-file",
-                str(combined_data),
-                *map(str, raw_data),
-            ],
-            root,
-        )
-        _run_coverage(
-            [
-                sys.executable,
-                "-m",
-                "coverage",
-                "json",
-                "--data-file",
-                str(combined_data),
-                "-o",
-                str(raw_json),
-            ],
-            root,
-        )
+        with tempfile.TemporaryDirectory(prefix="secretary-coverage-") as work:
+            # coverage combine recognizes inputs by the basename set through
+            # --data-file. Keep that basename aligned with coverage.<suite>,
+            # while keeping its intermediate SQLite data outside the published
+            # aggregate artifact directory.
+            combined_data = Path(work) / "coverage"
+            raw_json = output_dir / ".coverage.native.json"
+            _run_coverage(
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "combine",
+                    "--data-file",
+                    str(combined_data),
+                    *map(str, raw_data),
+                ],
+                root,
+            )
+            _run_coverage(
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "json",
+                    "--data-file",
+                    str(combined_data),
+                    "-o",
+                    str(raw_json),
+                ],
+                root,
+            )
         coverage = _coverage_payload(raw_json)
         if base_sha:
             changed_report = _changed_line_report(

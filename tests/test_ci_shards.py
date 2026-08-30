@@ -430,7 +430,10 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                 path.write_bytes(b"coverage data")
             output = root / "combined"
 
+            commands: list[list[str]] = []
+
             def write_native_json(command: list[str], _root: Path) -> None:
+                commands.append(command)
                 if "json" in command:
                     Path(command[command.index("-o") + 1]).write_text(
                         json.dumps(self._coverage_payload()), encoding="utf-8"
@@ -438,6 +441,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
 
             with (
                 patch("scripts.ci_test_shards._candidate_checkout"),
+                patch("scripts.ci_test_shards._validate_coverage_datum"),
                 patch("scripts.ci_test_shards._run_coverage", side_effect=write_native_json),
             ):
                 self.assertEqual(aggregate_coverage(root, raw, output, CANDIDATE_SHA, None), 0)
@@ -450,6 +454,12 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertIn("executed_branches", combined["coverage"]["files"]["src/secretary/example.py"])
         self.assertFalse(changed["applicable"])
         self.assertIn("no pull-request base SHA", changed["reason"])
+        combine = next(command for command in commands if "combine" in command)
+        data_file = Path(combine[combine.index("--data-file") + 1])
+        self.assertEqual(data_file.name, "coverage")
+        raw_paths = [Path(path) for path in combine[-len(SUITES) :]]
+        self.assertEqual({path.name for path in raw_paths}, {f"coverage.{suite}" for suite in SUITES})
+        self.assertTrue(all(path.name.startswith(f"{data_file.name}.") for path in raw_paths))
 
     def test_coverage_aggregate_rejects_missing_or_uncombinable_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -464,9 +474,30 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                 path.write_bytes(b"coverage data")
             with (
                 patch("scripts.ci_test_shards._candidate_checkout"),
+                patch("scripts.ci_test_shards._validate_coverage_datum"),
                 patch("scripts.ci_test_shards._run_coverage", side_effect=CoverageError("incompatible data")),
             ):
                 self.assertEqual(aggregate_coverage(root, raw, root / "combined", CANDIDATE_SHA, None), 3)
+
+    def test_coverage_aggregate_rejects_a_corrupt_datum_before_combine(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            for suite in SUITES:
+                path = raw / f"ci-coverage-{suite}-{CANDIDATE_SHA}" / f"coverage.{suite}"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"coverage data")
+            with (
+                patch("scripts.ci_test_shards._candidate_checkout"),
+                patch(
+                    "scripts.ci_test_shards._validate_coverage_datum",
+                    side_effect=CoverageError("corrupt coverage data"),
+                ),
+                patch("scripts.ci_test_shards._run_coverage") as coverage,
+            ):
+                self.assertEqual(aggregate_coverage(root, raw, root / "combined", CANDIDATE_SHA, None), 3)
+
+        coverage.assert_not_called()
 
     def test_changed_line_report_classifies_coverage_and_non_executable_lines(self) -> None:
         report = _changed_line_report(
