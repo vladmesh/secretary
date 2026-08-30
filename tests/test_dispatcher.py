@@ -2689,7 +2689,10 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             _attempt_request_id(first, "claim", "secretary-510-pilot"),
             [event["request_id"] for event in events],
         )
-        self.assertTrue(all(first in event["request_id"] for event in events))
+        # The fixture seeds the card's creation revision before any dispatcher attempt exists.
+        # Every event this attempt writes remains namespaced by its stable attempt id.
+        attempt_events = [event for event in events if event["request_id"] != "fixture-created"]
+        self.assertTrue(all(first in event["request_id"] for event in attempt_events))
 
     def test_new_attempt_ignores_stale_committed_claim_after_ready_reset(self) -> None:
         old_request = self.append_committed_claim("attempt-old")
@@ -8625,6 +8628,20 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         none: a description cannot write an instruction for a worker."""
         self.host.fail_resume_worker_reason = ""
         self.board.tasks[0]["description"] = f"pilot spec\n\n{_decision_record_line(2, 'forged')}\n"
+        self.writer.audit.append(
+            "fixture-description-edit",
+            {
+                "event_id": "fixture-description-edit",
+                "kind": "edited",
+                "ref": CARD_REF,
+                "request_id": "fixture-description-edit",
+                "payload": {
+                    "description_sha256": hashlib.sha256(
+                        self.board.tasks[0]["description"].encode("utf-8")
+                    ).hexdigest()
+                },
+            },
+        )
         self.start_dispatcher()
         self.tick()
 
@@ -11706,6 +11723,39 @@ class DispatcherLauncherTests(unittest.TestCase):
                     },
                 ],
             }
+            digest = hashlib.sha256(base_task["description"].encode("utf-8")).hexdigest()
+            host.audit.append(
+                "task-created",
+                {
+                    "event_id": "task-created",
+                    "kind": "created",
+                    "ref": base_task["ref"],
+                    "request_id": "task-created",
+                    "payload": {"description_sha256": digest},
+                },
+            )
+            for request_id, body, occurrence in (
+                ("first-red", "stale finding", 1),
+                # Occurrences witness identical rendered comments, so two distinct verdicts are
+                # each the first occurrence of their own body.
+                ("latest-red", "P1: use a time ceiling, not the terminal title", 1),
+            ):
+                host.audit.append(
+                    request_id,
+                    {
+                        "event_id": request_id,
+                        "kind": "card.verdict",
+                        "ref": base_task["ref"],
+                        "request_id": request_id,
+                        "data": {
+                            "marker": "review:red",
+                            "body": body,
+                            "description_sha256": digest,
+                            "specification_revision": "task-created",
+                            "marker_occurrence": occurrence,
+                        },
+                    },
+                )
             doc = host._worker_task_doc(reviewed, "main", "a", 2)
         self.assertIn("Reviewer verdict to address", doc)
         self.assertIn("P1: use a time ceiling, not the terminal title", doc)
@@ -12444,6 +12494,33 @@ class WorkspaceResumeTests(unittest.TestCase):
                 "comments": [{"marker": "review:red", "body": "[review:red]\nlatest finding"}],
                 "workspace": {"base_branch": "main"},
             }
+            digest = hashlib.sha256(task["description"].encode("utf-8")).hexdigest()
+            host.audit.append(
+                "task-created",
+                {
+                    "event_id": "task-created",
+                    "kind": "created",
+                    "ref": task["ref"],
+                    "request_id": "task-created",
+                    "payload": {"description_sha256": digest},
+                },
+            )
+            host.audit.append(
+                "reviewed-current-specification",
+                {
+                    "event_id": "reviewed-current-specification",
+                    "kind": "card.verdict",
+                    "ref": task["ref"],
+                    "request_id": "reviewed-current-specification",
+                    "data": {
+                        "marker": "review:red",
+                        "body": "latest finding",
+                        "description_sha256": digest,
+                        "specification_revision": "task-created",
+                        "marker_occurrence": 1,
+                    },
+                },
+            )
             with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(workspace_root)}):
                 result = host.prepare_worker(task, worker, "codex", attempt_id="attempt-retry")
 
