@@ -26,9 +26,7 @@ from unittest import mock
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary import dispatcher as dispatcher_module
-from tests.test_dispatcher import (
-    DispatcherRuntimeFixture,
-)
+from tests.dispatcher_fixtures import DispatcherRuntimeFixture
 
 
 def _refuse_everything(_episode, action, _now, **_kwargs):

@@ -15,36 +15,8 @@ from secretary.board.transitions import BoardProtocolError
 from secretary.cli import main
 from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskAudit, TaskError, TaskWriter
-from tests.fakes.tasks import WriteKanboard
+from tests.fakes.product_issues import ProductBoard
 from tests.observer_identity import as_observer
-
-
-class ProductBoard(WriteKanboard):
-    """Kanboard fixture with the Product/Issue layout and real status filtering."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.tasks[0]["id"] = 12
-
-    def call(self, method: str, **params: object) -> object:
-        if method == "getColumns":
-            return [
-                {"id": 1, "title": "Issues"},
-                {"id": 2, "title": "Ready"},
-                {"id": 3, "title": "In progress"},
-                {"id": 4, "title": "Validate"},
-                {"id": 5, "title": "Blocked"},
-                {"id": 6, "title": "Done"},
-            ]
-        if method == "getAllTasks":
-            self.calls.append((method, params))
-            status = params.get("status_id")
-            if status == 1:
-                return [task for task in self.tasks if int(task.get("is_active", 1) or 0) != 0]
-            if status == 0:
-                return [task for task in self.tasks if int(task.get("is_active", 1) or 0) == 0]
-            return []
-        return super().call(method, **params)
 
 
 class LiveSwimlaneBoard(ProductBoard):
@@ -1170,13 +1142,13 @@ class ProductIssueStoreTests(unittest.TestCase):
                 self.client.tasks[0]["column_id"] = 2
                 self.client.metadata[12] = {"project": "secretary", "task_type": "code", "claim": ""}
                 request_id = f"pending-claim-{record_type}"
-                claim = dict(
-                    role="dispatcher",
-                    actor="d",
-                    reference="secretary-468",
-                    worker="replayed-worker",
-                    request_id=request_id,
-                )
+                claim = {
+                    "role": "dispatcher",
+                    "actor": "d",
+                    "reference": "secretary-468",
+                    "worker": "replayed-worker",
+                    "request_id": request_id,
+                }
                 writer.audit.stage(
                     request_id,
                     {
