@@ -56,8 +56,7 @@ SPRINT_METADATA = {
     "sprint_observer",
 }
 SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
-# What a restart costs the sprint.  Every type here is charged: it enters `total` and moves the
-# signal and hard thresholds.
+# Charged restart types contribute to total and thresholds.
 BUDGET_EVENT_TYPES = (
     "red_review",
     "blocked",
@@ -66,27 +65,17 @@ BUDGET_EVENT_TYPES = (
     "recreated_task",
     "hotfix",
 )
-# A bring-up that never produced a head says nothing about the card (`FAILURE_CLASS_INFRASTRUCTURE`
-# in `dispatcher_launch`), so it must not spend the sprint's restart budget.  It is still counted,
-# because an observer reading a sprint has to see how often the host failed to bring a card up; it
-# is counted apart, so counting it can never move a threshold.  The two families are recorded
-# through the same `record_budget` call and told apart only here.
+# Infrastructure bring-up failures are visible but never spend restart budget.
 BUDGET_UNCHARGED_INFRASTRUCTURE = "infrastructure_blocked"
 BUDGET_UNCHARGED_EVENT_TYPES = (BUDGET_UNCHARGED_INFRASTRUCTURE,)
 BUDGET_RECORDED_EVENT_TYPES = BUDGET_EVENT_TYPES + BUDGET_UNCHARGED_EVENT_TYPES
-# The uncharged counts live in their own metadata field rather than inside `sprint_budget`: the
-# hard-stop edge rewrites `sprint_budget` from the computed `by_type` alone (`SprintSupplement`),
-# and a quantity stored inside it would be erased by the charge that stops the sprint.
+# Uncharged counts stay outside computed sprint_budget metadata.
 BUDGET_UNCHARGED_FIELD = "sprint_budget_uncharged"
 DEFAULT_BUDGET_SIGNAL = 3
 DEFAULT_BUDGET_HARD = 6
-# How many sprints an installation may hold open at once.  One is what this product
-# has always been; two is the pilot, and it is opt-in per installation.
 DEFAULT_OPEN_SPRINT_LIMIT = 1
 MAX_OPEN_SPRINT_LIMIT = 2
-# An observer gets a short window to durably reflect a card transition.  Freshness is
-# based on the transition itself, rather than the time a status reader happens to run,
-# so a timely resume stays fresh until another meaningful transition occurs.
+# Observer freshness is based on card transitions, not status-read time.
 RESUME_FRESHNESS_GRACE_SECONDS = 5 * 60
 RESUME_FIELDS = (
     "selected_step",
@@ -97,23 +86,16 @@ RESUME_FIELDS = (
     "next_safe_step",
 )
 _GUARD_INDEX = "sprints/active-repositories.json"
-# Version 2 keys the index by reserved project instead of repository path.  The card
-# guards ask about a card's project, and `repositories` are filesystem paths, so a
-# version 1 index answers a question nobody asks; it is rebuilt rather than read.
+# Version 1 indexes are rebuilt: guards key by project, not repository path.
 _GUARD_INDEX_VERSION = 2
 _ADMISSION_LOCK = "sprints/admission.lock"
 SPRINT_CREATED = "created"
 SPRINT_REOPENED = "reopened"
 SPRINT_CLOSED = "closed"
 SPRINT_STATUSES = {"open", "closed", "stopped"}
-# A sprint in one of these states takes no further semantic work: `_write` refuses a resume,
-# a comment and a current task on it, so the resume record its row carries is the last one
-# anybody wrote and cannot go stale afterwards.  Freshness for such a sprint is read from
-# that record alone, which is why no status path consults the audit for it.
+# Terminal sprint states reject semantic writes, so their resume freshness is stable.
 SPRINT_TERMINAL_STATUSES = {"closed", "stopped"}
-# An admitted create that the backend refused holds nothing: it compensates its own row
-# and re-checks the installation before it publishes.  These are the refusals of that
-# re-check, and they are answers to the caller rather than a pending repair.
+# A compensated refused create holds nothing and needs no pending repair.
 _ADMISSION_REFUSALS = {"sprint_conflict", "resource_conflict"}
 
 
@@ -171,9 +153,7 @@ def update_active_sprint_projects(data_dir: str | Path, sprint: dict[str, Any]) 
         path = Path(data_dir) / _GUARD_INDEX
         projects = _read_guard_index(path)
         if projects is None and path.exists():
-            # An index of an older key space cannot be updated one sprint at a time:
-            # the entries of the other open sprints are not in this call.  Dropping it
-            # leaves the next guarded write to rebuild it from the board.
+            # Rebuild stale index key spaces from the board.
             path.unlink()
             return
         projects = projects or {}
@@ -369,10 +349,7 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
     """
     product = str(candidate.get("product") or "").strip()
     ordered = sorted(others, key=lambda row: str(row["ref"]))
-    # Both sides are judged, and the candidate first: a row from before sprints owned a
-    # product carries none, and it is no more disjoint as the sprint being admitted than
-    # as the sprint already open.  Judging only the other side would make the answer
-    # depend on which of the two was looked at first.
+    # Judge both sides so disjointness does not depend on iteration order.
     if ordered and not product:
         raise TaskError(
             "resource_conflict",
@@ -572,8 +549,7 @@ class SprintReader:
                 for comment in comments_raw
                 if isinstance(comment, dict)
             ]
-        # Freshness depends on the linked-card set, so computing it in `_normalize` would both
-        # scan the audit too early and scan it a second time after the cards are loaded.
+        # Freshness requires linked cards, loaded after normalization.
         sprint = self._normalize(
             raw,
             _sprint_metadata(self.client.call("getTaskMetadata", task_id=task_id)),
@@ -755,10 +731,7 @@ class SprintWriter:
         )
         self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
         self.audit = TaskAudit(data_dir)
-        # Opening a sprint has the semantics the Product/Issue transaction already
-        # carries: one staged intent per request id, sub-steps that recognise their own
-        # earlier attempt, and one audit event however often the delivery repeats.  The
-        # primitive is reused as it stands rather than reproduced beside it.
+        # Reuse the Product/Issue transaction's staged-intent semantics.
         self.transactions = ProductIssueTransaction(data_dir, self.audit)
         self.data_dir = Path(data_dir)
         self.instance = Path(instance) if instance is not None else None
@@ -858,11 +831,7 @@ class SprintWriter:
             reference=reference,
             observer=observer,
         )
-        # Admission and the row it admits are one transition on this installation: a
-        # concurrent create that only read before this one wrote would open a second
-        # sprint.  Request ownership is settled first and under the same lock: a repeat
-        # of one delivery resumes its own staged intent, and only a request nobody has
-        # seen yet is measured against live product, issue and conflict state.
+        # Lock admission with row creation; resolve request ownership first.
         with sprint_admission_lock(self.data_dir):
             document, committed = self.transactions.existing(request_id, kind=SPRINT_CREATED, intent=intent)
             if committed is not None:
@@ -1076,12 +1045,7 @@ class SprintWriter:
             answer = exc.code in _ADMISSION_REFUSALS or (
                 exc.code in {"validation", "role_forbidden"} and not document.get("progress")
             )
-            # A refusal answered to the caller is the end of this request: it holds no row,
-            # and leaving its staged intent behind would leave a repair nobody is going to
-            # run.  That answer is only available once compensation proves the request holds
-            # nothing; when it cannot, a row and a staged intent of a refused create are both
-            # still on disk, and calling the request over would strand them, so the caller is
-            # told it is repairable under the same request id instead.
+            # Refuse only after compensation proves the request holds no row.
             clean = self._compensate_create(document)
             if answer and clean:
                 self.transactions.discard(document)
@@ -1128,10 +1092,7 @@ class SprintWriter:
         progress = document.setdefault("progress", {})
         board_id = ensure_sprint_board(self.client)
         created_ref = self._reference(document, board_id, admitted=admitted)
-        # A staged create that is being resumed was admitted before the refusal that
-        # stalled it, and it held nothing meanwhile.  The installation is measured again
-        # here, before anything of this sprint is published, so a repeat that lost the
-        # slot to another sprint is refused instead of opening a second one.
+        # Recheck admission before a resumed create publishes a sprint.
         if admitted and not progress.get("reference_done"):
             staged = progress.get("task_id")
             staged_id = staged if isinstance(staged, int) else None
@@ -1146,10 +1107,7 @@ class SprintWriter:
         progress["task_id"] = task_id
         self.transactions.save(document)
         self._ensure_metadata(document, task_id, self._create_values(intent), step="fields")
-        # The reference is the last step, and it is what publishes the sprint: until it
-        # is written the row carries no sprint reference and no reader counts it as a
-        # sprint, so nothing observes one open without the product, issues and
-        # reservations it was admitted with.
+        # Write the reference last to publish an atomically admitted sprint.
         if str(row.get("reference") or "") != created_ref:
             progress["reference_started"] = True
             self.transactions.save(document)
@@ -1230,9 +1188,7 @@ class SprintWriter:
             row = next((row for row in rows if str(row.get("reference") or "") == reference), None)
             if row is not None:
                 return row
-        # The reference is written last on purpose (see _finish_create), so a row that this
-        # request created but did not get as far as publishing carries no reference to be
-        # found by; the request id travels in the description until it does.
+        # Unpublished create rows are found by request id, not reference.
         marker = _create_marker(str(document["request_id"]))
         matches = [row for row in rows if str(row.get("description") or "") == marker]
         if len(matches) > 1:
@@ -1457,10 +1413,7 @@ class SprintWriter:
         task_reference = task_reference.strip()
         if not task_reference:
             raise TaskError("validation", "current task requires a task reference", 2)
-        # The pointer is the other half of the resume entry, and it is guarded the same way. The
-        # link check below is a constraint on the value, not on the caller: any Ready card of the
-        # target sprint satisfies it, so without this a head of another sprint could move where
-        # that sprint's head resumes from.
+        # Guard the resume pointer to prevent cross-sprint cursor movement.
         request_id = request_id or str(uuid.uuid4())
         self._guard_observer_identity(
             role=role,
@@ -1725,10 +1678,7 @@ class SprintWriter:
             )
         if (delivery_id or through_event) and role != "observer":
             raise TaskError("role_forbidden", "only an observer resume can acknowledge delivery", 3)
-        # Role alone answered this before, and role alone is not enough: an acknowledgement moves
-        # the event cursor of the sprint it names, so an observer of another sprint could drop
-        # events its head was the only reader of. The whole resume is guarded, not only the
-        # acknowledgement, because the entry is the sprint's own recovery state.
+        # Guard whole resumes by sprint as acknowledgements move its event cursor.
         request_id = request_id or str(uuid.uuid4())
         self._guard_observer_identity(
             role=role,
@@ -2075,14 +2025,7 @@ class SprintWriter:
                 if task_ref not in archived:
                     archived.append(task_ref)
                     self.transactions.save(document)
-            # `closed` is published last, and that is what keeps a successor out of an
-            # unfinished close: an interrupted close leaves the sprint open, an open sprint
-            # still reserves its projects, and `create` already refuses a second sprint on a
-            # reserved project.  The invariant is the one the board always had, not a lock
-            # whose lifetime the recovery would have to extend.  The dispositions therefore
-            # run against their own open sprint, which the reservation guard would refuse a
-            # PO move into; they carry the guard's existing `sprint_override` with the
-            # reason that authorized them, rather than a new way around it.
+            # Publish closed last so unfinished closes retain project reservations.
             self._dispose_remaining_cards(document, event, payload, decisions or {})
             sprint = self.reader.show(str(event["ref"]), include_cards=False)
             typed_request_id = str(document["request_id"]) + ":typed-close"
@@ -2166,10 +2109,7 @@ class SprintWriter:
                 2,
             )
         store = self._issue_store()
-        # Durable before the first issue write, exactly as `status_started` is durable before
-        # the status changes: from here on this close has done something a retry has to
-        # continue rather than replay, so its plan may not be thrown away by a refusal that
-        # arrives later — including one from an issue somebody else closed in the meantime.
+        # Persist the close plan before its first issue write.
         document.setdefault("progress", {})["issues_started"] = True
         self.transactions.save(document)
         for entry in pending:

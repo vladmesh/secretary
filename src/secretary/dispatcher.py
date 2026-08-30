@@ -308,8 +308,6 @@ from secretary.dispatcher_tui import (
     terminal_turn_started as _terminal_turn_started,
 )
 from secretary.dispatcher_types import (
-    # Every dispatcher stop has an initiator (review takeover, verdict, watchdog, replacement,
-    # operator, reconciliation), and both HeadRuns record it.
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
@@ -489,10 +487,7 @@ from triggered_agents.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
 
-# Head prompts run in the head's own shell, so the checkout fallback stays a shell expression.
 _PYTHONPATH_PREFIX = pythonpath_prefix()
-# A TASK.md runs from the candidate worktree, so ``-P`` keeps Python from prepending that worktree
-# to sys.path and shadowing the control plane package selected above.
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
 
 
@@ -507,10 +502,7 @@ def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
 
 
-# Orca puts a worktree at <workspaces root>/<repo directory>/<worktree name>, so the observer repo's
-# directory carries this name and the path fixed in the launch intent is the path Orca hands back.
 OBSERVER_WORKSPACE_DIR = OBSERVER_REPO_NAME
-# The only branch of the observer repo, fixed at init so no bring-up has to ask git for its name.
 OBSERVER_REPO_BRANCH = "observers"
 
 # How long a confirmed stop waits for a head to leave after each signal, and how often it looks: a
@@ -518,9 +510,6 @@ OBSERVER_REPO_BRANCH = "observers"
 HEAD_STOP_GRACE_SECONDS = 5.0
 HEAD_STOP_POLL_SECONDS = 0.1
 
-# The verdicts from which the wait/watchdog path may take its destructive steps (S1-4).
-# Everything else waits: this is the vocabulary the vitality guard enforces, spelled here
-# so telemetry can name which comments describe decisions rather than shadow records.
 DESTRUCTIVE_VERDICTS = frozenset(
     {
         VitalityVerdict.CONFIRMED_STALL,
@@ -528,12 +517,7 @@ DESTRUCTIVE_VERDICTS = frozenset(
     }
 )
 
-# What two provider-source descriptors have to agree on before one launch may keep the copy it was
-# already prepared with. These are the facts preflight fixes for the lifetime of the source: its
-# schema, the run it fences, and the session root it selects from. Deliberately not the baseline,
-# which is a moment-in-time listing of that root, nor the binding facts, which only the pane's own
-# session can produce. A difference in any of them is a foreign descriptor, not a stale one, and is
-# left to fail the handoff merge as the identity conflict it is.
+# Preflight identity excludes the mutable baseline and pane-derived binding facts.
 _PREPARED_SOURCE_IDENTITY_KEYS = (
     "version",
     "kind",
@@ -574,20 +558,13 @@ class LaunchedHead:
     handle: str
     head: str = ""
     run: dict[str, Any] = field(default_factory=dict)
-    # `terminal create` / `split` returns paneKey synchronously. Its leaf survives Orca's handle
-    # aliasing, so launch callers carry it instead of recovering it from an inventory.
     leaf: str = ""
-    # The launch prompt's bounded transport receipt, so recovery never infers it from the pane.
     delivery_evidence: dict[str, Any] = field(default_factory=dict)
-    # The head's own run: identity that outlives a pane handle, lifecycle, and the initiator that
-    # ended it. Empty for a bring-up whose caller keeps no lifecycle of its own.
     head_run: dict[str, Any] = field(default_factory=dict)
-    # A successful recovery route that the dispatcher exposes in this tick's outcome.
     fallback_reason: str = ""
 
 
 class InstanceCatalog:
-    # Part of the catalog surface; `__init__` replaces it with the validated instance directory.
     instance_dir: Path | None = None
 
     def __init__(self, instance_path: Path) -> None:
@@ -757,8 +734,6 @@ class InstanceCatalog:
         model: str | None = None
         model_source = ""
         if str(profile.get("adapter") or "") == "claude":
-            # A claude profile need not pin a model (`claude-default` does not); the CLI resolves one
-            # from its settings at startup. Read it here so the record names the model that ran.
             model, model_source = _claude_launch_model(
                 profile, workspace=workspace, env=_role_launch_env(role)
             )
@@ -1179,7 +1154,6 @@ class CommandHostRuntime:
             workspace = self._create_workspace(project, worker_id, base, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
             self._run_setup(project, workspace)
-        # The caller's generation, not a constant: the first round of a claim is a report round too.
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id, generation)
@@ -1205,7 +1179,6 @@ class CommandHostRuntime:
             # Recorded instead of re-reading the registry, which a later edit would answer differently.
             "run": launched.run,
             "delivery_evidence": dict(launched.delivery_evidence),
-            # The head's own run: the identity every later nudge and the stop address this worker by.
             "head_run": dict(launched.head_run),
         }
 
@@ -1292,7 +1265,6 @@ class CommandHostRuntime:
                 ],
                 "observer repo commit",
             )
-        # How Orca learns the path; it answers with the same repo when it knows it, so this is a no-op.
         self._run_json(["orca", "repo", "add", "--path", str(repo), "--json"])
         return repo
 
@@ -1401,7 +1373,6 @@ class CommandHostRuntime:
                 "workspace": str(workspace),
                 "handle": f"noop:{head}:{workspace.name}:{OBSERVER_PROMPT_FILE}",
                 "leaf": "",
-                # No pane exists in this mode, so no prompt was put in front of anything.
                 "prompt_delivered": False,
                 "delivery_evidence": {},
                 "pid_file": pid_file,
@@ -1485,7 +1456,6 @@ class CommandHostRuntime:
                 delivery_evidence = _delivery_evidence_json(receipt.delivery, "observer-launch")
             else:
                 exc = failure
-                # Every prompt this bring-up put in front of a head is accounted for, batch or not.
                 evidence = _delivery_evidence_json(exc, "observer-launch")
                 try:
                     self._stop_observer_terminals(
@@ -1513,7 +1483,6 @@ class CommandHostRuntime:
             "workspace": str(workspace),
             "handle": lifecycle_run.handle,
             "leaf": lifecycle_run.leaf,
-            # Whether this bring-up put a prompt in front of the head, and what delivery saw doing it.
             "prompt_delivered": delivered,
             "delivery_evidence": delivery_evidence,
             "pid_file": pid_file,
@@ -1553,7 +1522,6 @@ class CommandHostRuntime:
         )
         workspace = str(getattr(record, "workspace", "") or "")
         if not workspace:
-            # A record written before the intent named a workspace: the handle is all that is left.
             if record.handle:
                 self._close_observer_pane(record, record.handle)
             return
@@ -1657,7 +1625,6 @@ class CommandHostRuntime:
         status: dict[str, Any] = {"idle": seen.readiness == READINESS_READY}
         if seen.last_output_at:
             status["last_activity"] = seen.last_output_at
-        # Only the idle-recovery path needs that clock, and it says so itself when it is missing.
         return status
 
     def _observer_lifecycle_run(self, record: Any) -> head_ops.HeadRun:
@@ -4576,19 +4543,12 @@ class DispatcherRuntime:
                 "reason": worker_choice.reason,
                 "failover": {"worker": worker_choice.to_json()},
             }
-        # The reviewer is resolved at claim too, because the claim writes its head onto the card. A
-        # wholly dead reviewer chain does not stop the work: its own preflight waits for the resource.
         review_choice = self.resolve_head(self.catalog.review_head(task))
         collapse = self._failover_collapse(worker_choice, review_choice)
         if collapse is not None:
             return dict(collapse, pilot_ref=ref)
         head = worker_choice.head
         review_head = review_choice.head or review_choice.preferred
-        # Beside the head preflight, and for the same reason: whether this card's registered
-        # project can be broad-checked at all is a question about the installation's registry, not
-        # about anything a claim creates, so it is answered here — off the binding and the adapter,
-        # with the card still in Ready and nothing spent (secretary-1458). It is asked after the
-        # heads only because a claim this dispatcher cannot make at all decides nothing.
         contract_verdict = self._broad_check_contract_verdict(task)
         # A card the dispatcher still holds a record for, back in Ready with its claim already
         # committed under the current attempt, is a re-run. An attempt id otherwise lives as long as
@@ -4606,7 +4566,6 @@ class DispatcherRuntime:
                 "worker-respawn-blocked",
                 "worker-wait-stall",
                 "rework-blocked",
-                # The contract preflight's own block, which a repaired adapter brings back to Ready.
                 "contract-preflight-blocked",
                 "gate-blocked",
                 "gate-red-blocked",
@@ -4614,14 +4573,12 @@ class DispatcherRuntime:
                 "merge-gate-blocked",
                 "merge-gate-red-blocked",
                 "merge-blocked",
-                # A card blocked from Assessment comes back to Ready the same way as the rest.
                 "release-drift-blocked",
                 "release-failed-blocked",
                 "review-blocked",
                 "review-freeze-red-blocked",
                 "review-inventory-blocked",
                 "review-wait-stall",
-                # The stale-result rework's own block, which this list never named.
                 "stale-done-rework-blocked",
             )
         )
@@ -4652,12 +4609,7 @@ class DispatcherRuntime:
             payload["attempt_id"] = attempt_id
         claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
         worker_id = _worker_id(task)
-        # Everything a refusal's outcome needs is built here, before the claim: the class, the
-        # evidence and the card's reason are a pure reading of what the verdict already said.
-        # The board protocol gives the dispatcher no Ready-to-Blocked edge, so the claim is the
-        # only door to recording an outcome — and it is a door, not a round. Between it and the
-        # transition below there is no step that can fail and leave the card In progress with no
-        # outcome on it.
+        # Claim is the only board transition that can record a Ready refusal.
         contract_outcome = self._contract_preflight_decision(
             task,
             contract_verdict,
@@ -4687,8 +4639,6 @@ class DispatcherRuntime:
                 failure=failure,
                 reason=blocked_reason,
             )
-        # Before the card is read back, so the comment is inside the baseline the record takes: a
-        # failover head is written onto the card, where the reviewer and the observer read it.
         self._comment_head_failover(ref, attempt_id, worker_choice, review_choice)
         claimed = self.reader.show(ref)
         record = DispatcherRecord(
@@ -4700,16 +4650,12 @@ class DispatcherRuntime:
             attempt_id=attempt_id,
             comment_baseline=len(claimed.get("comments") or []),
             review_baseline=0,
-            # The claim opens the attempt's first report round, durable before the TASK.md names it.
             report_generation=1,
             state="claim_verified",
             claimed_at=time.time(),
-            # Empty unless the walk left the card's preference behind. The pair lets the review
-            # document name the head that did the work without re-resolving a moved role default.
             preferred_head=worker_choice.preferred if worker_choice.substituted else "",
             preferred_review_head=(review_choice.preferred if review_choice.substituted else ""),
         )
-        # The journal, not the board, knows how many rounds a card has had: a return to Ready adds one.
         self.open_worker_round(record, round_number=self._journal_round(ref) + 1)
         records[ref] = record
         self.save_records(payload, records)
@@ -4804,7 +4750,6 @@ class DispatcherRuntime:
                     "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
                     "reason": failure,
                 }
-            # A launch nobody can record is how a card ends up with two heads, so the host is untouched.
             return _launch_intent_unwritable(
                 step="claim", ref=ref, attempt_id=record.attempt_id, role=WORKER_ROLE, reason=failure
             )
@@ -4844,17 +4789,10 @@ class DispatcherRuntime:
                 role=WORKER_ROLE,
             )
             if deferred is not None:
-                # The head did not come up and nothing of it is running. The card keeps its claim and
-                # its record: `claim_verified` is what makes the next tick launch it again.
                 records[ref] = record
                 self.save_records(payload, records)
                 return deferred
-            # The deferral is spent, so this bring-up is over. What it was — a host that never
-            # opened a pane, or this card's own checkout contract — is decided by the one shared
-            # classifier, and the same object writes the card's reason, the durable action token in
-            # the transition and the tick outcome the steward reads. An infrastructure outcome is
-            # not a retry: the card is blocked for a person exactly as before, and no new attempt
-            # is opened here.
+            # An infrastructure outcome blocks for a person; it is not a new attempt.
             failure = _classify_bring_up_failure(
                 exc, record, WORKER_ROLE, stage=STAGE_CLAIM, attempt_id=record.attempt_id
             )

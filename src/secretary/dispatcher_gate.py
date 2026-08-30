@@ -44,33 +44,21 @@ from secretary.dispatcher_helpers import (
 )
 from secretary.dispatcher_types import GateTransportError, HostError
 
-# How long a github CI rollup may sit non-terminal (PENDING/NONE) before the pending watchdog
-# escalates the card to Blocked — a required check nothing ever posts, a job waiting on manual
-# environment approval, or a removed workflow would otherwise leave the card unwatched forever.
+# Pending CI has a bounded watchdog so missing checks cannot strand a card.
 GATE_PENDING_STALL_SECONDS = int(os.environ.get("SECRETARY_GATE_PENDING_STALL_SECONDS", str(6 * 3600)))
 
-# Single knob for how much of a failed gate's log reaches the worker: both the local-gate
-# stderr/stdout tail and the github-gate `--log-failed` fragment size read this.
 GATE_LOG_FRAGMENT_LINES = int(os.environ.get("SECRETARY_GATE_LOG_FRAGMENT_LINES", "40"))
 
-# How many consecutive ticks the gate backend may fail to answer before the card is blocked. A
-# blip costs the card a tick, not a round; a backend that is genuinely gone still reaches a human.
+# Consecutive backend silence is bounded before human escalation.
 GATE_TRANSPORT_MAX_ATTEMPTS = max(1, int(os.environ.get("SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS", "5")))
 
-# A failed Actions run with an enumerated CI-service signature may be rerun without reopening the
-# worker.  The cap is per HEAD SHA: it is a recovery mechanism, never an unbounded poll of an
-# already-concluded run.
+# Enumerated CI-service failures rerun per SHA with a bounded cap.
 GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS = max(
     1, int(os.environ.get("SECRETARY_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS", "2"))
 )
 
-# How much of one board source (the card statement, the worker's done report) reaches the PR body.
-# The PR describes the change and points at the card; it is not a second copy of the board, and a
-# body must not approach GitHub's own size ceiling.
 PR_BODY_SECTION_CHARS = int(os.environ.get("SECRETARY_PR_BODY_SECTION_CHARS", "4000"))
 
-# Closing line of every gate-written body: says who opened the PR and why, so a reader who lands
-# on it from the merge commit knows the PR is the pipeline's and not a human's proposal.
 _PR_BODY_FOOTER = (
     "Opened by the secretary CI gate so that the `pull_request` workflow runs. "
     "Title and body are built from the card and the worker's done report."
@@ -82,16 +70,9 @@ _NO_DIFF_WORKFLOW = "ci.yml"
 _WORKFLOW_RUN_FIELDS = "databaseId,headSha,status,conclusion,url"
 # `gh run view --log[-failed]` emits one line per log entry as `<job>\t<step>\t<content>`.
 _ERROR_MARK_RE = re.compile(r"##\[error\]")
-# The runner's own generic completion echo — posted with the same `##[error]` marker as a real
-# cause, by both a failing step and a `needs: [...]` aggregator's summary script. It is never the
-# cause, only noise the runner always appends.
 _RUNNER_BOILERPLATE_RE = re.compile(r"(?i)process completed with exit code \d+")
-# Content-level signs of a preparation/infra failure rather than a test/assertion failure: a
-# worker that reads a down registry or dependency install as "my code is broken" edits the wrong
-# thing.
-# Infrastructure reds have a deliberately small, reviewable vocabulary.  A setup step alone is
-# not sufficient: broken workflow YAML and setup scripts fail there too.  Every accepted signature
-# names a CI service boundary and an unambiguous unavailable/5xx response from it.
+# CI-service signatures distinguish infrastructure from code/test failures.
+# Only explicit CI service unavailable/5xx signatures classify infrastructure reds.
 _ACTION_DOWNLOAD_5XX_RE = re.compile(
     # The runner prints its preparation notice and the failed download on separate entries.  The
     # fragment, not a source line, is the unit of adjacency because `_failed_log` joins entries
@@ -194,22 +175,15 @@ class GateResult:
     status: str  # "green" | "red" | "pending"
     summary: str
     log: str = ""
-    # Stable identity of the failure, independent of the head SHA (which changes on every rework
-    # commit): what the repeat-bounce check compares round to round. Empty for green/pending.
     fingerprint: str = ""
-    # A terminal red is either a code/workflow verdict or an enumerated CI-service outage.  This
-    # structured result, not a phrase later rendered into a card comment, is what the dispatcher
-    # uses to decide whether it may retry the exact same SHA without reopening the worker.
+    # Structured terminal reds decide whether the exact SHA may rerun.
     failure_class: str = "substantive"  # "substantive" | "infrastructure"
     failure_reason: str = ""
     # The Actions run which supplied an infrastructure-classified red.  Only this concrete run
     # can be rerun; an external status or a log without a run URL remains a red verdict.
     failed_run_id: str = ""
     failed_run_repo: str = ""
-    # A green result is reusable evidence only when it names the exact tree and the terminal
-    # checks which judged it.  The dispatcher persists this plain JSON object with the card so it
-    # can hand the same receipt to review, Assessment and the release audit without asking another
-    # role to repeat a broad suite.
+    # Reusable green evidence names the exact tree and terminal checks.
     attestation: dict[str, object] | None = None
 
 
@@ -244,9 +218,7 @@ def gate_check(host, task: dict, record) -> GateResult:
         return GateResult("green", "noop gate")
     ci = _validation(host, task).get("ci") or "none"
     workspace = record.workspace
-    # Every mode needs the checkout now, `none` included: the candidate-history preflight below
-    # is not mechanical validation and `none` does not opt out of it, so a workspace that cannot
-    # be read is a gate that cannot answer rather than a boundary quietly skipped.
+    # Every mode, including none, needs a readable checkout for candidate preflight.
     if not workspace or not Path(workspace).is_dir():
         raise HostError("gate workspace is missing")
     base = host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
@@ -257,9 +229,7 @@ def gate_check(host, task: dict, record) -> GateResult:
             f"workspace and report done again",
             fingerprint=_fingerprint("base-conflict", base),
         )
-    # Ahead of every publication, every validation command and the `none` exit: a project without
-    # a mechanical gate still merges its candidate, so it is exactly as unable to repair a
-    # published AI trailer as one with a gate.
+    # Candidate trailer preflight precedes every gate mode and publication.
     history = _candidate_history_gate(host, workspace, base)
     if history is not None:
         return history
@@ -435,9 +405,7 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     tail = (
         _tail((completed.stderr or completed.stdout or "").strip(), GATE_LOG_FRAGMENT_LINES) or "(no output)"
     )
-    # A local command carries no Actions job/step provenance.  Do not infer infrastructure from
-    # arbitrary test output here: it could be a test fixture mentioning a registry or a workflow
-    # setup script the worker must fix.
+    # Local output lacks Actions provenance and cannot classify infrastructure.
     return GateResult(
         "red", "local validation failed", tail, fingerprint=_fingerprint("local", tail), attestation=receipt
     )
@@ -1205,10 +1173,7 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
             host, ["gh", "run", "view", run_id, "-R", repo, "--log-failed"], "gate failed log"
         )
     except GateTransportError as exc:
-        # The one backend call whose silence is deliberately not a transport failure of the gate:
-        # the verdict is already red, decided by an answer that did arrive, and the log is only
-        # the excerpt attached to it. Turning this into a retry would send a card whose CI has
-        # genuinely failed back around the loop, so the fragment degrades and says why.
+        # Failed-log silence degrades the excerpt; it does not reopen an answered red verdict.
         return _LogFragment(available=False, reason=f"the log could not be fetched: {exc}")
     if completed.returncode != 0:
         return _LogFragment(available=False, reason="`gh run view --log-failed` returned an error")

@@ -168,29 +168,16 @@ CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.j
 WATCHDOG_SECONDS = int(os.environ.get("TA_WATCHDOG_SECONDS", "1200"))  # busy + this quiet = stuck
 IDLE_PROBE_MS = 2500  # tui-idle satisfied within this = idle; timeout = busy
 ORCA_TIMEOUT_S = 20  # never let a hung orca call wedge dispatch while it holds the lock
-# How long a just-created terminal gets the benefit of the doubt before "not visible in `terminal
-# list` yet" (triggered-agents-445, PR #95 review B2) is read the same as "nothing was ever
-# spawned". Generous relative to the lag this guards against (Orca registering a brand new pty),
-# tiny relative to any real tick cadence (hourly + jitter).
+# Briefly tolerate Orca registration lag for just-created terminals.
 CREATE_VISIBILITY_GRACE_S = 60
-# `finalize` (the detached helper started by an ephemeral head's trailer) retries the run lock this many times,
-# sleeping this long between attempts, before deferring to the next tick (triggered-agents-445,
-# PR #95 review B2, round 4). A live dispatch tick holds the lock only for the length of its own
-# Orca calls, so a short bounded wait lets the finalizer clean up its own completed terminal
-# instead of abandoning it the instant it sees contention — while a tick genuinely wedged on the
-# lock still hands teardown off rather than spinning forever.
+# Finalizers retry lock contention briefly, then defer rather than spin.
 FINALIZE_LOCK_ATTEMPTS = 4
 FINALIZE_LOCK_RETRY_S = 2.0
 REPORT_VISIBILITY_GAP_SECONDS = 60
-# A reused terminal is only useful while an agent REPL still owns the pane. `tui-idle` alone is
-# not enough: Orca reports it for a shell that replaced a completed agent too. Keep this bounded
-# like the other terminal probes so a broken pane turns into a failed unit rather than a wedged
-# scheduler invocation.
+# Warm reuse requires a live agent REPL, not merely tui-idle.
 REUSE_DELIVERY_TIMEOUT_S = float(os.environ.get("TA_REUSE_DELIVERY_TIMEOUT_S", "12"))
 REUSE_DELIVERY_POLL_S = float(os.environ.get("TA_REUSE_DELIVERY_POLL_S", "0.25"))
-# How much of a pane's retained output "is an agent REPL still here" is decided on. The panel as
-# an operator would see it, not the whole scrollback: a marker from a session that ended hours ago
-# must not answer for the pane as it is now.
+# REPL detection uses the visible panel, not stale scrollback.
 _SCREEN_READ_LINES = 200
 _SHELL_PROMPT_RE = re.compile(
     r"(?:^[^\n]*@[^\n:]+:[^\n]*[#$](?:\s|$)|^(?:bash|zsh|fish|sh)[^\n]*[#$](?:\s|$))",
@@ -205,13 +192,7 @@ class DispatchCommand:
     launch: str
     profile: str | None
     card_ref: str | None = None
-    # Whether `launch` carries no prompt at all, so `skill` still has to be typed into the head
-    # once it is up. Every Codex head is an interactive session and none of them takes a prompt on
-    # its command line; a `claude`/`hermes` launch seeds its own and this stays False.
     prompt_after_start: bool = False
-    # The registry profile `launch` was rendered from, for an interactive head that needs its
-    # workspace prepared before a pane is created. None for every other launch, including the bare
-    # fallback invocation a failed resolution falls back to.
     head_profile: dict | None = None
 
 
@@ -699,9 +680,6 @@ def _ensure_head_ready(ws: str, cmd: DispatchCommand, *, role: str = "service") 
     trust entry the pane cannot reach readiness — and it raises before any pane is created.
     """
     if cmd.prompt_after_start and str((cmd.head_profile or {}).get("adapter") or "") == "codex":
-        # This service path does not own a dispatcher record, but it still crosses the shared
-        # pre-pane boundary.  It attaches the same advisory provider telemetry as a pipeline
-        # head while keeping the Codex trust write as the only hard preparation requirement.
         spec = HeadSpec.from_profile(str(cmd.profile or role), cmd.head_profile)
         preflight_codex_launch(
             cmd.head_profile,
@@ -742,8 +720,7 @@ def _agent_terminals(ws: str, state: AgentState | None = None, *, host: SessionH
     try:
         panes = host.panes(ws)
     except Exception as exc:
-        # An unreadable list is not an empty workspace. Every caller treats None as a deferred
-        # decision so an Orca hiccup cannot turn into a second curator or a healthy teardown.
+        # An unreadable list is unknown, never an empty workspace.
         print(f"dispatch: terminal list unavailable for {ws} ({exc})")
         return None
     saved_handle = state.load_terminal_handle() if state else None
@@ -790,9 +767,7 @@ def _create_terminal(
     """
     generation = None
     if _is_ephemeral(agent):
-        # Stamp a fresh monotonic generation and bake it into the terminal's own self-teardown
-        # trailer, so a finalizer firing after this terminal's head exits can prove the workspace's
-        # current terminal is still this one before stopping it (review B2, round 4).
+        # Finalizers use this generation to stop only their current terminal.
         generation = state.next_terminal_generation()
         launch = _with_finalizer(agent, launch, generation)
     pane = host.open_pane(ws, f"triggered-agent:{agent}", launch)
@@ -1162,8 +1137,7 @@ def _send_reuse_dispatch(
             _deliver_interactive_skill(terminal_handle, workspace, cmd.skill, host=host)
         else:
             sent_at = time.time()
-            # The send stays unchecked and the confirmation stays the proof: what makes this
-            # dispatch real is the head's own record of the turn, never the send's exit code.
+            # The head's turn record, not send exit status, confirms dispatch.
             _unchecked(lambda: host.send(terminal_handle, cmd.skill, enter=True))
             _confirm_delivery(terminal_handle, workspace, sent_at, host=host)
     except Exception as exc:
@@ -1271,9 +1245,7 @@ def _reap_ghosts(ws: str) -> tuple[int, bool]:
                     print(f"dispatch: reap failed to close a tab in {ws} ({e})")
     if not ok:
         return closed, False
-    # A successful close RPC is only an acknowledgement, not proof that the tab left Orca's
-    # session store. Re-list before reporting a clean teardown; otherwise an accepted-but-lost
-    # close could let the next curator start beside the same pending tab.
+    # Re-list after close: RPC acknowledgement does not prove tab removal.
     try:
         after = (orca_rpc.call("session.tabs.listAll").get("result") or {}).get("snapshots", []) or []
     except Exception as e:
@@ -1924,10 +1896,7 @@ def _tick(
         return _cleanup_only(agent, ws, state, event, terms, host=host)
 
     if not terms:
-        # A terminal this same agent just created can take a moment to show up in `terminal
-        # list` (triggered-agents-445, PR #95 review B2). Read that gap the same as "nothing
-        # was ever spawned" and a second dispatch landing inside it would create a duplicate
-        # curator/head — guard on the timestamp `_create_terminal` just recorded instead.
+        # Avoid duplicate creation during terminal-list visibility lag.
         last_created = state.load_terminal_created_at()
         if last_created is not None and (time.time() - last_created) < CREATE_VISIBILITY_GRACE_S:
             state.log_run(event, action="recent-create-guard")
@@ -1938,15 +1907,7 @@ def _tick(
             return 0
         if _is_ephemeral(agent):
             if not reap_ok:
-                # The top-of-run reap could NOT confirm this workspace is free of ghost tabs (a
-                # session.tabs.close failed, or session.tabs.listAll was unavailable). The live
-                # PTY of the finished run may be gone (so `_agent_terminals`/`_raw_terminal_count`
-                # read empty), but its `pending-handle` tab still lingers in
-                # session.tabs.listAll. Creating a fresh session now would leave that artifact
-                # sitting right next to a brand new curator — the exact "zero tabs after
-                # completion" breach (triggered-agents-445, PR #95 review B1, round 7). Bail; the
-                # next tick re-reaps before it creates. Restart paths above already do this;
-                # this is the same guard for the no-live-terminal create path.
+                # Do not create beside an unconfirmed ghost tab.
                 state.log_run(event, action="reap-tab-failed")
                 print(
                     f"dispatch[{agent}]: a ghost tab would not close (or tab list "
@@ -1955,9 +1916,7 @@ def _tick(
                 return 0
             raw = _raw_terminal_count(ws, host=host)
             if raw is None:
-                # The raw list itself failed (round 4, review B1): "unknown", not "zero". We
-                # can't rule out a stray we'd be piling a fresh session on top of, so don't
-                # create this tick -- the next one retries once Orca answers again.
+                # Unknown raw inventory cannot authorize a fresh terminal.
                 state.log_run(event, action="stray-check-failed")
                 print(
                     f"dispatch[{agent}]: terminal list unavailable — skipping create to "
@@ -1965,11 +1924,7 @@ def _tick(
                 )
                 return 0
             if raw > 0:
-                # `_agent_terminals` recognized nothing, but Orca still lists a live terminal in
-                # this workspace -- a stray it can't match by title/handle (an orphan from a
-                # past incident, review B3). An ephemeral workspace's whole point is converging
-                # to at most one terminal, so sweep it before creating rather than piling a
-                # fresh session on top of an orphan that would otherwise run forever.
+                # Sweep unrecognized live terminals before creating an ephemeral session.
                 if not _stop_and_confirm_workspace_empty(ws, host=host):
                     state.log_run(event, action="stray-sweep-failed")
                     print(
@@ -2014,10 +1969,7 @@ def _tick(
             state.log_run(event, action="busy-skip")
             print(f"dispatch[{agent}]: agent busy ({int(quiet)}s silent) — left running, no dispatch")
             return 0
-        # busy but silent too long -> stuck: sweep and restart, reaping the ghost the stop
-        # just made right away rather than leaving it for the top of the next run. Bail
-        # without creating if the stop can't be confirmed -- proceeding anyway risks a second
-        # live session alongside a stuck one that never actually died (review B3).
+        # A stuck busy terminal must be confirmed stopped before replacement.
         if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="watchdog-stop-failed")
             print(
@@ -2054,11 +2006,7 @@ def _tick(
         print(f"dispatch[{agent}]: busy but stuck ({int(quiet)}s silent) — watchdog restart -> {cmd.skill}")
         return 0
 
-    # idle: an ephemeral agent (curator, triggered-agents-445) never reuses a warm terminal —
-    # the previous run just finished (successfully or not), so tear its terminal + tab down
-    # and start the next tick on a brand new provider session, same shape as the watchdog
-    # restart above minus the profile-red gate below (a fresh spawn always re-resolves the
-    # head, so there's nothing to divert from).
+    # Ephemeral agents tear down idle terminals instead of warm reuse.
     if _is_ephemeral(agent):
         if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="ephemeral-stop-failed")
@@ -2101,12 +2049,7 @@ def _tick(
         )
         return 0
 
-    # idle: a warm terminal keeps whatever profile it was spawned with, so a resource that's
-    # gone red since spawn would otherwise get the skill anyway (only a fresh spawn
-    # re-resolves). Stop it and start fresh on the resolved fallback instead — same shape as
-    # the watchdog restart above — rather than leaving the red terminal running alongside a
-    # new one, which would pile up one extra terminal per red tick (triggered-agents-274,
-    # triggered-agents-275).
+    # Red profiles stop warm terminals before fallback replacement.
     if _reuse_head_is_red(agent, state, registry):
         if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="red-fallback-stop-failed")
@@ -2136,10 +2079,7 @@ def _tick(
         )
         return 0
 
-    # idle: a terminal can remain live after its agent exits, leaving bash in the same pane.
-    # `tui-idle` reports that shell as idle too, so inspect the rendered panel before any
-    # slash command is sent. A dead REPL takes the normal stop/reap/fresh-create route.
-    # Its telemetry action is `warm-repl-restart`, not `reused`.
+    # Verify the visible REPL before sending a slash command to an idle pane.
     if not _agent_repl_visible(survivor.handle, host=host):
         if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="warm-repl-stop-failed")
@@ -2175,12 +2115,7 @@ def _tick(
         print(f"dispatch[{agent}]: idle terminal had no live agent REPL: fresh terminal -> {cmd.skill}")
         return 0
 
-    # idle: warm reuse, killing nothing -> no ghost. Close only legacy duplicates (one-time).
-    # The resolution comes first, before a single verb reaches this warm pane: the pre-scan
-    # that let the tick get here read the registry earlier than the resolution does, so the
-    # command this reuse would deliver can be one a supervisor holds. It is built here and
-    # handed down rather than resolved inside the delivery, which keeps the tick to the one
-    # resolution and the one report card it always had.
+    # Resolve before warm delivery so its command matches this tick's backend decision.
     pending = reports.command(variant, registry, resolution) if pending is None else pending
     supervised = _supervised_bring_up(agent, ws, state, event, pending, host=host, reports=reports)
     if supervised is not None:
