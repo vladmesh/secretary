@@ -112,6 +112,27 @@ class TaskReaderTests(unittest.TestCase):
         self.assertEqual(task["comments"][0]["marker"], "report:done")
         self.assertEqual(task["comments"][0]["created_at"], "2024-07-03T09:47:00Z")
 
+    def test_export_includes_archived_cards_in_one_metadata_comments_batch(self) -> None:
+        self.client.tasks[1]["is_active"] = 0
+        exported = self.reader.export()
+
+        self.assertEqual([card["reference"] for card in exported], ["secretary-468", "old-1"])
+        self.assertEqual(len(self.client.batch_calls), 1)
+        self.assertEqual(
+            self.client.batch_calls[0],
+            [
+                ("getTaskMetadata", {"task_id": 12}),
+                ("getAllComments", {"task_id": 12}),
+                ("getTaskMetadata", {"task_id": 13}),
+                ("getAllComments", {"task_id": 13}),
+            ],
+        )
+        self.assertFalse(exported[0]["closed"])
+        self.assertTrue(exported[1]["closed"])
+        self.assertEqual(
+            exported[0]["comments"], [{"ts": "1720000020", "text": "[report:done]\nReady for review"}]
+        )
+
     def test_show_reports_missing_task(self) -> None:
         with self.assertRaisesRegex(TaskError, "not found") as raised:
             self.reader.show("missing")
@@ -2353,7 +2374,11 @@ class TaskWriterTests(unittest.TestCase):
     def test_pending_blocks_export_from_the_same_data_root(self) -> None:
         self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
         with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
-            export_board(Path(self.tmpdir.name), instance_dir=Path(self.tmpdir.name), command=["pipeline"])
+            export_board(
+                Path(self.tmpdir.name),
+                instance_dir=Path(self.tmpdir.name),
+                reader=mock.Mock(),
+            )
 
 
 class AssessmentStateTests(unittest.TestCase):

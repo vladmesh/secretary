@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 import tempfile
 import threading
 import unittest
@@ -144,17 +143,15 @@ class SprintRestoreTests(unittest.TestCase):
         )
         return ref
 
-    def _pipeline_command(self) -> list[str]:
-        """A stand-in for `triggered_agents pipeline export`; cards are not the subject here."""
-        script = self.root / "fake_pipeline.py"
-        script.write_text("print(%r)" % json.dumps([CARD_EXPORT]), encoding="utf-8")
-        return [sys.executable, str(script)]
+    def _card_reader(self) -> mock.Mock:
+        """Canonical board-export seam; cards are not the subject of these tests."""
+        return mock.Mock(export=mock.Mock(return_value=[CARD_EXPORT]))
 
     def _export(self) -> None:
         export_board(
             self.source_data,
             instance_dir=self.instance,
-            command=self._pipeline_command(),
+            reader=self._card_reader(),  # type: ignore[arg-type]
             sprint_client=self.source,
         )
         # Only the normalized export travels; the target backend starts from nothing else.
@@ -300,7 +297,7 @@ class SprintRestoreTests(unittest.TestCase):
         export_board(
             self.target_data,
             instance_dir=self.instance,
-            command=self._pipeline_command(),
+            reader=self._card_reader(),  # type: ignore[arg-type]
             sprint_client=first,
         )
         second_data = self.root / "second-recovery"
@@ -644,7 +641,7 @@ class SprintRestoreTests(unittest.TestCase):
         export_board(
             self.target_data,
             instance_dir=self.instance,
-            command=self._pipeline_command(),
+            reader=self._card_reader(),  # type: ignore[arg-type]
             sprint_client=client,
         )
         again = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
@@ -724,7 +721,7 @@ class SprintRestoreTests(unittest.TestCase):
         export_board(
             self.target_data,
             instance_dir=self.instance,
-            command=self._pipeline_command(),
+            reader=self._card_reader(),  # type: ignore[arg-type]
             sprint_client=first,
         )
         second_data = self.root / "second-data"

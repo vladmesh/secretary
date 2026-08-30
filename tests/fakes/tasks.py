@@ -37,6 +37,7 @@ class FakeKanboard(BatchedCalls):
     def __init__(self) -> None:
         self.instance_dir = Path(tempfile.gettempdir())
         self.calls: list[tuple[str, dict]] = []
+        self.batch_calls: list[list[tuple[str, dict]]] = []
         self.tasks = [
             {
                 "id": "12",
@@ -90,6 +91,11 @@ class FakeKanboard(BatchedCalls):
         if method == "getAllComments":
             return [{"date_creation": 1720000020, "comment": "[report:done]\nReady for review"}]
         raise AssertionError(method)
+
+    def call_batch(self, calls):
+        batch = list(calls)
+        self.batch_calls.append(batch)
+        return super().call_batch(batch)
 
 
 class WriteKanboard(FakeKanboard):

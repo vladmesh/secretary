@@ -7,7 +7,6 @@ import shutil
 import sqlite3
 import stat as stat_module
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,7 +39,7 @@ from secretary._fsutil import (
 )
 from secretary.config import validate
 from secretary.memory_journal import export_memory_snapshot
-from secretary.tasks import TaskAudit
+from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
 KANBOARD_DATA_PATH = "/var/www/app/data"
@@ -170,8 +169,7 @@ def export_board(
     data_dir: Path,
     *,
     instance_dir: Path,
-    pipeline_worktree: Path = PIPELINE_WORKTREE,
-    command: list[str] | None = None,
+    reader: TaskReader | None = None,
     sprint_client: Any = None,
 ) -> DataExport:
     data_dir = data_dir.expanduser().resolve()
@@ -191,22 +189,23 @@ def export_board(
             f"board export blocked by {product_issue['pending']} unresolved Product/Issue transaction(s)"
         )
 
-    # One `pipeline export` instead of a `show` per card: the checkpoint writer runs this on
-    # every dispatcher tick under `tick_lock`, and the per-card path cost a subprocess and five
-    # API round trips each (~66s on a 200-card board, longer than the tick itself).
-    cards = _pipeline_json(["export"], pipeline_worktree=pipeline_worktree, command=command)
+    try:
+        task_reader = reader if reader is not None else TaskReader(KanboardClient.for_instance(instance_dir))
+        cards = task_reader.export()
+    except TaskError as exc:
+        raise RuntimeError(f"secretary task export failed: {exc.message}") from None
     if not isinstance(cards, list):
-        raise RuntimeError("pipeline export did not return a card list")
+        raise RuntimeError("secretary task export did not return a card list")
 
     normalized = []
     for card in sorted(cards, key=lambda item: str(item.get("reference", ""))):
         if not isinstance(card, dict):
-            raise RuntimeError("pipeline export returned an invalid card")
+            raise RuntimeError("secretary task export returned an invalid card")
         if not str(card.get("reference") or ""):
             continue
         normalized.append(normalize_board_card(card, card))
 
-    # Sprint entities live on their own board and never reach `pipeline export`, so the
+    # Sprint entities live on their own board and never reach the task board export, so the
     # checkpoint reads them separately instead of inferring them from linked cards.
     sprints = export_sprint_entities(instance_dir, sprint_client)
 
@@ -216,7 +215,7 @@ def export_board(
     )
     summary = {
         "version": 1,
-        "source": "triggered_agents pipeline",
+        "source": "secretary task",
         "card_count": len(normalized),
         "sprint_count": len(sprints),
         "raw_active_task_count": raw_active_task_count,
@@ -244,8 +243,7 @@ def export_board(
 
 
 def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) -> dict[str, Any]:
-    """Checkpoint record for one card. `pipeline export` carries both views, so the export
-    path passes the same payload twice; the list/show pair stays for callers holding both."""
+    """Checkpoint record for one card from its task export projection or list/show pair."""
     metadata = shown_card.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
@@ -664,38 +662,6 @@ def _write_data_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
                 temp_path.unlink()
             except OSError:
                 pass
-
-
-def _pipeline_json(
-    args: list[str],
-    *,
-    pipeline_worktree: Path,
-    command: list[str] | None,
-) -> Any:
-    cmd = command or [sys.executable, "-P", "-m", "triggered_agents", "pipeline"]
-    env = os.environ.copy()
-    pythonpath = str(pipeline_worktree / "src")
-    if env.get("PYTHONPATH"):
-        pythonpath = f"{pythonpath}{os.pathsep}{env['PYTHONPATH']}"
-    env["PYTHONPATH"] = pythonpath
-    try:
-        result = subprocess.run(
-            [*cmd, *args],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(f"pipeline command not found: {cmd[0]}") from None
-    except subprocess.CalledProcessError as exc:
-        reason = (exc.stderr or exc.stdout or "pipeline command failed").strip().splitlines()
-        raise RuntimeError(reason[-1] if reason else "pipeline command failed") from None
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"pipeline command returned invalid JSON: {exc}") from None
 
 
 def _latest_raw_active_task_count(board_dir: Path, *, board_name: str) -> int | None:

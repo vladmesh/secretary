@@ -512,6 +512,72 @@ class TaskReader:
             result.append(normalized)
         return sorted(result, key=lambda task: (task["state"], task["position"], task["ref"], task["id"]))
 
+    def export(self) -> list[dict[str, Any]]:
+        """Return the complete legacy checkpoint projection in bounded board reads.
+
+        Checkpoints retain the established board schema while reading it through the
+        canonical Secretary transport.  Metadata and comments have no Kanboard bulk
+        endpoint, so both are requested in one bounded JSON-RPC batch for the whole
+        board rather than once per card.
+        """
+        # The installed head registry remains the authority for legacy effective-head values;
+        # this is deliberately not a dependency on pipeline board operations or its export CLI.
+        from triggered_agents.agents.pipeline.heads import default_head, reviewer_head
+
+        project_id, columns, swimlanes = self._board()
+        cards = all_project_cards(self.client, project_id)
+        rows = [card for card in cards if isinstance(card, dict)]
+        task_ids = [_task_number(card) for card in rows]
+        answers = self.client.call_batch(
+            (method, {"task_id": task_id})
+            for task_id in task_ids
+            for method in ("getTaskMetadata", "getAllComments")
+        )
+        result = []
+        for index, card in enumerate(rows):
+            meta = _task_metadata(answers[index * 2])
+            raw_comments = answers[index * 2 + 1] or []
+            if not isinstance(raw_comments, list):
+                raise TaskError("backend_error", "Kanboard returned invalid task comments", 1)
+            task_id = task_ids[index]
+            head = _text(meta.get("head"))
+            review = _text(meta.get("review_head"))
+            result.append(
+                {
+                    "id": task_id,
+                    "reference": _text(card.get("reference")),
+                    "title": _text(card.get("title")),
+                    "description": _text(card.get("description")),
+                    "column": columns.get(_positive_int(card.get("column_id")) or -1, ""),
+                    "swimlane": swimlanes.get(_positive_int(card.get("swimlane_id")) or -1, ""),
+                    "position": _nonnegative_int(card.get("position")),
+                    "date_moved": _positive_int(card.get("date_moved")),
+                    "closed": not _task_is_active(card),
+                    "metadata": meta,
+                    "task_type": _text(meta.get("task_type")),
+                    "project": _text(meta.get("project")),
+                    "blocked_by": _text(meta.get("blocked_by")),
+                    "head": head,
+                    "effective_head": _text(meta.get("resolved_head")) or head or default_head(),
+                    "review_head": review,
+                    "effective_review_head": (
+                        _text(meta.get("resolved_review_head")) or review or reviewer_head()
+                    ),
+                    "claim": _text(meta.get("claim")),
+                    "slug": _text(meta.get("slug")),
+                    "base_branch": _text(meta.get("base_branch")),
+                    "comments": [
+                        {
+                            "ts": _text(comment.get("date_creation")),
+                            "text": _text(comment.get("comment")),
+                        }
+                        for comment in raw_comments
+                        if isinstance(comment, dict)
+                    ],
+                }
+            )
+        return result
+
     def show(self, reference: str) -> dict[str, Any]:
         project_id, columns, swimlanes = self._board()
         card = project_card_by_reference(self.client, project_id, reference)
@@ -1726,9 +1792,7 @@ class TaskWriter:
                 "body_sha256": _digest(body),
                 "assessment_visit": visit or None,
                 "description_sha256": _digest(current["description"]),
-                "specification_revision": specification_revision(
-                    committed_events, current["description"]
-                )
+                "specification_revision": specification_revision(committed_events, current["description"])
                 or None,
             }
             if current["state"] != "assessment":

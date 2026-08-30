@@ -42,6 +42,18 @@ from secretary.tasks import TaskError
 from tests.fakes.sprints import SprintKanboard
 
 
+class TaskExportReader:
+    """Small seam for the canonical task export; it never starts a subprocess."""
+
+    def __init__(self, cards: list[dict] | None = None) -> None:
+        self.cards = cards if cards is not None else [{"id": 1, "reference": "secretary-1", "title": "One"}]
+        self.calls = 0
+
+    def export(self) -> list[dict]:
+        self.calls += 1
+        return self.cards
+
+
 class DataLayoutTests(unittest.TestCase):
     def test_init_layout_creates_target_dirs_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -237,57 +249,84 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(normalized["comments"], [{"ts": "1", "text": "[worker]\nok"}])
 
     def test_export_board_writes_normalized_cards_and_is_idempotent(self):
-        calls = []
-
-        def fake_run(command, **_kwargs):
-            calls.append(command)
-            return subprocess_completed(
-                json.dumps(
-                    [
-                        {
-                            "id": 1,
-                            "reference": "secretary-353",
-                            "title": "Export",
-                            "description": "spec",
-                            "column": "Ready",
-                            "swimlane": "secretary",
-                            "position": 1,
-                            "metadata": {"project": "secretary"},
-                            "comments": [{"ts": "10", "text": "[po]\nbody"}],
-                        }
-                    ]
-                )
-            )
+        reader = TaskExportReader(
+            [
+                {
+                    "id": 1,
+                    "reference": "secretary-353",
+                    "title": "Export",
+                    "description": "spec",
+                    "column": "Ready",
+                    "swimlane": "secretary",
+                    "position": 1,
+                    "metadata": {"project": "secretary"},
+                    "comments": [{"ts": "10", "text": "[po]\nbody"}],
+                }
+            ]
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
-            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                first = export_board(
-                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
-                )
-                first_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
-                second = export_board(
-                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
-                )
-                second_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
+            first = export_board(
+                data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=SprintKanboard()
+            )
+            first_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
+            second = export_board(
+                data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=SprintKanboard()
+            )
+            second_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
 
         self.assertEqual(first.count, 1)
         self.assertEqual(second.count, 1)
         self.assertEqual(first_payload, second_payload)
-        # One `pipeline export` per export run: the writer runs under the tick lock, so a
-        # per-card call must not come back here.
-        self.assertEqual([command[-1] for command in calls], ["export", "export"])
+        self.assertEqual(reader.calls, 2)
 
-    def test_export_board_writes_an_empty_sprint_set_without_a_sprint_board(self):
-        def fake_run(command, **_kwargs):
-            return subprocess_completed(json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}]))
+    def test_export_board_uses_the_reader_not_a_subprocess_or_pipeline_path(self):
+        reader = TaskExportReader()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch("secretary.data.subprocess.run", side_effect=AssertionError("no subprocess")):
+                result = export_board(
+                    Path(tmpdir) / "secretary-data",
+                    instance_dir=Path(tmpdir),
+                    reader=reader,  # type: ignore[arg-type]
+                    sprint_client=SprintKanboard(),
+                )
 
+        self.assertEqual(result.source, "secretary task")
+        self.assertEqual(reader.calls, 1)
+
+    def test_task_reader_failure_preserves_the_previous_board_snapshot(self):
+        reader = TaskExportReader()
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
-            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
+            export_board(
+                data_dir,
+                instance_dir=Path(tmpdir),
+                reader=reader,  # type: ignore[arg-type]
+                sprint_client=SprintKanboard(),
+            )
+            previous = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
+            failed_reader = mock.Mock()
+            failed_reader.export.side_effect = TaskError("backend_error", "backend refused export", 1)
+
+            with self.assertRaisesRegex(RuntimeError, "secretary task export failed: backend refused export"):
                 export_board(
-                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
+                    data_dir,
+                    instance_dir=Path(tmpdir),
+                    reader=failed_reader,  # type: ignore[arg-type]
+                    sprint_client=SprintKanboard(),
                 )
+
+            current = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
+
+        self.assertEqual(current, previous)
+
+    def test_export_board_writes_an_empty_sprint_set_without_a_sprint_board(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            export_board(
+                data_dir, instance_dir=Path(tmpdir), reader=TaskExportReader(), sprint_client=SprintKanboard()
+            )
             board = data_dir / "board"
             sprints = json.loads((board / "sprints.json").read_text(encoding="utf-8"))
             ndjson = (board / "sprints.ndjson").read_text(encoding="utf-8")
@@ -306,35 +345,21 @@ class ExportTests(unittest.TestCase):
                     raise TaskError("backend_error", "sprint board is unreachable", 1)
                 return super().call(method, **params)
 
-        def fake_run(command, **_kwargs):
-            return subprocess_completed(json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}]))
-
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
-            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                with self.assertRaisesRegex(RuntimeError, "sprint board is unreachable"):
-                    export_board(
-                        data_dir,
-                        instance_dir=Path(tmpdir),
-                        command=["pipeline"],
-                        sprint_client=BrokenSprintKanboard(),
-                    )
+            with self.assertRaisesRegex(RuntimeError, "sprint board is unreachable"):
+                export_board(
+                    data_dir,
+                    instance_dir=Path(tmpdir),
+                    reader=TaskExportReader(),
+                    sprint_client=BrokenSprintKanboard(),
+                )
             published = sorted(path.name for path in (data_dir / "board").iterdir())
 
         # Unreachable sprints must not produce a partial snapshot of cards alone.
         self.assertEqual(published, [])
 
     def test_export_board_records_matching_active_raw_count_when_dump_exists(self):
-        def fake_run(command, **_kwargs):
-            return subprocess_completed(
-                json.dumps(
-                    [
-                        {"id": 1, "reference": "secretary-1", "title": "One"},
-                        {"id": 2, "reference": "secretary-2", "title": "Two"},
-                    ]
-                )
-            )
-
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             database = data_dir / "board" / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
@@ -348,18 +373,22 @@ class ExportTests(unittest.TestCase):
                 conn.execute(
                     "insert into tasks (project_id, is_active) values (2, 1), (2, 0), (2, 1), (1, 1)"
                 )
-            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                export_board(
-                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
-                )
+            export_board(
+                data_dir,
+                instance_dir=Path(tmpdir),
+                reader=TaskExportReader(
+                    [
+                        {"id": 1, "reference": "secretary-1", "title": "One"},
+                        {"id": 2, "reference": "secretary-2", "title": "Two"},
+                    ]
+                ),
+                sprint_client=SprintKanboard(),
+            )
             summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
 
         self.assertEqual(summary["raw_active_task_count"], 2)
 
     def test_export_board_skips_raw_count_when_board_project_missing(self):
-        def fake_run(command, **_kwargs):
-            return subprocess_completed(json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}]))
-
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             database = data_dir / "board" / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
@@ -371,10 +400,9 @@ class ExportTests(unittest.TestCase):
                 )
                 conn.execute("insert into projects (id, name) values (1, 'Other')")
                 conn.execute("insert into tasks (project_id, is_active) values (1, 1), (1, 1), (1, 1)")
-            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                export_board(
-                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
-                )
+            export_board(
+                data_dir, instance_dir=Path(tmpdir), reader=TaskExportReader(), sprint_client=SprintKanboard()
+            )
             summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
 
         # A dump with no Pipeline board: another board's 3 active tasks must neither enter the
@@ -383,9 +411,6 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(summary["card_count"], 1)
 
     def test_export_board_records_stale_raw_count_without_failing(self):
-        def fake_run(command, **_kwargs):
-            return subprocess_completed(json.dumps([]))
-
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             database = data_dir / "board" / "kanboard-raw-20260710T000000Z" / "data" / "db.sqlite"
@@ -397,10 +422,12 @@ class ExportTests(unittest.TestCase):
                 )
                 conn.execute("insert into projects (id, name) values (1, 'Pipeline')")
                 conn.execute("insert into tasks (project_id, is_active) values (1, 1), (1, 1)")
-            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                export_board(
-                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
-                )
+            export_board(
+                data_dir,
+                instance_dir=Path(tmpdir),
+                reader=TaskExportReader([]),
+                sprint_client=SprintKanboard(),
+            )
             summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
 
         self.assertEqual(summary["card_count"], 0)
@@ -414,13 +441,7 @@ class ExportTests(unittest.TestCase):
                 {"id": 2, "reference": "secretary-2", "title": "Two"},
             ],
         ]
-        run_index = 0
-
-        def fake_run(command, **_kwargs):
-            nonlocal run_index
-            stdout = json.dumps(cards_by_run[run_index])
-            run_index += 1
-            return subprocess_completed(stdout)
+        reader = TaskExportReader(cards_by_run[0])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
@@ -429,32 +450,27 @@ class ExportTests(unittest.TestCase):
             raw_marker.parent.mkdir(parents=True)
             raw_marker.write_bytes(b"not sqlite")
 
-            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                export_board(
-                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
-                )
-                old_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
-                old_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
-                old_summary = (board_dir / "export.json").read_text(encoding="utf-8")
+            export_board(data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=SprintKanboard())
+            old_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
+            old_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
+            old_summary = (board_dir / "export.json").read_text(encoding="utf-8")
 
-                original_replace = os.replace
-                failed = False
+            original_replace = os.replace
+            failed = False
+            reader.cards = cards_by_run[1]
 
-                def fail_on_ndjson_publish(source, destination):
-                    nonlocal failed
-                    if not failed and Path(destination) == board_dir / "cards.ndjson":
-                        failed = True
-                        raise OSError("full")
-                    return original_replace(source, destination)
+            def fail_on_ndjson_publish(source, destination):
+                nonlocal failed
+                if not failed and Path(destination) == board_dir / "cards.ndjson":
+                    failed = True
+                    raise OSError("full")
+                return original_replace(source, destination)
 
-                with mock.patch("secretary.data.os.replace", side_effect=fail_on_ndjson_publish):
-                    with self.assertRaisesRegex(RuntimeError, "could not publish board export"):
-                        export_board(
-                            data_dir,
-                            instance_dir=Path(tmpdir),
-                            command=["pipeline"],
-                            sprint_client=SprintKanboard(),
-                        )
+            with mock.patch("secretary.data.os.replace", side_effect=fail_on_ndjson_publish):
+                with self.assertRaisesRegex(RuntimeError, "could not publish board export"):
+                    export_board(
+                        data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=SprintKanboard()
+                    )
 
             current_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
             current_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
@@ -1313,10 +1329,6 @@ class ExportTests(unittest.TestCase):
             data_module.PIPELINE_STATE_DIR,
             Path.home() / "orca" / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline",
         )
-
-
-def subprocess_completed(stdout: str):
-    return mock.Mock(stdout=stdout, stderr="", returncode=0)
 
 
 def init_instance_repo(path: Path) -> Path:
