@@ -318,27 +318,40 @@ class CiTestSuiteManifestTests(unittest.TestCase):
     def test_reported_runner_writes_success_evidence_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "passing_suite.py").write_text(
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "__init__.py").write_text("", encoding="utf-8")
+            (tests / "test_passing.py").write_text(
                 "import unittest\n"
                 "class Passing(unittest.TestCase):\n"
                 "    def test_pass(self): self.assertTrue(True)\n",
                 encoding="utf-8",
             )
             report_dir = root / "artifacts" / "unit"
-            report_dir.mkdir(parents=True)
-            sys.path.insert(0, str(root))
+            grouped = {suite: ["tests/test_passing.py"] for suite in SUITES}
+            loaded_tests = {
+                name: module
+                for name, module in list(sys.modules.items())
+                if name == "tests" or name.startswith("tests.")
+            }
+            for name in loaded_tests:
+                del sys.modules[name]
             try:
-                with patch("scripts.ci_test_shards.modules", return_value=["passing_suite"]):
-                    log = BoundedTee(StringIO(), report_dir / "test-output.log")
-                    evidence = run_reported_suite("unit", ["ignored"], CANDIDATE_SHA, log)
-                    _write_evidence(report_dir, evidence, log)
+                with (
+                    redirect_stdout(StringIO()),
+                    patch("scripts.ci_test_shards.load_manifest", return_value=grouped),
+                ):
+                    self.assertEqual(run_suite_with_evidence(root, "unit", report_dir, CANDIDATE_SHA), 0)
             finally:
-                sys.path.remove(str(root))
-                sys.modules.pop("passing_suite", None)
+                for name in list(sys.modules):
+                    if name == "tests" or name.startswith("tests."):
+                        del sys.modules[name]
+                sys.modules.update(loaded_tests)
 
             summary = StringIO()
             with redirect_stdout(summary):
                 self.assertEqual(report_summary(report_dir), 0)
+            evidence = _read_evidence(report_dir)
 
         self.assertEqual(evidence.outcome, "success")
         self.assertIn("Candidate SHA", summary.getvalue())
@@ -359,7 +372,10 @@ class CiTestSuiteManifestTests(unittest.TestCase):
     def test_reported_manifest_or_report_failure_is_infrastructure_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             report_dir = Path(tmp) / "report"
-            with patch("scripts.ci_test_shards.load_manifest", side_effect=ManifestError("bad manifest")):
+            with (
+                redirect_stdout(StringIO()),
+                patch("scripts.ci_test_shards.load_manifest", side_effect=ManifestError("bad manifest")),
+            ):
                 self.assertEqual(run_suite_with_evidence(Path(tmp), "unit", report_dir, CANDIDATE_SHA), 3)
 
             evidence = _read_evidence(report_dir)

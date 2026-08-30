@@ -618,7 +618,11 @@ def run_suite_with_evidence(root: Path, suite_name: str, report_dir: Path, candi
                 detail=str(exc),
             )
         else:
-            evidence = run_reported_suite(suite_name, grouped[suite_name], candidate_sha, log)
+            sys.path.insert(0, str(root))
+            try:
+                evidence = run_reported_suite(suite_name, grouped[suite_name], candidate_sha, log)
+            finally:
+                sys.path.pop(0)
     try:
         _write_evidence(report_dir, evidence, log)
     except OSError as exc:
