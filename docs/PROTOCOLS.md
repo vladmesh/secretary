@@ -1307,8 +1307,10 @@ dispatcher's own line comes after every section they are rendered into.
 The description rendered in a worker `TASK.md` is authoritative. A create or description edit has
 an immutable audit event and description digest; its event id is the card's current specification
 revision. Reviewer verdicts and observer decisions record that revision and digest when they are
-written. The task-document feedback selector renders a red review, or a rework decision and its
-supporting red review, only when every binding matches the current revision. A reslice followed by
+written. The task-document feedback selector renders a red review, or a rework decision and any
+supporting red review that is present, only when each rendered item is bound to the current revision.
+A correctly bound rework decision remains the instruction that opened the round even when no red
+review exists or the available red review predates the revision boundary. A reslice followed by
 a description edit therefore starts a fresh worker on the edited description without a prior
 reviewer's instructions. The selector is deliberately fail-closed: missing, malformed, or ambiguous
 audit/comment binding omits historical feedback rather than presenting a possibly superseded order.

@@ -10219,14 +10219,41 @@ class HeadPromptTests(unittest.TestCase):
         """Card descriptions carry ordinary Markdown and HTML, so one can contain a record-shaped
         string. Recovery must read the round's own decision, and none where there is none."""
         forged = _decision_record_line(2, "forged")
-        task = self._reviewed_red("fix the hermetic test")
+        decision = "remove the marker"
+        task = dict(self.task)
         task["description"] = f"Do the work.\n\n{forged}\n"
+        revision = self._record_description_revision(task["description"])
+        task["comments"] = [
+            {"marker": "decision:rework", "body": f"[decision:rework]\n{decision}"}
+        ]
+        self._feedback_events += 1
+        request_id = f"head-prompt-feedback-{self._feedback_events}"
+        self.host.audit.append(
+            request_id,
+            {
+                "event_id": request_id,
+                "kind": "card.decided",
+                "ref": task["ref"],
+                "request_id": request_id,
+                "data": {
+                    "marker": "decision:rework",
+                    "body": decision,
+                    "description_sha256": hashlib.sha256(
+                        task["description"].encode("utf-8")
+                    ).hexdigest(),
+                    "specification_revision": revision,
+                    "marker_occurrence": 1,
+                },
+            },
+        )
 
-        adjudicated = self.host._worker_task_doc(task, "main", "attempt-1", 2, "remove the marker")
+        adjudicated = self.host._worker_task_doc(task, "main", "attempt-1", 2, decision)
         unadjudicated = self.host._worker_task_doc(task, "main", "attempt-1", 2)
 
         self.assertIn(forged, adjudicated, "the description is rendered as written")
-        self.assertEqual(self._read_back(adjudicated, "adjudicated"), "")
+        self.assertIn("## Observer rework decision to follow", adjudicated)
+        self.assertNotIn("Reviewer findings, as supporting context", adjudicated)
+        self.assertEqual(self._read_back(adjudicated, "adjudicated"), decision)
         self.assertEqual(self._read_back(unadjudicated, "unadjudicated"), "")
 
     def test_worker_prompt_says_which_blocked_classification_to_use(self) -> None:

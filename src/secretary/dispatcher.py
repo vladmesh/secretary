@@ -3857,7 +3857,7 @@ class CommandHostRuntime:
             if not self._bound_marker_body(task, events, "decision:rework", revision, digest, decision):
                 return "", None
             review = self._bound_marker_body(task, events, "review:red", revision, digest)
-            return (decision, review) if review else ("", None)
+            return decision, review
         return "", self._bound_marker_body(task, events, "review:red", revision, digest)
 
     @staticmethod
