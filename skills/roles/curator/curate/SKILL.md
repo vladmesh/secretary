@@ -16,7 +16,7 @@ The canon is markdown facts in a Git journal. The index is derived. One fact is 
 ### 1. Take the fresh batch
 
 ```
-python3 -P -m triggered_agents curator harvest [--project <canonical-id>]
+python3 -P -m triggered_agents curator harvest [--project <canonical-id|review:po>]
 ```
 
 Run it from your own workspace (the run's starting working directory is the curator worktree). **Do not
@@ -35,11 +35,11 @@ the writer finishes; it is never a role-wide clean skip.
 
 The first fact-bearing harvest writes an identity-bound pending record. Repeating harvest before advance
 returns that same batch even if sources have grown. The selector is part of that identity: use the same
-`--project <canonical-id>` for harvest and advance, and do not switch between a selected project and the
+`--project <canonical-id|review:po>` for harvest and advance, and do not switch between a selected project and the
 explicit all-backlog mode. Do not alter the state directory or pending file. Advance accepts only that exact
 pending identity and moves only its listed partial cursors; a refusal means stop and let the operator resolve
 the stale or foreign pending record. To inspect work without changing state, use
-`python3 -P -m triggered_agents curator backlog [--project <canonical-id>] [--json]`; it emits aggregate
+`python3 -P -m triggered_agents curator backlog [--project <canonical-id|review:po>] [--json]`; it emits aggregate
 metadata only, never source text.
 
 The batch comes from two kinds of source:
@@ -87,13 +87,23 @@ Scope follows the source's displayed route, not a guessed path or a directory na
 - `project:<canonical-id>` — a source routed through one registered binding's canonical `id`. A fact about
   the task pipeline (board, runtime, curator, secretary) belongs to `project:secretary`.
 - `global` — only material explicitly marked `global`, such as a runtime's installation-wide memory.
+- `review:po` — only a conclusion from a multi-project observer source that cannot be assigned to one
+  project without product-owner judgment. This is a pending triage basket, not operational truth.
 - `unknown` is not a project scope. Do not assign an unknown source by default; skip it unless the fact itself
   establishes an owner through independently reliable context.
 
 The route is authoritative only when discovery found one normalized registry match: every valid binding's checkout,
 or its workspace tree when it has a safe optional `orca_binding`. Prefixes, unregistered paths and ambiguous routes
 stay `unknown`; a missing `orca_binding` never invents a workspace route. Observer workspace tokens restore the
-canonical `sprint:` prefix before they route only through a readable sprint with exactly one reservation.
+canonical `sprint:` prefix. One registered reservation routes to that project. Multiple distinct registered
+reservations route to `review:po`; malformed, duplicate or unregistered reservation sets remain `unknown`.
+
+For a `review:po` source, first separate conclusions whose owner is unambiguous and write those directly to the
+corresponding `project:<canonical-id>`. Only a genuinely shared or ownership-ambiguous current conclusion belongs
+in `review:po`. Such a fact must use the tags `pending-review,multi-project`, name its candidate project scopes and
+state why PO judgment is required. Do not create a review fact merely to record that a session was examined or
+that it contained no durable fact. The same ban on changelog, rejected alternatives and implementation history
+applies to the review basket.
 
 **Personal memory of the runtimes** (the second kind of source) is read through the same barrier and the
 same durability bar as transcripts: the file is already one head's distillate, but it is not yours, so
@@ -145,11 +155,11 @@ Then write it:
 
 ```
 python3 -P -m triggered_agents curator memory-write \
-  --actor curator --scope <global|project:<dir>> --slug <kebab-slug> --file /tmp/fact.md
+  --actor curator --scope <global|project:<dir>|review:po> --slug <kebab-slug> --file /tmp/fact.md
 ```
 
-- `--scope` is `global` or `project:<dir>`. It picks the canon directory: a project scope lands in
-  `facts/<dir>/`.
+- `--scope` is `global`, `project:<dir>`, or `review:po`. It picks the canon directory: a project scope lands in
+  `facts/<dir>/`; PO review lands in `facts/po-review/`.
 - `--slug` is a short kebab-case summary of the fact, the card's name in the canon.
 - `--file` is the temporary file. Metadata goes in the file's frontmatter (`tags`, `source`, `pinned`,
   `supersedes`) or in flags (`--tags`, `--pinned`, `--supersedes <old-slug>`, `--source`); flags override
@@ -171,7 +181,7 @@ carry it over — refer to it by name and location instead.
 ### 5. Move the watermark
 
 ```
-python3 -P -m triggered_agents curator advance [--project <canonical-id>]
+python3 -P -m triggered_agents curator advance [--project <canonical-id|review:po>]
 ```
 
 Order matters: move the watermark ONLY after every fact has been written through `memory-write`. If the

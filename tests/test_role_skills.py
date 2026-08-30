@@ -37,6 +37,7 @@ ROLES_ROOT = MANIFEST.parent / "roles"
 
 OBSERVER_SKILL = "observe-sprint"
 OPEN_SPRINT_SKILL = "open-sprint"
+CURATOR_SKILL = "curate"
 
 
 class CanonicalRegistryTests(unittest.TestCase):
@@ -65,6 +66,17 @@ class CanonicalRegistryTests(unittest.TestCase):
         source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
 
         self.assertTrue(source.is_file(), f"{source} is missing")
+
+    def test_curator_skill_routes_ambiguous_multi_project_facts_to_po_review(self) -> None:
+        source = ROLES_ROOT / "curator" / CURATOR_SKILL / "SKILL.md"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertIn("<canonical-id|review:po>", text)
+        self.assertIn("Multiple distinct registered\nreservations route to `review:po`", text)
+        self.assertIn("tags `pending-review,multi-project`", text)
+        self.assertIn("name its candidate project scopes", text)
+        self.assertIn("Do not create a review fact merely to record that a session was examined", text)
+        self.assertIn("--scope <global|project:<dir>|review:po>", text)
 
     def test_observer_skill_contains_the_minimal_supported_change_guardrails(self) -> None:
         source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
