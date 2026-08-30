@@ -19,7 +19,11 @@ Each exact-SHA suite execution writes its GitHub step summary and uploads the
 truncation marker if it reaches that boundary. Artifacts, including the JUnit XML, are retained for
 14 days. For pull requests, `<sha>` is the branch-head candidate SHA; for other events it is
 `github.sha`. The summary names the same candidate SHA, outcome, counts, duration, slowest tests
-and concise failure locations.
+and concise failure locations. Immediately before and after each selected suite, the runner records
+Git's complete `status --porcelain=v1 --untracked-files=all` snapshot for the candidate checkout.
+A green suite requires those snapshots to match exactly. Evidence retains snapshot entry counts and
+digests, plus at most ten bounded changed-status entries, rather than publishing unbounded checkout
+contents.
 
 The test job remains the aggregate required result and succeeds only when every applicable suite
 succeeds. Its own summary lists each suite as `success`, `product_failure`,
@@ -27,11 +31,15 @@ succeeds. Its own summary lists each suite as `success`, `product_failure`,
 missing, malformed or unwritable JSON/JUnit/log evidence is an infrastructure failure. Cancelled
 matrix work is never treated as success, while routing that explicitly skips a suite is recorded as
 not applicable rather than a test failure.
+An unavailable Git status command or any test-generated tracked or untracked product artifact is
+also an infrastructure failure. If a product test failed in the same contaminated suite, its concise
+failure location remains in the evidence, but the suite is classified as infrastructure failure
+because the execution boundary cannot be trusted.
 The manifest owns the taxonomy: every top-level tests/test_*.py file must occur once, under one
 of those names. Unknown names, missing files, stale entries, duplicate entries and empty suites
 make the manifest invalid before a selected suite starts.
 
-Use a focused local check while changing the runner or its manifest:
+On a control host, use only focused local work while changing the runner or its manifest:
 
     python3 -m unittest -v tests.test_ci_shards
     python3 scripts/ci_test_shards.py --check
@@ -58,7 +66,8 @@ workspace.
 The profile is intentionally narrow: it proves the existing isolation seams rather than testing
 real host, systemd, Orca, credentials, Docker, VM, Ansible or provisioning behaviour. Those runtime
 contours remain in their named CI suites or explicit operator checks. The control host intentionally
-uses focused checks only. Complete validation remains dispatcher-owned exact-SHA GitHub CI.
+uses focused checks and `--fast` only. Complete validation remains dispatcher-owned exact-SHA GitHub
+CI; do not run a local broad suite.
 
 ## Changed Python lint
 

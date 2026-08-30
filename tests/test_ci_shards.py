@@ -17,10 +17,12 @@ from scripts.ci_test_shards import (
     FAST_MODULES,
     SUITES,
     BoundedTee,
+    CheckoutStatusError,
     ManifestError,
     SuiteEvidence,
     TestRecord,
     _read_evidence,
+    _summary,
     _write_evidence,
     aggregate_evidence,
     fast_environment,
@@ -39,6 +41,37 @@ CANDIDATE_SHA = "a" * 40
 
 
 class CiTestSuiteManifestTests(unittest.TestCase):
+    def _commit_checkout(self, root: Path) -> None:
+        subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "CI test"], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "config", "user.email", "ci-test@example.invalid"], check=True
+        )
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "--quiet", "-m", "fixture"], check=True)
+
+    def _run_temporary_suite(self, root: Path, report_dir: Path) -> int:
+        grouped = {suite: ["tests/test_passing.py"] for suite in SUITES}
+        loaded_tests = {
+            name: module
+            for name, module in list(sys.modules.items())
+            if name == "tests" or name.startswith("tests.")
+        }
+        for name in loaded_tests:
+            del sys.modules[name]
+        try:
+            with (
+                patch.object(sys, "dont_write_bytecode", True),
+                redirect_stdout(StringIO()),
+                patch("scripts.ci_test_shards.load_manifest", return_value=grouped),
+            ):
+                return run_suite_with_evidence(root, "unit", report_dir, CANDIDATE_SHA)
+        finally:
+            for name in list(sys.modules):
+                if name == "tests" or name.startswith("tests."):
+                    del sys.modules[name]
+            sys.modules.update(loaded_tests)
+
     def test_live_manifest_partitions_every_top_level_test_once(self) -> None:
         root = Path(__file__).resolve().parents[1]
 
@@ -397,7 +430,9 @@ class CiTestSuiteManifestTests(unittest.TestCase):
 
     def test_reported_runner_writes_success_evidence_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            temporary = Path(tmp)
+            root = temporary / "checkout"
+            root.mkdir()
             tests = root / "tests"
             tests.mkdir()
             (tests / "__init__.py").write_text("", encoding="utf-8")
@@ -407,26 +442,9 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                 "    def test_pass(self): self.assertTrue(True)\n",
                 encoding="utf-8",
             )
-            report_dir = root / "artifacts" / "unit"
-            grouped = {suite: ["tests/test_passing.py"] for suite in SUITES}
-            loaded_tests = {
-                name: module
-                for name, module in list(sys.modules.items())
-                if name == "tests" or name.startswith("tests.")
-            }
-            for name in loaded_tests:
-                del sys.modules[name]
-            try:
-                with (
-                    redirect_stdout(StringIO()),
-                    patch("scripts.ci_test_shards.load_manifest", return_value=grouped),
-                ):
-                    self.assertEqual(run_suite_with_evidence(root, "unit", report_dir, CANDIDATE_SHA), 0)
-            finally:
-                for name in list(sys.modules):
-                    if name == "tests" or name.startswith("tests."):
-                        del sys.modules[name]
-                sys.modules.update(loaded_tests)
+            self._commit_checkout(root)
+            report_dir = temporary / "runner-temp" / "unit"
+            self.assertEqual(self._run_temporary_suite(root, report_dir), 0)
 
             summary = StringIO()
             with redirect_stdout(summary):
@@ -434,8 +452,120 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             evidence = _read_evidence(report_dir)
 
         self.assertEqual(evidence.outcome, "success")
+        self.assertIsNotNone(evidence.checkout_status)
+        self.assertFalse(evidence.checkout_status.changed)
         self.assertIn("Candidate SHA", summary.getvalue())
         self.assertIn("collected 1, passed 1", summary.getvalue())
+        self.assertIn("Checkout status: unchanged", summary.getvalue())
+
+    def test_reported_runner_detects_a_tracked_checkout_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            root = temporary / "checkout"
+            root.mkdir()
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "__init__.py").write_text("", encoding="utf-8")
+            (root / "tracked.txt").write_text("before\n", encoding="utf-8")
+            (tests / "test_passing.py").write_text(
+                "import unittest\n"
+                "from pathlib import Path\n"
+                "class Passing(unittest.TestCase):\n"
+                "    def test_pass(self):\n"
+                "        Path('tracked.txt').write_text('after\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            self._commit_checkout(root)
+
+            report_dir = temporary / "runner-temp" / "unit"
+            self.assertEqual(self._run_temporary_suite(root, report_dir), 3)
+            evidence = _read_evidence(report_dir)
+
+        self.assertEqual(evidence.outcome, "infrastructure_failure")
+        self.assertIsNotNone(evidence.checkout_status)
+        self.assertTrue(evidence.checkout_status.changed)
+        self.assertTrue(any("tracked.txt" in entry for entry in evidence.checkout_status.changed_entries))
+
+    def test_reported_runner_detects_an_untracked_product_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            root = temporary / "checkout"
+            root.mkdir()
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "__init__.py").write_text("", encoding="utf-8")
+            (tests / "test_passing.py").write_text(
+                "import unittest\n"
+                "from pathlib import Path\n"
+                "class Passing(unittest.TestCase):\n"
+                "    def test_pass(self):\n"
+                "        Path('product-artifact.txt').write_text('artifact\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            self._commit_checkout(root)
+
+            report_dir = temporary / "runner-temp" / "unit"
+            self.assertEqual(self._run_temporary_suite(root, report_dir), 3)
+            evidence = _read_evidence(report_dir)
+            summary = _summary(evidence)
+
+        self.assertEqual(evidence.outcome, "infrastructure_failure")
+        self.assertEqual(evidence.counts["passed"], 1)
+        self.assertIsNotNone(evidence.checkout_status)
+        self.assertTrue(evidence.checkout_status.changed)
+        self.assertTrue(
+            any("product-artifact.txt" in entry for entry in evidence.checkout_status.changed_entries)
+        )
+        self.assertIn("Checkout status: changed", summary)
+        self.assertIn("product-artifact.txt", summary)
+
+    def test_checkout_contamination_overrides_a_product_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            root = temporary / "checkout"
+            root.mkdir()
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "__init__.py").write_text("", encoding="utf-8")
+            (tests / "test_passing.py").write_text(
+                "import unittest\n"
+                "from pathlib import Path\n"
+                "class Failing(unittest.TestCase):\n"
+                "    def test_failure(self):\n"
+                "        Path('product-artifact.txt').write_text('artifact\\n', encoding='utf-8')\n"
+                "        self.fail('product failure')\n",
+                encoding="utf-8",
+            )
+            self._commit_checkout(root)
+
+            report_dir = temporary / "runner-temp" / "unit"
+            self.assertEqual(self._run_temporary_suite(root, report_dir), 3)
+            evidence = _read_evidence(report_dir)
+
+        self.assertEqual(evidence.outcome, "infrastructure_failure")
+        self.assertIn("test outcome before checkout verification: product_failure", evidence.detail)
+        self.assertTrue(any("test_failure" in location for location in evidence.failure_locations))
+
+    def test_unavailable_checkout_status_is_an_infrastructure_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            root.mkdir()
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "__init__.py").write_text("", encoding="utf-8")
+            (tests / "test_passing.py").write_text("", encoding="utf-8")
+            self._commit_checkout(root)
+
+            report_dir = Path(tmp) / "runner-temp" / "unit"
+            with patch(
+                "scripts.ci_test_shards._checkout_snapshot",
+                side_effect=CheckoutStatusError("git status command failed"),
+            ):
+                self.assertEqual(self._run_temporary_suite(root, report_dir), 3)
+            evidence = _read_evidence(report_dir)
+
+        self.assertEqual(evidence.outcome, "infrastructure_failure")
+        self.assertIn("checkout status unavailable before suite execution", evidence.failure_locations)
 
     def test_bounded_log_keeps_a_marker_after_its_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
