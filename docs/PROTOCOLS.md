@@ -432,9 +432,10 @@ went red while the card was parked. Deciding again on a release that failed part
 separate card; until it exists, Blocked is the one answer, because it cannot publish twice.
 
 `secretary task move` is the writer for the transition itself. The board has one role and transition
-model, this one; the `triggered_agents pipeline` surface is a consumer of the same board and carries
-only the steward's `Assessment -> Blocked` escalation. `--target` is accepted as a second spelling
-of `--to` on that command; both name the same destination state.
+model, this one. There is no parallel `triggered_agents pipeline` writer: steward report cards,
+steward signals, and retro Done retention enter through Secretary's canonical TaskReader/TaskWriter
+adapters, preserving the audit and sprint guards. `--target` is accepted as a second spelling of
+`--to` on that command; both name the same destination state.
 
 ```bash
 python3 -P -m secretary task list --project PROJECT
@@ -1089,9 +1090,8 @@ steward carries moving one into it; the reason is a comment on the card and is c
 transition event, so how a Blocked card was disposed of stays answerable.
 
 The `reported` events are the authoritative copy and keep the classification of every block, so counting how
-often one head blocks is a question for the audit. The compatibility CLI (`triggered_agents pipeline report`)
-cannot write a classification, so it refuses `--kind blocked` outright and names this command instead. The
-vocabulary has one definition, in `secretary.tasks`. Its `--kind done` is unchanged.
+often one head blocks is a question for the audit. The retired `triggered_agents pipeline` CLI is no longer a
+write path; the vocabulary has one definition, in `secretary.tasks`. Its `--kind done` is unchanged.
 
 The dispatcher also remembers the SHA that a mechanical gate or a red review rejected in the current
 attempt. A `done` report on the same SHA normally does not move to Validate: the first such report sends the

@@ -4,8 +4,9 @@
 # replaced, so the branch logic is reviewable and covered by tests instead of hiding in a systemd
 # unit string (triggered-agents-276).
 #
-# Exit-code protocol of `python3 -P -m triggered_agents <agent> precheck` (all agents, see each cli.py
-# and runtime/state.py PRECHECK_SKIP):
+# Exit-code protocol of the role launcher precheck (curator uses
+# `triggered_agents`; steward/retro use `secretary.dispatch.standing_agent`; see
+# each cli.py and runtime/state.py PRECHECK_SKIP):
 #   0              -> there is work: exec the dispatch, the head wakes up.
 #   100            -> deliberate skip (nothing changed / paused): no new skill dispatch, but still
 #                     run `dispatch --cleanup-only` (triggered-agents-445) so an ephemeral agent's
@@ -52,6 +53,16 @@ export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary
 agent="${1:?usage: ta-gate.sh <agent> [variant]}"
 variant="${2:-}"
 
+# Curator remains on its released triggered-agent entrypoint.  Steward and
+# retro are board-owning roles: their live paths enter through Secretary's
+# composition root, which injects the canonical TaskReader/TaskWriter ports.
+# Keep this selection outside role_env so the role-local environment boundary
+# remains identical for every command below.
+role_module="triggered_agents"
+case "$agent" in
+    steward|retro) role_module="secretary.dispatch.standing_agent" ;;
+esac
+
 run_role_env() {
     python3 -P -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
 }
@@ -61,7 +72,7 @@ exec_role_env() {
 }
 
 if [ -n "$variant" ]; then
-    exec_role_env python3 -P -m triggered_agents "$agent" dispatch "$variant"
+    exec_role_env python3 -P -m "$role_module" "$agent" dispatch "$variant"
 fi
 
 # How long the gate keeps re-attempting a precheck that could not reach the board: attempts spaced
@@ -73,7 +84,7 @@ board_wait="${TA_GATE_BOARD_WAIT:-120}"
 
 attempt=1
 while : ; do
-    run_role_env python3 -P -m triggered_agents "$agent" precheck
+    run_role_env python3 -P -m "$role_module" "$agent" precheck
     rc=$?
     if [ "$rc" -ne 101 ] || [ "$attempt" -ge "$board_attempts" ]; then
         break
@@ -84,10 +95,10 @@ while : ; do
 done
 
 if [ "$rc" -eq 0 ]; then
-    exec_role_env python3 -P -m triggered_agents "$agent" dispatch
+    exec_role_env python3 -P -m "$role_module" "$agent" dispatch
 elif [ "$rc" -eq 100 ]; then
     echo "[ta-$agent] precheck: no change, skill dispatch skipped"
-    exec_role_env python3 -P -m triggered_agents "$agent" dispatch --cleanup-only
+    exec_role_env python3 -P -m "$role_module" "$agent" dispatch --cleanup-only
 elif [ "$rc" -eq 101 ]; then
     # No dispatch and no cleanup: both talk to the same board none of the attempts could reach.
     echo "[ta-$agent] precheck: board unreachable after $board_attempts attempts; run not taken" >&2

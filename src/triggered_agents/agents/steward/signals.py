@@ -19,14 +19,12 @@ import os
 import re
 import time
 from collections import defaultdict
-from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Protocol, TypedDict
 
 from ...runtime import production_telemetry, shared_state
 from ...runtime.state import AgentState
 from ..pipeline import naming as pipeline_naming
-from ..pipeline import ops as pipeline_ops
 
 STATE = AgentState("steward")
 
@@ -71,41 +69,18 @@ _STATE_COLUMNS = {
 }
 
 
-class _LegacyStewardSignalReader:
-    """Lazy compatibility adapter; production continues to read pipeline_ops by default."""
-
-    def active_cards(
-        self, *, states: set[str] | None = None, project: str | None = None
-    ) -> list[StewardSignalCard]:
-        if states is not None:
-            unknown = states - _STATE_COLUMNS.keys()
-            if unknown:
-                raise ValueError(f"unknown card states: {sorted(unknown)}")
-            rows: Iterable[tuple[str, dict]] = (
-                (state, row)
-                for state in _STATE_COLUMNS
-                if state in states
-                for row in pipeline_ops.list_cards(column=_STATE_COLUMNS[state], project=project)
-            )
-        else:
-            rows = (("", row) for row in pipeline_ops.list_cards(project=project))
-        return [
-            {
-                "reference": str(row.get("reference") or ""),
-                "state": next(
-                    (known for known, column in _STATE_COLUMNS.items() if column == row.get("column")), state
-                ),
-                "column": str(row.get("column") or _STATE_COLUMNS.get(state, "")),
-                "project": str(row.get("project") or ""),
-                "date_moved": row.get("date_moved") if isinstance(row.get("date_moved"), int) else None,
-                "steward_report": str(row.get("steward_report") or ""),
-            }
-            for state, row in rows
-        ]
-
-
 def resolve_reader(reader: StewardSignalReader | None = None) -> StewardSignalReader:
-    return reader if reader is not None else _LegacyStewardSignalReader()
+    """Return the explicitly composed board reader.
+
+    The generic steward helpers intentionally have no board implementation of
+    their own.  Live automation supplies Secretary's canonical adapter through
+    ``secretary.dispatch.standing_agent``; a missing port is a wiring error,
+    never an opportunity to bypass audit and sprint guards through the retired
+    pipeline CLI.
+    """
+    if reader is None:
+        raise RuntimeError("steward board reader must be supplied by the composition root")
+    return reader
 
 
 # Both pipeline signals — unhealthy ticks and resource flips — are reached across a process

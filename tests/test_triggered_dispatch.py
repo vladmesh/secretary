@@ -13,7 +13,6 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes.triggered_dispatch import FakeSessionHost
-from triggered_agents.agents.pipeline import ops as pipeline_ops
 from triggered_agents.runtime import codex_preflight, dispatch, tui_delivery
 from triggered_agents.runtime import state as runtime_state
 from triggered_agents.runtime.agent_prompt_transport import (
@@ -23,6 +22,24 @@ from triggered_agents.runtime.agent_prompt_transport import (
 from triggered_agents.runtime.claude_sessions import claude_project_dir_name
 from triggered_agents.runtime.head import HeadSpec
 from triggered_agents.runtime.pane_host import Pane, PaneHostError
+
+
+class RecordingReports:
+    """In-memory structural report port for runtime lifecycle tests."""
+
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str, str]] = []
+        self.moves: list[tuple[str, str, str]] = []
+
+    def create_report(self, *, project: str, title: str, slug: str) -> str:
+        self.created.append((project, title, slug))
+        return "secretary-report-1"
+
+    def in_progress_reports(self, *, project: str) -> list[dict[str, object]]:
+        return []
+
+    def move_report(self, *, reference: str, target: str, reason: str) -> None:
+        self.moves.append((reference, target, reason))
 
 
 class TriggeredDispatchReuseTests(unittest.TestCase):
@@ -126,33 +143,20 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         host = FakeSessionHost(panes=(Pane("term", "leaf", "triggered-agent:steward", 1.0),))
         cmd = dispatch.DispatchCommand("/steward", "claude /steward", None, "secretary-report-1")
 
-        with (
-            mock.patch.object(
-                pipeline_ops, "create_report_card", side_effect=AssertionError("legacy create was reached")
-            ),
-            mock.patch(
-                "triggered_agents.agents.pipeline.ops.list_cards",
-                side_effect=AssertionError("legacy list was reached"),
-            ),
-            mock.patch(
-                "triggered_agents.agents.pipeline.ops.move_card",
-                side_effect=AssertionError("legacy move was reached"),
-            ),
-        ):
-            self.assertEqual(
-                dispatch._steward_report_card("steward", "hourly", report_board=reports),
-                "secretary-report-1",
-            )
-            self.assertEqual(
-                dispatch._fresh_steward_report_in_progress(
-                    "steward", time.time(), self.workspace, state, host=host, report_board=reports
-                )["reference"],
-                "secretary-report-1",
-            )
-            dispatch._release_steward_report(state, "tick", cmd, "not dispatched", report_board=reports)
-            dispatch._escalate_steward_preflight_failure(
-                state, "tick", cmd, RuntimeError("preflight"), report_board=reports
-            )
+        self.assertEqual(
+            dispatch._steward_report_card("steward", "hourly", report_board=reports),
+            "secretary-report-1",
+        )
+        self.assertEqual(
+            dispatch._fresh_steward_report_in_progress(
+                "steward", time.time(), self.workspace, state, host=host, report_board=reports
+            )["reference"],
+            "secretary-report-1",
+        )
+        dispatch._release_steward_report(state, "tick", cmd, "not dispatched", report_board=reports)
+        dispatch._escalate_steward_preflight_failure(
+            state, "tick", cmd, RuntimeError("preflight"), report_board=reports
+        )
 
         self.assertEqual(len(reports.created), 1)
         self.assertEqual([move[1] for move in reports.moves], ["done", "blocked"])
@@ -335,21 +339,17 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
     def test_unconfirmed_reuse_recovers_steward_card_and_fails_dispatch(self) -> None:
         command = dispatch.DispatchCommand("/steward --card secretary-817", "claude", None, "secretary-817")
         host = FakeSessionHost(panes=(self.term,), screens=("Claude Code\n❯",))
-        moved: list[tuple] = []
+        reports = RecordingReports()
         patches = self._common_run_patches() + [
             mock.patch.object(dispatch, "_fresh_steward_report_in_progress", return_value=None),
             mock.patch.object(dispatch, "_dispatch_command", return_value=command),
             mock.patch.object(dispatch, "REUSE_DELIVERY_TIMEOUT_S", 0),
-            mock.patch(
-                "triggered_agents.agents.pipeline.ops.move_card",
-                side_effect=lambda *args, **kwargs: moved.append((args, kwargs)),
-            ),
         ]
         with self._running(patches), self.assertRaises(dispatch.ReuseDeliveryError):
-            dispatch.run("steward", host=host)
+            dispatch.run("steward", host=host, report_board=reports)
 
-        self.assertEqual(moved[0][0], ("steward", "secretary-817", "Done"))
-        self.assertIn("dispatch failed", moved[0][1]["reason"])
+        self.assertEqual(reports.moves[0][:2], ("secretary-817", "done"))
+        self.assertIn("dispatch failed", reports.moves[0][2])
         self.assertEqual(self._actions("steward"), ["dispatch-recovery", "reuse-delivery-unconfirmed"])
 
 
@@ -713,34 +713,30 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
             prompt_after_start=True,
             head_profile=self.profile,
         )
-        moved: list[tuple] = []
+        reports = RecordingReports()
         state = mock.Mock()
 
         with (
             mock.patch.object(dispatch, "_dispatch_command", return_value=command),
             mock.patch.object(dispatch, "_create_terminal") as create,
-            mock.patch(
-                "triggered_agents.agents.pipeline.ops.move_card",
-                side_effect=lambda *args, **kwargs: moved.append((args, kwargs)),
-            ),
             self.assertRaises(dispatch.CodexPreflightError),
         ):
             dispatch._spawn_fresh_terminal(
-                "steward", None, self.workspace, state, "dispatch", host=FakeSessionHost()
+                "steward",
+                None,
+                self.workspace,
+                state,
+                "dispatch",
+                host=FakeSessionHost(),
+                reports=dispatch._TickReports("steward", state, "dispatch", report_board=reports),
             )
 
         create.assert_not_called()
-        self.assertEqual(moved[0][0], ("steward", "secretary-817", "Blocked"))
-        self.assertIn("no head was started", moved[0][1]["reason"])
-        self.assertIn("trust_level 'untrusted'", moved[0][1]["reason"])
-        self.assertNotIn("Done", [call[0][2] for call in moved])
+        self.assertEqual(reports.moves[0][:2], ("secretary-817", "blocked"))
+        self.assertIn("no head was started", reports.moves[0][2])
+        self.assertIn("trust_level 'untrusted'", reports.moves[0][2])
+        self.assertNotIn("done", [call[1] for call in reports.moves])
         state.clear_active_report.assert_called_once_with("secretary-817")
-
-    def test_the_escalation_is_allowed_by_the_boards_own_transition_matrix(self) -> None:
-        """The column this lands a report card in is one the steward may actually move it to."""
-        from triggered_agents.agents.pipeline import model
-
-        model.check_move("steward", "In progress", "Blocked")
 
     def test_the_service_launcher_and_the_dispatcher_run_one_preflight(self) -> None:
         """Not two implementations that agree today: the same function object."""

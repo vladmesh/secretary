@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import shlex
 import subprocess
 import time
@@ -477,8 +478,35 @@ BUILTIN_PROBE_RESULTS = {
 
 
 def run_builtin_probe_result(resource_id: str) -> ProbeResult:
-    """Dispatch to the real check for `resource_id` — the thing heads.toml's `probe = "python3 -m
-    triggered_agents pipeline probe --resource <id>"` command actually runs. Raises KeyError for
-    an id with no builtin (a resource that only ever needs "true"/"false" has no reason to go
-    through this CLI at all)."""
+    """Dispatch to the real check for `resource_id`.
+
+    The registry invokes this module directly, keeping resource probes alive
+    without retaining the retired board CLI.  Raises KeyError for an id with no
+    builtin probe.
+    """
     return BUILTIN_PROBE_RESULTS[resource_id]()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run a named built-in resource probe for the heads registry."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="triggered_agents.agents.pipeline.health")
+    parser.add_argument("--resource", required=True)
+    args = parser.parse_args(argv)
+    try:
+        result = run_builtin_probe_result(args.resource)
+    except KeyError:
+        print(
+            f"health probe: no builtin probe for {args.resource!r} "
+            f"(known: {', '.join(sorted(BUILTIN_PROBES))})",
+            file=sys.stderr,
+        )
+        return 2
+    if not result.ok:
+        print(format_probe_failure(args.resource, result), file=sys.stderr)
+    return 0 if result.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

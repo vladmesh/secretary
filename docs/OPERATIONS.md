@@ -1230,8 +1230,8 @@ was lost leaves the six columns plus a trailing `Assessment` and the next run fi
 with all of them named. Every run proves that each card's column and position are unchanged before
 it reports success. After it runs, install accepts the board unchanged.
 
-`python3 -P -m triggered_agents pipeline setup` is not a migration and never was: it reconciles columns
-by index, so it refuses a board that holds cards unless the layout already matches, and points here.
+The retired `triggered_agents pipeline setup` command is not a migration. Use the canonical
+`secretary board migrate-assessment` command above for the explicit, audited repair path.
 
 ## An export whose sprint rows carry no observer
 
@@ -1597,6 +1597,12 @@ invalid installation configuration prints an explicit error rather than falling 
 command. A non-zero exit means at least one enabled role is red or the installation configuration is unavailable.
 
 The sources are the live data plane, not a checkout:
+
+- `scripts/secretary-agent-gate.sh` preserves one role-local environment and one exit-code protocol
+  for every role, while routing steward and retro through `secretary.dispatch.standing_agent`.
+  Curator remains on `triggered_agents`. The steward deep-sweep variant stays ungated and uses the
+  same Secretary root; cleanup-only and terminal finalizers retain their existing zero-side-effect
+  and lifecycle paths.
 
 - curator, steward and retro write a run log through their shared agent state, that is, under `$TA_STATE/<agent>/`
   or, when that variable is unset (as it is in the packaged units), under the data directory. Healthy means the last

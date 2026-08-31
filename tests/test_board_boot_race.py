@@ -166,13 +166,14 @@ class PrecheckDeferralTests(unittest.TestCase):
 
     def test_retro_defers_the_daily_run_instead_of_crashing_on_it(self):
         unreachable = kanboard.KanboardUnreachable("getAllProjects: board unreachable after 90s")
+        retention = mock.Mock()
+        retention.close_old_done.side_effect = unreachable
         with (
             mock.patch.object(retro_cli, "STATE", self.state),
-            mock.patch.object(retro_cli.pipeline_ops, "close_old_done_cards", side_effect=unreachable),
         ):
-            self.assert_deferred(retro_cli.cmd_precheck())
+            self.assert_deferred(retro_cli.cmd_precheck(retention))
 
-    def test_retro_precheck_uses_an_injected_retention_port_not_pipeline_ops(self):
+    def test_retro_precheck_uses_its_injected_retention_port(self):
         class Retention:
             calls = 0
 
@@ -183,7 +184,6 @@ class PrecheckDeferralTests(unittest.TestCase):
         retention = Retention()
         with (
             mock.patch.object(retro_cli, "STATE", self.state),
-            mock.patch.object(retro_cli.pipeline_ops, "close_old_done_cards", side_effect=AssertionError("legacy")),
             mock.patch.object(retro_cli.harvest, "harvest", return_value={"sessions": []}),
         ):
             self.assertEqual(retro_cli.cmd_precheck(retention), 100)
@@ -238,7 +238,9 @@ class GateTests(unittest.TestCase):
     oneshot has no start timeout by default, so the gate is free to wait.
     """
 
-    def run_gate(self, codes: list[int], attempts: int = 3) -> subprocess.CompletedProcess:
+    def run_gate(
+        self, codes: list[int], attempts: int = 3, *, agent: str = "retro", variant: str | None = None
+    ) -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp)
             codes_file = bin_dir / "codes"
@@ -272,9 +274,10 @@ class GateTests(unittest.TestCase):
                 TA_GATE_BOARD_ATTEMPTS=str(attempts),
                 TA_GATE_BOARD_WAIT="0",
             )
-            result = subprocess.run(
-                [str(GATE), "retro"], capture_output=True, text=True, env=env, timeout=120
-            )
+            command = [str(GATE), agent]
+            if variant is not None:
+                command.append(variant)
+            result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=120)
             log = Path(str(codes_file) + ".log")
             result.attempts = len(log.read_text(encoding="utf-8").splitlines()) if log.is_file() else 0
             return result
@@ -313,6 +316,24 @@ class GateTests(unittest.TestCase):
         self.assertEqual(result.attempts, 1)
         self.assertIn("settlement busy, tick deferred", result.stderr)
         self.assertNotIn("ran:", result.stdout)
+
+    def test_gate_routes_board_roles_through_secretary_and_leaves_curator_legacy(self):
+        for agent in ("retro", "steward"):
+            with self.subTest(agent):
+                result = self.run_gate([0], agent=agent)
+                self.assertEqual(result.returncode, 0)
+                self.assertIn(f"-m secretary.dispatch.standing_agent {agent} dispatch", result.stdout)
+
+        curator = self.run_gate([0], agent="curator")
+        self.assertEqual(curator.returncode, 0)
+        self.assertIn("-m triggered_agents curator dispatch", curator.stdout)
+        self.assertNotIn("secretary.dispatch.standing_agent", curator.stdout)
+
+    def test_deep_sweep_keeps_its_ungated_variant_through_the_standing_root(self):
+        result = self.run_gate([], agent="steward", variant="deep-sweep")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.attempts, 0)
+        self.assertIn("-m secretary.dispatch.standing_agent steward dispatch deep-sweep", result.stdout)
 
 
 class UnitSpecTests(unittest.TestCase):

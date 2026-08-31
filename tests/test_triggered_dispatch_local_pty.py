@@ -36,7 +36,6 @@ from unittest import mock
 from secretary.dispatcher_watchdog import head_process_status
 from triggered_agents.agents.pipeline import heads as pipeline_heads
 from triggered_agents.agents.pipeline import health as pipeline_health
-from triggered_agents.agents.pipeline import ops as pipeline_ops
 from triggered_agents.runtime import dispatch
 from triggered_agents.runtime import state as runtime_state
 from triggered_agents.runtime.head import HeadCommand
@@ -266,7 +265,7 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
     def run_tick(self, registry, *, host=None) -> int:
         host = ForbiddenSessionHost() if host is None else host
         with self._tick(registry, host=host):
-            return dispatch.run(self.AGENT, host=host)
+            return dispatch.run(self.AGENT, host=host, report_board=getattr(self, "board", None))
 
     # -- what the tick left behind -------------------------------------------------------------
 
@@ -855,7 +854,7 @@ class StewardBoard:
         self.cards: list[dict] = []
         self.moves: list[tuple[str, str, str]] = []
 
-    def create_report_card(self, *, project: str, title: str, slug: str) -> dict:
+    def create_report(self, *, project: str, title: str, slug: str) -> str:
         card = {
             "reference": f"secretary-report-{len(self.cards) + 1}",
             "column": "In progress",
@@ -866,18 +865,19 @@ class StewardBoard:
             "project": project,
         }
         self.cards.append(card)
-        return card
+        return str(card["reference"])
 
-    def list_cards(self, *, column: str | None = None, project: str | None = None) -> list[dict]:
-        return [card for card in self.cards if column is None or card["column"] == column]
+    def in_progress_reports(self, *, project: str) -> list[dict]:
+        return [card for card in self.cards if card["column"] == "In progress" and card["project"] == project]
 
-    def move_card(self, agent: str, reference: str, column: str, *, reason: str = "") -> dict:
+    def move_report(self, *, reference: str, target: str, reason: str) -> None:
+        column = {"done": "Done", "blocked": "Blocked"}[target]
         for card in self.cards:
             if card["reference"] == reference:
                 card["column"] = column
                 card["date_moved"] = time.time()
-                self.moves.append((agent, reference, column))
-                return card
+                self.moves.append(("steward", reference, column))
+                return
         raise AssertionError(f"a tick moved a card that was never created: {reference}")
 
     def in_progress(self) -> list[str]:
@@ -911,9 +911,6 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         with (
             super()._tick(registry, host=host) as running,
             mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/steward"}),
-            mock.patch.object(pipeline_ops, "create_report_card", side_effect=self.board.create_report_card),
-            mock.patch.object(pipeline_ops, "list_cards", side_effect=self.board.list_cards),
-            mock.patch.object(pipeline_ops, "move_card", side_effect=self.board.move_card),
         ):
             yield running
 
