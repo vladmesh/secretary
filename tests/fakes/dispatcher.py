@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import sys
@@ -1328,6 +1329,12 @@ class FakeHost:
         profile = self.catalog.profiles.get(head, {"adapter": "codex"})
         adapter = str(profile.get("adapter") or "unknown")
         document = str(Path(workspace) / "TASK.md") if role == "worker" and workspace else ""
+        prompt_identity: dict[str, str] = {}
+        if document:
+            prompt_identity = {
+                "path": str(Path(document).resolve(strict=False)),
+                "version": f"sha256:{hashlib.sha256(Path(document).read_bytes()).hexdigest()}",
+            }
         return head_ops.HeadRun(
             run_id=run_id or f"run-{role}-{self.head_runs}",
             spec=head_ops.HeadSpec(profile_id=head, adapter=adapter),
@@ -1336,6 +1343,13 @@ class FakeHost:
             handle=handle,
             leaf=leaf,
             pid_file=pid_file_path("review" if role == "reviewer" else "worker", task["ref"]),
+            fanout_policy={
+                "version": 1,
+                "state": "unknown",
+                "terminal_state": "unknown",
+                "events": [],
+                **({"prompt_identity": prompt_identity} if prompt_identity else {}),
+            },
         ).to_json()
 
     def worker_status(self, task: dict, record) -> dict:

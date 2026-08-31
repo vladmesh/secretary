@@ -29,6 +29,7 @@ from secretary.routing_journal import (
     HeadRun,
     attempts,
     head_run_from_profile,
+    launched_head_run_snapshot,
     routing_payload,
 )
 from secretary.sprints import refresh_active_sprint_projects
@@ -45,6 +46,7 @@ from secretary.tasks import (
 )
 from tests.fakes.tasks import FakeKanboard, WriteKanboard
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
+from triggered_agents.runtime.head import HeadRun as LifecycleHeadRun, HeadSpec, TaskRef
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 
@@ -3689,6 +3691,37 @@ class RoutingJournalTests(unittest.TestCase):
 
         self.assertEqual(restored, run)
         self.assertEqual(restored.session_id_reason, "")
+
+    def test_launch_prompt_identity_does_not_reread_a_mutated_worker_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            document = Path(tmp) / "TASK.md"
+            original = b"first launch instruction\n"
+            document.write_bytes(original)
+            lifecycle = LifecycleHeadRun(
+                run_id="worker-launch",
+                spec=HeadSpec(profile_id="codex", adapter="codex"),
+                workspace=tmp,
+                task_ref=TaskRef.card("secretary-1517", document=str(document)),
+                role="worker",
+                fanout_policy={
+                    "version": 1,
+                    "state": "unknown",
+                    "terminal_state": "unknown",
+                    "events": [],
+                    "prompt_identity": {
+                        "path": str(document),
+                        "version": "sha256:" + hashlib.sha256(original).hexdigest(),
+                    },
+                },
+            )
+            document.write_text("later rework instruction\n", encoding="utf-8")
+
+            snapshot = launched_head_run_snapshot(
+                self._run("worker", "codex"), lifecycle_run=lifecycle.to_json()
+            )
+
+        self.assertEqual(snapshot["prompt_path"], str(document))
+        self.assertEqual(snapshot["prompt_version"], "sha256:" + hashlib.sha256(original).hexdigest())
 
 
 class ReportDurabilityGateTests(unittest.TestCase):

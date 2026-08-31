@@ -17,7 +17,6 @@ import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from triggered_agents.runtime.head import CODEX_TUI_MODE
@@ -195,15 +194,15 @@ def launched_head_run_snapshot(
         session_id_reason = str(snapshot.get("session_id_reason") or "")
     snapshot["session_id"] = session_id
     snapshot["session_id_reason"] = session_id_reason
-    prompt_path = _prompt_path(lifecycle)
+    prompt_path, prompt_version = _prompt_identity(lifecycle)
     if prompt_path:
-        # A retained worker continues the document and conversation it originally received. Its
-        # rework route reuses that snapshot rather than hashing a rewritten TASK.md under the same
-        # launch identity.
+        # This is captured before the head is started, rather than read from a mutable TASK.md
+        # after delivery. A retained worker therefore keeps the exact document it received even
+        # when a later rework has replaced the workspace projection.
         if not snapshot.get("prompt_path"):
             snapshot["prompt_path"] = prompt_path
         if not snapshot.get("prompt_version"):
-            snapshot["prompt_version"] = _prompt_sha256(prompt_path)
+            snapshot["prompt_version"] = prompt_version
     else:
         snapshot.setdefault("prompt_path", "")
         snapshot.setdefault("prompt_version", "")
@@ -232,19 +231,22 @@ def _session_identity(lifecycle_run: dict[str, Any]) -> tuple[str | None, str]:
     return None, f"{adapter} session id was not available at launch ({state or 'no provider source'})"
 
 
-def _prompt_path(lifecycle_run: dict[str, Any]) -> str:
-    task_ref = lifecycle_run.get("task_ref")
-    if not isinstance(task_ref, dict):
-        return ""
-    return str(task_ref.get("document") or "")
+def _prompt_identity(lifecycle_run: dict[str, Any]) -> tuple[str, str]:
+    """Return the launch-time prompt fact held by one lifecycle run.
 
-
-def _prompt_sha256(path: str) -> str:
-    try:
-        content = Path(path).read_bytes()
-    except OSError:
-        return ""
-    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+    New worker and reviewer bring-ups capture this before their pane is opened. Historical runs
+    have no such attestation, so they stay visibly incomplete instead of letting a later routing
+    write hash a document another head may already have rewritten.
+    """
+    policy = lifecycle_run.get("fanout_policy")
+    identity = policy.get("prompt_identity") if isinstance(policy, dict) else None
+    if not isinstance(identity, dict):
+        return "", ""
+    path = str(identity.get("path") or "")
+    version = str(identity.get("version") or "")
+    if not path or not version:
+        raise ValueError("launch prompt identity is incomplete")
+    return path, version
 
 
 def run_key(run: HeadRun | dict[str, Any] | None) -> str:
@@ -256,10 +258,11 @@ def run_key(run: HeadRun | dict[str, Any] | None) -> str:
     and still appends an event for the latter.
     """
     payload = run.to_json() if isinstance(run, HeadRun) else dict(run or {})
-    # A routing event is idempotent on its resolved launch configuration. Provider conversations
-    # and generated task documents are per-bring-up evidence, not configuration: including either
-    # would turn an unchanged respawn into a second route and break crash recovery's one-event key.
-    for field in ("session_id", "session_id_reason", "prompt_path", "prompt_version"):
+    # A provider session is a bring-up identity. A crash retry returns the same one and therefore
+    # keeps its request id, while a respawn that opened a fresh provider conversation must append a
+    # second event even when the profile configuration did not change. Prompt facts remain evidence
+    # rather than a routing key: one launch can be recovered without rereading its document.
+    for field in ("session_id_reason", "prompt_path", "prompt_version"):
         payload.pop(field, None)
     material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]

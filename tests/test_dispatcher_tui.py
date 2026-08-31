@@ -44,6 +44,52 @@ from triggered_agents.runtime.tui_delivery import composer_holds_payload
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
+    def test_claude_binding_retries_the_exact_run_until_its_late_session_id_arrives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            root = Path(tmp) / "claude-projects"
+            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(root)}):
+                run = prepare_claude_provider_progress_source(
+                    HeadRun(
+                        run_id="claude-late",
+                        spec=HeadSpec(profile_id="claude", adapter="claude"),
+                        workspace=str(workspace),
+                        task_ref=TaskRef.card("secretary-1517"),
+                        role="worker",
+                    )
+                )
+                run = bind_claude_provider_progress_source(run)
+                self.assertEqual(
+                    run.fanout_policy["provider_progress_source"]["state"], "awaiting_transcript"
+                )
+
+                transcript = root / claude_project_dir_name(str(workspace)) / "own.jsonl"
+                transcript.parent.mkdir(parents=True)
+                transcript.write_text('{"type":"assistant"}\n', encoding="utf-8")
+                run = bind_claude_provider_progress_source(run)
+                self.assertEqual(
+                    run.fanout_policy["provider_progress_source"]["state"], "awaiting_session_id"
+                )
+
+                # The selected path is fenced by its device/inode. A later same-workspace file
+                # cannot become this run's conversation while Claude finishes its own header.
+                foreign = transcript.with_name("foreign.jsonl")
+                foreign.write_text(
+                    '{"type":"assistant","sessionId":"foreign-session"}\n', encoding="utf-8"
+                )
+                transcript.write_text(
+                    '{"type":"assistant"}\n'
+                    '{"type":"assistant","sessionId":"late-own-session"}\n',
+                    encoding="utf-8",
+                )
+                run = bind_claude_provider_progress_source(run)
+
+            source = run.fanout_policy["provider_progress_source"]
+            self.assertEqual(source["state"], "bound")
+            self.assertEqual(source["session_id"], "late-own-session")
+            self.assertEqual(source["path"], str(transcript.resolve()))
+
     def test_provider_progress_uses_only_text_free_run_bound_cursors(self) -> None:
         """Both provider shapes reject competing workspace files and expose only opaque cursors."""
         with tempfile.TemporaryDirectory() as tmp:

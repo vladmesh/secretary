@@ -318,6 +318,10 @@ def prepare_claude_provider_progress_source(run: HeadRun) -> HeadRun:
         # new transcript beneath this recorded root and never scans another location.
         "state": "unbound",
         "reason": "",
+        # The pane and its JSONL are not one atomic provider operation.  Retain a small retry
+        # budget on the exact run instead of permanently downgrading the first empty scan.
+        "bind_attempts": 0,
+        "bind_max_attempts": 3,
         "run_id": run_id,
         "head_run_fingerprint": run_fingerprint,
         "workspace": str(Path(run.workspace).resolve(strict=False)),
@@ -330,20 +334,23 @@ def prepare_claude_provider_progress_source(run: HeadRun) -> HeadRun:
 
 
 def bind_claude_provider_progress_source(run: HeadRun) -> HeadRun:
-    """Bind one newly-created Claude transcript without choosing a same-workspace fallback."""
+    """Boundedly bind one exact-run Claude transcript without a workspace fallback.
+
+    Claude can create the transcript and write its session id after its pane comes up.  A missing
+    file or temporarily blank session id is therefore retried a small, durable number of times;
+    ambiguity and every identity failure remain terminal rather than choosing another workspace
+    session.
+    """
     source = _progress_source(run)
-    if source.get("kind") != "claude_session_jsonl" or source.get("state") != "unbound":
+    pending_states = {"unbound", "awaiting_transcript", "awaiting_session_id"}
+    if source.get("kind") != "claude_session_jsonl" or source.get("state") not in pending_states:
         return run
     reason = _source_matches_run(source, run)
     if reason:
         return _replace_progress_source(run, {**source, "state": "unavailable", "reason": reason})
     root = Path(str(source.get("root") or ""))
     baseline = source.get("baseline")
-    if (
-        not root.is_dir()
-        or not isinstance(baseline, list)
-        or not all(isinstance(path, str) for path in baseline)
-    ):
+    if not isinstance(baseline, list) or not all(isinstance(path, str) for path in baseline):
         return _replace_progress_source(
             run,
             {
@@ -352,34 +359,51 @@ def bind_claude_provider_progress_source(run: HeadRun) -> HeadRun:
                 "reason": "Claude source baseline is unavailable or malformed",
             },
         )
+    if not root.is_dir():
+        return _retry_claude_binding(source, run, "Claude source root is absent after launch")
+    if source.get("state") == "awaiting_session_id":
+        candidate = _pending_claude_candidate(source, root)
+        if candidate is None:
+            return _replace_progress_source(
+                run,
+                {
+                    **source,
+                    "state": "unavailable",
+                    "reason": "Claude pending provider source cannot be verified",
+                },
+            )
+    else:
+        try:
+            root_resolved = root.resolve(strict=True)
+            candidates = [
+                path.resolve(strict=True)
+                for path in claude_session_paths(run.workspace, root=root)
+                if str(path.resolve(strict=False)) not in set(baseline)
+            ]
+            candidates = [path for path in candidates if path.is_relative_to(root_resolved)]
+        except (OSError, ValueError):
+            return _replace_progress_source(
+                run,
+                {
+                    **source,
+                    "state": "unavailable",
+                    "reason": "Claude source cannot be enumerated",
+                },
+            )
+        if not candidates:
+            return _retry_claude_binding(source, run, "Claude source is absent after launch")
+        if len(candidates) != 1:
+            return _replace_progress_source(
+                run,
+                {
+                    **source,
+                    "state": "unavailable",
+                    "reason": "Claude source is ambiguous after launch",
+                },
+            )
+        candidate = candidates[0]
     try:
-        root_resolved = root.resolve(strict=True)
-        candidates = [
-            path.resolve(strict=True)
-            for path in claude_session_paths(run.workspace, root=root)
-            if str(path.resolve(strict=False)) not in set(baseline)
-        ]
-        candidates = [path for path in candidates if path.is_relative_to(root_resolved)]
-    except (OSError, ValueError):
-        return _replace_progress_source(
-            run,
-            {
-                **source,
-                "state": "unavailable",
-                "reason": "Claude source cannot be enumerated",
-            },
-        )
-    if len(candidates) != 1:
-        return _replace_progress_source(
-            run,
-            {
-                **source,
-                "state": "unavailable",
-                "reason": "Claude source is ambiguous or absent after launch",
-            },
-        )
-    try:
-        stat = candidates[0].stat()
+        stat = candidate.stat()
     except OSError:
         return _replace_progress_source(
             run,
@@ -389,13 +413,24 @@ def bind_claude_provider_progress_source(run: HeadRun) -> HeadRun:
                 "reason": "Claude source cannot be inspected",
             },
         )
-    session_id = _claude_session_id(candidates[0])
+    session_id = _claude_session_id(candidate)
+    if not session_id:
+        pending = {
+            **source,
+            "state": "awaiting_session_id",
+            "path": str(candidate),
+            "device": int(stat.st_dev),
+            "inode": int(stat.st_ino),
+            "initial_size": int(stat.st_size),
+            "initial_mtime_ns": int(stat.st_mtime_ns),
+        }
+        return _retry_claude_binding(pending, run, "Claude source has no session id yet")
     return _replace_progress_source(
         run,
         {
             **source,
             "state": "bound",
-            "path": str(candidates[0]),
+            "path": str(candidate),
             "device": int(stat.st_dev),
             "inode": int(stat.st_ino),
             "initial_size": int(stat.st_size),
@@ -403,6 +438,62 @@ def bind_claude_provider_progress_source(run: HeadRun) -> HeadRun:
             "session_id": session_id,
         },
     )
+
+
+def _retry_claude_binding(source: dict[str, Any], run: HeadRun, reason: str) -> HeadRun:
+    """Persist one bounded retry without weakening the run fence."""
+    try:
+        attempts = int(source.get("bind_attempts", 0)) + 1
+        maximum = int(source.get("bind_max_attempts", 3))
+    except (TypeError, ValueError):
+        return _replace_progress_source(
+            run,
+            {**source, "state": "unavailable", "reason": "Claude source retry budget is malformed"},
+        )
+    if maximum < 1 or attempts >= maximum:
+        return _replace_progress_source(
+            run,
+            {
+                **source,
+                "state": "unavailable",
+                "bind_attempts": attempts,
+                "bind_max_attempts": maximum,
+                "reason": reason,
+            },
+        )
+    return _replace_progress_source(
+        run,
+        {
+            **source,
+            "state": (
+                "awaiting_transcript"
+                if source.get("state") != "awaiting_session_id"
+                else "awaiting_session_id"
+            ),
+            "bind_attempts": attempts,
+            "bind_max_attempts": maximum,
+            "reason": reason,
+        },
+    )
+
+
+def _pending_claude_candidate(source: dict[str, Any], root: Path) -> Path | None:
+    """Reopen the one candidate selected before its asynchronous session id arrived."""
+    try:
+        root_resolved = root.resolve(strict=True)
+        candidate = Path(str(source.get("path") or "")).resolve(strict=True)
+        stat = candidate.stat()
+        if (
+            not candidate.is_relative_to(root_resolved)
+            or candidate.suffix != ".jsonl"
+            or int(source.get("device")) != int(stat.st_dev)
+            or int(source.get("inode")) != int(stat.st_ino)
+            or int(source.get("initial_size")) > int(stat.st_size)
+        ):
+            return None
+        return candidate
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def _claude_session_id(path: Path) -> str:
