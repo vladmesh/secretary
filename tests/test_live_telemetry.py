@@ -1883,5 +1883,54 @@ class StewardStaleColumnsTests(unittest.TestCase):
         self.assertEqual(notified, {"secretary-1025": _LONG_AGO})
 
 
+class StewardSignalPortTests(unittest.TestCase):
+    class Reader:
+        def __init__(self) -> None:
+            self.calls: list[tuple[set[str] | None, str | None]] = []
+
+        def active_cards(self, *, states=None, project=None):
+            self.calls.append((states, project))
+            cards = [
+                {"reference": "secretary-1", "state": "blocked", "column": "Blocked", "project": "secretary", "date_moved": _LONG_AGO, "steward_report": ""},
+                {"reference": "secretary-2", "state": "ready", "column": "Ready", "project": "secretary", "date_moved": _LONG_AGO, "steward_report": ""},
+                {"reference": "secretary-3", "state": "blocked", "column": "Blocked", "project": "secretary", "date_moved": _LONG_AGO, "steward_report": "1"},
+            ]
+            return [
+                card for card in cards
+                if (states is None or card["state"] in states) and (project is None or card["project"] == project)
+            ]
+
+    def test_injected_reader_covers_signal_reads_and_advance_without_legacy_ops(self) -> None:
+        reader = self.Reader()
+        with tempfile.TemporaryDirectory() as tmp:
+            state = AgentState("steward", state_dir=Path(tmp) / "state")
+            workspace = Path(tmp) / "workspaces" / "other-project"
+            (workspace / "999-orphan").mkdir(parents=True)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
+                stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
+                stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT", Path(tmp) / "workspaces"))
+                stack.enter_context(
+                    mock.patch.object(
+                        steward_signals, "_pipeline_tick_signals", return_value=([], steward_signals._empty_watermark())
+                    )
+                )
+                stack.enter_context(mock.patch.object(steward_signals, "_resource_signals", return_value=({}, {})))
+                stack.enter_context(
+                    mock.patch.object(steward_signals.pipeline_ops, "list_cards", side_effect=AssertionError("legacy read"))
+                )
+                batch = steward_signals.scan(reader)
+                self.assertEqual(batch["signals"]["new_blocked"], ["secretary-1"])
+                self.assertIn(
+                    {"reference": "secretary-2", "column": "Ready", "since": _LONG_AGO}, batch["signals"]["stale"]
+                )
+                self.assertEqual(batch["signals"]["new_orphan_workspaces"], [str(workspace / "999-orphan")])
+                state.ensure_dir()
+                state.pending_file.write_text(json.dumps({"notified_blocked": []}), encoding="utf-8")
+                self.assertEqual(steward_cli.cmd_advance(reader), 0)
+            self.assertEqual(state.load_watermark()["notified_blocked"], ["secretary-1"])
+        self.assertIn((None, "other-project"), reader.calls)
+
+
 if __name__ == "__main__":
     unittest.main()

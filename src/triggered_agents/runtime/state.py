@@ -22,28 +22,14 @@ from pathlib import Path
 
 STATE_ROOT = Path(os.environ.get("TA_STATE", str(Path.home() / "secretary-data" / "automation-state")))
 
-# Precheck exit-code protocol, shared by every agent's `precheck` command and the systemd gate
-# (deploy/ta-gate.sh): 0 = there is work (dispatch the head), PRECHECK_SKIP = a deliberate skip
-# (nothing changed / paused: a clean run, not a failure), PRECHECK_DEFERRED = a deliberately
-# unclaimed tick (no dispatch or cleanup), and any OTHER code = precheck itself broke.
-# 100 is deliberately NOT 1: Python's default uncaught-crash exit code is 1 (ImportError, an
-# exception before the return, a raise inside the except handler), so a crashed precheck must land
-# in the gate's error branch and fail the unit, never masquerade as a quiet skip (triggered-agents-276).
+# Shared precheck protocol: 0 dispatches; explicit skip/defer codes are clean; all others fail.
+# Skip is not 1, Python's uncaught-exception exit code.
 PRECHECK_SKIP = 100
 
-# The one precheck failure that is not the precheck's own fault: the board refused the connection
-# for the whole retry window (runtime/kanboard.py KanboardUnreachable), so the agent could not even
-# find out whether it has work. The gate (scripts/secretary-agent-gate.sh) waits and re-runs a
-# precheck that answers this, a bounded number of times, which keeps the run alive instead of
-# spending it on a board that is seconds away from listening. A timer with `Persistent=true`
-# catches its missed run up at boot — the moment the board is least likely to be listening — and a
-# daily unit that crashes there loses the whole day, since the timer does not re-fire
-# (secretary-964). Distinct from PRECHECK_SKIP, which claims the tick was answered and clean.
+# Board unavailability is retryable and distinct from a clean skip.
 PRECHECK_BOARD_UNREACHABLE = 101
 
-# A short, crash-safe transaction is already settling the role's durable state.  This differs from
-# PRECHECK_SKIP: cleanup could race the holder's live head, so the gate exits successfully without
-# calling dispatch at all.  Curator uses this for cursor-settlement contention (secretary-1501).
+# Durable settlement is in progress; exit cleanly without racing live-head cleanup.
 PRECHECK_DEFERRED = 102
 
 

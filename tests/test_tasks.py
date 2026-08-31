@@ -17,9 +17,11 @@ from unittest import mock
 
 from secretary import tasks
 from secretary.board.card_transitions import CARD_TRANSITIONS
+from secretary.board.done_retention import close_old_done
 from secretary.board.host import TransitionRequest
 from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
+from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.board_transport import BoardTransport
 from secretary.cli import main
@@ -29,6 +31,7 @@ from secretary.routing_journal import (
     HeadRun,
     attempts,
     head_run_from_profile,
+    launched_head_run_snapshot,
     routing_payload,
 )
 from secretary.sprints import refresh_active_sprint_projects
@@ -45,6 +48,7 @@ from secretary.tasks import (
 )
 from tests.fakes.tasks import FakeKanboard, WriteKanboard
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
+from triggered_agents.runtime.head import HeadRun as LifecycleHeadRun, HeadSpec, TaskRef
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 
@@ -112,6 +116,27 @@ class TaskReaderTests(unittest.TestCase):
         self.assertEqual(task["comments"][0]["marker"], "report:done")
         self.assertEqual(task["comments"][0]["created_at"], "2024-07-03T09:47:00Z")
 
+    def test_export_includes_archived_cards_in_one_metadata_comments_batch(self) -> None:
+        self.client.tasks[1]["is_active"] = 0
+        exported = self.reader.export()
+
+        self.assertEqual([card["reference"] for card in exported], ["secretary-468", "old-1"])
+        self.assertEqual(len(self.client.batch_calls), 1)
+        self.assertEqual(
+            self.client.batch_calls[0],
+            [
+                ("getTaskMetadata", {"task_id": 12}),
+                ("getAllComments", {"task_id": 12}),
+                ("getTaskMetadata", {"task_id": 13}),
+                ("getAllComments", {"task_id": 13}),
+            ],
+        )
+        self.assertFalse(exported[0]["closed"])
+        self.assertTrue(exported[1]["closed"])
+        self.assertEqual(
+            exported[0]["comments"], [{"ts": "1720000020", "text": "[report:done]\nReady for review"}]
+        )
+
     def test_show_reports_missing_task(self) -> None:
         with self.assertRaisesRegex(TaskError, "not found") as raised:
             self.reader.show("missing")
@@ -160,6 +185,79 @@ class TaskReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "schema") as raised:
             self.reader.list()
         self.assertEqual(raised.exception.code, "backend_error")
+
+    def test_steward_report_read_is_bounded_and_exposes_no_backend_row(self) -> None:
+        client = WriteKanboard()
+        client.tasks[0]["column_id"] = 3
+        client.tasks.append(
+            {
+                "id": 14,
+                "reference": "secretary-469",
+                "title": "not a report",
+                "column_id": 3,
+                "position": 2,
+                "swimlane_id": 4,
+                "date_moved": "1720000400",
+            }
+        )
+        client.metadata[14] = {"project": "secretary", "task_type": "research"}
+        reader = TaskReader(client)  # type: ignore[arg-type]
+
+        reports = reader.steward_reports_in_progress("secretary")
+
+        self.assertEqual(
+            reports,
+            [{"reference": "secretary-468", "date_moved": None, "steward_report": "1"}],
+        )
+        self.assertEqual(len(client.batch_calls), 1)
+        self.assertEqual(
+            client.batch_calls[0],
+            [("getTaskMetadata", {"task_id": 12}), ("getTaskMetadata", {"task_id": 14})],
+        )
+
+    def test_steward_signal_cards_are_bounded_normalized_and_filtered(self) -> None:
+        cards = self.reader.steward_signal_cards(states={"ready"}, project="secretary")
+
+        self.assertEqual(
+            cards,
+            [
+                {
+                    "reference": "secretary-468",
+                    "state": "ready",
+                    "column": "Ready",
+                    "project": "secretary",
+                    "date_moved": None,
+                    "steward_report": "1",
+                }
+            ],
+        )
+        self.assertEqual(len(self.client.batch_calls), 1)
+        self.assertEqual(
+            self.client.batch_calls[0],
+            [("getTaskMetadata", {"task_id": 12}), ("getTaskMetadata", {"task_id": 13})],
+        )
+        self.assertEqual(set(cards[0]), {"reference", "state", "column", "project", "date_moved", "steward_report"})
+        self.assertIsInstance(StewardSignalBoard(self.reader).active_cards(states={"ready"}), list)
+
+    def test_steward_signal_cards_reject_invalid_backend_shapes(self) -> None:
+        with self.assertRaisesRegex(TaskError, "unknown task states") as raised:
+            self.reader.steward_signal_cards(states={"not-a-state"})
+        self.assertEqual(raised.exception.code, "validation")
+        original_call = self.client.call
+        with (
+            mock.patch.object(
+                self.client,
+                "call",
+                side_effect=lambda method, **params: ["not-a-card"]
+                if method == "getAllTasks"
+                else original_call(method, **params),
+            ),
+            self.assertRaisesRegex(TaskError, "invalid task list"),
+        ):
+            self.reader.steward_signal_cards()
+        self.client.metadata[12] = "not-a-map"  # type: ignore[assignment]
+        with self.assertRaisesRegex(TaskError, "invalid task metadata"):
+            self.reader.steward_signal_cards()
 
 
 class TaskCliTests(unittest.TestCase):
@@ -390,6 +488,138 @@ class TaskWriterTests(unittest.TestCase):
             self.writer.move(role="po", actor="p", reference="secretary-468", target="ready", reason="")
         self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+
+    def test_generic_create_keeps_in_progress_closed_to_steward_reports(self) -> None:
+        self.assertNotIn("steward_report", inspect.signature(self.writer.create).parameters)
+        with self.assertRaisesRegex(TaskError, "only a steward report") as raised:
+            self.writer.create(
+                role="steward",
+                actor="dispatch",
+                project="secretary",
+                task_type="research",
+                title="not an accounting artifact",
+                target="in_progress",
+                slug="not-a-report",
+            )
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertFalse(any(call[0] == "createTask" for call in self.client.calls))
+
+    def test_steward_report_create_is_audited_directly_in_progress_and_replays(self) -> None:
+        self.client.tasks.append(
+            {
+                "id": 14,
+                "reference": "secretary-700",
+                "title": "Archived high-water mark",
+                "column_id": 6,
+                "position": 1,
+                "swimlane_id": 4,
+                "is_active": 0,
+            }
+        )
+        self.client.metadata[14] = {}
+        self.client.comments[14] = []
+
+        result = self.writer.create_steward_report(
+            actor="dispatch",
+            project="secretary",
+            title="steward: hourly sweep",
+            slug="steward-sweep-20260830-120000",
+            request_id="steward-report-create",
+        )
+
+        self.assertEqual(result["task"]["ref"], "secretary-701")
+        self.assertEqual(result["task"]["state"], "in_progress")
+        task_id = int(str(result["task"]["id"]).removeprefix("task_kanboard_"))
+        self.assertEqual(
+            self.client.metadata[task_id],
+            {
+                "record_type": "task",
+                "task_type": "research",
+                "project": "secretary",
+                "complexity": "standard",
+                "family_preference": "auto",
+                "slug": "steward-sweep-20260830-120000",
+                "claim": "steward-sweep-20260830-120000",
+                "steward_report": "1",
+            },
+        )
+        self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+        event = self.writer.audit.committed_event("steward-report-create")
+        assert event is not None
+        self.assertTrue(event["payload"]["steward_report"])
+
+        replay = self.writer.create_steward_report(
+            actor="dispatch",
+            project="secretary",
+            title="steward: hourly sweep",
+            slug="steward-sweep-20260830-120000",
+            request_id="steward-report-create",
+        )
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+
+    def test_steward_report_pending_metadata_recovers_without_duplicate_create(self) -> None:
+        self.client.fail_metadata = True
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.create_steward_report(
+                actor="dispatch",
+                project="secretary",
+                title="steward: hourly sweep",
+                slug="steward-sweep-20260830-120001",
+                request_id="steward-report-pending",
+            )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+
+        self.client.fail_metadata = False
+        recovered = self.writer.create_steward_report(
+            actor="dispatch",
+            project="secretary",
+            title="steward: hourly sweep",
+            slug="steward-sweep-20260830-120001",
+            request_id="steward-report-pending",
+        )
+        self.assertTrue(recovered["replayed"])
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+
+    def test_steward_cannot_close_an_ordinary_in_progress_card(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        self.client.metadata[12].pop("steward_report")
+        with self.assertRaisesRegex(TaskError, "only for its own report") as raised:
+            self.writer.move(
+                role="steward",
+                actor="dispatch",
+                reference="secretary-468",
+                target="done",
+                reason="close",
+                request_id="ordinary-steward-close",
+            )
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+
+    def test_steward_can_close_its_in_progress_report(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        result = self.writer.move(
+            role="steward",
+            actor="dispatch",
+            reference="secretary-468",
+            target="done",
+            reason="sweep complete",
+            request_id="report-steward-close",
+        )
+        self.assertEqual(result["task"]["state"], "done")
+
+    def test_steward_report_adapter_is_structural_task_reader_writer_composition(self) -> None:
+        board = StewardReportBoard(self.writer.reader, self.writer, actor="dispatch")
+        reference = board.create_report(
+            project="secretary",
+            title="steward: hourly sweep",
+            slug="steward-sweep-20260830-120002",
+        )
+
+        self.assertEqual(board.in_progress_reports(project="secretary")[0]["reference"], reference)
+        board.move_report(reference=reference, target="done", reason="sweep complete")
+        self.assertEqual(self.writer.reader.show(reference)["state"], "done")
 
     def test_kanboard_host_executes_every_declared_card_edge_through_the_typed_canon(self) -> None:
         columns = {
@@ -2353,7 +2583,146 @@ class TaskWriterTests(unittest.TestCase):
     def test_pending_blocks_export_from_the_same_data_root(self) -> None:
         self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
         with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
-            export_board(Path(self.tmpdir.name), instance_dir=Path(self.tmpdir.name), command=["pipeline"])
+            export_board(
+                Path(self.tmpdir.name),
+                instance_dir=Path(self.tmpdir.name),
+                reader=mock.Mock(),
+            )
+
+
+class DoneRetentionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = WriteKanboard()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.client.instance_dir = Path(self.tmpdir.name)
+        self.reader = TaskReader(self.client)
+        self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
+        self.task = self.client.tasks[0]
+        self.task.update({"column_id": 6, "date_moved": 100, "is_active": 1})
+        self.client.metadata[12].update({"record_type": "task", "task_type": "code"})
+
+    def cleanup(self, *, now: float = 100 + 14 * 86400 + 1) -> dict:
+        return close_old_done(self.reader, self.writer, now=now, retention_days=14)
+
+    def test_strict_threshold_missing_timestamp_and_deterministic_order(self) -> None:
+        self.client.tasks.append(
+            {"id": 14, "reference": "a-old", "title": "old", "column_id": 6, "date_moved": 100, "is_active": 1}
+        )
+        self.client.metadata[14] = {"record_type": "task"}
+        self.client.tasks.append(
+            {"id": 15, "reference": "missing", "title": "missing", "column_id": 6, "is_active": 1}
+        )
+        self.client.metadata[15] = {"record_type": "task"}
+        result = self.cleanup()
+        self.assertEqual(result["closed"], ["a-old", "secretary-468"])
+        self.assertEqual(result["closed_count"], 2)
+        self.assertEqual(self.client.tasks[-1]["is_active"], 1)
+
+        self.client.tasks[-1]["date_moved"] = 100
+        equal = close_old_done(self.reader, self.writer, now=100 + 14 * 86400, retention_days=14)
+        self.assertEqual(equal["closed"], [])
+
+    def test_reader_includes_only_active_done_execution_candidates(self) -> None:
+        self.client.tasks.append(
+            {"id": 14, "reference": "product", "title": "p", "column_id": 6, "date_moved": 1, "is_active": 1}
+        )
+        self.client.metadata[14] = {"record_type": "product"}
+        self.client.tasks.append(
+            {"id": 15, "reference": "ready", "title": "r", "column_id": 2, "date_moved": 1, "is_active": 1}
+        )
+        self.client.metadata[15] = {"record_type": "task"}
+        self.client.tasks.append(
+            {"id": 16, "reference": "closed", "title": "c", "column_id": 6, "date_moved": 1, "is_active": 0}
+        )
+        self.client.metadata[16] = {"record_type": "task"}
+        self.assertEqual(self.reader.done_retention_candidates(), [{"reference": "secretary-468", "date_moved": 100}])
+
+    def test_product_or_issue_is_refused_without_close(self) -> None:
+        for record_type in ("issue", "product"):
+            self.client.metadata[12]["record_type"] = record_type
+            with self.assertRaisesRegex(TaskError, "cannot be retired") as raised:
+                self.writer.retire_done(
+                    reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+                )
+            self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertFalse(any(method == "closeTask" for method, _params in self.client.calls))
+
+    def test_race_before_close_skips_changed_episode(self) -> None:
+        original = self.client.call
+        reads = 0
+
+        def race(method: str, **params: object) -> object:
+            nonlocal reads
+            if method == "getAllTasks" and params.get("status_id") == 1:
+                reads += 1
+                if reads == 2:
+                    self.task["date_moved"] = 200
+            return original(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=race):
+            result = self.writer.retire_done(
+                reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+            )
+        self.assertTrue(result["skipped"])
+        self.assertFalse(any(method == "closeTask" for method, _params in self.client.calls))
+
+    def test_race_before_close_skips_state_change(self) -> None:
+        original = self.client.call
+        reads = 0
+
+        def race(method: str, **params: object) -> object:
+            nonlocal reads
+            if method == "getAllTasks" and params.get("status_id") == 1:
+                reads += 1
+                if reads == 2:
+                    self.task["column_id"] = 2
+            return original(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=race):
+            result = self.writer.retire_done(
+                reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+            )
+        self.assertTrue(result["skipped"])
+        self.assertFalse(any(method == "closeTask" for method, _params in self.client.calls))
+
+    def test_replay_uses_episode_key_and_no_archive_comment(self) -> None:
+        first = self.writer.retire_done(
+            reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+        )
+        second = self.writer.retire_done(
+            reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+        )
+        self.assertTrue(first["retired"])
+        self.assertTrue(second["skipped"])
+        self.assertEqual(len([call for call in self.client.calls if call[0] == "closeTask"]), 1)
+        self.assertFalse(any(call[0] == "createComment" for call in self.client.calls))
+        event = self.writer.audit.events("secretary-468", kind="retired")[0]
+        self.assertEqual(event["actor"]["role"], "retro")
+        self.assertEqual(event["payload"]["expected_date_moved"], 100)
+        self.assertEqual(event["request_id"], tasks._done_retention_request_id(12, 100))
+
+    def test_lost_close_reply_recovers_through_generic_reconcile(self) -> None:
+        original = self.client.call
+
+        def close_then_lose(method: str, **params: object) -> object:
+            if method == "closeTask":
+                original(method, **params)
+                raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
+            return original(method, **params)
+
+        with (
+            mock.patch.object(self.client, "call", side_effect=close_then_lose),
+            self.assertRaisesRegex(TaskError, "audit repair"),
+        ):
+            self.writer.retire_done(
+                reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+            )
+        closes = len([call for call in self.client.calls if call[0] == "closeTask"])
+        self.assertEqual(self.writer.audit.reconcile(), (0, 1))
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+        self.assertEqual(closes, len([call for call in self.client.calls if call[0] == "closeTask"]))
+        self.assertEqual(len(self.writer.audit.events("secretary-468", kind="retired")), 1)
 
 
 class AssessmentStateTests(unittest.TestCase):
@@ -3672,6 +4041,54 @@ class RoutingJournalTests(unittest.TestCase):
         )
 
         self.assertEqual(run.effort, "medium")
+
+    def test_head_run_round_trips_session_and_prompt_identity(self) -> None:
+        run = HeadRun(
+            role="worker",
+            head="codex",
+            adapter="codex",
+            model="gpt-5.6-terra",
+            model_source="profile",
+            session_id="rollout-123",
+            prompt_path="/workspaces/card/TASK.md",
+            prompt_version="sha256:" + "a" * 64,
+        )
+
+        restored = HeadRun.from_json(run.to_json())
+
+        self.assertEqual(restored, run)
+        self.assertEqual(restored.session_id_reason, "")
+
+    def test_launch_prompt_identity_does_not_reread_a_mutated_worker_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            document = Path(tmp) / "TASK.md"
+            original = b"first launch instruction\n"
+            document.write_bytes(original)
+            lifecycle = LifecycleHeadRun(
+                run_id="worker-launch",
+                spec=HeadSpec(profile_id="codex", adapter="codex"),
+                workspace=tmp,
+                task_ref=TaskRef.card("secretary-1517", document=str(document)),
+                role="worker",
+                fanout_policy={
+                    "version": 1,
+                    "state": "unknown",
+                    "terminal_state": "unknown",
+                    "events": [],
+                    "prompt_identity": {
+                        "path": str(document),
+                        "version": "sha256:" + hashlib.sha256(original).hexdigest(),
+                    },
+                },
+            )
+            document.write_text("later rework instruction\n", encoding="utf-8")
+
+            snapshot = launched_head_run_snapshot(
+                self._run("worker", "codex"), lifecycle_run=lifecycle.to_json()
+            )
+
+        self.assertEqual(snapshot["prompt_path"], str(document))
+        self.assertEqual(snapshot["prompt_version"], "sha256:" + hashlib.sha256(original).hexdigest())
 
 
 class ReportDurabilityGateTests(unittest.TestCase):

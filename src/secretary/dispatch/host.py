@@ -2629,6 +2629,9 @@ class CommandHostRuntime:
                 )
             except CodexFanoutPolicyError as exc:
                 raise HostError(str(exc)) from None
+            preflight_run = self._capture_launch_prompt_identity(
+                preflight_run, role=role, document=prompt_document
+            )
             return self._launched(
                 f"noop:{head}:{Path(workspace).name}:{Path(prompt_file).name}",
                 head,
@@ -2654,6 +2657,9 @@ class CommandHostRuntime:
             )
         except CodexFanoutPolicyError as exc:
             raise HostError(str(exc)) from None
+        preflight_run = self._capture_launch_prompt_identity(
+            preflight_run, role=role, document=prompt_document
+        )
         memory_identity: dict[str, str] | None = None
         project = str((task or {}).get("project") or "")
         if task is not None and role in {"worker", "reviewer"} and project:
@@ -2738,6 +2744,12 @@ class CommandHostRuntime:
             # Pane create gives the leaf after the head wrote its base identity. A best-effort bind
             # is enough: the reader still requires the run, role and task binding to match.
             _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=receipt.run.leaf)
+        lifecycle_run = receipt.run
+        if lifecycle_run.spec.adapter == "claude":
+            # Claude creates its jsonl after its pane starts.  Capture the one transcript that the
+            # pre-pane baseline identifies before routing records this bring-up, so the journal has
+            # the provider's session id rather than asking analytics to reconstruct it from cwd.
+            lifecycle_run = _bind_claude_provider_progress_source(lifecycle_run)
         delivery = receipt.delivery
         return self._launched(
             receipt.run.handle,
@@ -2748,7 +2760,7 @@ class CommandHostRuntime:
             failover,
             leaf=receipt.run.leaf,
             delivery_evidence=(_delivery_evidence_json(delivery, subject) if delivery is not None else {}),
-            head_run=receipt.run.to_json(),
+            head_run=lifecycle_run.to_json(),
             fallback_reason=receipt.fallback_reason,
         )
 
@@ -2766,6 +2778,39 @@ class CommandHostRuntime:
         if task and task.get("ref"):
             return head_ops.TaskRef.card(str(task["ref"]), document=pointer)
         return head_ops.TaskRef.standing(role or "head", document=pointer)
+
+    def _capture_launch_prompt_identity(
+        self,
+        run: head_ops.HeadRun, *, role: str, document: str
+    ) -> head_ops.HeadRun:
+        """Attach the exact worker/reviewer document before a pane can observe it.
+
+        TASK.md is a mutable workspace projection, so routing may not read it after delivery.
+        The document digest is a required launch fact: a read failure aborts the bring-up before a
+        head can receive an instruction whose durable identity the dispatcher cannot record.
+        """
+        if role not in {WORKER_ROLE, REVIEW_ROLE, "reviewer"} or not document:
+            return run
+        path = Path(document)
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise HostError(f"launch prompt {path} could not be captured: {exc}") from None
+        policy = dict(run.fanout_policy)
+        policy["prompt_identity"] = {
+            "path": str(path.resolve(strict=False)),
+            "version": f"sha256:{hashlib.sha256(content).hexdigest()}",
+        }
+        captured = run.with_fanout_policy(policy)
+        # The Codex ingress owns the exact run it hands back immediately before delivery. Keep
+        # that handoff aligned with the launch-time prompt fact, or its later provider binding
+        # would otherwise return the pre-capture record and erase this identity.
+        ingress = self._codex_provider_ingresses.get(run.run_id)
+        if ingress is not None:
+            ingress.run = captured
+        if self._prepared_provider_runs.get(run.run_id) is not None:
+            self._prepared_provider_runs[run.run_id] = captured
+        return captured
 
     def _head_transport(
         self,
@@ -3439,65 +3484,52 @@ class CommandHostRuntime:
                 gate_red,
                 "",
             ]
-        if _validation_ci(self, task) == "github":
-            sections += [
-                "## Check-cost contract",
-                "",
-                "This project has a required GitHub CI gate on the exact candidate SHA. Do not run",
-                "the full local suite or any local broad suite in this worker. Run only focused",
-                "tests for the code you changed and report those commands and results. GitHub CI",
-                "runs the complete required suite after the branch is published; its",
-                "dispatcher-owned exact-SHA gate receipt is the authoritative broad evidence.",
-                "Do not duplicate that gate locally merely to report done.",
-                "",
-            ]
-        else:
-            sections += [
-                "## Check-cost contract",
-                "",
-                "During development, run the smallest relevant checks first. Run at most one local broad",
-                "suite for this report generation and unchanged content when it is actually useful; name any",
-                "additional broad rerun and its reason in the report. A later executed local/GitHub gate is",
-                "reusable downstream only if it produces a valid dispatcher-owned exact-SHA gate receipt. A",
-                "none/noop gate or a missing dispatcher-owned exact-SHA gate receipt attests no broad suite;",
-                "do not call it authoritative, and run the appropriate validation before reporting when this",
-                "card's acceptance criteria require it.",
-                "",
-                "Run that broad suite through the receipt wrapper, so its worker-local broad receipt outlives",
-                "the pane:",
-                "",
-                "    python3 -m secretary check broad --reuse --module <this project's broad suite module>",
-                "",
-                "`--reuse` is the default way to invoke it: with a usable worker-local broad receipt it prints",
-                "that worker-local broad receipt",
-                "and returns the result the run had, and otherwise it runs the suite. So the answer to a",
-                "pane that scrolled away is this same command, not a rerun; asking for a rerun over content the",
-                "worker-local broad receipt already covers is prohibited. Drop `--reuse` only to force a fresh run you can",
-                "name a reason for.",
-                "",
-                "It streams the combined output while the suite runs and returns the check's own exit",
-                "status, and it writes `state/checks/broad-<digest>.json` in this workspace: command and",
-                "digest, cwd and imported project, start/end/duration, exit code, parsed verdict and",
-                "counts where the runner prints them, and a bounded diagnostic tail. Read it back with",
-                "`python3 -m secretary check show --module <the same module>` and quote its summary",
-                "in the report. While that worker-local broad receipt is usable, you already have the answer. An edit to the",
-                "content, or a concrete red result you are fixing, opens a new justified run — name which",
-                "one in the report. Committing content a receipt already covers is not one of them: the",
-                "identity is the tree, so a commit that changes no byte reuses the worker-local broad receipt.",
-                "The worker-local broad receipt is workspace-local and ignored by git; never commit it.",
-                "It is never presented as a dispatcher-owned exact-SHA gate receipt.",
-                "",
-                "A worker-local broad receipt stands in for a run only while it describes this content and the check",
-                "process imported the project from this workspace; an import resolved elsewhere is",
-                "recorded truthfully and still refused. `check show` and `--reuse` answer that with",
-                "one predicate, so they cannot disagree.",
-                "",
-                "A check that needs a shell runs as `--command '<shell>'` instead, and buys that",
-                "generality by attesting less: a shell may change directory or import environment",
-                "before any interpreter starts, so its receipt records no import provenance and is",
-                "never reused in place of a run. Prefer `--module` for the suite you report on.",
-                "",
-            ]
+        sections += [
+            "## Check-cost contract",
+            "",
+            "During development, run the smallest relevant checks first. Run at most one local broad",
+            "suite for this report generation and unchanged content when it is actually useful; name any",
+            "additional broad rerun and its reason in the report. A later executed local/GitHub gate is",
+            "reusable downstream only if it produces a valid dispatcher-owned exact-SHA gate receipt. A",
+            "none/noop gate or a missing dispatcher-owned exact-SHA gate receipt attests no broad suite;",
+            "do not call it authoritative, and run the appropriate validation before reporting when this",
+            "card's acceptance criteria require it.",
+            "",
+            "Run that broad suite through the receipt wrapper, so its worker-local broad receipt outlives",
+            "the pane:",
+            "",
+            "    python3 -m secretary check broad --reuse --module <this project's broad suite module>",
+            "",
+            "`--reuse` is the default way to invoke it: with a usable worker-local broad receipt it prints",
+            "that worker-local broad receipt",
+            "and returns the result the run had, and otherwise it runs the suite. So the answer to a",
+            "pane that scrolled away is this same command, not a rerun; asking for a rerun over content the",
+            "worker-local broad receipt already covers is prohibited. Drop `--reuse` only to force a fresh run you can",
+            "name a reason for.",
+            "",
+            "It streams the combined output while the suite runs and returns the check's own exit",
+            "status, and it writes `state/checks/broad-<digest>.json` in this workspace: command and",
+            "digest, cwd and imported project, start/end/duration, exit code, parsed verdict and",
+            "counts where the runner prints them, and a bounded diagnostic tail. Read it back with",
+            "`python3 -m secretary check show --module <the same module>` and quote its summary",
+            "in the report. While that worker-local broad receipt is usable, you already have the answer. An edit to the",
+            "content, or a concrete red result you are fixing, opens a new justified run — name which",
+            "one in the report. Committing content a receipt already covers is not one of them: the",
+            "identity is the tree, so a commit that changes no byte reuses the worker-local broad receipt.",
+            "The worker-local broad receipt is workspace-local and ignored by git; never commit it.",
+            "It is never presented as a dispatcher-owned exact-SHA gate receipt.",
+            "",
+            "A worker-local broad receipt stands in for a run only while it describes this content and the check",
+            "process imported the project from this workspace; an import resolved elsewhere is",
+            "recorded truthfully and still refused. `check show` and `--reuse` answer that with",
+            "one predicate, so they cannot disagree.",
+            "",
+            "A check that needs a shell runs as `--command '<shell>'` instead, and buys that",
+            "generality by attesting less: a shell may change directory or import environment",
+            "before any interpreter starts, so its receipt records no import provenance and is",
+            "never reused in place of a run. Prefer `--module` for the suite you report on.",
+            "",
+        ]
         sections += [
             "## Scope of a rework",
             "",

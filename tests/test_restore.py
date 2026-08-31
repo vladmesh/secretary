@@ -102,15 +102,12 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             init_layout(data_dir)
-            with mock.patch(
-                "secretary.data.subprocess.run",
-                side_effect=lambda *_args, **_kwargs: mock.Mock(
-                    stdout=json.dumps([live_card]), stderr="", returncode=0
-                ),
-            ):
-                export = export_board(
-                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
-                )
+            export = export_board(
+                data_dir,
+                instance_dir=Path(tmpdir),
+                reader=mock.Mock(export=mock.Mock(return_value=[live_card])),
+                sprint_client=SprintKanboard(),
+            )
 
             self.assertEqual(export.count, 1)
             exported = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))

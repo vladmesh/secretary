@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes.triggered_dispatch import FakeSessionHost
+from triggered_agents.agents.pipeline import ops as pipeline_ops
 from triggered_agents.runtime import codex_preflight, dispatch, tui_delivery
 from triggered_agents.runtime import state as runtime_state
 from triggered_agents.runtime.agent_prompt_transport import (
@@ -96,6 +97,65 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
     def test_unreadable_automation_spec_disables_warm_reuse(self) -> None:
         with mock.patch.object(dispatch, "_load_spec", side_effect=ValueError("malformed automation.toml")):
             self.assertTrue(dispatch._is_ephemeral("curator"))
+
+    def test_injected_steward_report_port_owns_create_list_done_and_blocked(self) -> None:
+        class Reports:
+            def __init__(self) -> None:
+                self.created: list[tuple[str, str, str]] = []
+                self.moves: list[tuple[str, str, str]] = []
+
+            def create_report(self, *, project: str, title: str, slug: str) -> str:
+                self.created.append((project, title, slug))
+                return "secretary-report-1"
+
+            def in_progress_reports(self, *, project: str) -> list[dict[str, object]]:
+                return [
+                    {
+                        "reference": "secretary-report-1",
+                        "date_moved": int(time.time()),
+                        "steward_report": "1",
+                    }
+                ]
+
+            def move_report(self, *, reference: str, target: str, reason: str) -> None:
+                self.moves.append((reference, target, reason))
+
+        reports = Reports()
+        state = mock.Mock()
+        state.load_active_report.return_value = {"reference": "secretary-report-1", "terminal_handle": "term"}
+        host = FakeSessionHost(panes=(Pane("term", "leaf", "triggered-agent:steward", 1.0),))
+        cmd = dispatch.DispatchCommand("/steward", "claude /steward", None, "secretary-report-1")
+
+        with (
+            mock.patch.object(
+                pipeline_ops, "create_report_card", side_effect=AssertionError("legacy create was reached")
+            ),
+            mock.patch(
+                "triggered_agents.agents.pipeline.ops.list_cards",
+                side_effect=AssertionError("legacy list was reached"),
+            ),
+            mock.patch(
+                "triggered_agents.agents.pipeline.ops.move_card",
+                side_effect=AssertionError("legacy move was reached"),
+            ),
+        ):
+            self.assertEqual(
+                dispatch._steward_report_card("steward", "hourly", report_board=reports),
+                "secretary-report-1",
+            )
+            self.assertEqual(
+                dispatch._fresh_steward_report_in_progress(
+                    "steward", time.time(), self.workspace, state, host=host, report_board=reports
+                )["reference"],
+                "secretary-report-1",
+            )
+            dispatch._release_steward_report(state, "tick", cmd, "not dispatched", report_board=reports)
+            dispatch._escalate_steward_preflight_failure(
+                state, "tick", cmd, RuntimeError("preflight"), report_board=reports
+            )
+
+        self.assertEqual(len(reports.created), 1)
+        self.assertEqual([move[1] for move in reports.moves], ["done", "blocked"])
 
     def test_live_agent_repl_is_reused_after_delivery_is_confirmed(self) -> None:
         host = FakeSessionHost(

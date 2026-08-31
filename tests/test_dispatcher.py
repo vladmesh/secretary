@@ -2507,6 +2507,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(respawned["action"], "review-respawned")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
+        attempt = self.routing_history()[-1]
+        self.assertEqual([run.head for run in attempt.reviewer_runs], ["codex-reviewer", "codex-reviewer"])
+        self.assertNotEqual(attempt.reviewer_runs[0].session_id, attempt.reviewer_runs[1].session_id)
         card = self.reader.show("secretary-510-pilot")
         self.assertEqual(card["state"], "validate")
         # The operator must be able to tell a first stall from an already-restarted head, hours
@@ -5670,6 +5673,31 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
     def routing_history(self) -> list:
         return routing_attempts(TaskAudit(self.data_dir).events("secretary-510-pilot", kind="routing"))
 
+    def test_codex_worker_routing_records_the_mock_session_and_prompt_version(self) -> None:
+        self.start_dispatcher()
+
+        self.tick()
+
+        worker = self.routing_history()[-1].worker
+        self.assertEqual(worker.adapter, "codex")
+        self.assertTrue(worker.session_id)
+        self.assertEqual(worker.session_id_reason, "")
+        self.assertTrue(worker.prompt_path.endswith("/TASK.md"))
+        self.assertRegex(worker.prompt_version, r"^sha256:[0-9a-f]{64}$")
+
+    def test_claude_worker_routing_records_the_mock_session_and_prompt_version(self) -> None:
+        self.start_dispatcher()
+        self.board.metadata[12]["head"] = "claude-opus"
+
+        self.tick()
+
+        worker = self.routing_history()[-1].worker
+        self.assertEqual(worker.adapter, "claude")
+        self.assertTrue(worker.session_id)
+        self.assertEqual(worker.session_id_reason, "")
+        self.assertTrue(worker.prompt_path.endswith("/TASK.md"))
+        self.assertRegex(worker.prompt_version, r"^sha256:[0-9a-f]{64}$")
+
     def test_both_attempts_keep_their_head_pair_in_the_journal(self) -> None:
         """secretary-716: a finished card must still say who worked and who reviewed each attempt.
 
@@ -6116,9 +6144,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         record = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         self.assertEqual(record["worker_continuation"], {})
 
-    def test_worker_respawn_on_an_unchanged_head_stays_one_record(self) -> None:
-        """A respawn inside a round is the same head coming back, not a second worker: the round
-        keeps one launch record, and the journal does not read as two heads on one attempt."""
+    def test_worker_respawn_on_an_unchanged_head_records_its_new_provider_session(self) -> None:
+        """A same-profile respawn opens a new conversation and is a second real bring-up."""
         self.start_dispatcher()
         self.tick()
         self.assertEqual(self.tick()["action"], "waiting-worker-report")
@@ -6127,7 +6154,80 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["action"], "worker-respawned")
 
         attempt = self.routing_history()[-1]
-        self.assertEqual([run.head for run in attempt.worker_runs], ["codex"])
+        self.assertEqual([run.head for run in attempt.worker_runs], ["codex", "codex"])
+        self.assertNotEqual(attempt.worker_runs[0].session_id, attempt.worker_runs[1].session_id)
+
+    def test_worker_routing_crash_retry_keeps_the_same_provider_session_event(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        record = self._record_of()
+
+        self.runtime.record_worker_routing(
+            self.reader.show("secretary-510-pilot"), record, dict(record.worker_run)
+        )
+
+        attempt = self.routing_history()[-1]
+        self.assertEqual(len(attempt.worker_runs), 1)
+
+    def test_unbound_claude_launch_ids_distinguish_respawns_without_a_late_bind_event(self) -> None:
+        """Claude's transcript may arrive after routing, so lifecycle identity fences the launch."""
+        self.start_dispatcher()
+        task = self.reader.show("secretary-510-pilot")
+        record = DispatcherRecord(
+            worker="secretary-510-pilot-pilot",
+            workspace=str(self.data_dir / "workspaces" / "pilot"),
+            handle="",
+            head="claude-opus",
+            review_head="claude-opus",
+            attempt_id="claude-launch-identities",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            attempt_round=1,
+        )
+
+        def lifecycle(role: str, launch_id: str, *, session_id: str = "") -> dict:
+            policy: dict[str, object] = {
+                "version": 1,
+                "state": "unknown",
+                "terminal_state": "unknown",
+                "events": [],
+            }
+            if session_id:
+                policy["provider_progress_source"] = {"state": "bound", "session_id": session_id}
+            return HeadRun(
+                run_id=launch_id,
+                spec=HeadSpec(profile_id="claude-opus", adapter="claude"),
+                workspace=record.workspace,
+                task_ref=TaskRef.card(task["ref"]),
+                role=role,
+                fanout_policy=policy,
+            ).to_json()
+
+        record.worker_head_run = lifecycle("worker", "claude-worker-first")
+        self.runtime.record_worker_routing(task, record)
+        record.worker_head_run = lifecycle("worker", "claude-worker-second")
+        self.runtime.record_worker_routing(task, record)
+        record.worker_head_run = lifecycle("worker", "claude-worker-second", session_id="late-worker")
+        self.runtime.record_worker_routing(task, record)
+
+        record.review_head_run = lifecycle("reviewer", "claude-review-first")
+        self.runtime.record_review_routing(task, record)
+        record.review_head_run = lifecycle("reviewer", "claude-review-second")
+        self.runtime.record_review_routing(task, record)
+        record.review_head_run = lifecycle("reviewer", "claude-review-second", session_id="late-review")
+        self.runtime.record_review_routing(task, record)
+
+        attempt = self.routing_history()[-1]
+        self.assertEqual(
+            [run.launch_id for run in attempt.worker_runs],
+            ["claude-worker-first", "claude-worker-second"],
+        )
+        self.assertEqual(
+            [run.launch_id for run in attempt.reviewer_runs],
+            ["claude-review-first", "claude-review-second"],
+        )
 
     def test_worker_respawned_onto_a_repinned_profile_is_a_second_record(self) -> None:
         """A respawn after a registry repin runs a different configuration, and the round's verdict
@@ -9514,6 +9614,40 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn(expected, sentence)
         self.assertNotIn(other, sentence)
 
+    def test_worker_and_reviewer_launch_capture_their_prompt_before_delivery(self) -> None:
+        for role, name in (("worker", "TASK.md"), ("reviewer", "REVIEW.md")):
+            document = Path(self.tmpdir.name) / name
+            original = f"{role} launch prompt\n".encode()
+            document.write_bytes(original)
+            run = HeadRun(
+                run_id=f"{role}-launch",
+                spec=HeadSpec(profile_id="codex", adapter="codex"),
+                workspace=self.tmpdir.name,
+                task_ref=TaskRef.card("secretary-1517", document=str(document)),
+                role=role,
+            )
+
+            captured = self.host._capture_launch_prompt_identity(run, role=role, document=str(document))
+            document.write_text("rewritten after launch\n", encoding="utf-8")
+
+            identity = captured.fanout_policy["prompt_identity"]
+            self.assertEqual(identity["path"], str(document.resolve()))
+            self.assertEqual(identity["version"], "sha256:" + hashlib.sha256(original).hexdigest())
+
+    def test_worker_prompt_capture_refuses_an_unreadable_required_document(self) -> None:
+        document = Path(self.tmpdir.name) / "TASK.md"
+        run = HeadRun(
+            run_id="worker-launch",
+            spec=HeadSpec(profile_id="codex", adapter="codex"),
+            workspace=self.tmpdir.name,
+            task_ref=TaskRef.card("secretary-1517", document=str(document)),
+            role="worker",
+        )
+
+        with mock.patch.object(Path, "read_bytes", side_effect=OSError("read denied")):
+            with self.assertRaisesRegex(HostError, "could not be captured"):
+                self.host._capture_launch_prompt_identity(run, role="worker", document=str(document))
+
     def test_review_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._review_prompt(self.task, "attempt-1", 3)
         commands = self._command_lines(doc)
@@ -9610,18 +9744,13 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("worker-local broad receipt", doc)
         self.assertIn("dispatcher-owned exact-SHA gate receipt", doc)
 
-    def test_github_worker_runs_only_focused_tests_and_leaves_the_full_suite_to_ci(self) -> None:
+    def test_github_worker_keeps_the_reusable_broad_receipt_contract(self) -> None:
         self.host.catalog._adapter = {"validation": {"ci": "github"}}
 
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-        prose = " ".join(doc.split())
 
-        self.assertIn("Do not run the full local suite or any local broad suite", prose)
-        self.assertIn("Run only focused tests for the code you changed", prose)
-        self.assertIn("GitHub CI runs the complete required suite", prose)
-        self.assertIn("dispatcher-owned exact-SHA gate receipt", prose)
-        self.assertNotIn("secretary check broad", doc)
-        self.assertNotIn("The full suite takes", doc)
+        self.assertIn("python3 -m secretary check broad --reuse --module", doc)
+        self.assertIn("dispatcher-owned exact-SHA gate receipt", doc)
 
     def test_local_worker_keeps_the_reusable_broad_receipt_contract(self) -> None:
         self.host.catalog._adapter = {"validation": {"ci": "local", "command": "python3 -m unittest"}}
@@ -9629,7 +9758,6 @@ class HeadPromptTests(unittest.TestCase):
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
         self.assertIn("python3 -m secretary check broad --reuse --module", doc)
-        self.assertNotIn("Do not run the full local suite or any local broad suite", doc)
 
     def test_worker_prompt_names_each_receipt_at_its_own_site(self) -> None:
         worker = self.host._worker_task_doc(self.task, "main", "attempt-1")
@@ -10752,6 +10880,11 @@ class DispatcherLauncherTests(unittest.TestCase):
                 "codex_mode": "tui",
                 "resource": "openai-sub",
                 "account": "openai-subscription",
+                "session_id": None,
+                "session_id_reason": "",
+                "launch_id": "",
+                "prompt_path": "",
+                "prompt_version": "",
             },
         )
 

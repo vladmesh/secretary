@@ -172,6 +172,23 @@ class PrecheckDeferralTests(unittest.TestCase):
         ):
             self.assert_deferred(retro_cli.cmd_precheck())
 
+    def test_retro_precheck_uses_an_injected_retention_port_not_pipeline_ops(self):
+        class Retention:
+            calls = 0
+
+            def close_old_done(self):
+                self.calls += 1
+                return {"closed": [], "closed_count": 0}
+
+        retention = Retention()
+        with (
+            mock.patch.object(retro_cli, "STATE", self.state),
+            mock.patch.object(retro_cli.pipeline_ops, "close_old_done_cards", side_effect=AssertionError("legacy")),
+            mock.patch.object(retro_cli.harvest, "harvest", return_value={"sessions": []}),
+        ):
+            self.assertEqual(retro_cli.cmd_precheck(retention), 100)
+        self.assertEqual(retention.calls, 1)
+
     def test_steward_defers_its_tick_instead_of_failing_the_unit(self):
         unreachable = kanboard.KanboardUnreachable("getAllTasks: board unreachable after 90s")
         with (

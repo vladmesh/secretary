@@ -19,7 +19,9 @@ import os
 import re
 import time
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import UTC, datetime
+from typing import Protocol, TypedDict
 
 from ...runtime import production_telemetry, shared_state
 from ...runtime.state import AgentState
@@ -39,6 +41,72 @@ STALE_HOURS = float(os.environ.get("TA_STEWARD_STALE_HOURS", "24"))
 
 WORKSPACES_ROOT = shared_state.WORKSPACES_ROOT
 _AGENTS_PROJECT = shared_state.AGENTS_PROJECT
+
+
+class StewardSignalCard(TypedDict):
+    """The only active-board fields needed by steward anomaly detection."""
+
+    reference: str
+    state: str
+    column: str
+    project: str
+    date_moved: int | None
+    steward_report: str
+
+
+class StewardSignalReader(Protocol):
+    def active_cards(
+        self, *, states: set[str] | None = None, project: str | None = None
+    ) -> list[StewardSignalCard]: ...
+
+
+_STATE_COLUMNS = {
+    "issues": "Issues",
+    "ready": "Ready",
+    "in_progress": "In progress",
+    "validate": "Validate",
+    "assessment": "Assessment",
+    "blocked": "Blocked",
+    "done": "Done",
+}
+
+
+class _LegacyStewardSignalReader:
+    """Lazy compatibility adapter; production continues to read pipeline_ops by default."""
+
+    def active_cards(
+        self, *, states: set[str] | None = None, project: str | None = None
+    ) -> list[StewardSignalCard]:
+        if states is not None:
+            unknown = states - _STATE_COLUMNS.keys()
+            if unknown:
+                raise ValueError(f"unknown card states: {sorted(unknown)}")
+            rows: Iterable[tuple[str, dict]] = (
+                (state, row)
+                for state in _STATE_COLUMNS
+                if state in states
+                for row in pipeline_ops.list_cards(column=_STATE_COLUMNS[state], project=project)
+            )
+        else:
+            rows = (("", row) for row in pipeline_ops.list_cards(project=project))
+        return [
+            {
+                "reference": str(row.get("reference") or ""),
+                "state": next(
+                    (known for known, column in _STATE_COLUMNS.items() if column == row.get("column")), state
+                ),
+                "column": str(row.get("column") or _STATE_COLUMNS.get(state, "")),
+                "project": str(row.get("project") or ""),
+                "date_moved": row.get("date_moved") if isinstance(row.get("date_moved"), int) else None,
+                "steward_report": str(row.get("steward_report") or ""),
+            }
+            for state, row in rows
+        ]
+
+
+def resolve_reader(reader: StewardSignalReader | None = None) -> StewardSignalReader:
+    return reader if reader is not None else _LegacyStewardSignalReader()
+
 
 # Both pipeline signals — unhealthy ticks and resource flips — are reached across a process
 # boundary through the production dispatcher's own data plane (runtime/production_telemetry.py),
@@ -301,20 +369,22 @@ def ensure_pipeline_baseline(batch: dict) -> None:
         return
 
 
-def _blocked_signals(mark: dict) -> tuple[list[str], list[str]]:
+def _blocked_signals(mark: dict, reader: StewardSignalReader | None = None) -> tuple[list[str], list[str]]:
     """(new Blocked refs since the watermark, every ref currently Blocked)."""
     # A steward report card may intentionally end in Blocked when the run found items that need
     # a human. That report is an accounting artifact, not a fresh anomaly for the next hourly
     # sweep. Stale still catches report cards left in In progress after a dead head.
     blocked = [
-        c["reference"] for c in pipeline_ops.list_cards(column="Blocked") if c.get("steward_report") != "1"
+        c["reference"]
+        for c in resolve_reader(reader).active_cards(states={"blocked"})
+        if c["steward_report"] != "1"
     ]
     seen = set(mark["notified_blocked"])
     new = [r for r in blocked if r not in seen]
     return new, blocked
 
 
-def _stale_signals(mark: dict) -> tuple[list[dict], dict]:
+def _stale_signals(mark: dict, reader: StewardSignalReader | None = None) -> tuple[list[dict], dict]:
     """Cards past STALE_HOURS in their current column, excluding ones already notified at their current
     date_moved — a card that moves again re-arms the check; one that just sits still, already flagged
     once, does not re-fire every hour. (new stale hits, {ref: date_moved} for every card ACTUALLY
@@ -329,9 +399,16 @@ def _stale_signals(mark: dict) -> tuple[list[dict], dict]:
     notified = mark["notified_stale"]
     hits = []
     next_notified = {}
+    cards = resolve_reader(reader).active_cards(
+        states={state for state, column in _STATE_COLUMNS.items() if column in STALE_COLUMNS}
+    )
+    # Keep the historical JSON/markdown order: stale columns in their documented
+    # order, and cards inside each column in the reader's stable board order.
     for column in STALE_COLUMNS:
-        for card in pipeline_ops.list_cards(column=column):
-            moved = card.get("date_moved")
+        for card in cards:
+            if card["column"] != column:
+                continue
+            moved = card["date_moved"]
             if not moved:
                 continue
             ref = card["reference"]
@@ -367,7 +444,7 @@ def _resource_signals(mark: dict) -> tuple[dict, dict]:
     return changed, current
 
 
-def _active_card_id_prefixes(project: str) -> set[str]:
+def _active_card_id_prefixes(project: str, reader: StewardSignalReader | None = None) -> set[str]:
     """id-prefixes (`<id>-`, `review-<id>-`) for every active card of `project`, in ANY column —
     including Blocked. The pipeline deliberately leaves a card's worker/reviewer workspace on disk
     with NO cards.json record at all once it reaches Blocked (dispatcher.py's report:blocked path,
@@ -378,7 +455,7 @@ def _active_card_id_prefixes(project: str) -> set[str]:
     dedup suffix on a re-claim (`<id>-<slug>-2`) still starts with the plain `<id>-` prefix, so
     prefix match survives that without needing the exact slug or dedup count."""
     prefixes = set()
-    for card in pipeline_ops.list_cards(project=project):
+    for card in resolve_reader(reader).active_cards(project=project):
         cid = pipeline_naming.card_id(card["reference"])
         prefixes.add(f"{cid}-")
         prefixes.add(f"review-{cid}-")
@@ -394,7 +471,7 @@ def _active_card_id_prefixes(project: str) -> set[str]:
 _PIPELINE_WS_RE = re.compile(r"^(review-)?\d+-")
 
 
-def _orphan_signals(mark: dict) -> tuple[list[str], list[str]]:
+def _orphan_signals(mark: dict, reader: StewardSignalReader | None = None) -> tuple[list[str], list[str]]:
     """(new orphan workspace paths, every orphan path found this scan) — a directory under
     WORKSPACES_ROOT/<project>/* that is named like a pipeline workspace (_PIPELINE_WS_RE) but
     matches no active card of that project by id-prefix (see _active_card_id_prefixes): a tick
@@ -406,7 +483,7 @@ def _orphan_signals(mark: dict) -> tuple[list[str], list[str]]:
     for project_dir in sorted(WORKSPACES_ROOT.iterdir()):
         if not project_dir.is_dir() or project_dir.name == _AGENTS_PROJECT:
             continue
-        prefixes = _active_card_id_prefixes(project_dir.name)
+        prefixes = _active_card_id_prefixes(project_dir.name, reader)
         for ws in sorted(project_dir.iterdir()):
             if (
                 ws.is_dir()
@@ -419,15 +496,16 @@ def _orphan_signals(mark: dict) -> tuple[list[str], list[str]]:
     return new, orphans
 
 
-def scan() -> dict:
+def scan(reader: StewardSignalReader | None = None) -> dict:
     """Everything precheck/the skill need: signals since the watermark, plus the raw state to
     fold into the watermark on advance(). Read-only — never touches the watermark file itself."""
+    resolved_reader = resolve_reader(reader)
     mark = load_watermark()
     tick_hits, tick_pending = _pipeline_tick_signals(mark)
-    new_blocked, all_blocked = _blocked_signals(mark)
-    stale_hits, stale_current = _stale_signals(mark)
+    new_blocked, all_blocked = _blocked_signals(mark, resolved_reader)
+    stale_hits, stale_current = _stale_signals(mark, resolved_reader)
     changed_resources, resource_current = _resource_signals(mark)
-    new_orphans, all_orphans = _orphan_signals(mark)
+    new_orphans, all_orphans = _orphan_signals(mark, resolved_reader)
     return {
         "signals": {
             "pipeline_ticks": tick_hits,

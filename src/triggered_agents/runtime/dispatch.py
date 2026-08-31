@@ -128,7 +128,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol
 
 from . import claude_env, finalizer, orca_rpc
 from .claude_sessions import claude_session_paths
@@ -194,6 +194,42 @@ class DispatchCommand:
     card_ref: str | None = None
     prompt_after_start: bool = False
     head_profile: dict | None = None
+
+
+class StewardReportBoard(Protocol):
+    """The report-card surface the terminal scheduler actually needs.
+
+    It is deliberately narrower than either board implementation.  A future
+    composition root may pass Secretary's canonical adapter without making the
+    triggered-agent runtime import Secretary back.
+    """
+
+    def create_report(self, *, project: str, title: str, slug: str) -> str: ...
+
+    def in_progress_reports(self, *, project: str) -> list[dict[str, Any]]: ...
+
+    def move_report(self, *, reference: str, target: Literal["done", "blocked"], reason: str) -> None: ...
+
+
+class _LegacyStewardReportBoard:
+    """Lazy compatibility adapter used until the production composition switches."""
+
+    def create_report(self, *, project: str, title: str, slug: str) -> str:
+        from ..agents.pipeline import ops as pipeline_ops
+
+        return str(pipeline_ops.create_report_card(project=project, title=title, slug=slug)["reference"])
+
+    def in_progress_reports(self, *, project: str) -> list[dict[str, Any]]:
+        from ..agents.pipeline import ops as pipeline_ops
+
+        return list(pipeline_ops.list_cards(column="In progress", project=project))
+
+    def move_report(self, *, reference: str, target: Literal["done", "blocked"], reason: str) -> None:
+        from ..agents.pipeline import ops as pipeline_ops
+
+        pipeline_ops.move_card(
+            "steward", reference, {"done": "Done", "blocked": "Blocked"}[target], reason=reason
+        )
 
 
 class ReuseDeliveryError(TuiDeliveryError):
@@ -561,7 +597,9 @@ def _launch_cmd(
     return skill, launch, used.profile, after_start, used.head_profile
 
 
-def _steward_report_card(agent: str, variant: str | None) -> str | None:
+def _steward_report_card(
+    agent: str, variant: str | None, *, report_board: StewardReportBoard | None = None
+) -> str | None:
     """Create the steward's own wake-up report card (project secretary, non-code type,
     straight into In progress, already claimed by itself — see pipeline.ops.create_report_card)
     right before a dispatch actually reaches the head. None for every agent but steward
@@ -569,17 +607,15 @@ def _steward_report_card(agent: str, variant: str | None) -> str | None:
     """
     if agent != "steward":
         return None
-    from ..agents.pipeline import ops as pipeline_ops
-
+    report_board = _LegacyStewardReportBoard() if report_board is None else report_board
     now = datetime.now(UTC)
     kind = variant or "hourly"
     slug = f"steward-sweep-{now:%Y%m%d-%H%M%S}"
-    card = pipeline_ops.create_report_card(
+    return report_board.create_report(
         project=os.environ.get("SECRETARY_META_PROJECT", "secretary"),
         title=f"steward: {kind} sweep {now:%Y-%m-%d %H:%M UTC}",
         slug=slug,
     )
-    return card["reference"]
 
 
 def _is_ephemeral(agent: str) -> bool:
@@ -605,6 +641,8 @@ def _dispatch_command(
     variant: str | None,
     snapshot: RegistrySnapshot | None = None,
     resolution: LaunchResolution | None = None,
+    *,
+    report_board: StewardReportBoard | None = None,
 ) -> DispatchCommand:
     """(skill, launch, resolved head profile) for a dispatch about to actually reach the head —
     the one spot that also creates the steward's report card, so every real dispatch (fresh
@@ -620,7 +658,7 @@ def _dispatch_command(
 
     `snapshot` is the tick's one reading of the registry, carried through to the resolution."""
     resolution = _resolve_launch(agent, variant, snapshot) if resolution is None else resolution
-    card_ref = _steward_report_card(agent, variant)
+    card_ref = _steward_report_card(agent, variant, report_board=report_board)
     skill, launch, after_start, used = _render_launch(agent, resolution, card_ref)
     return DispatchCommand(
         skill, launch, used.profile, card_ref, prompt_after_start=after_start, head_profile=used.head_profile
@@ -636,7 +674,13 @@ def _terminal_handle_live(ws: str, handle: str, *, host: SessionHost) -> bool:
 
 
 def _fresh_steward_report_in_progress(
-    agent: str, now: float, ws: str, state: AgentState, *, host: SessionHost
+    agent: str,
+    now: float,
+    ws: str,
+    state: AgentState,
+    *,
+    host: SessionHost,
+    report_board: StewardReportBoard | None = None,
 ) -> dict | None:
     """A secondary run guard for steward dispatch.
 
@@ -648,12 +692,12 @@ def _fresh_steward_report_in_progress(
     if agent != "steward":
         return None
     try:
-        from ..agents.pipeline import ops as pipeline_ops
         from ..agents.steward import signals as steward_signals
 
+        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
         threshold = steward_signals.STALE_HOURS * 3600
         meta_project = os.environ.get("SECRETARY_META_PROJECT", "secretary")
-        for card in pipeline_ops.list_cards(column="In progress", project=meta_project):
+        for card in report_board.in_progress_reports(project=meta_project):
             moved = card.get("date_moved")
             if card.get("steward_report") != "1" or not moved or now - moved >= threshold:
                 continue
@@ -816,7 +860,12 @@ def _memory_heartbeat(run: HeadRun, command: str) -> str:
 
 
 def _recover_steward_dispatch_failure(
-    state: AgentState, event: str, cmd: DispatchCommand, failure: BaseException
+    state: AgentState,
+    event: str,
+    cmd: DispatchCommand,
+    failure: BaseException,
+    *,
+    report_board: StewardReportBoard | None = None,
 ) -> None:
     """Close out a steward report card whose head was brought up but never took the run."""
     if not cmd.card_ref:
@@ -824,9 +873,8 @@ def _recover_steward_dispatch_failure(
     state.clear_active_report(cmd.card_ref)
     body = f"steward dispatch failed before the head accepted the report-card run.\n\nfailure: {failure}"
     try:
-        from ..agents.pipeline import ops as pipeline_ops
-
-        pipeline_ops.move_card("steward", cmd.card_ref, "Done", reason=body)
+        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        report_board.move_report(reference=cmd.card_ref, target="done", reason=body)
         state.log_run(event, action="dispatch-recovery", result="done", reference=cmd.card_ref)
     except Exception as recovery_error:
         state.log_run(
@@ -838,7 +886,14 @@ def _recover_steward_dispatch_failure(
         )
 
 
-def _release_steward_report(state: AgentState, event: str, cmd: DispatchCommand, note: str) -> None:
+def _release_steward_report(
+    state: AgentState,
+    event: str,
+    cmd: DispatchCommand,
+    note: str,
+    *,
+    report_board: StewardReportBoard | None = None,
+) -> None:
     """Close a steward report card whose tick turned out to dispatch nothing after all.
 
     The card is created by the same call that renders the skill naming it, so a tick cannot know
@@ -849,9 +904,8 @@ def _release_steward_report(state: AgentState, event: str, cmd: DispatchCommand,
         return
     state.clear_active_report(cmd.card_ref)
     try:
-        from ..agents.pipeline import ops as pipeline_ops
-
-        pipeline_ops.move_card("steward", cmd.card_ref, "Done", reason=note)
+        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        report_board.move_report(reference=cmd.card_ref, target="done", reason=note)
         state.log_run(event, action="dispatch-release", result="done", reference=cmd.card_ref)
     except Exception as error:
         state.log_run(
@@ -860,7 +914,12 @@ def _release_steward_report(state: AgentState, event: str, cmd: DispatchCommand,
 
 
 def _escalate_steward_preflight_failure(
-    state: AgentState, event: str, cmd: DispatchCommand, failure: BaseException
+    state: AgentState,
+    event: str,
+    cmd: DispatchCommand,
+    failure: BaseException,
+    *,
+    report_board: StewardReportBoard | None = None,
 ) -> None:
     """Put a steward report card in front of a human when its workspace could not be prepared.
 
@@ -879,9 +938,8 @@ def _escalate_steward_preflight_failure(
         f"failure: {failure}"
     )
     try:
-        from ..agents.pipeline import ops as pipeline_ops
-
-        pipeline_ops.move_card("steward", cmd.card_ref, "Blocked", reason=body)
+        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        report_board.move_report(reference=cmd.card_ref, target="blocked", reason=body)
         state.log_run(
             event, action="dispatch-preflight", result="blocked", reference=cmd.card_ref, error=str(failure)
         )
@@ -895,7 +953,13 @@ def _escalate_steward_preflight_failure(
         )
 
 
-def _release_standing_report(state: AgentState, event: str, note: str) -> None:
+def _release_standing_report(
+    state: AgentState,
+    event: str,
+    note: str,
+    *,
+    report_board: StewardReportBoard | None = None,
+) -> None:
     """Close the steward report card the head this tick has just stopped was writing.
 
     The card in `active_report.json` belongs to the head recorded as this role's owner, not to
@@ -912,9 +976,8 @@ def _release_standing_report(state: AgentState, event: str, note: str) -> None:
         return
     state.clear_active_report(reference)
     try:
-        from ..agents.pipeline import ops as pipeline_ops
-
-        pipeline_ops.move_card("steward", reference, "Done", reason=note)
+        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        report_board.move_report(reference=reference, target="done", reason=note)
         state.log_run(event, action="owner-report-release", result="done", reference=reference)
     except Exception as error:
         state.log_run(
@@ -947,10 +1010,13 @@ class _TickReports:
         "this tick dispatched nothing after all, so the report card it made is closed unwritten."
     )
 
-    def __init__(self, agent: str, state: AgentState, event: str) -> None:
+    def __init__(
+        self, agent: str, state: AgentState, event: str, *, report_board: StewardReportBoard | None = None
+    ) -> None:
         self.agent = agent
         self.state = state
         self.event = event
+        self.report_board = _LegacyStewardReportBoard() if report_board is None else report_board
         #: This tick's own card, and whether it has been discharged. Nothing is outstanding until
         #: a command carrying one exists.
         self.cmd: DispatchCommand | None = None
@@ -977,7 +1043,7 @@ class _TickReports:
         resolution: LaunchResolution | None = None,
     ) -> DispatchCommand:
         """This tick's dispatch command, and the card it carries, recorded as outstanding."""
-        cmd = _dispatch_command(self.agent, variant, snapshot, resolution)
+        cmd = _dispatch_command(self.agent, variant, snapshot, resolution, report_board=self.report_board)
         self.cmd = cmd
         self.settled = cmd.card_ref is None
         return cmd
@@ -988,15 +1054,19 @@ class _TickReports:
         self.settled = True
 
     def undispatched(self, cmd: DispatchCommand, note: str) -> None:
-        _release_steward_report(self.state, self.event, cmd, note)
+        _release_steward_report(self.state, self.event, cmd, note, report_board=self.report_board)
         self.settled = True
 
     def failed(self, cmd: DispatchCommand, failure: BaseException) -> None:
-        _recover_steward_dispatch_failure(self.state, self.event, cmd, failure)
+        _recover_steward_dispatch_failure(
+            self.state, self.event, cmd, failure, report_board=self.report_board
+        )
         self.settled = True
 
     def preflight_failed(self, cmd: DispatchCommand, failure: BaseException) -> None:
-        _escalate_steward_preflight_failure(self.state, self.event, cmd, failure)
+        _escalate_steward_preflight_failure(
+            self.state, self.event, cmd, failure, report_board=self.report_board
+        )
         self.settled = True
 
     def owner_stopped(self, note: str) -> None:
@@ -1006,7 +1076,7 @@ class _TickReports:
         naming that head is forgotten, which is the only order in which the card can still be
         matched to the head that was writing it.
         """
-        _release_standing_report(self.state, self.event, note)
+        _release_standing_report(self.state, self.event, note, report_board=self.report_board)
 
     def _close_an_orphan(self) -> None:
         """The backstop under both of the above: a report with no owner left anywhere.
@@ -1031,6 +1101,7 @@ class _TickReports:
             self.event,
             "the head that was writing this report is no longer this role's recorded head, so "
             "the report was closed unwritten by the tick that found it ownerless.",
+            report_board=self.report_board,
         )
 
 
@@ -1754,7 +1825,12 @@ def _supervised_bring_up(
 
 
 def run(
-    agent: str, variant: str | None = None, cleanup_only: bool = False, *, host: SessionHost | None = None
+    agent: str,
+    variant: str | None = None,
+    cleanup_only: bool = False,
+    *,
+    host: SessionHost | None = None,
+    report_board: StewardReportBoard | None = None,
 ) -> int:
     """`variant` selects a differently-scheduled mode of the same agent: a different prompt from
     `_launch_cmd`, and its own runs.jsonl event name so the two wake-up kinds stay distinguishable
@@ -1788,7 +1864,7 @@ def run(
     # tick lists, probes, sends into and stops is the same one, and a helper cannot quietly
     # open a second route to Orca of its own.
     host = session_host(_run_json) if host is None else host
-    with state.lock(), _TickReports(agent, state, event) as reports:
+    with state.lock(), _TickReports(agent, state, event, report_board=report_board) as reports:
         return _tick(agent, variant, ws, state, event, reports, cleanup_only=cleanup_only, host=host)
 
 
@@ -1867,7 +1943,9 @@ def _tick(
         pending = cmd
     elif resolution is not None:
         pending = reports.command(variant, registry, resolution)
-    active_report = _fresh_steward_report_in_progress(agent, time.time(), ws, state, host=host)
+    active_report = _fresh_steward_report_in_progress(
+        agent, time.time(), ws, state, host=host, report_board=reports.report_board
+    )
     if active_report:
         if pending is not None:
             # A launch diverted onto a pane profile builds its command, and the steward's

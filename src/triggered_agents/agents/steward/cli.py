@@ -41,6 +41,11 @@ STATE = signals.STATE
 ROLE_SKILLS = Path(__file__).resolve().parents[4] / "scripts" / "role_skills.py"
 
 
+def _scan(reader: signals.StewardSignalReader | None) -> dict:
+    """Preserve the legacy zero-argument signal path unless a port is supplied."""
+    return signals.scan() if reader is None else signals.scan(reader)
+
+
 def _deep_sweep_file():
     """Recomputed on every call (not a module-level constant) so a test that patches `STATE`
     (or a variant timer resolving a different agent's state dir) sees it follow, same reasoning
@@ -48,9 +53,9 @@ def _deep_sweep_file():
     return STATE.dir / "deep_sweep_watermark.json"
 
 
-def cmd_scan(as_json: bool) -> int:
+def cmd_scan(as_json: bool, reader: signals.StewardSignalReader | None = None) -> int:
     with STATE.lock():
-        batch = signals.scan()
+        batch = _scan(reader)
         STATE.ensure_dir()
         STATE.pending_file.write_text(json.dumps(batch["pending"], ensure_ascii=False), encoding="utf-8")
     signals.ensure_pipeline_baseline(batch)  # outside the lock above — it takes the lock itself
@@ -61,7 +66,7 @@ def cmd_scan(as_json: bool) -> int:
     return 0
 
 
-def cmd_advance() -> int:
+def cmd_advance(reader: signals.StewardSignalReader | None = None) -> int:
     if not STATE.pending_file.is_file():
         print("steward: nothing to advance (run scan first)", file=sys.stderr)
         return 1
@@ -74,8 +79,8 @@ def cmd_advance() -> int:
         # triggered-agents-244 note Z2).
         current_blocked = {
             c["reference"]
-            for c in signals.pipeline_ops.list_cards(column="Blocked")
-            if c.get("steward_report") != "1"
+            for c in signals.resolve_reader(reader).active_cards(states={"blocked"})
+            if c["steward_report"] != "1"
         }
         pending["notified_blocked"] = sorted(set(pending["notified_blocked"]) | current_blocked)
         STATE.save_watermark(pending)
@@ -85,7 +90,7 @@ def cmd_advance() -> int:
     return 0
 
 
-def cmd_precheck() -> int:
+def cmd_precheck(reader: signals.StewardSignalReader | None = None) -> int:
     """Exit 0 if any anomaly signal is present, PRECHECK_SKIP (100) to skip a clean run,
     PRECHECK_BOARD_UNREACHABLE (101) when the board refused the connection for the whole retry
     window, 2 when precheck itself broke (bad env, any other exception). Both the caught error (2)
@@ -95,7 +100,7 @@ def cmd_precheck() -> int:
     the tick is deferred, not answered and not broken (secretary-964). See runtime/state.py
     PRECHECK_SKIP and scripts/secretary-agent-gate.sh."""
     try:
-        batch = signals.scan()
+        batch = _scan(reader)
     except KanboardUnreachable as e:
         scrubbed = scrub_secrets(str(e))
         STATE.log_run("precheck", result="board-unreachable", error=scrubbed)
@@ -198,15 +203,15 @@ def cmd_deep_sweep_advance() -> int:
     return 0
 
 
-def main(argv=None) -> int:
+def main(argv=None, reader: signals.StewardSignalReader | None = None) -> int:
     argv = list(argv or [])
     cmd = argv[0] if argv else "help"
     if cmd == "scan":
-        return cmd_scan("--json" in argv)
+        return cmd_scan("--json" in argv, reader)
     if cmd == "advance":
-        return cmd_advance()
+        return cmd_advance(reader)
     if cmd == "precheck":
-        return cmd_precheck()
+        return cmd_precheck(reader)
     if cmd == "status":
         return cmd_status()
     if cmd == "deep-sweep-since":

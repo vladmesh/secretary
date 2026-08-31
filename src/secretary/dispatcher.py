@@ -323,6 +323,9 @@ from secretary.routing_journal import (
     attempts as _routing_attempts,
 )
 from secretary.routing_journal import (
+    launched_head_run_snapshot as _launched_head_run_snapshot,
+)
+from secretary.routing_journal import (
     routing_payload as _routing_payload,
 )
 from secretary.routing_journal import (
@@ -5550,13 +5553,17 @@ class DispatcherRuntime:
         ref = task["ref"]
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
-        record.worker_run = run or self.head_run_snapshot(
+        snapshot = run or self.head_run_snapshot(
             task,
             role="worker",
             head=record.head,
             workspace=record.workspace,
             failover=bool(record.preferred_head),
         )
+        snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=record.worker_head_run)
+        if record.worker_run and _run_key(record.worker_run) == _run_key(snapshot):
+            snapshot = record.worker_run
+        record.worker_run = snapshot
         self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
 
     def record_review_routing(
@@ -5566,13 +5573,17 @@ class DispatcherRuntime:
         ref = task["ref"]
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
-        record.review_run = run or self.head_run_snapshot(
+        snapshot = run or self.head_run_snapshot(
             task,
             role="reviewer",
             head=record.review_head,
             workspace=record.workspace,
             failover=bool(record.preferred_review_head),
         )
+        snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=record.review_head_run)
+        if record.review_run and _run_key(record.review_run) == _run_key(snapshot):
+            snapshot = record.review_run
+        record.review_run = snapshot
         self._record_routing(ref, record, phase="review", heads=[record.review_run])
 
     def _record_routing(
@@ -5593,6 +5604,25 @@ class DispatcherRuntime:
         if outcome:
             parts.append(outcome)
         parts.extend(_run_key(head) for head in heads)
+        request_id = _attempt_request_id(record.attempt_id, f"routing-{phase}", ref, "-".join(parts))
+        # A tick can die after the journal commit but before its launch snapshot reaches dispatcher
+        # state. Recovery cannot rediscover that provider conversation from a live workspace, so it
+        # must reuse the committed event's exact dynamic facts rather than retry the same request id
+        # with a newly-derived null session or a rewritten prompt digest.
+        existing = self.audit.committed_event(request_id)
+        if existing is not None:
+            payload = existing.get("payload") if isinstance(existing, dict) else None
+            recorded_heads = payload.get("heads") if isinstance(payload, dict) else None
+            if isinstance(recorded_heads, list):
+                by_role = {
+                    str(head.get("role") or ""): head for head in recorded_heads if isinstance(head, dict)
+                }
+                for head in heads:
+                    recorded = by_role.get(str(head.get("role") or ""))
+                    if recorded is not None:
+                        head.clear()
+                        head.update(recorded)
+            return
         self.writer.routing(
             role="dispatcher",
             actor=self.owner,
@@ -5604,7 +5634,7 @@ class DispatcherRuntime:
                 heads=heads,
                 outcome=outcome,
             ),
-            request_id=_attempt_request_id(record.attempt_id, f"routing-{phase}", ref, "-".join(parts)),
+            request_id=request_id,
         )
 
     def _record_verdict_routing(self, ref: str, record: DispatcherRecord, outcome: str) -> None:

@@ -84,9 +84,10 @@ workspace.
 
 The profile is intentionally narrow: it proves the existing isolation seams rather than testing
 real host, systemd, Orca, credentials, Docker, VM, Ansible or provisioning behaviour. Those runtime
-contours remain in their named CI suites or explicit operator checks. The control host intentionally
-uses focused checks and `--fast` only. Complete validation remains dispatcher-owned exact-SHA GitHub
-CI; do not run a local broad suite.
+contours remain in their named CI suites or explicit operator checks. Start with focused checks and
+`--fast`; when a task or repository contract requires the canonical local broad suite, run it once
+through the reusable receipt wrapper. Complete validation remains dispatcher-owned exact-SHA GitHub
+CI.
 
 ## Runtime deadline boundary
 
@@ -100,8 +101,8 @@ ordering or cleanup.
 small exception: it starts the production local-PTY substrate and runtime without deadline
 overrides, reads back the admitted shipped delivery deadline, and checks the runtime's shipped
 grace and stop-confirmation wiring. It belongs only to `runtime-component`. Do not move it, or any
-real PTY/process lifecycle test, into `--fast`; do not replace focused worker checks with a full or
-broad local run. The dispatcher-owned exact-SHA GitHub gate remains the complete required suite.
+real PTY/process lifecycle test, into `--fast`. A local broad receipt does not replace the
+dispatcher-owned exact-SHA GitHub gate, which remains the complete required suite.
 
 ## Changed Python lint
 

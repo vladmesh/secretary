@@ -61,15 +61,9 @@ TUI_DELIVERY_RESEND_GRACE_S = float(
         "SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")
     )
 )
-# How much of a pane is fingerprinted. The screen is read for evidence, never for content, so the
-# bound is on the input to the digest rather than on anything that is kept.
+# Screen evidence is bounded before digesting and never retained as content.
 TUI_FINGERPRINT_LIMIT = 4000
-# How many lines of a pane are read when the composer is what is being looked at. `orca terminal
-# read` with no limit answers with the retained *history* — 120 lines of it — and a TUI that
-# repaints its bottom block in place leaves earlier prompt markers stranded in the middle of that
-# window. What follows the last of them is then transcript rather than a composer, and a live
-# observer pane really did answer with the text of an earlier nudge sitting after its last `›`.
-# A read bounded to the bottom is what makes this evidence about the pane's current screen.
+# Limit composer reads to the screen bottom; unbounded history can contain stale markers.
 TUI_COMPOSER_READ_LINES = int(
     os.environ.get("SECRETARY_TUI_COMPOSER_READ_LINES", os.environ.get("TA_TUI_COMPOSER_READ_LINES", "24"))
 )
@@ -84,8 +78,7 @@ _WAIT_ERROR_CODE_RE = re.compile(r'"code"\s*:\s*"([a-z_]+)"')
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 # The prompt markers the interactive heads of this product paint: Codex's `›` and Claude's `❯`.
 COMPOSER_MARKERS = ("›", "❯")
-# Codex covers a large paste with a placeholder instead of the text. A composer holding one is the
-# exact shape of the failure this boundary exists for, so it is classified rather than only hashed.
+# Codex may replace a large paste with a placeholder; classify that state explicitly.
 _PASTE_RE = re.compile(r"pasted?\s+content", re.IGNORECASE)
 
 
@@ -94,11 +87,7 @@ _PASTE_RE = re.compile(r"pasted?\s+content", re.IGNORECASE)
 DELIVERY_CONFIRMED = "confirmed"
 DELIVERY_ACCEPTED = "accepted"
 
-# How far one delivery got, as four things that happen in order and are observed separately.
-# `terminal send` answering `accepted: true` with a byte count proves only the first of them: the
-# payload was written into the pane. A pane that is holding that payload in its composer, with or
-# without a paste placeholder over it, has reached STAGE_PAYLOAD_WRITTEN and no further, and Orca
-# will call it `tui-idle` the whole time because nothing is working in it.
+# Transport acceptance proves only that bytes entered the pane, not that a turn began.
 STAGE_NONE = "none"
 STAGE_PAYLOAD_WRITTEN = "payload_written"
 STAGE_ENTER_ACCEPTED = "enter_accepted"
@@ -813,11 +802,7 @@ def _confirm_interactive_turn(
                 f"(stage={evidence.stage}, resends={evidence.resends})",
                 evidence=evidence,
             )
-        # A provider record proves that *a* turn started after the send boundary.  It cannot
-        # override the direct, prompt-specific proof that this payload is still sitting in the
-        # composer: that record may belong to a concurrent or delayed turn.  Probe first so a
-        # swallowed payload remains a delivery failure even when the journal has unrelated
-        # activity in the same workspace.
+        # A provider turn cannot override proof that this prompt remains in the composer.
         if not evidence.payload_left_in_composer and confirm is not None and confirm(sent_at):
             _advance(evidence, STAGE_TURN_OBSERVED)
             _advance(evidence, STAGE_ACKNOWLEDGED)
@@ -842,16 +827,7 @@ def _confirm_interactive_turn(
             and evidence.resends < TUI_DELIVERY_RETRIES
             and time.monotonic() >= next_resend_at
         ):
-            # Ready or held in a dialog: either way the pane is not working on this prompt, so it
-            # is entered again. A composer still holding the payload needs the Enter alone, which
-            # is what carries a prompt past a dialog that swallowed it; a composer that is empty
-            # with nothing having happened is a pane the payload never reached, so it is written
-            # again. A pane whose screen cannot be read gets the bare Enter it always got.
-            #
-            # Writing it again is the only step here that can put a second copy of the prompt in
-            # front of a head, so it is taken only when the pane accounts for the payload nowhere:
-            # not in the composer, not in output printed since the send, and not in a turn already
-            # observed. Anything less is an Enter, which costs nothing if the pane is working.
+            # Re-send only when no evidence accounts for the payload; otherwise use bare Enter.
             unaccounted_for = (
                 probe.screen_read
                 and not evidence.payload_left_in_composer

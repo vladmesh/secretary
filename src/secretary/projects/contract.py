@@ -60,7 +60,7 @@ from typing import Any
 
 from secretary.config import ConfigError, load_config, validate
 
-# --- The enumerated refusal shapes. Both sides read these; nobody invents a sixth. ---------------
+# Enumerated refusal shapes shared by both sides.
 ADAPTER_UNAVAILABLE = "adapter_unavailable"
 ADAPTER_INVALID = "adapter_invalid"
 BROAD_CHECK_INCOMPLETE = "broad_check_incomplete"
@@ -74,20 +74,17 @@ CONTRACT_REFUSALS = (
     CANNOT_ATTEST_PROJECT,
 )
 
-# --- The three states of an answer. A caller branches on these by name and on nothing else. ------
+# Enumerated answer states.
 CONTRACT_FIT = "fit"
 CONTRACT_REFUSED = "refused"
 CONTRACT_UNDECIDABLE = "undecidable"
 CONTRACT_STATES = (CONTRACT_FIT, CONTRACT_REFUSED, CONTRACT_UNDECIDABLE)
 
-# --- The enumerated open questions. Each one names something the asker does not hold. ------------
-# The contract is fine as far as the registry can say; the interpreter it names is resolved from a
-# candidate workspace, and there is none yet.
+# Enumerated open questions: the registry cannot resolve this interpreter yet.
 UNDECIDABLE_RELATIVE_INTERPRETER = "relative_interpreter"
-# The card names no registered project, so there is no adapter to judge and no contract to have.
+# No registered project means no adapter contract to evaluate.
 UNDECIDABLE_NO_REGISTERED_PROJECT = "no_registered_project"
-# The installation could not even look the project up. The paths that need the binding fail on it
-# in their own words; this decision states nothing about a project it could not read.
+# Lookup failure makes no claim about the project binding.
 UNDECIDABLE_PROJECT_UNAVAILABLE = "project_unavailable"
 UNDECIDABLE_QUESTIONS = (
     UNDECIDABLE_RELATIVE_INTERPRETER,
@@ -95,13 +92,11 @@ UNDECIDABLE_QUESTIONS = (
     UNDECIDABLE_PROJECT_UNAVAILABLE,
 )
 
-# The default that predates any adapter contract, and the diagnosis a caller shows for it.
+# Legacy default and its public diagnosis.
 LEGACY_IMPORT_PACKAGE = "secretary"
 LEGACY_REASON_MISSING_BROAD_CHECK = "adapter_missing_broad_check"
 
-# What the worker's CLI calls each refusal. A missing interpreter keeps the code the worker already
-# reported for exactly this condition when it discovered it by trying to start the process; the
-# preflight only reports it earlier, and never with a second name.
+# CLI names for refusals; preflight preserves the existing missing-interpreter code.
 WORKER_ERROR_CODES = {
     ADAPTER_UNAVAILABLE: "invalid_project_adapter",
     ADAPTER_INVALID: "invalid_project_adapter",
@@ -248,8 +243,7 @@ def decide(
 def _legacy_default(adapter_name: str, project_root: Path) -> ContractVerdict:
     """The contract an adapter that declares none falls back to, judged against this checkout."""
     contract = ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK)
-    # The default names the interpreter running right now, so it is answerable from either side and
-    # never leaves an open question.
+    # The default names the running interpreter and is always answerable.
     if not _executable(contract.interpreter):
         return ContractVerdict.as_refused(
             INTERPRETER_UNAVAILABLE,
@@ -257,13 +251,7 @@ def _legacy_default(adapter_name: str, project_root: Path) -> ContractVerdict:
             f"could not start configured interpreter {contract.interpreter!r}: it is not an executable file",
         )
     if not _attests(project_root, contract.import_package):
-        # Only the legacy default is judged against the checkout's own layout. An adapter that
-        # declares a contract has stated which package attests that project, and OPERATIONS.md
-        # promises that statement is honoured rather than second-guessed by a layout heuristic;
-        # what such a contract actually imported is still checked by the receipt's provenance. The
-        # default states nothing about this project: it names Secretary's package for every
-        # registered project alike, so for a checkout that does not hold those sources the check it
-        # buys attests an installed copy of somebody else's code.
+        # Only the legacy default uses checkout layout; declared contracts use receipt provenance.
         return ContractVerdict.as_refused(
             CANNOT_ATTEST_PROJECT,
             adapter_name,
@@ -304,8 +292,7 @@ def _declared_contract(
                 "schema resolves from the candidate workspace; no candidate workspace exists yet, "
                 "so the tree that will run the check is the only side that can answer this",
             )
-        # Keep a venv's symlink spelling. Resolving the final component would turn
-        # `.venv/bin/python` into the base interpreter and discard that environment's site paths.
+        # Preserve a venv symlink: resolving it loses its site paths.
         interpreter = str(Path(workspace).resolve() / interpreter_path)
     if not _executable(interpreter):
         return ContractVerdict.as_refused(
