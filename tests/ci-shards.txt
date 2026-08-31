@@ -7,7 +7,6 @@ integration-recovery tests/test_backup.py
 integration-board tests/test_board.py
 integration-board tests/test_board_batch_transport.py
 integration-board tests/test_board_boot_race.py
-integration-board tests/test_board_export.py
 integration-board tests/test_board_transport.py
 packaging tests/test_bootstrap.py
 unit tests/test_broad_check.py
@@ -66,11 +65,7 @@ integration-memory tests/test_memory_permissions.py
 integration-memory tests/test_memory_service.py
 unit tests/test_observer_metadata.py
 packaging tests/test_onboarding.py
-integration-board tests/test_pipeline_assessment_column.py
-integration-board tests/test_pipeline_blocked_report.py
-integration-board tests/test_pipeline_card_reference.py
 integration-board tests/test_pipeline_paths.py
-integration-board tests/test_pipeline_proposal_route.py
 packaging tests/test_portable_upgrade.py
 unit tests/test_product_issues.py
 unit tests/test_product_lanes.py

@@ -7,8 +7,8 @@ App-level access is HTTP Basic against the endpoint in the installation's
 transport failure or an RPC-level error. A refused connection is retried for a bounded
 window and then raised as KanboardUnreachable, the one failure a caller may treat as
 "not yet" rather than "broken". `call_batch` sends several calls in one request
-for read paths that would otherwise be one round trip per task. Higher-level board
-operations live in agents/pipeline/ops.py.
+for read paths that would otherwise be one round trip per task. Higher-level
+board operations live in Secretary's canonical task adapters.
 """
 
 from __future__ import annotations

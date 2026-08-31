@@ -49,6 +49,14 @@ from triggered_agents.runtime import health, production_telemetry, role_env
 from triggered_agents.runtime.state import PRECHECK_SKIP, AgentState
 
 
+class EmptyStewardReader:
+    def active_cards(self, *, states=None, project=None):
+        return []
+
+
+EMPTY_STEWARD_READER = EmptyStewardReader()
+
+
 def _ts(minutes_ago: float) -> str:
     return (datetime.now(UTC) - timedelta(minutes=minutes_ago)).isoformat()
 
@@ -256,7 +264,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
             stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
             stack.enter_context(
-                mock.patch.object(steward_signals.pipeline_ops, "list_cards", return_value=[])
+                mock.patch.object(steward_signals, "resolve_reader", return_value=EMPTY_STEWARD_READER)
             )
             stack.enter_context(
                 mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.data_dir / "no-workspaces")
@@ -433,7 +441,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
             stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
             stack.enter_context(
-                mock.patch.object(steward_signals.pipeline_ops, "list_cards", return_value=[])
+                mock.patch.object(steward_signals, "resolve_reader", return_value=EMPTY_STEWARD_READER)
             )
             stack.enter_context(
                 mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.data_dir / "no-workspaces")
@@ -1238,9 +1246,12 @@ class HealthExpectedStateTests(unittest.TestCase):
     def test_enabled_role_with_an_inactive_timer_is_red(self) -> None:
         self.write_instance()
         for role, _ in self.ROLES:
-            with self.subTest(role=role), mock.patch.object(health, "_timer_active", return_value=False), mock.patch.object(
-                health, "_runs_status", return_value=([], "fresh")
-            ), mock.patch.object(health, "_pipeline_status", return_value=([], "fresh")):
+            with (
+                self.subTest(role=role),
+                mock.patch.object(health, "_timer_active", return_value=False),
+                mock.patch.object(health, "_runs_status", return_value=([], "fresh")),
+                mock.patch.object(health, "_pipeline_status", return_value=([], "fresh")),
+            ):
                 code, output = self.check_output((role,))
 
                 self.assertEqual(code, 1)
@@ -1251,9 +1262,11 @@ class HealthExpectedStateTests(unittest.TestCase):
         for role, component in self.ROLES:
             with self.subTest(role=role):
                 self.write_instance({component: False})
-                with mock.patch.object(health, "_timer_active", side_effect=AssertionError), mock.patch.object(
-                    health, "_runs_status", side_effect=AssertionError
-                ), mock.patch.object(health, "_pipeline_status", side_effect=AssertionError):
+                with (
+                    mock.patch.object(health, "_timer_active", side_effect=AssertionError),
+                    mock.patch.object(health, "_runs_status", side_effect=AssertionError),
+                    mock.patch.object(health, "_pipeline_status", side_effect=AssertionError),
+                ):
                     code, output = self.check_output((role,))
 
                 self.assertEqual(code, 0)
@@ -1264,8 +1277,9 @@ class HealthExpectedStateTests(unittest.TestCase):
 
     def test_disabling_steward_deep_sweep_does_not_disable_steward_schedule(self) -> None:
         self.write_instance({"steward-deep-sweep": False})
-        with mock.patch.object(health, "_timer_active", return_value=False), mock.patch.object(
-            health, "_runs_status", return_value=([], "fresh")
+        with (
+            mock.patch.object(health, "_timer_active", return_value=False),
+            mock.patch.object(health, "_runs_status", return_value=([], "fresh")),
         ):
             code, output = self.check_output(("steward",))
 
@@ -1465,7 +1479,7 @@ class StewardPipelineSignalTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(steward_cli, "STATE", self.state))
             stack.enter_context(
-                mock.patch.object(steward_signals.pipeline_ops, "list_cards", return_value=[])
+                mock.patch.object(steward_signals, "resolve_reader", return_value=EMPTY_STEWARD_READER)
             )
             stack.enter_context(
                 mock.patch.object(
@@ -1859,8 +1873,15 @@ class StewardStaleColumnsTests(unittest.TestCase):
                 return []
             return [{"reference": "secretary-1025", "date_moved": _LONG_AGO}]
 
-        with mock.patch.object(steward_signals.pipeline_ops, "list_cards", side_effect=list_cards):
-            hits, notified = steward_signals._stale_signals({"notified_stale": {}})
+        class Reader:
+            def active_cards(self, *, states=None, project=None):
+                return [
+                    {"reference": row["reference"], "column": column, "date_moved": row["date_moved"]}
+                    for column in steward_signals.STALE_COLUMNS
+                    for row in list_cards(column)
+                ]
+
+        hits, notified = steward_signals._stale_signals({"notified_stale": {}}, Reader())
 
         self.assertEqual(hits, [{"reference": "secretary-1025", "column": "Assessment", "since": _LONG_AGO}])
         self.assertEqual(notified, {"secretary-1025": _LONG_AGO})
@@ -1870,14 +1891,13 @@ class StewardStaleColumnsTests(unittest.TestCase):
         self.assertNotIn("Done", looked_at)
 
     def test_a_stale_assessment_card_fires_only_once_per_dwell(self) -> None:
-        with mock.patch.object(
-            steward_signals.pipeline_ops,
-            "list_cards",
-            side_effect=lambda column=None, **_kwargs: (
-                [{"reference": "secretary-1025", "date_moved": _LONG_AGO}] if column == "Assessment" else []
-            ),
-        ):
-            hits, notified = steward_signals._stale_signals({"notified_stale": {"secretary-1025": _LONG_AGO}})
+        class Reader:
+            def active_cards(self, *, states=None, project=None):
+                return [{"reference": "secretary-1025", "column": "Assessment", "date_moved": _LONG_AGO}]
+
+        hits, notified = steward_signals._stale_signals(
+            {"notified_stale": {"secretary-1025": _LONG_AGO}}, Reader()
+        )
 
         self.assertEqual(hits, [])
         self.assertEqual(notified, {"secretary-1025": _LONG_AGO})
@@ -1891,13 +1911,36 @@ class StewardSignalPortTests(unittest.TestCase):
         def active_cards(self, *, states=None, project=None):
             self.calls.append((states, project))
             cards = [
-                {"reference": "secretary-1", "state": "blocked", "column": "Blocked", "project": "secretary", "date_moved": _LONG_AGO, "steward_report": ""},
-                {"reference": "secretary-2", "state": "ready", "column": "Ready", "project": "secretary", "date_moved": _LONG_AGO, "steward_report": ""},
-                {"reference": "secretary-3", "state": "blocked", "column": "Blocked", "project": "secretary", "date_moved": _LONG_AGO, "steward_report": "1"},
+                {
+                    "reference": "secretary-1",
+                    "state": "blocked",
+                    "column": "Blocked",
+                    "project": "secretary",
+                    "date_moved": _LONG_AGO,
+                    "steward_report": "",
+                },
+                {
+                    "reference": "secretary-2",
+                    "state": "ready",
+                    "column": "Ready",
+                    "project": "secretary",
+                    "date_moved": _LONG_AGO,
+                    "steward_report": "",
+                },
+                {
+                    "reference": "secretary-3",
+                    "state": "blocked",
+                    "column": "Blocked",
+                    "project": "secretary",
+                    "date_moved": _LONG_AGO,
+                    "steward_report": "1",
+                },
             ]
             return [
-                card for card in cards
-                if (states is None or card["state"] in states) and (project is None or card["project"] == project)
+                card
+                for card in cards
+                if (states is None or card["state"] in states)
+                and (project is None or card["project"] == project)
             ]
 
     def test_injected_reader_covers_signal_reads_and_advance_without_legacy_ops(self) -> None:
@@ -1909,20 +1952,24 @@ class StewardSignalPortTests(unittest.TestCase):
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
                 stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
-                stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT", Path(tmp) / "workspaces"))
+                stack.enter_context(
+                    mock.patch.object(steward_signals, "WORKSPACES_ROOT", Path(tmp) / "workspaces")
+                )
                 stack.enter_context(
                     mock.patch.object(
-                        steward_signals, "_pipeline_tick_signals", return_value=([], steward_signals._empty_watermark())
+                        steward_signals,
+                        "_pipeline_tick_signals",
+                        return_value=([], steward_signals._empty_watermark()),
                     )
                 )
-                stack.enter_context(mock.patch.object(steward_signals, "_resource_signals", return_value=({}, {})))
                 stack.enter_context(
-                    mock.patch.object(steward_signals.pipeline_ops, "list_cards", side_effect=AssertionError("legacy read"))
+                    mock.patch.object(steward_signals, "_resource_signals", return_value=({}, {}))
                 )
                 batch = steward_signals.scan(reader)
                 self.assertEqual(batch["signals"]["new_blocked"], ["secretary-1"])
                 self.assertIn(
-                    {"reference": "secretary-2", "column": "Ready", "since": _LONG_AGO}, batch["signals"]["stale"]
+                    {"reference": "secretary-2", "column": "Ready", "since": _LONG_AGO},
+                    batch["signals"]["stale"],
                 )
                 self.assertEqual(batch["signals"]["new_orphan_workspaces"], [str(workspace / "999-orphan")])
                 state.ensure_dir()

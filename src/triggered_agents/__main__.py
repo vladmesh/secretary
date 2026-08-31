@@ -15,7 +15,11 @@ import sys
 from dataclasses import dataclass
 from importlib import import_module
 
-AGENTS = ("curator", "retro", "pipeline", "steward")
+AGENTS = ("curator", "retro", "steward")
+# Pipeline is a scheduled production-dispatcher component, rather than an
+# agent command.  It remains in the cross-component health output even though
+# its retired board CLI is no longer a dispatchable/public agent.
+HEALTH_COMPONENTS = ("curator", "retro", "pipeline", "steward")
 
 
 @dataclass(frozen=True)
@@ -65,7 +69,7 @@ def main(argv=None) -> int:
     if argv[0] == "health":  # cross-agent, not a per-agent cmd
         from .runtime import health
 
-        return health.check(AGENTS)
+        return health.check(HEALTH_COMPONENTS)
     agent, rest = argv[0], argv[1:]
     if agent not in AGENTS:
         print(f"triggered_agents: unknown agent {agent!r} (known: {', '.join(AGENTS)})", file=sys.stderr)
@@ -74,16 +78,6 @@ def main(argv=None) -> int:
         # Every dispatchable agent here is an LLM head driven by the generic singleton terminal
         # driver, which keeps one warm claude terminal per agent. Task dispatch itself is not one
         # of them: it lives in `secretary/dispatcher_production.py`, on its own timer.
-        if agent == "pipeline":
-            # `pipeline` is a board CLI, not a head: its automation.toml ships no skill, so there
-            # is nothing to dispatch. Refuse instead of falling through into the terminal driver,
-            # which would fail on the missing skill.
-            print(
-                "triggered_agents: pipeline has no dispatch — it is the board CLI only "
-                "(task dispatch lives in secretary/dispatcher_production.py)",
-                file=sys.stderr,
-            )
-            return 2
         dispatch_args = rest[1:]
         parsed = parse_dispatch_arguments(dispatch_args)
         from .runtime import dispatch

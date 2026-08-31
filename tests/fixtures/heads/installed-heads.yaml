@@ -6,13 +6,13 @@
 resources:
   claude-sub:
     account: claude-subscription
-    probe: python3 -m triggered_agents pipeline probe --resource claude-sub
+    probe: python3 -m triggered_agents.agents.pipeline.health --resource claude-sub
   openrouter:
     account: openrouter-pooled-key
-    probe: python3 -m triggered_agents pipeline probe --resource openrouter
+    probe: python3 -m triggered_agents.agents.pipeline.health --resource openrouter
   openai-sub:
     account: openai-subscription
-    probe: python3 -m triggered_agents pipeline probe --resource openai-sub
+    probe: python3 -m triggered_agents.agents.pipeline.health --resource openai-sub
 profiles:
   codex:
     resource: openai-sub

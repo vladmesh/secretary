@@ -120,6 +120,12 @@ write goes through `secretary task` or `secretary sprint`, which apply role guar
 append-only audit. The dispatcher resolves routing, drives the worker and reviewer lifecycle, and
 checks board, workspace, report and review state before each transition.
 
+The standing-agent gate keeps curator on its generic triggered-agent entrypoint. Steward and retro
+enter `secretary.dispatch.standing_agent`, the composition root that supplies canonical task-backed
+ports for steward signals/report cards and retro Done retention. The generic runtime owns only the
+structural ports and never imports Secretary, so board policy stays at the product boundary without
+pulling task lifecycle into terminal/session management.
+
 ### Head runtime ownership
 
 `HeadRuntime` is the lifecycle boundary used by the dispatcher and the mechanical-role driver. Its

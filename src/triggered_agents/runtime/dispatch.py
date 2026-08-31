@@ -211,27 +211,6 @@ class StewardReportBoard(Protocol):
     def move_report(self, *, reference: str, target: Literal["done", "blocked"], reason: str) -> None: ...
 
 
-class _LegacyStewardReportBoard:
-    """Lazy compatibility adapter used until the production composition switches."""
-
-    def create_report(self, *, project: str, title: str, slug: str) -> str:
-        from ..agents.pipeline import ops as pipeline_ops
-
-        return str(pipeline_ops.create_report_card(project=project, title=title, slug=slug)["reference"])
-
-    def in_progress_reports(self, *, project: str) -> list[dict[str, Any]]:
-        from ..agents.pipeline import ops as pipeline_ops
-
-        return list(pipeline_ops.list_cards(column="In progress", project=project))
-
-    def move_report(self, *, reference: str, target: Literal["done", "blocked"], reason: str) -> None:
-        from ..agents.pipeline import ops as pipeline_ops
-
-        pipeline_ops.move_card(
-            "steward", reference, {"done": "Done", "blocked": "Blocked"}[target], reason=reason
-        )
-
-
 class ReuseDeliveryError(TuiDeliveryError):
     """A warm terminal did not visibly accept its next skill command."""
 
@@ -601,13 +580,15 @@ def _steward_report_card(
     agent: str, variant: str | None, *, report_board: StewardReportBoard | None = None
 ) -> str | None:
     """Create the steward's own wake-up report card (project secretary, non-code type,
-    straight into In progress, already claimed by itself — see pipeline.ops.create_report_card)
+    straight into In progress, already claimed by itself — through the supplied
+    Secretary-owned report-board port)
     right before a dispatch actually reaches the head. None for every agent but steward
     (triggered-agents-255): the rest keep their existing dispatch untouched.
     """
     if agent != "steward":
         return None
-    report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+    if report_board is None:
+        raise RuntimeError("steward report board must be supplied by the composition root")
     now = datetime.now(UTC)
     kind = variant or "hourly"
     slug = f"steward-sweep-{now:%Y%m%d-%H%M%S}"
@@ -694,7 +675,8 @@ def _fresh_steward_report_in_progress(
     try:
         from ..agents.steward import signals as steward_signals
 
-        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        if report_board is None:
+            raise RuntimeError("steward report board must be supplied by the composition root")
         threshold = steward_signals.STALE_HOURS * 3600
         meta_project = os.environ.get("SECRETARY_META_PROJECT", "secretary")
         for card in report_board.in_progress_reports(project=meta_project):
@@ -873,7 +855,8 @@ def _recover_steward_dispatch_failure(
     state.clear_active_report(cmd.card_ref)
     body = f"steward dispatch failed before the head accepted the report-card run.\n\nfailure: {failure}"
     try:
-        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        if report_board is None:
+            raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=cmd.card_ref, target="done", reason=body)
         state.log_run(event, action="dispatch-recovery", result="done", reference=cmd.card_ref)
     except Exception as recovery_error:
@@ -904,7 +887,8 @@ def _release_steward_report(
         return
     state.clear_active_report(cmd.card_ref)
     try:
-        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        if report_board is None:
+            raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=cmd.card_ref, target="done", reason=note)
         state.log_run(event, action="dispatch-release", result="done", reference=cmd.card_ref)
     except Exception as error:
@@ -938,7 +922,8 @@ def _escalate_steward_preflight_failure(
         f"failure: {failure}"
     )
     try:
-        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        if report_board is None:
+            raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=cmd.card_ref, target="blocked", reason=body)
         state.log_run(
             event, action="dispatch-preflight", result="blocked", reference=cmd.card_ref, error=str(failure)
@@ -976,7 +961,8 @@ def _release_standing_report(
         return
     state.clear_active_report(reference)
     try:
-        report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        if report_board is None:
+            raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=reference, target="done", reason=note)
         state.log_run(event, action="owner-report-release", result="done", reference=reference)
     except Exception as error:
@@ -1016,7 +1002,7 @@ class _TickReports:
         self.agent = agent
         self.state = state
         self.event = event
-        self.report_board = _LegacyStewardReportBoard() if report_board is None else report_board
+        self.report_board = report_board
         #: This tick's own card, and whether it has been discharged. Nothing is outstanding until
         #: a command carrying one exists.
         self.cmd: DispatchCommand | None = None
@@ -1868,6 +1854,8 @@ def run(
         # precheck skip the exact zero-side-effect no-op it always was before this card. Nothing
         # of this agent's is read or written here, so there is no card and no record to discharge.
         return 0
+    if agent == "steward" and report_board is None:
+        raise RuntimeError("steward report board must be supplied by the composition root")
     ws = _workspace(agent)
     state = AgentState(agent)
     event = variant or "dispatch"

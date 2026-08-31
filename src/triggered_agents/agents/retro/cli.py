@@ -34,7 +34,6 @@ from typing import Any, Protocol
 from ...runtime.kanboard import KanboardUnreachable
 from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, AgentState
 from ..curator import discover, harvest
-from ..pipeline import ops as pipeline_ops
 from . import search_log
 
 STATE = AgentState("retro")
@@ -46,13 +45,6 @@ class DoneRetention(Protocol):
     def close_old_done(self) -> dict[str, Any]: ...
 
 
-class _LegacyDoneRetention:
-    """Keep the released retro command on the exact legacy board implementation."""
-
-    def close_old_done(self) -> dict[str, Any]:
-        return pipeline_ops.close_old_done_cards()
-
-
 def _batch_window(batch: dict):
     """(min_ts, max_ts) across the batch's turns, for scoping the search-log tail."""
     ts = [t["ts"] for s in batch["sessions"] for t in s["turns"] if t.get("ts")]
@@ -60,7 +52,9 @@ def _batch_window(batch: dict):
 
 
 def _cleanup_done(retention: DoneRetention | None = None) -> dict:
-    out = (retention or _LegacyDoneRetention()).close_old_done()
+    if retention is None:
+        raise RuntimeError("retro Done-retention board must be supplied by the composition root")
+    out = retention.close_old_done()
     refs = out["closed"]
     STATE.log_run(
         "done-cleanup",

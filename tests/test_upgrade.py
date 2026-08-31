@@ -276,7 +276,9 @@ class ApplyHostTests(unittest.TestCase):
             )
 
         self.assertTrue(result.ok, result.errors)
-        self.assertTrue(load_managed_manifest(self.manifest)[0], "installation user can read the published manifest")
+        self.assertTrue(
+            load_managed_manifest(self.manifest)[0], "installation user can read the published manifest"
+        )
         info = self.manifest.stat()
         self.assertEqual((info.st_uid, info.st_gid), (account.pw_uid, account.pw_gid))
         self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
@@ -1528,7 +1530,7 @@ class HealthUnitNameTests(unittest.TestCase):
         self.assertEqual(health.timer_unit("pipeline"), "secretary-dispatcher-production.timer")
 
     def test_every_checked_unit_is_one_the_product_ships(self):
-        from triggered_agents.__main__ import AGENTS
+        from triggered_agents.__main__ import HEALTH_COMPONENTS
         from triggered_agents.runtime import health
 
         shipped = {
@@ -1537,7 +1539,7 @@ class HealthUnitNameTests(unittest.TestCase):
                 upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX
             )
         }
-        for agent in AGENTS:
+        for agent in HEALTH_COMPONENTS:
             self.assertIn(health.timer_unit(agent), shipped, agent)
 
 

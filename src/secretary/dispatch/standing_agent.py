@@ -1,8 +1,8 @@
-"""Secretary-owned alternative composition root for standing agents.
+"""Secretary-owned composition root for the board-owning standing agents.
 
-This module is intentionally not wired into host automation yet.  It lets the
-steward use Secretary's canonical task adapters while every production entry
-point continues through ``python3 -m triggered_agents``.
+The live steward and retro gate paths enter here so every board read/write uses
+Secretary's canonical task adapters.  The generic triggered-agent runtime
+remains independent: it receives only its narrow structural ports.
 """
 
 from __future__ import annotations

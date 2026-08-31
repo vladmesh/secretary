@@ -332,7 +332,7 @@ def load_registry(path: Path | None = None) -> Registry:
 @cache
 def _load_registry(path: Path) -> Registry:
     """The registry file, parsed and validated. Cached per (process, path) — every dispatcher tick
-    is a fresh `python3 -m triggered_agents pipeline tick` process, so this only dedupes the 2+
+    is a fresh production-dispatcher process, so this only dedupes the 2+
     reads a single tick already does (claim's `_check_head`, then the bring-up's own lookup),
     never a long-lived process going stale against an edited file on disk. A raised
     HeadRegistryError is not cached — the next call re-reads, so a fixed-then-retried registry

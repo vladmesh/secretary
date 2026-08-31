@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import json
 import os
 import tempfile
@@ -51,6 +52,18 @@ class StewardCliReaderTests(unittest.TestCase):
 
 
 class StandingAgentEntrypointTests(unittest.TestCase):
+    def test_retired_board_cli_modules_are_not_importable(self) -> None:
+        for name in (
+            "triggered_agents.agents.pipeline.cli",
+            "triggered_agents.agents.pipeline.model",
+            "triggered_agents.agents.pipeline.ops",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNone(importlib.util.find_spec(name))
+
+    def test_pipeline_is_not_registered_as_a_triggered_agent_command(self) -> None:
+        self.assertEqual(triggered_main.main(["pipeline", "list"]), 2)
+
     def test_signal_commands_get_the_canonical_reader(self) -> None:
         reader = object()
         with (
@@ -135,7 +148,9 @@ class StandingAgentEntrypointTests(unittest.TestCase):
 
     def test_retro_cleanup_port_is_lazy_and_only_passed_to_cleanup_commands(self) -> None:
         with (
-            mock.patch.object(standing_agent.KanboardClient, "for_instance", side_effect=AssertionError("client")),
+            mock.patch.object(
+                standing_agent.KanboardClient, "for_instance", side_effect=AssertionError("client")
+            ),
             mock.patch.object(retro_cli, "main", return_value=8) as main,
         ):
             self.assertEqual(standing_agent.main(["retro", "harvest", "--json"]), 8)
