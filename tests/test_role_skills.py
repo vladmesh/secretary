@@ -71,11 +71,13 @@ class CanonicalRegistryTests(unittest.TestCase):
         source = ROLES_ROOT / "curator" / CURATOR_SKILL / "SKILL.md"
         text = source.read_text(encoding="utf-8")
 
-        self.assertIn("<canonical-id|review:po>", text)
+        self.assertIn("<canonical-id|unknown|review:po>", text)
         self.assertIn("Multiple distinct registered\nreservations route to `review:po`", text)
         self.assertIn("tags `pending-review,multi-project`", text)
         self.assertIn("name its candidate project scopes", text)
         self.assertIn("Do not create a review fact merely to record that a session was examined", text)
+        self.assertIn("tags `pending-review,unknown-source`", text)
+        self.assertIn("Ownership ambiguity is not a reason to discard a durable conclusion", text)
         self.assertIn("--scope <global|project:<dir>|review:po>", text)
 
     def test_observer_skill_contains_the_minimal_supported_change_guardrails(self) -> None:

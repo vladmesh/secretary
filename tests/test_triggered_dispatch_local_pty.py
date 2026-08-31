@@ -481,7 +481,7 @@ class OneRegistryReadingTests(MechanicalRoleBackendTestCase):
         self.assertEqual(made, [], "the supervised tick reached Orca's session store")
         run_dir = self.run_dirs()[0]
         self.await_(
-            lambda: "/retro" in self.head_output(run_dir),
+            lambda: "$retro " in self.head_output(run_dir),
             message="the head never reported the skill its own terminal handed it",
         )
 
@@ -602,7 +602,7 @@ class SupervisedDeliveryTests(MechanicalRoleBackendTestCase):
 
         run_dir = self.run_dirs()[0]
         self.await_(
-            lambda: "/retro" in self.head_output(run_dir),
+            lambda: "$retro " in self.head_output(run_dir),
             message="the head never reported the skill its own terminal handed it",
         )
 
@@ -617,7 +617,7 @@ class SupervisedDeliveryTests(MechanicalRoleBackendTestCase):
 
         run_dir = self.run_dirs()[0]
         self.await_(lambda: "UP" in self.head_output(run_dir), message="the head never started")
-        self.assertNotIn("/retro", self.head_output(run_dir))
+        self.assertNotIn("$retro", self.head_output(run_dir))
 
 
 class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
@@ -652,9 +652,9 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
         """Criterion 5, on the precondition secretary-1468 put in front of the spawn."""
         self.prompt_after_start = True
         run_dir = self.raise_one()
-        self.await_(lambda: "/retro" in self.head_output(run_dir))
+        self.await_(lambda: "$retro " in self.head_output(run_dir))
         head, supervisor = self.head_pid(run_dir), self.supervisor_pid(run_dir)
-        delivered = self.head_output(run_dir).count("/retro")
+        delivered = self.head_output(run_dir).count("$retro ")
 
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
@@ -665,7 +665,7 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
             "the live head was replaced",
         )
         self.assertEqual(
-            self.head_output(run_dir).count("/retro"), delivered, "the busy head was sent a second skill"
+            self.head_output(run_dir).count("$retro "), delivered, "the busy head was sent a second skill"
         )
         self.assertEqual(self.actions(), ["supervised-started", "supervised-busy-skip"])
         self.assertEqual(
