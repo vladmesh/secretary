@@ -1258,10 +1258,26 @@ already owns.
 **Durability order.** A completed phase never advances past its own account. On every worker-report and
 reviewer-verdict path the occurrence is made durable in the append-only audit *before* the control event and
 the transition: it is staged under its request id and then appended. A card may advance past a staged
-obligation, because the exact staged record is still owed and the next tick for that card publishes it
-before anything else reads the journal; it may not advance past nothing at all. Recovery finishes the exact
-staged occurrence, never a re-derived one, so a session file that grew in between cannot change what the
-phase was accounted for, and finishing is idempotent.
+obligation, because the exact staged record is still owed and a later tick publishes it; it may not advance
+past nothing at all.
+
+**Where a staged obligation is settled.** One site, and it is not the card's own tick. A phase can finish
+and take its card out of the pipeline in the same breath — `report:blocked` moves it to Blocked, a green
+verdict with no observer moves it to Done — and the dispatcher drops that card's record on the way out.
+Nothing that walks active cards, dispatcher records or the board would ever reach it again. So every
+production tick *begins*, once the singleton, pause and mutation guards have permitted work and before
+observer fencing, `ACTIVE_STATES` selection, active-card reconciliation, any phase-boundary read and any new
+claim, by publishing the whole pending set of staged `attempt.usage` records straight out of the audit. That
+pass takes no dispatcher record, no board lookup and no card state as input, and pending usage publication
+takes precedence over every piece of card lifecycle work in the tick. A publication failure publishes
+nothing in the record's place: the exact staged occurrence stays pending, the tick reports it as a degraded
+`attempt-usage-recovery` action naming the cards still owed, and it is eligible again on every later
+permitted tick whatever state its card has reached by then. The per-card publication that remains is an
+idempotent fast path immediately before that card's own session-boundary read, so a new phase subtracts a
+published boundary rather than a staged one; correctness on the terminal paths comes from the global pass
+alone. Publication always finishes the exact staged occurrence, never a re-derived one, so a session file
+that grew in between cannot change what the phase was accounted for, and it is idempotent: a record already
+appended is simply not in the pending set, and a tick that owes nothing does nothing and reports nothing.
 
 **Non-blocking, and what is not.** Reading the provider never decides anything: a missing session, an
 unreadable journal and malformed records are named degraded outcomes inside the occurrence, and the worker

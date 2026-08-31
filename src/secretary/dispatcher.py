@@ -640,10 +640,11 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
-        # A usage occurrence staged by a tick that did not live to append it is an obligation this
-        # card still owes. Publish it before anything else reads the journal: it is the durable
-        # boundary the next phase on the same provider session subtracts.
-        self.finish_attempt_usage_obligations(ref)
+        # Staged usage obligations are deliberately not settled here: a card can finish its last
+        # phase and leave `ACTIVE_STATES` in the same tick, so no per-card pass can be the site that
+        # guarantees publication. `publish_pending_attempt_usage` owns that, over the whole pending
+        # set, at the top of the production tick.
+        #
         # A launch intent can outlive its tick. Re-establish the exact provider source before
         # adoption reads a heartbeat, not after a mismatched session was attributed to this card.
         record = records.get(ref)
@@ -5702,15 +5703,84 @@ class DispatcherRuntime:
     def finish_attempt_usage_obligations(self, ref: str) -> None:
         """Publish any usage occurrence this card staged but did not get appended.
 
-        The recovery half of the durability order: a phase may advance past a staged obligation, so
-        something has to finish it, and it has to finish that exact staged record rather than a new
-        read of a session file that has moved on since. Failing here changes nothing — the
-        obligation is durable and stays owed until a later pass publishes it.
+        An idempotent fast path, and only that: it exists so the boundary read immediately below it
+        in `_write_attempt_usage` sees the previous phase's published boundary rather than a staged
+        one. What makes publication *certain* is `publish_pending_attempt_usage`, which does not
+        need this card to still be active — or to exist. Failing here changes nothing.
         """
         try:
             self.writer.finish_attempt_usage(role="dispatcher", reference=ref)
         except Exception:  # noqa: BLE001 - a staged obligation survives its own recovery failing
             return
+
+    def pending_attempt_usage(self) -> list[str]:
+        """The card ref of every `attempt.usage` occurrence staged in the audit and not published.
+
+        Read from the pending set alone. A terminal card holds no dispatcher record and appears in
+        no active cycle, and its finished phase is owed an account exactly the same.
+        """
+        return [
+            str(record.get("ref") or "")
+            for record in self.audit.pending_events()
+            if record.get("kind") == ATTEMPT_USAGE_KIND
+        ]
+
+    def publish_pending_attempt_usage(self) -> list[dict[str, Any]]:
+        """Publish every staged `attempt.usage` occurrence the installation still owes.
+
+        The single enforcement site of the durability order. A phase is accounted for as soon as its
+        occurrence is staged, and the card is then free to advance — including into Blocked or Done,
+        which no later step of the tick looks at again. So the obligation is finished from the
+        pending set itself: no dispatcher record, no board lookup, no card state, nothing a terminal
+        card has already given up. It runs before observer fencing, before the active cycle is read
+        and before any phase boundary is, because every one of those reads a journal these records
+        belong in.
+
+        Publishing the exact staged record is the whole of it. A failure publishes nothing in its
+        place: the record stays pending, stays exact, and is eligible again on every later permitted
+        tick, whatever state its card has reached by then.
+        """
+        try:
+            owed = self.pending_attempt_usage()
+        except Exception as exc:  # noqa: BLE001 - an unreadable pending set is reported, not raised
+            return [
+                {
+                    "status": "degraded",
+                    "step": "attempt-usage-recovery",
+                    "action": "attempt-usage-pending-unreadable",
+                    "reason": (
+                        "staged usage occurrences could not be read, so any obligation among them "
+                        f"is still owed: {type(exc).__name__}: {exc}"
+                    ),
+                }
+            ]
+        if not owed:
+            return []
+        failure = ""
+        try:
+            self.writer.finish_attempt_usage(role="dispatcher")
+        except Exception as exc:  # noqa: BLE001 - the obligation outlives its own recovery failing
+            failure = f"{type(exc).__name__}: {exc}"
+        try:
+            remaining = self.pending_attempt_usage()
+        except Exception as exc:  # noqa: BLE001 - unknown is owed, not settled
+            remaining = list(owed)
+            failure = failure or f"{type(exc).__name__}: {exc}"
+        outcome: dict[str, Any] = {
+            "status": "degraded" if remaining else "ok",
+            "step": "attempt-usage-recovery",
+            "action": "attempt-usage-still-pending" if remaining else "attempt-usage-published",
+            "published": max(0, len(owed) - len(remaining)),
+            "pending": len(remaining),
+            "refs": sorted({ref for ref in owed if ref}),
+        }
+        if remaining:
+            outcome["pending_refs"] = sorted({ref for ref in remaining if ref})
+            outcome["reason"] = (
+                f"{len(remaining)} staged usage occurrence(s) could not be published and stay owed"
+                + (f": {failure}" if failure else "")
+            )
+        return [outcome]
 
     def record_attempt_usage(self, ref: str, record: DispatcherRecord, *, role: str, attempt_id: str) -> None:
         """Persist what the phase that just finished cost, before the card can advance past it.
