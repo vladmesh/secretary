@@ -16,7 +16,7 @@ from secretary.codex_provider_events import (
 )
 from secretary.config import DataDirError, instance_data_dir
 from secretary.dispatch.attempt_usage import (
-    ATTEMPT_USAGE_KIND,
+    apply_phase_boundary as _apply_phase_boundary,
 )
 from secretary.dispatch.attempt_usage import (
     attempt_usage_data as _attempt_usage_data,
@@ -25,10 +25,10 @@ from secretary.dispatch.attempt_usage import (
     attempt_usage_reason as _attempt_usage_reason,
 )
 from secretary.dispatch.attempt_usage import (
-    collect_usage as _collect_usage,
+    causal_phase_boundary as _causal_phase_boundary,
 )
 from secretary.dispatch.attempt_usage import (
-    durable_phase_boundary as _durable_phase_boundary,
+    collect_usage as _collect_usage,
 )
 from secretary.dispatch.attempt_usage import (
     provider_usage_source as _provider_usage_source,
@@ -5700,29 +5700,13 @@ class DispatcherRuntime:
             request_id=request_id,
         )
 
-    def finish_attempt_usage_obligations(self, ref: str) -> None:
-        """Publish any usage occurrence this card staged but did not get appended.
-
-        An idempotent fast path, and only that: it exists so the boundary read immediately below it
-        in `_write_attempt_usage` sees the previous phase's published boundary rather than a staged
-        one. What makes publication *certain* is `publish_pending_attempt_usage`, which does not
-        need this card to still be active — or to exist. Failing here changes nothing.
-        """
-        try:
-            self.writer.finish_attempt_usage(role="dispatcher", reference=ref)
-        except Exception:  # noqa: BLE001 - a staged obligation survives its own recovery failing
-            return
-
     def pending_attempt_usage(self) -> list[str]:
-        """The card ref of every `attempt.usage` occurrence staged in the audit and not published.
-
-        Read from the pending set alone. A terminal card holds no dispatcher record and appears in
-        no active cycle, and its finished phase is owed an account exactly the same.
-        """
+        """Card refs whose canonical usage occurrence still awaits export publication."""
+        canon = self.writer.board_host.canon
+        if canon is None:
+            return []
         return [
-            str(record.get("ref") or "")
-            for record in self.audit.pending_events()
-            if record.get("kind") == ATTEMPT_USAGE_KIND
+            occurrence.event.ref for occurrence in canon.attempt_usage_occurrences() if occurrence.pending
         ]
 
     def publish_pending_attempt_usage(self) -> list[dict[str, Any]]:
@@ -5736,7 +5720,9 @@ class DispatcherRuntime:
         and before any phase boundary is, because every one of those reads a journal these records
         belong in.
 
-        Publishing the exact staged record is the whole of it. A failure publishes nothing in its
+        The canonical committed-plus-pending projection is also the source of recovery obligations;
+        recovery does not interpret the pending directory independently. Publishing the exact staged
+        record is the whole of it. A failure publishes nothing in its
         place: the record stays pending, stays exact, and is eligible again on every later permitted
         tick, whatever state its card has reached by then.
         """
@@ -5795,7 +5781,8 @@ class DispatcherRuntime:
         have been. Failing to make the occurrence durable is an audit failure, and this method
         refuses to swallow it: the control event and the transition may not outrun the account of
         the phase they close. A staged-but-unappended obligation is durable enough to advance past,
-        because `finish_attempt_usage_obligations` publishes that exact record later.
+        because the canonical occurrence projection makes it authoritative immediately and the global
+        publication reconciler later appends that exact record.
         """
         try:
             self._write_attempt_usage(ref, record, role=role, attempt_id=attempt_id)
@@ -5809,9 +5796,6 @@ class DispatcherRuntime:
     def _write_attempt_usage(self, ref: str, record: DispatcherRecord, *, role: str, attempt_id: str) -> None:
         phase = "worker" if role == WORKER_ROLE else "review"
         journal_role = WORKER if role == WORKER_ROLE else REVIEWER
-        # An obligation from an earlier phase is published first: it is this phase's own starting
-        # boundary, and a boundary that is still staged is a boundary the read below cannot see.
-        self.finish_attempt_usage_obligations(ref)
         # A round is what binds the occurrence to a phase. Every accepted terminal report has one;
         # a record rebuilt without one still owes the phase an account, so the first round answers
         # for it rather than the occurrence being dropped.
@@ -5831,18 +5815,33 @@ class DispatcherRuntime:
             # below still reports its own adapter, model and whatever session identity it holds.
             pass
         run = HeadRun.from_json(snapshot)
+        try:
+            occurrences = self.writer.board_host.canon.attempt_usage_occurrences(ref=ref)
+        except (OSError, TypeError, ValueError, TaskError) as exc:
+            raise TaskError(
+                "audit_unavailable", f"attempt usage projection is unreadable: {exc}", 4
+            ) from None
         collection = _collect_usage(
             adapter=run.adapter,
             source=_provider_usage_source(lifecycle, adapter=run.adapter),
-            # One phase-accounting rule for both adapters: this phase owns what the session spent
-            # after the boundary the previous phase on that same session made durable. A retained
-            # worker resumed into a second round therefore never pays for its first one again.
-            baseline=_durable_phase_boundary(
-                self.audit.events(ref, kind=ATTEMPT_USAGE_KIND),
-                adapter=run.adapter,
-                session_id=run.session_id or "",
-            ),
         )
+        if collection.collected:
+            try:
+                baseline = _causal_phase_boundary(
+                    occurrences,
+                    adapter=run.adapter,
+                    session_id=run.session_id or "",
+                    attempt=attempt,
+                    attempt_id=record.attempt_id or attempt_id,
+                    report_generation=generation,
+                    phase=phase,
+                    role=journal_role,
+                )
+            except (TypeError, ValueError) as exc:
+                raise TaskError(
+                    "audit_unavailable", f"attempt usage projection is unreadable: {exc}", 4
+                ) from None
+            collection = _apply_phase_boundary(collection, baseline)
         data = _attempt_usage_data(
             attempt=attempt,
             attempt_id=record.attempt_id or attempt_id,

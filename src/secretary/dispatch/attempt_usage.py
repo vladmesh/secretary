@@ -7,7 +7,7 @@ of the feature — everything downstream of it is one typed board event.
 
 Both providers write a journal that describes a *session*, not a phase, so the module reads a
 session total and then subtracts the boundary the previous phase on that same session already made
-durable. One rule for both adapters: a phase owns the usage after the previous durable terminal
+durable. One rule for both adapters: a phase owns the usage after the previous authoritative terminal
 boundary for its provider session and through its own terminal boundary, and a session nobody has
 accounted for yet starts at zero. That is what keeps a retained worker — the same conversation
 resumed for a second round — from being charged twice for its first round.
@@ -28,11 +28,12 @@ named degraded outcome, never an exception the caller has to survive.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from secretary.board.events import AttemptUsageOccurrence
 from secretary.board.models import TOKEN_DIMENSIONS, AttemptUsageOutcome, EventKind
 
 CODEX_ADAPTER = "codex"
@@ -141,32 +142,51 @@ def provider_usage_source(lifecycle_run: Mapping[str, Any] | None, *, adapter: s
     return dict(source) if isinstance(source, Mapping) else {}
 
 
-def durable_phase_boundary(
-    events: Iterable[Mapping[str, Any]],
+def causal_phase_boundary(
+    occurrences: Sequence[AttemptUsageOccurrence],
     *,
     adapter: str,
     session_id: str,
+    attempt: int,
+    attempt_id: str,
+    report_generation: int,
+    phase: str,
+    role: str,
 ) -> TokenTotals | None:
-    """The last durable session total already accounted for on this provider session.
+    """The causal predecessor's boundary for this provider session.
 
-    Read from the card's own committed ``attempt.usage`` occurrences, in append order, because the
-    append-only audit is the only place a previous phase's boundary is durable at all: a dispatcher
-    record can be lost and rebuilt, and a retained worker outlives several of them.
+    Committed and staged occurrences have equal semantic authority. Their append order is irrelevant:
+    the phase identity carried by each event decides which occurrence precedes this one. A matching
+    predecessor without a usable boundary is an audit failure, not permission to restart at zero.
     """
     if not session_id:
         return None
-    boundary: TokenTotals | None = None
-    for event in events:
-        if not isinstance(event, Mapping) or event.get("kind") != ATTEMPT_USAGE_KIND:
+    phase_order = {"worker": 0, "review": 1}
+    current = (attempt, report_generation, phase_order[phase])
+    predecessors: list[tuple[tuple[int, int, int], AttemptUsageOccurrence]] = []
+    for occurrence in occurrences:
+        data = occurrence.event.data
+        if data["role"] != role or data["phase"] != phase:
             continue
-        data = event.get("data")
-        if not isinstance(data, Mapping):
-            continue
-        if data.get("session_id") != session_id or data.get("adapter") != adapter:
-            continue
-        totals = TokenTotals.from_json(data.get("session_totals"))
-        if totals is not None:
-            boundary = totals
+        order = (
+            int(data["attempt"]),
+            int(data["report_generation"]),
+            phase_order[str(data["phase"])],
+        )
+        if order == current and data["attempt_id"] != attempt_id:
+            raise ValueError("current attempt usage phase belongs to a conflicting attempt id")
+        if order < current and data["adapter"] == adapter and data["session_id"] == session_id:
+            predecessors.append((order, occurrence))
+    if not predecessors:
+        return None
+    _order, predecessor = max(predecessors, key=lambda item: item[0])
+    boundary = TokenTotals.from_json(predecessor.event.data.get("session_totals"))
+    if boundary is None:
+        identity = predecessor.event.data
+        raise ValueError(
+            "causal attempt usage predecessor has no readable session-total boundary "
+            f"(attempt {identity['attempt']}, generation {identity['report_generation']})"
+        )
     return boundary
 
 
@@ -199,6 +219,32 @@ def phase_interval(
     return TokenTotals(**phase), TokenTotals(**start), rewound
 
 
+def apply_phase_boundary(
+    collection: UsageCollection,
+    baseline: TokenTotals | None,
+) -> UsageCollection:
+    """Apply one projected predecessor to an already-read provider session total.
+
+    Keeping this separate from the provider read preserves failure precedence without rereading the
+    provider journal: a degraded current read needs no arithmetic, while a collected one must have
+    its causal predecessor resolved before it becomes the phase occurrence.
+    """
+    if not collection.collected:
+        return collection
+    tokens, start, rewound = phase_interval(collection.session_totals, baseline)
+    return replace(
+        collection,
+        detail=(
+            "the provider session total fell below the authoritative boundary of an earlier phase; "
+            "this phase is accounted as owning none of it"
+            if rewound
+            else collection.detail
+        ),
+        tokens=tokens,
+        baseline=start,
+    )
+
+
 def collect_usage(
     *,
     adapter: str,
@@ -207,7 +253,7 @@ def collect_usage(
 ) -> UsageCollection:
     """Read one finished phase's usage out of its bound provider source.
 
-    ``baseline`` is the previous durable boundary for this same provider session, so what comes back
+    ``baseline`` is the previous authoritative boundary for this same provider session, so what comes back
     is the interval this phase owns rather than everything the session has ever spent.
 
     Never raises: every way this can fail is one of the declared degraded outcomes, because the
@@ -252,21 +298,15 @@ def collect_usage(
     session = aggregate(records)
     skipped = unparsed + session.invalid
     if session.records:
-        tokens, start, rewound = phase_interval(session.totals, baseline)
-        return UsageCollection(
-            AttemptUsageOutcome.COLLECTED,
-            detail=(
-                f"the {adapter} session total fell below the durable boundary of an earlier phase; "
-                "this phase is accounted as owning none of it"
-                if rewound
-                else ""
+        return apply_phase_boundary(
+            UsageCollection(
+                AttemptUsageOutcome.COLLECTED,
+                source_kind=kind,
+                records=session.records,
+                skipped_records=skipped,
+                session_totals=session.totals,
             ),
-            source_kind=kind,
-            records=session.records,
-            skipped_records=skipped,
-            tokens=tokens,
-            session_totals=session.totals,
-            baseline=start,
+            baseline,
         )
     if session.invalid:
         return UsageCollection(

@@ -612,9 +612,7 @@ class TaskReader:
         if not isinstance(raw, list) or any(not isinstance(card, dict) for card in raw):
             raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
         done = [
-            card
-            for card in raw
-            if _positive_int(card.get("column_id")) == done_id and _task_is_active(card)
+            card for card in raw if _positive_int(card.get("column_id")) == done_id and _task_is_active(card)
         ]
         metadata = self._metadata_of(done)
         candidates: list[dict[str, Any]] = []
@@ -1133,6 +1131,45 @@ class TaskAudit:
                     result.append(json.load(source))
             except (OSError, ValueError):
                 continue
+        return result
+
+    def _occurrence_projection_records(self) -> list[tuple[dict[str, Any], bool]]:
+        """Read committed and pending audit records atomically for a fail-closed projection.
+
+        Generic audit readers retain their released best-effort behaviour. The usage projection
+        cannot skip an unreadable record, because that record may be the causal boundary a later
+        phase must subtract.
+        """
+        result: list[tuple[dict[str, Any], bool]] = []
+        with self._locked_audit():
+            try:
+                with open(self.events_path, encoding="utf-8") as events:
+                    for line_number, line in enumerate(events, 1):
+                        if not line.strip():
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except ValueError as exc:
+                            raise ValueError(f"audit journal record {line_number} is unreadable") from exc
+                        if not isinstance(record, dict):
+                            raise TypeError(f"audit journal record {line_number} is not an object")
+                        result.append((record, False))
+            except FileNotFoundError:
+                pass
+            if not os.path.isdir(self.pending_dir):
+                return result
+            for name in sorted(os.listdir(self.pending_dir)):
+                if not name.endswith(".json"):
+                    continue
+                path = os.path.join(self.pending_dir, name)
+                try:
+                    with open(path, encoding="utf-8") as source:
+                        record = json.load(source)
+                except (OSError, ValueError) as exc:
+                    raise ValueError(f"pending audit record {name} is unreadable") from exc
+                if not isinstance(record, dict):
+                    raise TypeError(f"pending audit record {name} is not an object")
+                result.append((record, True))
         return result
 
     def status(self) -> dict[str, int | bool]:
@@ -2204,19 +2241,12 @@ class TaskWriter:
         if canon is None:
             return 0
         finished = 0
-        for record in self.audit.pending_events():
-            if record.get("record_type") != Event.RECORD_TYPE:
-                continue
-            if record.get("kind") != EventKind.ATTEMPT_USAGE.value:
-                continue
-            if reference and record.get("ref") != reference:
-                continue
-            request_id = str(record.get("request_id") or "")
-            if not request_id:
+        for occurrence in canon.attempt_usage_occurrences(ref=reference):
+            if not occurrence.pending:
                 continue
             try:
-                canon.commit(request_id, Event.from_record(record))
-            except (OSError, ValueError, TaskError):
+                canon.commit(occurrence.request_id, occurrence.event)
+            except (OSError, TypeError, ValueError, TaskError):
                 # The obligation stays exactly where it is: still staged, still owed, still exact.
                 continue
             finished += 1
@@ -3179,7 +3209,9 @@ class TaskWriter:
             # A transport error after close is ambiguous; leave its pending
             # evidence.  A definite local guard/validation failure is not.
             if exc.code == "backend_unavailable":
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+                raise TaskError(
+                    "audit_pending", "backend write committed; audit repair is required", 4
+                ) from None
             current = self.audit.pending_event(request_id)
             if current == event:
                 try:

@@ -497,6 +497,21 @@ def _validate_attempt_usage_event(
             raise ValueError(f"a collected attempt usage outcome reports at least one {account} dimension")
         if not collected and any(value is not None for value in counts.values()):
             raise ValueError("a degraded attempt usage outcome reports no token totals")
+    if collected:
+        tokens = data["tokens"]
+        totals = data["session_totals"]
+        baseline = data["phase_baseline"]
+        for name in TOKEN_DIMENSIONS:
+            values = (tokens[name], totals[name], baseline[name])
+            if all(value is None for value in values):
+                continue
+            if any(value is None for value in values):
+                raise ValueError(
+                    f"attempt usage dimension {name} must be available in all three accounts or none"
+                )
+            expected = max(0, totals[name] - baseline[name])
+            if tokens[name] != expected:
+                raise ValueError(f"attempt usage dimension {name} does not match its session-total interval")
 
 
 def _format_time(value: datetime) -> str:

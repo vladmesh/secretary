@@ -15,7 +15,9 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
+from secretary.board.events import AttemptUsageOccurrence, BoardEventCanon
 from secretary.board.models import (
     TOKEN_DIMENSIONS,
     Actor,
@@ -28,14 +30,14 @@ from secretary.dispatch.attempt_usage import (
     CLAUDE_SOURCE_KIND,
     CODEX_SOURCE_KIND,
     TokenTotals,
+    causal_phase_boundary,
     claude_usage,
     codex_usage,
     collect_usage,
-    durable_phase_boundary,
     phase_interval,
     provider_usage_source,
 )
-from secretary.tasks import TaskError, is_significant_card_event
+from secretary.tasks import TaskAudit, TaskError, is_significant_card_event
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 
 DIGEST = "a" * 64
@@ -328,61 +330,89 @@ class PhaseIntervalTests(unittest.TestCase):
         self.assertEqual(totals.input, 0)
 
 
-class DurableBoundaryTests(unittest.TestCase):
-    """The boundary comes out of the card's own committed occurrences, not a second journal."""
+class CausalBoundaryTests(unittest.TestCase):
+    """Phase identity, not publication order, selects the predecessor boundary."""
 
     @staticmethod
-    def occurrence(session_id: str, adapter: str = "codex", **totals: int | None) -> dict:
-        return {
-            "kind": "attempt.usage",
-            "data": {
-                "adapter": adapter,
-                "session_id": session_id,
-                "session_totals": dict.fromkeys(TOKEN_DIMENSIONS, None) | totals,
-            },
+    def occurrence(
+        attempt: int,
+        total: int | None,
+        *,
+        request_id: str = "request",
+        pending: bool = False,
+        session_id: str = "session-1",
+        attempt_id: str = "attempt-1",
+    ) -> AttemptUsageOccurrence:
+        accounts = dict.fromkeys(TOKEN_DIMENSIONS, None)
+        overrides = {
+            "attempt": attempt,
+            "report_generation": attempt,
+            "attempt_id": attempt_id,
+            "session_id": session_id,
+            "tokens": accounts | ({"input": total} if total is not None else {}),
+            "session_totals": accounts | ({"input": total} if total is not None else {}),
+            "phase_baseline": accounts | ({"input": 0} if total is not None else {}),
         }
+        if total is None:
+            overrides |= {"outcome": "source_unreadable", "detail": "unreadable"}
+        event = usage_event(**overrides)
+        event = Event(
+            event_id=f"evt-{request_id}",
+            kind=event.kind,
+            entity_kind=event.entity_kind,
+            ref=event.ref,
+            actor=event.actor,
+            reason=event.reason,
+            occurred_at=event.occurred_at,
+            data=event.data,
+        )
+        return AttemptUsageOccurrence(request_id, event, pending)
 
-    def test_the_last_boundary_recorded_for_this_session_is_the_one_that_counts(self) -> None:
-        boundary = durable_phase_boundary(
-            [
-                self.occurrence("session-1", input=100),
-                self.occurrence("session-1", input=450),
-            ],
+    def boundary(self, occurrences: list[AttemptUsageOccurrence]) -> TokenTotals | None:
+        return causal_phase_boundary(
+            occurrences,
             adapter="codex",
             session_id="session-1",
+            attempt=3,
+            attempt_id="attempt-1",
+            report_generation=3,
+            phase="worker",
+            role="worker",
+        )
+
+    def test_the_latest_causal_phase_wins_when_publication_order_is_reversed(self) -> None:
+        boundary = self.boundary(
+            [self.occurrence(2, 450, request_id="second"), self.occurrence(1, 100, request_id="first")]
         )
 
         self.assertEqual(boundary, TokenTotals(input=450))
 
-    def test_another_session_and_another_adapter_leave_no_boundary_here(self) -> None:
-        events = [
-            self.occurrence("session-2", input=999),
-            self.occurrence("session-1", adapter="claude", input=888),
-        ]
-
-        self.assertIsNone(durable_phase_boundary(events, adapter="codex", session_id="session-1"))
-
-    def test_a_degraded_occurrence_records_no_boundary_and_the_earlier_one_still_stands(self) -> None:
-        """An unreadable phase cannot lower the boundary its predecessor already made durable."""
-        events = [
-            self.occurrence("session-1", input=450),
-            self.occurrence("session-1"),
-        ]
-
+    def test_a_pending_occurrence_is_an_authoritative_boundary(self) -> None:
         self.assertEqual(
-            durable_phase_boundary(events, adapter="codex", session_id="session-1"),
+            self.boundary([self.occurrence(2, 450, request_id="second", pending=True)]),
             TokenTotals(input=450),
         )
 
+    def test_another_session_leaves_no_boundary_here(self) -> None:
+        self.assertIsNone(self.boundary([self.occurrence(2, 999, session_id="session-2")]))
+
+    def test_a_degraded_causal_predecessor_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no readable session-total boundary"):
+            self.boundary([self.occurrence(2, None)])
+
     def test_a_run_with_no_session_identity_has_no_boundary_to_find(self) -> None:
-        events = [self.occurrence("", input=450)]
-
-        self.assertIsNone(durable_phase_boundary(events, adapter="codex", session_id=""))
-
-    def test_events_of_other_kinds_are_ignored(self) -> None:
-        events = [{"kind": "routing", "data": {"session_id": "session-1", "adapter": "codex"}}]
-
-        self.assertIsNone(durable_phase_boundary(events, adapter="codex", session_id="session-1"))
+        self.assertIsNone(
+            causal_phase_boundary(
+                [],
+                adapter="codex",
+                session_id="",
+                attempt=1,
+                attempt_id="attempt-1",
+                report_generation=1,
+                phase="worker",
+                role="worker",
+            )
+        )
 
 
 class SourceCollectionTests(unittest.TestCase):
@@ -489,7 +519,7 @@ class SourceCollectionTests(unittest.TestCase):
 
         self.assertIs(result.outcome, AttemptUsageOutcome.COLLECTED)
         self.assertEqual(result.tokens.input, 0)
-        self.assertIn("fell below the durable boundary", result.detail)
+        self.assertIn("fell below the authoritative boundary", result.detail)
 
     def test_a_truncated_tail_still_reports_the_complete_records_before_it(self) -> None:
         """The normal shape of a journal read while its writer is still around."""
@@ -582,6 +612,14 @@ class AttemptUsageEventTests(unittest.TestCase):
             restored.data["session_totals"]["input"] - restored.data["phase_baseline"]["input"],
         )
 
+    def test_a_collected_interval_must_match_its_total_and_baseline(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            usage_event(tokens=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 99, "output": 20})
+
+    def test_a_dimension_is_available_in_all_three_accounts_or_none(self) -> None:
+        with self.assertRaisesRegex(ValueError, "all three accounts"):
+            usage_event(tokens=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 100})
+
     def test_a_degraded_outcome_may_not_carry_token_totals(self) -> None:
         """Fabricating a zero for an unreadable phase is exactly the confusion this event exists
         to remove."""
@@ -645,6 +683,98 @@ class AttemptUsageEventTests(unittest.TestCase):
         )
 
         self.assertEqual(Event.from_record(moved.to_record("request-2")), moved)
+
+
+class AttemptUsageProjectionTests(unittest.TestCase):
+    """The repository view joins export visibility without changing occurrence semantics."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.audit = TaskAudit(self.root)
+        self.canon = BoardEventCanon(self.root, audit=self.audit)
+
+    def test_committed_and_pending_occurrences_share_one_validated_view(self) -> None:
+        committed = usage_event(attempt=1, report_generation=1)
+        pending = usage_event(attempt=2, report_generation=2)
+        pending = Event(
+            event_id="evt_pending",
+            kind=pending.kind,
+            entity_kind=pending.entity_kind,
+            ref=pending.ref,
+            actor=pending.actor,
+            reason=pending.reason,
+            occurred_at=pending.occurred_at,
+            data=pending.data,
+        )
+        self.canon.commit("request-committed", committed)
+        self.canon.stage("request-pending", pending)
+
+        projected = self.canon.attempt_usage_occurrences(ref=CARD_REF)
+
+        self.assertEqual([item.request_id for item in projected], ["request-committed", "request-pending"])
+        self.assertEqual([item.pending for item in projected], [False, True])
+        self.assertEqual(projected[1].event.data, pending.data)
+
+    def test_an_exact_committed_pending_duplicate_is_one_exported_occurrence(self) -> None:
+        event = usage_event()
+        record = event.to_record("same-request")
+        self.audit.append("same-request", record)
+        Path(self.audit.pending_dir).mkdir(parents=True, exist_ok=True)
+        self.audit._atomic_json(self.audit._pending_path("same-request"), record)
+
+        projected = self.canon.attempt_usage_occurrences(ref=CARD_REF)
+
+        self.assertEqual(len(projected), 1)
+        self.assertFalse(projected[0].pending)
+
+    def test_conflicting_request_payload_fails_closed(self) -> None:
+        committed = usage_event()
+        self.audit.append("same-request", committed.to_record("same-request"))
+        conflict = usage_event(
+            tokens=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 101, "output": 20},
+            session_totals=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 551, "output": 81},
+        )
+        Path(self.audit.pending_dir).mkdir(parents=True, exist_ok=True)
+        self.audit._atomic_json(self.audit._pending_path("same-request"), conflict.to_record("same-request"))
+
+        with self.assertRaisesRegex(ValueError, "conflicting event payloads"):
+            self.canon.attempt_usage_occurrences(ref=CARD_REF)
+
+    def test_one_event_id_cannot_have_two_request_owners(self) -> None:
+        event = usage_event()
+        self.audit.append("first-request", event.to_record("first-request"))
+        Path(self.audit.pending_dir).mkdir(parents=True, exist_ok=True)
+        self.audit._atomic_json(self.audit._pending_path("second-request"), event.to_record("second-request"))
+
+        with self.assertRaisesRegex(ValueError, "conflicting request owners"):
+            self.canon.attempt_usage_occurrences(ref=CARD_REF)
+
+    def test_one_causal_phase_cannot_have_two_occurrence_owners(self) -> None:
+        first = usage_event()
+        second = Event(
+            event_id="evt_second",
+            kind=first.kind,
+            entity_kind=first.entity_kind,
+            ref=first.ref,
+            actor=first.actor,
+            reason=first.reason,
+            occurred_at=first.occurred_at,
+            data=first.data,
+        )
+        self.canon.commit("first-request", first)
+        self.canon.stage("second-request", second)
+
+        with self.assertRaisesRegex(ValueError, "conflicting occurrence owners"):
+            self.canon.attempt_usage_occurrences(ref=CARD_REF)
+
+    def test_unreadable_pending_evidence_fails_closed(self) -> None:
+        self.audit.stage("broken", usage_event().to_record("broken"))
+        Path(self.audit._pending_path("broken")).write_text("{", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "pending audit record .* is unreadable"):
+            self.canon.attempt_usage_occurrences(ref=CARD_REF)
 
 
 class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
@@ -1144,6 +1274,123 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual([usage["session_totals"]["output"] for usage in phases], [90, 130])
         self.assertEqual([usage["phase_baseline"]["output"] for usage in phases], [0, 90])
 
+    def _assert_two_pending_retained_worker_phases(self, adapter: str) -> None:
+        """Keep publication down through both phases, then recover them in reverse order."""
+        if adapter == "claude":
+            self.claude_worker()
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        journal = (
+            self.codex_journal("retained.jsonl", input_tokens=100, output_tokens=10)
+            if adapter == "codex"
+            else self.claude_journal("retained.jsonl", "msg_1", input_tokens=8, output_tokens=90)
+        )
+        session_id = self.bind_source("worker", journal, adapter=adapter)
+        restore = self.refuse_usage_audit("append")
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()
+        self._review_red()
+        self.assertEqual(self._park_and_decide("rework")["action"], "review-red-reused-worker")
+        if adapter == "codex":
+            write_jsonl(journal, [codex_token_count(input_tokens=450, output_tokens=61)])
+            expected = {"input": [100, 350], "output": [10, 51], "final": {"input": 450, "output": 61}}
+        else:
+            write_jsonl(
+                journal,
+                [
+                    claude_assistant("msg_1", input_tokens=8, output_tokens=90),
+                    claude_assistant("msg_2", input_tokens=5, output_tokens=40),
+                ],
+            )
+            expected = {"input": [8, 5], "output": [90, 40], "final": {"input": 13, "output": 130}}
+        self.host.commit = "retained-rework-c0ffee"
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+
+        staged = [
+            item
+            for item in self.writer.board_host.canon.attempt_usage_occurrences(ref=CARD_REF)
+            if item.event.data["role"] == "worker" and item.event.data["session_id"] == session_id
+        ]
+        staged.sort(key=lambda item: item.event.data["report_generation"])
+        self.assertEqual(len(staged), 2)
+        self.assertTrue(all(item.pending for item in staged))
+        self.assertEqual([item.event.data["tokens"]["input"] for item in staged], expected["input"])
+        self.assertEqual([item.event.data["tokens"]["output"] for item in staged], expected["output"])
+
+        # Same-request replay returns the immutable staged occurrence; the grown provider journal
+        # cannot replace its already-accounted interval.
+        replay = staged[1]
+        with self.assertRaises(TaskError) as still_pending:
+            self.writer.attempt_usage(
+                role="dispatcher",
+                actor="secretary-dispatcher",
+                reference=CARD_REF,
+                data=replay.event.data,
+                reason=replay.event.reason,
+                request_id=replay.request_id,
+            )
+        self.assertEqual(still_pending.exception.code, "audit_pending")
+
+        restore()
+        canon = self.writer.board_host.canon
+        original_projection = canon.attempt_usage_occurrences
+
+        def reversed_projection(*, ref: str = ""):
+            return tuple(reversed(original_projection(ref=ref)))
+
+        with mock.patch.object(canon, "attempt_usage_occurrences", side_effect=reversed_projection):
+            self.production_tick()
+
+        exported = [
+            usage
+            for usage in self.usage_events()
+            if usage["role"] == "worker" and usage["session_id"] == session_id
+        ]
+        self.assertEqual(len(exported), 2)
+        exported.sort(key=lambda usage: usage["report_generation"])
+        for dimension in ("input", "output"):
+            self.assertEqual(
+                sum(usage["tokens"][dimension] for usage in exported), expected["final"][dimension]
+            )
+        self.assertEqual(self.staged_usage(), [])
+
+    def test_two_codex_phases_are_authoritative_while_both_appends_are_unavailable(self) -> None:
+        self._assert_two_pending_retained_worker_phases("codex")
+
+    def test_two_claude_phases_are_authoritative_while_both_appends_are_unavailable(self) -> None:
+        self._assert_two_pending_retained_worker_phases("claude")
+
+    def test_a_degraded_predecessor_holds_a_later_phase_on_the_same_session(self) -> None:
+        """The provider failure is recorded and phase one advances; its absent boundary may not be
+        guessed when the retained session later becomes readable."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        journal = self.data_dir / "sessions" / "appears-later.jsonl"
+        self.bind_source("worker", journal)
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        first = [usage for usage in self.usage_events() if usage["role"] == "worker"]
+        self.assertEqual(first[0]["outcome"], "source_unreadable")
+
+        self.tick()
+        self._review_red()
+        self._park_and_decide("rework")
+        write_jsonl(journal, [codex_token_count(input_tokens=450, output_tokens=61)])
+        self.host.commit = "retained-rework-c0ffee"
+        self._report_done()
+
+        with self.assertRaises(TaskError) as refused:
+            self.tick()
+
+        self.assertEqual(refused.exception.code, "audit_unavailable")
+        self.assertIn("predecessor", refused.exception.message)
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+        self.assertEqual(len([usage for usage in self.usage_events() if usage["role"] == "worker"]), 1)
+
     def test_a_replayed_second_phase_reproduces_its_interval_rather_than_the_session_total(
         self,
     ) -> None:
@@ -1319,10 +1566,10 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self.tick()
 
-        def refuse() -> list[dict]:
+        def refuse(*, ref: str = ""):
             raise OSError("the pending directory is unreadable")
 
-        self.runtime.audit.pending_events = refuse
+        self.writer.board_host.canon.attempt_usage_occurrences = refuse
 
         tick = self.production_tick()
 

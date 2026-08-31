@@ -10,6 +10,7 @@ from secretary.board.card_transitions import (
     card_transition,
 )
 from secretary.board.events import (
+    AttemptUsageOccurrence,
     BoardEventCanon,
     BoardEventPending,
     MutationEventTransaction,
@@ -43,7 +44,6 @@ from secretary.board.models import (
 from secretary.board.transitions import (
     TRANSITIONS,
     BoardProtocolError,
-    EventKind,
     InvalidTransition,
     transition,
 )
@@ -62,6 +62,7 @@ __all__ = [
     "CARD_TRANSITIONS",
     "TRANSITIONS",
     "Actor",
+    "AttemptUsageOccurrence",
     "BoardEntity",
     "BoardEventCanon",
     "BoardEventPending",

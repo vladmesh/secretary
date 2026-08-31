@@ -1212,15 +1212,29 @@ dimension and any reader can check it. A `collected` outcome reports at least on
 three; every degraded outcome reports none anywhere, so no reader can mistake an unreadable phase for a
 free one. There is no price table and no monetary conversion here.
 
-**Phase accounting.** Both providers journal a *session*, not a phase, and one session can serve several
-phases: the ordinary red-review rework retains the worker and resumes the same conversation into the next
-round. One rule covers both adapters. A phase owns the usage recorded after the previous durable terminal
-boundary for that same provider session, through its own terminal boundary. A session no occurrence has
-accounted for yet starts at zero. The previous boundary is the `session_totals` of the most recent
-committed `attempt.usage` occurrence on this card for the same adapter and `session_id`, which is why the
-boundary survives a lost dispatcher record: the append-only audit is where it lives. A degraded occurrence
-records no boundary and therefore does not lower the one its predecessor established. If a session total
-comes back *below* a boundary already made durable — a replaced or rotated session file — the phase is
+**Canonical occurrence projection and phase accounting.** One repository projection is the source of
+truth for usage. It reads the card's committed and staged TaskAudit records under the audit lock, validates
+every `attempt.usage` record through the typed event schema, and returns each immutable occurrence with a
+separate `pending` publication flag. An exact committed-plus-pending copy is one occurrence. A request id
+with another payload, an event id with another request owner, an unreadable record, or conflicting phase
+ownership makes the projection unavailable; readers fail closed instead of silently dropping evidence.
+The flag changes only export visibility. It never changes the event's identity, payload or semantic
+authority: a successful stage is immediately an accounted occurrence even before its journal append.
+
+Both providers journal a *session*, not a phase, and one session can serve several phases: the ordinary
+red-review rework retains the worker and resumes the same conversation into the next round. One rule covers
+both adapters. A phase owns the usage recorded after the previous authoritative terminal boundary for that
+same card, role, adapter and provider `session_id`, through its own terminal boundary. The predecessor is
+selected by the explicit causal identity in the events — numeric attempt, attempt id ownership, report
+generation and phase — never by committed or pending iteration order and never by append time. Delayed or
+reversed publication therefore cannot change an interval already staged. A session with no matching prior
+occurrence starts at zero. When the current provider read produces totals that need subtraction, a matching
+predecessor whose typed degraded outcome carries no `session_totals` is an audit failure: the later phase
+stays in place and no zero baseline is invented. An unreadable or conflicting projection is likewise an
+audit failure. This does not change provider-read failure precedence for the phase being recorded. If its
+own provider read is degraded, it needs no interval arithmetic, writes that named outcome and proceeds
+normally without rereading the provider. If a readable session
+total comes back *below* an authoritative boundary — a replaced or rotated session file — the phase is
 accounted as owning none of it (zeros, not a negative), and the occurrence says so in `detail`.
 
 **Adapter aggregation.** Codex writes a `token_count` event whose `total_token_usage` is the session's
@@ -1267,15 +1281,14 @@ verdict with no observer moves it to Done — and the dispatcher drops that card
 Nothing that walks active cards, dispatcher records or the board would ever reach it again. So every
 production tick *begins*, once the singleton, pause and mutation guards have permitted work and before
 observer fencing, `ACTIVE_STATES` selection, active-card reconciliation, any phase-boundary read and any new
-claim, by publishing the whole pending set of staged `attempt.usage` records straight out of the audit. That
-pass takes no dispatcher record, no board lookup and no card state as input, and pending usage publication
+claim, by publishing every occurrence the canonical projection marks pending. That pass takes no dispatcher
+record, no board lookup and no card state as input, and pending usage publication
 takes precedence over every piece of card lifecycle work in the tick. A publication failure publishes
 nothing in the record's place: the exact staged occurrence stays pending, the tick reports it as a degraded
 `attempt-usage-recovery` action naming the cards still owed, and it is eligible again on every later
-permitted tick whatever state its card has reached by then. The per-card publication that remains is an
-idempotent fast path immediately before that card's own session-boundary read, so a new phase subtracts a
-published boundary rather than a staged one; correctness on the terminal paths comes from the global pass
-alone. Publication always finishes the exact staged occurrence, never a re-derived one, so a session file
+permitted tick whatever state its card has reached by then. Phase-boundary selection consumes the same
+projection, so it sees a staged predecessor directly and does not depend on recovery winning a publication
+race first. Publication always finishes the exact staged occurrence, never a re-derived one, so a session file
 that grew in between cannot change what the phase was accounted for, and it is idempotent: a record already
 appended is simply not in the pending set, and a tick that owes nothing does nothing and reports nothing.
 
