@@ -1016,6 +1016,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         prepared = self.host.preflight_codex_run("codex-extra", **identity)  # type: ignore[arg-type]
         self._install_ingress(prepared)
         self._open_another_session()
+        (self.workspace / "TASK.md").write_text("rework instruction\n", encoding="utf-8")
 
         launched = self.host._launch(
             str(self.workspace),
@@ -1480,6 +1481,10 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.assertIsNone(failure)
         assert launched is not None
         self._assert_bound(record.worker_head_run, role="worker")
+        self.assertRegex(
+            record.worker_head_run["fanout_policy"]["prompt_identity"]["version"],
+            r"^sha256:[0-9a-f]{64}$",
+        )
         self.assertEqual(record.worker_head_run["fanout_policy"]["events"], [])
         self.assertEqual(record.worker_head_run, record.launch_intent["head_run"])
         callback_snapshot = next(
@@ -1595,6 +1600,10 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             )
 
         self._assert_bound(record.review_head_run, role="reviewer")
+        self.assertRegex(
+            record.review_head_run["fanout_policy"]["prompt_identity"]["version"],
+            r"^sha256:[0-9a-f]{64}$",
+        )
         self.assertEqual(record.review_head_run["fanout_policy"]["events"], [])
         self.assertEqual(record.review_head_run, record.launch_intent["head_run"])
         self.assertEqual(

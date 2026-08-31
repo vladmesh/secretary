@@ -2507,6 +2507,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(respawned["action"], "review-respawned")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
+        attempt = self.routing_history()[-1]
+        self.assertEqual([run.head for run in attempt.reviewer_runs], ["codex-reviewer", "codex-reviewer"])
+        self.assertNotEqual(attempt.reviewer_runs[0].session_id, attempt.reviewer_runs[1].session_id)
         card = self.reader.show("secretary-510-pilot")
         self.assertEqual(card["state"], "validate")
         # The operator must be able to tell a first stall from an already-restarted head, hours
@@ -5670,6 +5673,31 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
     def routing_history(self) -> list:
         return routing_attempts(TaskAudit(self.data_dir).events("secretary-510-pilot", kind="routing"))
 
+    def test_codex_worker_routing_records_the_mock_session_and_prompt_version(self) -> None:
+        self.start_dispatcher()
+
+        self.tick()
+
+        worker = self.routing_history()[-1].worker
+        self.assertEqual(worker.adapter, "codex")
+        self.assertTrue(worker.session_id)
+        self.assertEqual(worker.session_id_reason, "")
+        self.assertTrue(worker.prompt_path.endswith("/TASK.md"))
+        self.assertRegex(worker.prompt_version, r"^sha256:[0-9a-f]{64}$")
+
+    def test_claude_worker_routing_records_the_mock_session_and_prompt_version(self) -> None:
+        self.start_dispatcher()
+        self.board.metadata[12]["head"] = "claude-opus"
+
+        self.tick()
+
+        worker = self.routing_history()[-1].worker
+        self.assertEqual(worker.adapter, "claude")
+        self.assertTrue(worker.session_id)
+        self.assertEqual(worker.session_id_reason, "")
+        self.assertTrue(worker.prompt_path.endswith("/TASK.md"))
+        self.assertRegex(worker.prompt_version, r"^sha256:[0-9a-f]{64}$")
+
     def test_both_attempts_keep_their_head_pair_in_the_journal(self) -> None:
         """secretary-716: a finished card must still say who worked and who reviewed each attempt.
 
@@ -6116,9 +6144,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         record = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         self.assertEqual(record["worker_continuation"], {})
 
-    def test_worker_respawn_on_an_unchanged_head_stays_one_record(self) -> None:
-        """A respawn inside a round is the same head coming back, not a second worker: the round
-        keeps one launch record, and the journal does not read as two heads on one attempt."""
+    def test_worker_respawn_on_an_unchanged_head_records_its_new_provider_session(self) -> None:
+        """A same-profile respawn opens a new conversation and is a second real bring-up."""
         self.start_dispatcher()
         self.tick()
         self.assertEqual(self.tick()["action"], "waiting-worker-report")
@@ -6127,7 +6154,20 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["action"], "worker-respawned")
 
         attempt = self.routing_history()[-1]
-        self.assertEqual([run.head for run in attempt.worker_runs], ["codex"])
+        self.assertEqual([run.head for run in attempt.worker_runs], ["codex", "codex"])
+        self.assertNotEqual(attempt.worker_runs[0].session_id, attempt.worker_runs[1].session_id)
+
+    def test_worker_routing_crash_retry_keeps_the_same_provider_session_event(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        record = self._record_of()
+
+        self.runtime.record_worker_routing(
+            self.reader.show("secretary-510-pilot"), record, dict(record.worker_run)
+        )
+
+        attempt = self.routing_history()[-1]
+        self.assertEqual(len(attempt.worker_runs), 1)
 
     def test_worker_respawned_onto_a_repinned_profile_is_a_second_record(self) -> None:
         """A respawn after a registry repin runs a different configuration, and the round's verdict
@@ -9514,6 +9554,40 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn(expected, sentence)
         self.assertNotIn(other, sentence)
 
+    def test_worker_and_reviewer_launch_capture_their_prompt_before_delivery(self) -> None:
+        for role, name in (("worker", "TASK.md"), ("reviewer", "REVIEW.md")):
+            document = Path(self.tmpdir.name) / name
+            original = f"{role} launch prompt\n".encode()
+            document.write_bytes(original)
+            run = HeadRun(
+                run_id=f"{role}-launch",
+                spec=HeadSpec(profile_id="codex", adapter="codex"),
+                workspace=self.tmpdir.name,
+                task_ref=TaskRef.card("secretary-1517", document=str(document)),
+                role=role,
+            )
+
+            captured = self.host._capture_launch_prompt_identity(run, role=role, document=str(document))
+            document.write_text("rewritten after launch\n", encoding="utf-8")
+
+            identity = captured.fanout_policy["prompt_identity"]
+            self.assertEqual(identity["path"], str(document.resolve()))
+            self.assertEqual(identity["version"], "sha256:" + hashlib.sha256(original).hexdigest())
+
+    def test_worker_prompt_capture_refuses_an_unreadable_required_document(self) -> None:
+        document = Path(self.tmpdir.name) / "TASK.md"
+        run = HeadRun(
+            run_id="worker-launch",
+            spec=HeadSpec(profile_id="codex", adapter="codex"),
+            workspace=self.tmpdir.name,
+            task_ref=TaskRef.card("secretary-1517", document=str(document)),
+            role="worker",
+        )
+
+        with mock.patch.object(Path, "read_bytes", side_effect=OSError("read denied")):
+            with self.assertRaisesRegex(HostError, "could not be captured"):
+                self.host._capture_launch_prompt_identity(run, role="worker", document=str(document))
+
     def test_review_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._review_prompt(self.task, "attempt-1", 3)
         commands = self._command_lines(doc)
@@ -10746,6 +10820,10 @@ class DispatcherLauncherTests(unittest.TestCase):
                 "codex_mode": "tui",
                 "resource": "openai-sub",
                 "account": "openai-subscription",
+                "session_id": None,
+                "session_id_reason": "",
+                "prompt_path": "",
+                "prompt_version": "",
             },
         )
 

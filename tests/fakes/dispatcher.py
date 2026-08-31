@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import sys
@@ -933,7 +934,13 @@ class FakeHost:
         self._write_task_doc(task, workspace, attempt_id, generation)
         self.prepared.append(task["ref"])
         launched = self._launched(
-            f"term:{worker_id}", head, task, "worker", failover=failover, run_id=heartbeat_run_id
+            f"term:{worker_id}",
+            head,
+            task,
+            "worker",
+            workspace=str(workspace),
+            failover=failover,
+            run_id=heartbeat_run_id,
         )
         self._write_head_pid("worker", task["ref"], head_run=launched.head_run, leaf=launched.leaf)
         return {
@@ -1275,6 +1282,7 @@ class FakeHost:
             record.head,
             task,
             "worker",
+            workspace=record.workspace,
             failover=bool(record.preferred_head),
             run_id=heartbeat_run_id,
         )
@@ -1293,33 +1301,55 @@ class FakeHost:
         run_id: str = "",
     ) -> LaunchedHead:
         leaf = f"leaf:{handle}"
+        lifecycle = self._head_run(handle, head, task, role, workspace, leaf, run_id=run_id)
+        routing = self.catalog.head_run(
+            task, role=role, head=head, workspace=workspace, failover=failover
+        ).to_json()
+        # A fake launch is still a provider mock: give its routing event an opaque, distinct session
+        # id so dispatcher tests exercise the same launch-to-journal connection as real adapters.
+        routing["session_id"] = f"mock-{routing['adapter']}-session-{lifecycle['run_id']}"
+        routing["session_id_reason"] = ""
         return LaunchedHead(
             handle=handle,
             head=head,
-            run=self.catalog.head_run(
-                task, role=role, head=head, workspace=workspace, failover=failover
-            ).to_json(),
+            run=routing,
             leaf=leaf,
             delivery_evidence=dict(delivery_evidence or {}),
             # The head's own run, as `spawn` hands it back on the real host (secretary-1412). The
             # fake opens no pane, but it does report an identity: what a bring-up owes the record
             # is that this head can be named afterwards, and a fake that answered `{}` could not
             # show a recovery continuing the same run.
-            head_run=self._head_run(handle, head, task, role, workspace, leaf, run_id=run_id),
+            head_run=lifecycle,
         )
 
     def _head_run(
         self, handle: str, head: str, task: dict, role: str, workspace: str, leaf: str, *, run_id: str = ""
     ) -> dict:
         self.head_runs += 1
+        profile = self.catalog.profiles.get(head, {"adapter": "codex"})
+        adapter = str(profile.get("adapter") or "unknown")
+        document = str(Path(workspace) / "TASK.md") if role == "worker" and workspace else ""
+        prompt_identity: dict[str, str] = {}
+        if document:
+            prompt_identity = {
+                "path": str(Path(document).resolve(strict=False)),
+                "version": f"sha256:{hashlib.sha256(Path(document).read_bytes()).hexdigest()}",
+            }
         return head_ops.HeadRun(
             run_id=run_id or f"run-{role}-{self.head_runs}",
-            spec=head_ops.HeadSpec(profile_id=head, adapter="codex"),
+            spec=head_ops.HeadSpec(profile_id=head, adapter=adapter),
             workspace=workspace or str(self.root / f"{task['ref']}-pilot"),
-            task_ref=head_ops.TaskRef.card(task["ref"]),
+            task_ref=head_ops.TaskRef.card(task["ref"], document=document),
             handle=handle,
             leaf=leaf,
             pid_file=pid_file_path("review" if role == "reviewer" else "worker", task["ref"]),
+            fanout_policy={
+                "version": 1,
+                "state": "unknown",
+                "terminal_state": "unknown",
+                "events": [],
+                **({"prompt_identity": prompt_identity} if prompt_identity else {}),
+            },
         ).to_json()
 
     def worker_status(self, task: dict, record) -> dict:

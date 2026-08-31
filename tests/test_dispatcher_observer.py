@@ -5071,7 +5071,9 @@ class ClaudeObserverProviderContractTests(unittest.TestCase):
                 / "observer-session.jsonl"
             )
             transcript.parent.mkdir(parents=True)
-            transcript.write_text('{"type":"assistant"}\n', encoding="utf-8")
+            transcript.write_text(
+                '{"type":"assistant","sessionId":"claude-observer-session"}\n', encoding="utf-8"
+            )
             record = ObserverRecord(
                 sprint="sprint:1",
                 workspace=workspace,
@@ -5084,7 +5086,11 @@ class ClaudeObserverProviderContractTests(unittest.TestCase):
             bound = record.head_run["fanout_policy"]["provider_progress_source"]
             self.assertEqual(bound["state"], "bound")
             self.assertEqual(bound["path"], str(transcript.resolve()))
-            transcript.write_text('{"type":"assistant"}\n{"type":"assistant"}\n', encoding="utf-8")
+            transcript.write_text(
+                '{"type":"assistant","sessionId":"claude-observer-session"}\n'
+                '{"type":"assistant"}\n',
+                encoding="utf-8",
+            )
 
             progressed = host.observer_provider_progress(record)
 

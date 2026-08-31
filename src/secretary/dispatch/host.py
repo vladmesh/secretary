@@ -2629,6 +2629,9 @@ class CommandHostRuntime:
                 )
             except CodexFanoutPolicyError as exc:
                 raise HostError(str(exc)) from None
+            preflight_run = self._capture_launch_prompt_identity(
+                preflight_run, role=role, document=prompt_document
+            )
             return self._launched(
                 f"noop:{head}:{Path(workspace).name}:{Path(prompt_file).name}",
                 head,
@@ -2654,6 +2657,9 @@ class CommandHostRuntime:
             )
         except CodexFanoutPolicyError as exc:
             raise HostError(str(exc)) from None
+        preflight_run = self._capture_launch_prompt_identity(
+            preflight_run, role=role, document=prompt_document
+        )
         memory_identity: dict[str, str] | None = None
         project = str((task or {}).get("project") or "")
         if task is not None and role in {"worker", "reviewer"} and project:
@@ -2738,6 +2744,12 @@ class CommandHostRuntime:
             # Pane create gives the leaf after the head wrote its base identity. A best-effort bind
             # is enough: the reader still requires the run, role and task binding to match.
             _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=receipt.run.leaf)
+        lifecycle_run = receipt.run
+        if lifecycle_run.spec.adapter == "claude":
+            # Claude creates its jsonl after its pane starts.  Capture the one transcript that the
+            # pre-pane baseline identifies before routing records this bring-up, so the journal has
+            # the provider's session id rather than asking analytics to reconstruct it from cwd.
+            lifecycle_run = _bind_claude_provider_progress_source(lifecycle_run)
         delivery = receipt.delivery
         return self._launched(
             receipt.run.handle,
@@ -2748,7 +2760,7 @@ class CommandHostRuntime:
             failover,
             leaf=receipt.run.leaf,
             delivery_evidence=(_delivery_evidence_json(delivery, subject) if delivery is not None else {}),
-            head_run=receipt.run.to_json(),
+            head_run=lifecycle_run.to_json(),
             fallback_reason=receipt.fallback_reason,
         )
 
@@ -2766,6 +2778,39 @@ class CommandHostRuntime:
         if task and task.get("ref"):
             return head_ops.TaskRef.card(str(task["ref"]), document=pointer)
         return head_ops.TaskRef.standing(role or "head", document=pointer)
+
+    def _capture_launch_prompt_identity(
+        self,
+        run: head_ops.HeadRun, *, role: str, document: str
+    ) -> head_ops.HeadRun:
+        """Attach the exact worker/reviewer document before a pane can observe it.
+
+        TASK.md is a mutable workspace projection, so routing may not read it after delivery.
+        The document digest is a required launch fact: a read failure aborts the bring-up before a
+        head can receive an instruction whose durable identity the dispatcher cannot record.
+        """
+        if role not in {WORKER_ROLE, REVIEW_ROLE, "reviewer"} or not document:
+            return run
+        path = Path(document)
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise HostError(f"launch prompt {path} could not be captured: {exc}") from None
+        policy = dict(run.fanout_policy)
+        policy["prompt_identity"] = {
+            "path": str(path.resolve(strict=False)),
+            "version": f"sha256:{hashlib.sha256(content).hexdigest()}",
+        }
+        captured = run.with_fanout_policy(policy)
+        # The Codex ingress owns the exact run it hands back immediately before delivery. Keep
+        # that handoff aligned with the launch-time prompt fact, or its later provider binding
+        # would otherwise return the pre-capture record and erase this identity.
+        ingress = self._codex_provider_ingresses.get(run.run_id)
+        if ingress is not None:
+            ingress.run = captured
+        if self._prepared_provider_runs.get(run.run_id) is not None:
+            self._prepared_provider_runs[run.run_id] = captured
+        return captured
 
     def _head_transport(
         self,
