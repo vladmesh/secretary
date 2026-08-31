@@ -48,28 +48,15 @@ class Pane:
 
     handle: str
     leaf: str = ""
-    # The label the session manager currently shows for this pane. Weak identity on purpose: an
-    # interactive head overwrites it with its own OSC sequence seconds after launch, so it is only
-    # ever a fallback for a pane whose handle and leaf were never persisted.
+    # Weak fallback identity: an interactive head can overwrite its title.
     title: str = ""
-    # Whether the session manager still has a live connection to this pane. Only an inventory
-    # answers it; a pane just created is connected by construction. Callers use it to pick a pane,
-    # never to decide a head is dead — a disconnected pane is one nothing can be typed into, which
-    # is not the same fact as a process that exited.
+    # Inventory-only input reachability, never process liveness.
     connected: bool = True
-    # When this pane last printed, in epoch seconds, or 0.0 when the session manager did not say.
-    # Advisory work liveness for a caller that watches a head for progress; the pid heartbeat is
-    # what answers whether a process is there.
+    # Advisory output time; the PID heartbeat establishes process liveness.
     last_output_at: float = 0.0
-    # The runtime pane the session manager named for this pty, `None` when it named none -- which
-    # is what `orca terminal list` answers on the build measured on 2026-08-25: its entries carry
-    # no `paneRuntimeId` at all. The symptom `paneRuntimeId: -1` recorded in
-    # issue:84c0ae4f796f994a7c1d came from a different call, so this field is supplementary
-    # evidence to be reported where a host does supply it, and never the basis of an answer about
-    # what the window draws -- `RuntimeLayout` below is that basis. Advisory in exactly the sense
-    # `connected` is: it says what the window shows, never whether a process is there.
+    # Optional host runtime id; layout determines what is drawn, never this field.
     runtime_pane_id: int | None = None
-    # Set only by the head-operation recovery path. Pane inventory never supplies it.
+    # Set only by head-operation recovery, never inventory.
     fallback_reason: str = ""
 
 
@@ -93,9 +80,7 @@ class RuntimeLayout:
     supported: bool = False
     reason: str = ""
     known_workspace: bool = False
-    # The identities the drawn nodes carry. `leafId` is the primary key on purpose: the session
-    # manager can hand back a different handle alias for the same pty (dispatcher_state.py:132),
-    # so a handle that does not match is not evidence of anything.
+    # `leafId` is stable identity; a handle alias may change for the same pty.
     leaves: frozenset[str] = frozenset()
     handles: frozenset[str] = frozenset()
     terminal_nodes: int = 0
@@ -396,8 +381,7 @@ class OrcaSessionHost(OrcaPaneHost):
             raise PaneHostError("terminal inventory needs a workspace")
         args = ["orca", "terminal", "list", "--worktree", f"path:{workspace}"]
         if with_layout:
-            # The renderer tree is opt-in and every other caller pays nothing for it: a delivery
-            # tick asking which pty to write into does not need to know what is drawn.
+            # Rendering is optional; delivery needs only the pane inventory.
             args.append("--include-visual-layouts")
         args.append("--json")
         data = self.run_json(args)
@@ -425,9 +409,7 @@ class OrcaSessionHost(OrcaPaneHost):
         try:
             payload = self._list(workspace, with_layout=True)
         except Exception as exc:  # The injected runner owns its error type.
-            # Broad on purpose: what distinguishes "this build does not know the option" from "the
-            # session manager is down" is not the exception, it is whether the plain listing below
-            # answers. If it refuses too, that refusal is the one that propagates.
+            # A plain listing distinguishes unsupported layout data from host failure.
             return WorkspaceInventory(
                 panes=tuple(self.panes(workspace)),
                 layout=RuntimeLayout(

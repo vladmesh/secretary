@@ -31,16 +31,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:  # importing head.command imports this module, so keep the edge type-only
+if TYPE_CHECKING:  # Avoid a runtime import cycle with head.command.
     from .head.run import HeadRun
 
 CODEX_HOME_DEFAULT = str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home")
 # The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
 CODEX_CONFIG_FILE = "config.toml"
 
-# The schema attestation is intentionally a protocol version rather than a Codex version.  A
-# Codex upgrade can be safe only when a newly captured provider schema says so; a policy reader
-# never turns a newer CLI or a familiar model name into that evidence by itself.
+# Provider-schema protocol version, not a Codex version.
 FANOUT_ATTESTATION_VERSION = 1
 FANOUT_SCHEMA_ABSENT = "schema_absent"
 FANOUT_SCHEMA_UNKNOWN = "schema_unknown"
@@ -60,8 +58,7 @@ PROVIDER_EVENT_TYPES = (
     EVENT_UNPARSEABLE_PROVIDER_EVENT,
 )
 
-# These are classifiers, never allow evidence.  A schema may call a collaboration tool something
-# new tomorrow; that is why a tool not in this set is treated as unknown when an event calls it.
+# Classifiers never grant allow evidence; unknown tools remain unknown.
 KNOWN_COLLABORATION_TOOLS = frozenset(
     {
         "spawn_agent",
@@ -212,14 +209,11 @@ def preflight_codex_launch(
         schema_attestation=schema_attestation,
         binary_path=binary_path,
     )
-    # The source is bound only after the newly created pane has made its own Codex session.  Its
-    # pre-pane baseline is nevertheless durable now: a session file that already existed before
-    # this run is never attributed to it merely because it shares a workspace.
+    # Persist the pre-pane baseline; shared-workspace journals are not run identity.
     try:
         attested = _with_unbound_provider_source(profile, attested)
     except OSError as exc:
-        # A source baseline is telemetry plumbing.  Keep the typed diagnostic, but never turn
-        # recorder availability into an authority over terminal creation or prompt delivery.
+        # Telemetry availability never controls launch or delivery.
         attested = _unknown_run(attested, f"cannot establish Codex provider event source baseline: {exc}")
     try:
         ensure_codex_workspace_trusted(profile, workspace, config)
@@ -243,10 +237,7 @@ def attest_codex_fanout(
     role. A mapping that merely says a model did not spawn is not this shape and is recorded as
     schema-unknown.
     """
-    # A head profile is launch configuration, not provider evidence.  In particular, a static
-    # profile field must not promote a flag, inventory or a pasted claim into the provider's
-    # submitted tool schema.  The caller may supply only a separately captured schema object;
-    # normal production launches intentionally supply none until Codex exposes one.
+    # Launch configuration cannot promote itself to provider-schema evidence.
     raw = schema_attestation
     if raw is None:
         return _policy_run(
@@ -409,9 +400,7 @@ def enforce_provider_event(
             captured_at=captured_at,
         )
     except CodexFanoutRecordingError:
-        # No source writer succeeded, so keep the prior durable HeadRun authoritative.  Returning
-        # the classified event lets an immediate caller describe the loss if it needs to, without
-        # letting that non-durable telemetry leak into a later post-delivery handoff.
+        # Keep prior durable state authoritative when telemetry cannot be written.
         return ProviderEventOutcome(run=prior_run, event={})
     return outcome
 
@@ -595,9 +584,7 @@ def _with_unbound_provider_source(profile: Mapping[str, Any], run: HeadRun) -> H
         "version": 1,
         "kind": "codex_session_event_jsonl",
         "state": "unbound",
-        # The provider journal has no Secretary identity of its own.  These launch facts are
-        # copied into the source before a pane exists, then rechecked by liveness readers; a
-        # same-workspace journal therefore cannot become progress for a different retained run.
+        # Bind facts before the pane; a journal has no Secretary run identity.
         **codex_provider_source_descriptor(run),
         "root": str(root.resolve(strict=False)),
         "baseline": baseline,
@@ -678,8 +665,7 @@ def _codex_cli_identity(binary_path: str | None = None) -> tuple[str, str, str]:
     version = (result.stdout or result.stderr or "").strip()
     if not version:
         raise OSError("Codex CLI version command returned no version")
-    # Keep the exact string the binary reported.  An attester signs/captures precisely this value;
-    # parsing off a prefix would turn an unrecognised future form into a familiar old version.
+    # Preserve the exact attested version; prefixes could misclassify future forms.
     return str(path), digest, version
 
 
@@ -821,8 +807,7 @@ def _typed_provider_event(
             policy_outcome=FANOUT_TERMINAL_VIOLATION,
             reason="provider collaboration call observed",
         )
-    # A declared child-edge result with a relation is a violation even if the child identity is
-    # redacted by the provider.  An empty relation cannot be clean: it is unknown.
+    # A declared relation is a violation even with a redacted child; empty is unknown.
     if not child:
         return dict(
             base,
@@ -842,6 +827,5 @@ def _raw_event_digest(raw_event: Any) -> str:
     try:
         return _json_digest(raw_event)
     except ValueError:
-        # Do not retain a possibly secret ``repr``.  Its type still distinguishes the malformed
-        # provider payload and the fixed literal makes the digest deterministic.
+        # Never retain an untrusted repr; the fixed literal keeps the digest stable.
         return _json_digest({"unserialisable_type": type(raw_event).__name__})

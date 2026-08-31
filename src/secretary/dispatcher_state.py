@@ -23,14 +23,7 @@ from secretary.dispatcher_worker_lifecycle import (
 if TYPE_CHECKING:
     from secretary.dispatch.head_vitality_episode import VitalityEpisode
 
-# Every way a claim can answer "not this card". A claim-skip is about the card in front of the
-# scan and says nothing about the ones behind it, so the Ready pass records it and moves on to the
-# next card — halting the pass would let one unclaimable card stop work that has somewhere to go,
-# which is the failure this family-failover work exists to remove, only at queue scale.
-#
-# This set is the registry, not a convenience: the Ready scan reads it rather than comparing
-# against one action, so adding a new kind of claim-skip means adding it here and nowhere else. A
-# skip that is missing from it does not degrade, it stops the tick's whole Ready pass.
+    # Registry of claim skips: Ready records these and continues scanning.
 CLAIM_SKIP_RESOURCE_NOT_READY = "resource-not-ready"
 CLAIM_SKIP_FAILOVER_COLLAPSE = "failover-collapses-roles"
 CLAIM_SKIP_ACTIONS = frozenset(
@@ -58,14 +51,7 @@ class DispatcherRecord:
     review_baseline: int
     state: str
     claimed_at: float
-    # The report round the worker currently in this checkout was handed (secretary-1061). It keys
-    # the report request ids and the report body path in TASK.md, and nothing else: it is durable
-    # here before any TASK.md is written, it advances by one whenever a new report round opens
-    # (claim, red gate, red review, stale-done bounce) and never on a respawn inside a round. A
-    # command from a round that is over therefore names that round and never records a report of
-    # this one, instead of deduping this round's report into silence the way one shared id did.
-    # `review_baseline` used to carry this as well as its own job of indexing review markers; the
-    # two are separate values now because a comment count is not a round.
+    # Durable report round advances only when a new round opens, never on respawn.
     # The head each role was preferred on when the claim had to leave that preference behind
     # (secretary-1165), empty when it did not. The claim walks the canon's fallback chain when the
     # preferred head's resource is red or spent, and `head`/`review_head` above then name another
@@ -111,15 +97,7 @@ class DispatcherRecord:
     gate_infrastructure_reruns: int = 0
     gate_infrastructure_rerun_run_id: str = ""
     gate_infrastructure_rerun_reason: str = ""
-    # The pull request this card's github gate wrote, and the digest of the exact title and body
-    # it wrote there (secretary-1439): `{"number": int, "digest": str}`, empty at rest. This is the
-    # gate's whole authorship test on the refresh path, and it lives here — outside the pull
-    # request — because a pull request's text is supplied by whoever edited it last and can never
-    # establish who wrote it. Two earlier attempts to read authorship out of the body (a marker the
-    # gate looked for, then a digest the gate stamped into the body and read back) each overwrote a
-    # person's writing. Losing this record — a restore, a fresh installation, a card claimed before
-    # it existed, a record re-adopted from the board — means the gate stops refreshing that pull
-    # request, never that it assumes the text is its own.
+    # Gate-authored PR identity lives outside editable PR text; absence forbids refresh.
     gate_pr_authorship: dict[str, Any] = field(default_factory=dict)
     # Dispatcher-owned CI invocation for a base-identical research candidate.  The SHA and
     # discovered Actions run id survive a restart, so a later tick polls this invocation instead
@@ -133,12 +111,7 @@ class DispatcherRecord:
     rejected_failure_class: str = "substantive"
     rejected_failure_reason: str = ""
     rejected_done_reports: int = 0
-    # Reviewer pane (secretary-651). The reviewer runs in its own split pane inside the worker's
-    # worktree, so its terminal handle must be tracked apart from `handle` (the worker's) or
-    # stopping one takes down the other and recovery cannot tell them apart. review_leaf is the
-    # pane's leafId: `terminal list` can hand back a different handle alias for the same pty, so
-    # the leaf is the stable token to re-find the pane by. review_commit pins the checkout the
-    # reviewer was pointed at; the merge gate refuses a verdict once HEAD has moved off it.
+    # Reviewer leaf is stable across handle aliases; its commit fences verdicts to its checkout.
     review_handle: str = ""
     review_leaf: str = ""
     review_commit: str = ""
@@ -150,12 +123,7 @@ class DispatcherRecord:
     # The worker pane has the same handle-alias problem as the reviewer pane.  Keep its leafId
     # too, so an inventory alias cannot turn a live worker into a missing-terminal respawn.
     worker_leaf: str = ""
-    # Where each role's head writes its pid heartbeat (secretary-820). Recorded when the launch
-    # intent is taken back, so it names the head that is actually running. This is the identity
-    # that survives a lost pane handle: a head adopted from a launch intent has no handle, and
-    # without a pid the stop paths (freeze before review, respawn, red-verdict rework, freeze)
-    # would silently do nothing and a replacement head would start beside a live one. Cleared
-    # together with the handle whenever that role's head is confirmed stopped.
+    # Heartbeats preserve head identity across lost pane handles; clear only on confirmed stop.
     worker_pid_file: str = ""
     review_pid_file: str = ""
     # A Ready record keeps its workspace so the next claim can reuse the checkout. Once
@@ -193,12 +161,7 @@ class DispatcherRecord:
     worker_continuation_liveness: WorkerContinuationLiveness = field(
         default_factory=WorkerContinuationLiveness
     )
-    # Shadow-mode vitality episodes (head-vitality plan, "Vitality reducer"): the persisted
-    # conclusion of reduce_vitality for each role's head run, written by the wait tick and read by
-    # nobody. They exist so the next card can compare the reducer's verdicts against what the
-    # watchdog actually decided before any decision trusts them; no dispatcher branch may consult
-    # them. `None` means this record has never carried an episode - a record written before the
-    # field existed loads as exactly that, not as an empty verdict.
+    # Shadow vitality episodes are telemetry only; `None` means no episode was recorded.
     worker_vitality_episode: VitalityEpisode | None = None
     review_vitality_episode: VitalityEpisode | None = None
     review_waiting_since: float = 0.0
@@ -272,9 +235,7 @@ class DispatcherRecord:
     # prompt when the next tick chooses whether a head may be replaced.
     worker_delivery_failures: int = 0
     worker_delivery_evidence: dict[str, Any] = field(default_factory=dict)
-    # Durable launch intent (secretary-820): the bring-up this record is in the middle of, written
-    # before the host is asked for a head and cleared once the host has answered. Empty at rest.
-    # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
+    # Launch intent is persisted before host creation and cleared after its answer.
     launch_intent: dict[str, Any] = field(default_factory=dict)
 
     def owns_head(self, role: str | None = None) -> bool:
@@ -375,11 +336,7 @@ class DispatcherRecord:
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> DispatcherRecord:
-        # A record written before the continuation became one object carried the retention as flat
-        # fields. Nothing reads them any more, so loading such a record would report "no
-        # continuation" for a worker that is in fact frozen with a delivery pending: the lifecycle
-        # would then reuse or drop a head it cannot see. There is no conversion here on purpose,
-        # that is the compatibility promise this product dropped, so the load refuses instead.
+        # Refuse obsolete flat continuation fields; interpreting them as absent is unsafe.
         legacy = [
             field_name
             for field_name in (

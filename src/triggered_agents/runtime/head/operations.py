@@ -40,18 +40,11 @@ from .run import EXITED, HeadRun, StopInitiator, new_run_id
 from .spec import HeadSpec
 from .task_ref import TaskRef
 
-# The caller's own proof that its head began a turn, as `tui_delivery` takes it. A criterion, not
-# a transport: it is handed a send boundary and answers yes or no, and nothing about a session
-# manager reaches it.
+# Caller-owned proof that a head began a turn; this is a criterion, not transport.
 Confirm = Callable[[float], bool]
-# Somewhere durable to put a run before the operation acts on it, for a caller whose record has to
-# survive the operation dying half-way. Called with the run as it will be, never after the fact.
+# Persist a run before acting, so recovery sees the intended identity.
 Commit = Callable[["HeadRun"], None]
-# The product's launch-identity proof. It receives the exact run it would otherwise attribute to
-# the stop, and therefore runs before that attribution is made durable.
-# A launch preflight returns the exact run it attested.  Keeping that immutable value rather than
-# accepting side metadata is what prevents a pane from being created under a different identity
-# than the policy record persisted before it.
+# Launch preflight attests the immutable run before durable attribution.
 LaunchPreflight = Callable[["HeadRun"], "HeadRun"]
 
 
@@ -268,9 +261,7 @@ def spawn(
     if preflight is not None:
         run = preflight(run)
     if commit is not None:
-        # A policy attestation must hit durable state before the host is asked to create anything.
-        # This is also useful to the old launch-intent callers, which commit the still-handleless
-        # run before a process can write its heartbeat.
+        # Persist policy attestation before the host can create a process.
         commit(run)
     pane = _open_pane(
         host,
@@ -285,10 +276,7 @@ def spawn(
     if commit is not None:
         commit(run)
     if pointer is None:
-        # A head whose prompt went on its own command line has already been given its task; there
-        # is nothing to deliver and nothing to confirm. Which of the two shapes this head is in is
-        # the caller's to say, because it is the rendered command that decides it, not the spec:
-        # a raw command override runs an adapter's binary in a shape the profile never described.
+        # Command-line prompts are already delivered; the rendered command determines this.
         return HeadOutcome(run, fallback_reason=pane.fallback_reason)
     try:
         delivery = _deliver(transport, host, run, pointer, subject=subject or "head-launch")
@@ -346,9 +334,7 @@ def stop(
     """
     if run.lifecycle == EXITED:
         return HeadOutcome(run)
-    # A readable mismatch is not a stop attempt of this run.  In particular it must not create a
-    # durable ``finishing``/``stopped_by`` attribution before the product has proved the process
-    # behind the pid file is the expected HeadRun.
+    # A readable identity mismatch must not create a durable stop attribution.
     if preflight is not None:
         try:
             preflight(run)
@@ -360,9 +346,7 @@ def stop(
     transport = transport or HostTransport()
     handle = live.handle
     if live.leaf and live.workspace:
-        # The inventory read is part of the proof here, unlike the lenient relocation a nudge does:
-        # an inventory that cannot be read must not pass for a pane that is gone, or the next tick
-        # puts a replacement beside a head this stop failed to address.
+        # An unreadable inventory cannot prove absence for a destructive stop.
         try:
             handle = _handle_for_leaf(host, live.workspace, live.leaf)
         except Exception as exc:  # noqa: BLE001
@@ -415,11 +399,9 @@ def _open_pane(
     except PaneSplitSourceMissing:
         after_split = {(pane.handle, pane.leaf) for pane in host.panes(workspace)}
         if after_split - before_split:
-            # The failed split may have started a reviewer. No handle was returned, so opening a
-            # replacement would leave two heads in the same checkout. Fail closed instead.
+            # A failed split may still have started a reviewer; fail closed.
             raise
-        # The inventory proves this refusal left no pane in the worktree. Only this recognised
-        # token may take the standalone path; every other split error still escapes unchanged.
+        # Only this refusal proves no pane was created and permits standalone fallback.
         return replace(
             host.open_pane(workspace, title, command),
             fallback_reason="terminal_split_source_not_found",

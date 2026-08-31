@@ -572,7 +572,7 @@ class DivertedLaunchReportCardTests(MechanicalRoleBackendTestCase):
                 mock.patch.object(
                     dispatch,
                     "_release_steward_report",
-                    side_effect=lambda state, event, cmd, note: released.append(cmd),
+                    side_effect=lambda state, event, cmd, note, **_kwargs: released.append(cmd),
                 )
             )
             self.assertEqual(self.run_tick(self._diverted()), 0)

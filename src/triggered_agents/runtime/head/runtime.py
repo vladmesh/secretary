@@ -62,9 +62,7 @@ HEAD_GONE = "gone"
 HEAD_UNSUPPORTED = "unsupported"
 RECEIPT_STATUSES = (HEAD_OK, HEAD_BUSY, HEAD_DRAINING, HEAD_ALIVE, HEAD_GONE, HEAD_UNSUPPORTED)
 
-# Why an observation says what it says. A reason is a token, not a sentence, because callers route
-# on it: the dispatcher's observer status turns each of these into the failure its callers already
-# read, and a free-text reason would make that a substring match.
+# Observation reasons are routing tokens, never free text.
 OBSERVE_NO_ADDRESS = "no_address"
 OBSERVE_INVENTORY_UNREADABLE = "inventory_unreadable"
 OBSERVE_PANE_ABSENT = "pane_absent"

@@ -111,21 +111,13 @@ class KanboardBoardHost:
         existing = self._existing(request_id, entity, operation.actor, operation.reason)
         if existing is not None and self.canon.committed(request_id) is not None:
             return MutationResult(self.read(entity.kind, entity.ref), existing)
-        # A pending occurrence is its own validated recovery evidence.  Do not
-        # make its repair depend on mutable inputs such as the project registry
-        # that may have changed after the original writer staged it.
+        # Pending occurrence is validated recovery evidence, independent of mutable inputs.
         if existing is None:
             self._validate_create(entity)
         event = existing or self._entity_event(
             EventKind.ENTITY_CREATED, entity, operation.actor, operation.reason, related, request_id
         )
-        # The record's lane is resolved, and provisioned when the board has none, before the
-        # occurrence is staged.  Provisioning is a persistent backend write, and `effect` may hold
-        # no write but the create itself: a process that dies between the two would leave a staged
-        # occurrence whose retry may only confirm, never write.  Here a death costs at most an
-        # empty lane, which is not an occurrence and which the next attempt reuses.  The board
-        # lookup joins it because a read that can move earlier belongs before the staging point
-        # too.
+        # Resolve or provision the lane before staging; retries only confirm staged effects.
         board_id, column_id = self._issues_board()
         swimlane_id = self._issues_swimlane(board_id, entity)
 
@@ -146,20 +138,11 @@ class KanboardBoardHost:
                     reference=entity.ref,
                 )
             except Exception:
-                # An exception after the RPC was issued is deliberately not a
-                # refusal.  The confirming read either proves this exact
-                # reference or leaves the staged event pending; a retry must
-                # never issue a second unproven create.
+                # Post-RPC failure is uncertain: confirm or retain pending, never recreate.
                 return
             task_id = _positive_int(reply)
             if task_id is None:
-                # A false-ish reply is not enough to establish that the
-                # backend refused the write.  Both reads must complete and
-                # prove absence before this remains inside the transaction's
-                # discard window.  A transport, malformed-response, or
-                # ambiguous-marker failure is uncertain post-write evidence:
-                # confirmation then leaves the exact staged occurrence pending
-                # instead of authorizing a second create on retry.
+                # Discard only after both reads prove absence; otherwise retain pending.
                 try:
                     reference_row = self._raw_by_ref(entity.ref)
                     marker_row = self._raw_by_marker(request_id)
@@ -238,9 +221,7 @@ class KanboardBoardHost:
                 try:
                     saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
                 except Exception:
-                    # As with creates, the reply is not a proof that the write
-                    # did not happen.  Confirmation decides whether this exact
-                    # pending occurrence is recoverable.
+                    # A reply cannot disprove the write; confirmation decides recovery.
                     return
                 if not _comment_saved(saved):
                     raise BoardProtocolError("Kanboard rejected issue priority comment")
@@ -321,17 +302,14 @@ class KanboardBoardHost:
         current = self.read(EntityKind.CARD, operation.ref)
         if not isinstance(current, Card):
             raise BoardProtocolError("Card transition resolved a non-Card entity")
-        # A committed occurrence is historical evidence, not a lease on the
-        # Card's current state.  Return the current normalized Card without a
-        # second backend write even when later work has moved it onward.
+        # Committed history is not a lease on current state; do not write again.
         if event is not None and self.canon.committed(request_id) is not None:
             return MutationResult(current, event)
         if event is None:
             declaration = card_transition(operation.actor.role, current.state, operation.target)
             related = operation.related_refs
             if current.sprint_ref and current.sprint_ref not in related.refs:
-                # The sprint the Card belongs to is a related ref of every one of its
-                # transitions, whether or not the caller happened to pass it.
+                # Every Card transition includes its sprint ref.
                 related = RelatedRefs(related.refs + (current.sprint_ref,))
             event = self._event(current, declaration.event_kind, operation, related, request_id)
 
@@ -342,13 +320,7 @@ class KanboardBoardHost:
             return entity
 
         def effect() -> None:
-            # Everything here is before the column operation is issued, which is
-            # what makes a failure in it a discard rather than a recovery
-            # obligation.  The re-read is one of those: staging does not grant a
-            # stale caller permission to overwrite a newer Card state.  The
-            # confirming read back is deliberately *not* here - a read that
-            # fails after moveTaskPosition returned is not evidence the move did
-            # not happen, so the transaction runs it outside the discard window.
+            # Re-read before move; post-move confirmation is outside the discard window.
             entity = self.read(EntityKind.CARD, operation.ref)
             if not isinstance(entity, Card):
                 raise BoardProtocolError("Card transition resolved a non-Card entity")
@@ -387,11 +359,7 @@ class KanboardBoardHost:
                 related = operation.related_refs
                 if current.sprint_ref and current.sprint_ref not in related.refs:
                     related = RelatedRefs(related.refs + (current.sprint_ref,))
-                # The public comment cannot carry a request marker without changing
-                # its established grammar.  Instead, the staged occurrence records
-                # which matching row it is entitled to prove.  An older identical
-                # comment therefore cannot turn a transport failure before the
-                # write into a delivered new occurrence.
+                # The staged ordinal distinguishes this occurrence from older matching comments.
                 preview = self._marker_event(current, operation, related, request_id)
                 content = self.render_marker(preview)
                 owner = self.canon.audit.pending_marker_owner(operation.ref, content, request_id=request_id)
@@ -412,9 +380,7 @@ class KanboardBoardHost:
             content = self.render_marker(event)
 
             def effect() -> None:
-                # Re-read before issuing the effect: staging grants no authority to
-                # comment on a deleted or replaced Card.  A transport failure after
-                # createComment is uncertain, so confirmation owns that branch.
+                # Re-read before comment; post-write transport failure is uncertain.
                 entity = self.read(EntityKind.CARD, operation.ref)
                 if not isinstance(entity, Card):
                     raise BoardProtocolError("Card marker comment resolved a non-Card entity")
@@ -426,10 +392,7 @@ class KanboardBoardHost:
                         content=content,
                     )
                 except Exception as exc:
-                    # TaskError is imported by this adapter's existing legacy
-                    # reader seam.  Only an unavailable transport can have applied
-                    # the effect after losing the reply; a backend refusal remains
-                    # in MutationEventTransaction's discard window.
+                    # Only unavailable transport can hide an applied effect.
                     from secretary.tasks import TaskError
 
                     if isinstance(exc, TaskError) and exc.code == "backend_unavailable":
@@ -532,10 +495,7 @@ class KanboardBoardHost:
             transition(live, operation.target)
             task_id = self._sprint_task_id(operation.ref)
             supplement = operation.sprint
-            # Reopen deliberately persists its observer while the row remains
-            # closed.  If the following status write is refused, the command
-            # facade can restore that recorded preimage; treating the two calls
-            # as one would silently remove its released compensation boundary.
+            # Persist observer before reopen so a refused status write can compensate.
             if supplement is not None and supplement.observer is not None:
                 if (
                     self.client.call(
@@ -557,9 +517,7 @@ class KanboardBoardHost:
             try:
                 reply = self.client.call("saveTaskMetadata", task_id=task_id, values=values)
             except Exception:
-                # A transport failure after issuing the state effect is not a
-                # refusal.  Confirmation decides whether the staged event can
-                # commit, and otherwise leaves it for recovery.
+                # Post-effect transport failure is uncertain; confirm or retain for recovery.
                 return
             if reply is not True:
                 raise BoardProtocolError("Kanboard rejected Sprint transition")
@@ -1049,8 +1007,7 @@ class KanboardBoardHost:
                 str(metadata.get("issue_closed_reason") or "") or None,
             )
         if allow_incomplete:
-            # A staged create has not set metadata yet.  It is still sufficient evidence that
-            # the uniquely referenced backend effect happened; finish supplies the typed shape.
+            # Staged create proves the unique effect; finish supplies its typed shape.
             ref = str(row.get("reference") or "")
             if ref.startswith("product:"):
                 return Product(
@@ -1196,8 +1153,7 @@ class KanboardBoardHost:
             related,
             data=data,
         )
-        # Validate the complete payload before staging.  In particular, malformed
-        # action/status pairs cannot consume a request id or leave a pending row.
+        # Validate before staging so malformed payloads cannot consume request ids.
         cls.render_marker(event)
         return event
 
@@ -1220,9 +1176,7 @@ class KanboardBoardHost:
             for key, value in existing.data.items()
             if key not in {"request_related_refs", "marker_occurrence"}
         }
-        # Assessment visit is a mutable admission fact, not caller input.  An
-        # existing decision owner is checked against the caller's stable
-        # marker semantics before any later Assessment visit is consulted.
+        # Admission is mutable; check the stable decision owner first.
         if existing.kind is EventKind.CARD_DECIDED and "assessment_visit" not in data:
             expected_data.pop("assessment_visit", None)
         if expected_data != data:

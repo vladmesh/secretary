@@ -107,6 +107,12 @@ def _sprint_guard_override_request_id(request_id: str) -> str:
     return "sprint-guard-override-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
 
 
+def _done_retention_request_id(task_id: int, date_moved: int) -> str:
+    """One durable retry key for one card's one Done dwell episode."""
+    identity = f"kanboard:{task_id}:done:{date_moved}"
+    return "done-retention-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 _STATE_BY_COLUMN = {
     "Issues": "issues",
     "Ready": "ready",
@@ -511,6 +517,186 @@ class TaskReader:
                 continue
             result.append(normalized)
         return sorted(result, key=lambda task: (task["state"], task["position"], task["ref"], task["id"]))
+
+    def steward_reports_in_progress(self, project: str) -> list[dict[str, Any]]:
+        """Return the small, durable report view a steward dispatch needs.
+
+        This intentionally is not a second public Card list: callers get only the
+        identity, freshness timestamp and report marker needed to decide whether a
+        steward sweep is already running.  Kanboard exposes metadata per task, so
+        all candidate metadata is fetched in one batch rather than one RPC per row.
+        """
+        project_id, columns, _ = self._board()
+        in_progress_id = next(
+            (identifier for identifier, title in columns.items() if title == "In progress"), None
+        )
+        if in_progress_id is None:
+            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+        raw = self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
+        if not isinstance(raw, list):
+            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+        cards = [
+            card
+            for card in raw
+            if isinstance(card, dict) and _positive_int(card.get("column_id")) == in_progress_id
+        ]
+        metadata = self._metadata_of(cards)
+        reports: list[dict[str, Any]] = []
+        for card in cards:
+            task_id = _task_number(card)
+            meta = metadata[task_id]
+            if meta.get("project") != project or meta.get("steward_report") != "1":
+                continue
+            reports.append(
+                {
+                    "reference": _text(card.get("reference")),
+                    "date_moved": _positive_int(card.get("date_moved")),
+                    "steward_report": "1",
+                }
+            )
+        return reports
+
+    def steward_signal_cards(
+        self, *, states: set[str] | None = None, project: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return the bounded operational card view used by steward anomaly reads.
+
+        This is deliberately narrower than :meth:`list`: it exposes only the
+        active-card fields a watchdog needs and keeps Kanboard rows private.
+        Metadata is fetched once for the active board snapshot, never per card.
+        """
+        if states is not None and (unknown := states - set(_STATE_BY_COLUMN.values())):
+            raise TaskError("validation", f"unknown task states: {sorted(unknown)}", 2)
+        project_id, columns, _ = self._board()
+        raw = self.client.call("getAllTasks", project_id=project_id, status_id=1)
+        if not isinstance(raw, list) or any(not isinstance(card, dict) for card in raw):
+            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+        metadata = self._metadata_of(raw)
+        cards: list[dict[str, Any]] = []
+        for card in raw:
+            task_id = _task_number(card)
+            column = columns.get(_positive_int(card.get("column_id")) or -1)
+            state = _STATE_BY_COLUMN.get(column or "")
+            if state is None:
+                raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+            meta = metadata[task_id]
+            card_project = _text(meta.get("project"))
+            if states is not None and state not in states:
+                continue
+            if project is not None and card_project != project:
+                continue
+            cards.append(
+                {
+                    "reference": _text(card.get("reference")),
+                    "state": state,
+                    "column": column,
+                    "project": card_project,
+                    "date_moved": _positive_int(card.get("date_moved")),
+                    "steward_report": _text(meta.get("steward_report")),
+                }
+            )
+        return cards
+
+    def done_retention_candidates(self) -> list[dict[str, Any]]:
+        """Return the deliberately small view used by Done-retention cleanup.
+
+        The cleanup is allowed one active-board snapshot and one metadata batch.
+        It must not infer an age for incomplete Kanboard rows, so an unusable
+        ``date_moved`` is represented as ``None`` for the caller to skip.
+        """
+        project_id, columns, _ = self._board()
+        done_id = next((identifier for identifier, title in columns.items() if title == "Done"), None)
+        if done_id is None:
+            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+        raw = self.client.call("getAllTasks", project_id=project_id, status_id=1)
+        if not isinstance(raw, list) or any(not isinstance(card, dict) for card in raw):
+            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+        done = [
+            card
+            for card in raw
+            if _positive_int(card.get("column_id")) == done_id and _task_is_active(card)
+        ]
+        metadata = self._metadata_of(done)
+        candidates: list[dict[str, Any]] = []
+        for card in done:
+            task_id = _task_number(card)
+            # Product and Issue rows may be displayed in a task column, but they
+            # are not execution-task retention candidates.
+            if metadata[task_id].get("record_type") in _TYPED_RECORD_TYPES:
+                continue
+            candidates.append(
+                {
+                    "reference": _text(card.get("reference")),
+                    "date_moved": _positive_int(card.get("date_moved")),
+                }
+            )
+        return sorted(candidates, key=lambda candidate: str(candidate["reference"]))
+
+    def export(self) -> list[dict[str, Any]]:
+        """Return the complete legacy checkpoint projection in bounded board reads.
+
+        Checkpoints retain the established board schema while reading it through the
+        canonical Secretary transport.  Metadata and comments have no Kanboard bulk
+        endpoint, so both are requested in one bounded JSON-RPC batch for the whole
+        board rather than once per card.
+        """
+        # The installed head registry remains the authority for legacy effective-head values;
+        # this is deliberately not a dependency on pipeline board operations or its export CLI.
+        from triggered_agents.agents.pipeline.heads import default_head, reviewer_head
+
+        project_id, columns, swimlanes = self._board()
+        cards = all_project_cards(self.client, project_id)
+        rows = [card for card in cards if isinstance(card, dict)]
+        task_ids = [_task_number(card) for card in rows]
+        answers = self.client.call_batch(
+            (method, {"task_id": task_id})
+            for task_id in task_ids
+            for method in ("getTaskMetadata", "getAllComments")
+        )
+        result = []
+        for index, card in enumerate(rows):
+            meta = _task_metadata(answers[index * 2])
+            raw_comments = answers[index * 2 + 1] or []
+            if not isinstance(raw_comments, list):
+                raise TaskError("backend_error", "Kanboard returned invalid task comments", 1)
+            task_id = task_ids[index]
+            head = _text(meta.get("head"))
+            review = _text(meta.get("review_head"))
+            result.append(
+                {
+                    "id": task_id,
+                    "reference": _text(card.get("reference")),
+                    "title": _text(card.get("title")),
+                    "description": _text(card.get("description")),
+                    "column": columns.get(_positive_int(card.get("column_id")) or -1, ""),
+                    "swimlane": swimlanes.get(_positive_int(card.get("swimlane_id")) or -1, ""),
+                    "position": _nonnegative_int(card.get("position")),
+                    "date_moved": _positive_int(card.get("date_moved")),
+                    "closed": not _task_is_active(card),
+                    "metadata": meta,
+                    "task_type": _text(meta.get("task_type")),
+                    "project": _text(meta.get("project")),
+                    "blocked_by": _text(meta.get("blocked_by")),
+                    "head": head,
+                    "effective_head": _text(meta.get("resolved_head")) or head or default_head(),
+                    "review_head": review,
+                    "effective_review_head": (
+                        _text(meta.get("resolved_review_head")) or review or reviewer_head()
+                    ),
+                    "claim": _text(meta.get("claim")),
+                    "slug": _text(meta.get("slug")),
+                    "base_branch": _text(meta.get("base_branch")),
+                    "comments": [
+                        {
+                            "ts": _text(comment.get("date_creation")),
+                            "text": _text(comment.get("comment")),
+                        }
+                        for comment in raw_comments
+                        if isinstance(comment, dict)
+                    ],
+                }
+            )
+        return result
 
     def show(self, reference: str) -> dict[str, Any]:
         project_id, columns, swimlanes = self._board()
@@ -921,6 +1107,12 @@ class TaskAudit:
                 with open(path, encoding="utf-8") as source:
                     event = json.load(source)
                 request_id = str(event["request_id"])
+                # Retention's close has an ambiguous-response recovery rule:
+                # only TaskWriter can re-read the exact Done episode and prove
+                # it.  The generic journal repairer must leave that evidence.
+                if event.get("kind") == "retired":
+                    unresolved += 1
+                    continue
                 with self._locked_audit():
                     self._append_owned(request_id, event, operation="reconcile")
                 repaired += 1
@@ -1237,6 +1429,62 @@ class TaskWriter:
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
+        """Create an ordinary task through the released admission contract."""
+        return self._create(
+            role=role,
+            actor=actor,
+            project=project,
+            task_type=task_type,
+            title=title,
+            description=description,
+            target=target,
+            reference=reference,
+            blocked_by=blocked_by,
+            head=head,
+            review_head=review_head,
+            slug=slug,
+            base_branch=base_branch,
+            complexity=complexity,
+            family_preference=family_preference,
+            codex_launch_mode=codex_launch_mode,
+            sprint=sprint,
+            priority=priority,
+            budget_event=budget_event,
+            sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason,
+            request_id=request_id,
+            restoring=restoring,
+            steward_report=False,
+        )
+
+    def _create(
+        self,
+        *,
+        role: str,
+        actor: str,
+        project: str,
+        task_type: str,
+        title: str,
+        description: str = "",
+        target: str = "ready",
+        reference: str = "",
+        blocked_by: str = "",
+        head: str = "",
+        review_head: str = "",
+        slug: str = "",
+        base_branch: str = "",
+        complexity: str = "standard",
+        family_preference: str = "auto",
+        codex_launch_mode: str = "",
+        sprint: str = "",
+        priority: str = "",
+        budget_event: str = "",
+        sprint_override: bool = False,
+        sprint_override_reason: str = "",
+        request_id: str | None = None,
+        restoring: bool = False,
+        steward_report: bool,
+    ) -> dict[str, Any]:
         # Restore bypasses new-work admission only; all other guards still apply.
         self._role(role, _CREATE_ROLES)
         project = project.strip()
@@ -1268,8 +1516,18 @@ class TaskWriter:
             raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2)
         if not title:
             raise TaskError("validation", "create requires a non-empty title", 2)
-        if target not in {"ready", "issues"}:
-            raise TaskError("validation", "create target must be ready or issues", 2)
+        if target not in {"ready", "issues", "in_progress"}:
+            raise TaskError("validation", "create target must be ready, issues or in_progress", 2)
+        if target == "in_progress" and not (role == "steward" and steward_report):
+            raise TaskError("transition_forbidden", "only a steward report may be created In progress", 3)
+        if steward_report and (role != "steward" or target != "in_progress"):
+            raise TaskError("role_forbidden", "steward report creation requires steward In progress", 3)
+        if steward_report and (task_type != "research" or not slug or reference or sprint):
+            raise TaskError(
+                "validation",
+                "a steward report requires research, a slug, no explicit reference and no sprint",
+                2,
+            )
         if role in _PROPOSAL_CREATE_ROLES:
             if target != "issues":
                 raise TaskError("role_forbidden", f"{role} may create only proposals in Issues", 3)
@@ -1337,6 +1595,7 @@ class TaskWriter:
             "codex_launch_mode": codex_launch_mode or None,
             "sprint": sprint or None,
             "budget_event": budget_event or None,
+            **({"steward_report": True} if steward_report else {}),
             **override_payload,
             "title_sha256": _digest(title),
             "description_sha256": _digest(description),
@@ -1409,6 +1668,7 @@ class TaskWriter:
                 family_preference=family_preference,
                 codex_launch_mode=codex_launch_mode,
                 sprint=sprint,
+                steward_report=steward_report,
                 event=event,
                 request_id=request_id,
             )
@@ -1431,6 +1691,36 @@ class TaskWriter:
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
         return {"action": "created", "task": task, "event_id": event_id, "replayed": False}
 
+    def create_steward_report(
+        self,
+        *,
+        actor: str,
+        project: str,
+        title: str,
+        slug: str,
+        description: str = "",
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create the steward's accounting artifact directly in In progress.
+
+        The generic create transaction owns its reference reservation, staged
+        identity and pending-audit recovery.  This narrow facade only supplies
+        the invariant report shape; it never creates a temporary Ready card and
+        deliberately does not require a sprint.
+        """
+        return self._create(
+            role="steward",
+            actor=actor,
+            project=project,
+            task_type="research",
+            title=title,
+            description=description,
+            target="in_progress",
+            slug=slug,
+            steward_report=True,
+            request_id=request_id,
+        )
+
     def _create_backend(
         self,
         *,
@@ -1449,6 +1739,7 @@ class TaskWriter:
         family_preference: str,
         codex_launch_mode: str,
         sprint: str,
+        steward_report: bool,
         event: dict[str, Any],
         request_id: str,
     ) -> str:
@@ -1518,7 +1809,20 @@ class TaskWriter:
                     values["codex_launch_mode"] = codex_launch_mode
                 if sprint:
                     values["sprint_ref"] = sprint
+                if steward_report:
+                    values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
                 self.client.call("saveTaskMetadata", task_id=task_id, values=values)
+                if steward_report:
+                    created = self.reader.show_id(task_id)
+                    if not (
+                        created["state"] == "in_progress"
+                        and created["project"] == project
+                        and created["type"] == "research"
+                        and created.get("record_type") == "task"
+                        and created["claim"]["worker"] == slug
+                        and _is_steward_report(created)
+                    ):
+                        raise _CommittedWriteError()
             except Exception as exc:
                 raise _CommittedWriteError() from exc
             return created_ref
@@ -1726,9 +2030,7 @@ class TaskWriter:
                 "body_sha256": _digest(body),
                 "assessment_visit": visit or None,
                 "description_sha256": _digest(current["description"]),
-                "specification_revision": specification_revision(
-                    committed_events, current["description"]
-                )
+                "specification_revision": specification_revision(committed_events, current["description"])
                 or None,
             }
             if current["state"] != "assessment":
@@ -1933,6 +2235,16 @@ class TaskWriter:
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
         task = self.reader.show(reference)
+        if (
+            role == "steward"
+            and (task["state"], target) == ("in_progress", "done")
+            and not _is_steward_report(task)
+        ):
+            raise TaskError(
+                "transition_forbidden",
+                "steward may close In progress only for its own report card",
+                3,
+            )
         if self._legacy_record(request_id) is not None:
             # A move recorded before Card transitions migrated is a generic audit operation, and
             # it stays one: its retry replays that record and its pending form is finished by the
@@ -2655,6 +2967,121 @@ class TaskWriter:
             identity={"reason_sha256": _digest(reason)},
         )
 
+    def retire_done(
+        self,
+        *,
+        reference: str,
+        expected_date_moved: int,
+        cutoff: float,
+        retention_days: int,
+        actor: str = "retro-retention",
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Close one proven-old Done episode without using the PO archive path.
+
+        ``date_moved`` identifies the episode, rather than merely the card.  A
+        reopen or a move away and back to Done therefore turns an old candidate
+        into a harmless skip before a close can be sent.  Pending records retain
+        that proof and can retry a lost reply only for the same episode.
+        """
+        expected_date_moved = _positive_int(expected_date_moved) or 0
+        if not expected_date_moved:
+            return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
+        try:
+            cutoff_value = float(cutoff)
+        except (TypeError, ValueError):
+            raise TaskError("validation", "Done retention requires a numeric cutoff", 2) from None
+        if retention_days < 0:
+            raise TaskError("validation", "Done retention days cannot be negative", 2)
+
+        initial = self._retention_card(reference, task_id=None)
+        if initial is None:
+            return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
+        task_id, raw, metadata, done_id = initial
+        self._check_retention_record(metadata)
+        request_id = request_id or _done_retention_request_id(task_id, expected_date_moved)
+        identity = {
+            "expected_date_moved": expected_date_moved,
+            "cutoff": cutoff_value,
+            "retention_days": retention_days,
+            "task_id": task_id,
+        }
+        committed = self.audit.committed_event(request_id)
+        if committed is not None:
+            self.audit.require_claim(committed, kind="retired", reference=reference, identity=identity)
+            return {"action": "retired", "reference": reference, "retired": True, "replayed": True}
+        pending = self.audit.pending_event(request_id)
+        if pending is not None:
+            self.audit.require_claim(pending, kind="retired", reference=reference, identity=identity)
+            try:
+                self._finish_pending_retired(pending)
+                self._prove_retired_closed(pending)
+                self.audit.append(request_id, pending)
+            except (TaskError, OSError, KeyError, TypeError, ValueError):
+                raise TaskError(
+                    "audit_pending", "backend write committed; audit repair is required", 4
+                ) from None
+            return {"action": "retired", "reference": reference, "retired": True, "replayed": True}
+
+        # Do not stage a successful-looking occurrence for a candidate that has
+        # already aged out of eligibility between the list and this write.
+        if not self._retention_matches(raw, metadata, expected_date_moved, cutoff_value, done_id):
+            return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
+        event = {
+            "event_id": "evt_" + uuid.uuid4().hex,
+            "schema_version": 1,
+            "occurred_at": _now(),
+            "actor": {"role": "retro", "id": actor},
+            "kind": "retired",
+            "outcome": "success",
+            "task_id": f"task_kanboard_{task_id}",
+            "ref": reference,
+            "backend": {"kind": "kanboard", "task_id": task_id, "revision": "pending"},
+            "request_id": request_id,
+            "payload": identity,
+        }
+        self.audit.stage(request_id, event)
+        try:
+            # This is the final guard immediately before the destructive call.
+            guarded = self._retention_card(reference, task_id=task_id)
+            if guarded is None:
+                self.audit.discard(request_id, event)
+                return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
+            _guarded_id, latest, latest_metadata, latest_done_id = guarded
+            self._check_retention_record(latest_metadata)
+            if not self._retention_matches(
+                latest, latest_metadata, expected_date_moved, cutoff_value, latest_done_id
+            ):
+                self.audit.discard(request_id, event)
+                return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
+            if not self.client.call("closeTask", task_id=task_id):
+                raise TaskError("backend_error", "Kanboard rejected Done retention", 1)
+        except _CommittedWriteError:
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+        except TaskError as exc:
+            # A transport error after close is ambiguous; leave its pending
+            # evidence.  A definite local guard/validation failure is not.
+            if exc.code == "backend_unavailable":
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            current = self.audit.pending_event(request_id)
+            if current == event:
+                try:
+                    self.audit.discard(request_id, event)
+                except (OSError, TaskError):
+                    pass
+            raise
+        except Exception:  # noqa: BLE001 - an unknown close reply is deliberately ambiguous.
+            # JSON-RPC transport failures can occur after Kanboard applied the
+            # close, so reconciliation must prove or safely retry this episode.
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+        try:
+            self._finish_pending_retired(event)
+            self._prove_retired_closed(event)
+            self.audit.append(request_id, event)
+        except (TaskError, OSError, KeyError, TypeError, ValueError):
+            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+        return {"action": "retired", "reference": reference, "retired": True, "replayed": False}
+
     def restore_card(
         self,
         *,
@@ -2900,6 +3327,12 @@ class TaskWriter:
                     )
                     repaired += 1
                     continue
+                if event.get("kind") == "retired":
+                    self._finish_pending_retired(event)
+                    self._prove_retired_closed(event)
+                    self.audit.append(str(event["request_id"]), event)
+                    repaired += 1
+                    continue
                 self._finish_pending_cleanup(event, None)
                 task = (
                     self._pending_create_task(event)
@@ -2965,6 +3398,9 @@ class TaskWriter:
         if event.get("kind") == "archived":
             self._finish_pending_archive(event, retry_payload)
             return
+        if event.get("kind") == "retired":
+            self._finish_pending_retired(event)
+            return
         if event.get("kind") == "decided":
             self._finish_pending_decided(event, payload, retry_payload)
             return
@@ -2991,6 +3427,98 @@ class TaskWriter:
             or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
         ):
             raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
+
+    def _retention_card(
+        self, reference: str, *, task_id: int | None
+    ) -> tuple[int, dict[str, Any], dict[str, str], int] | None:
+        """Read an exact retention target, including archived rows when recovering."""
+        board_id, columns, _swimlanes = self.reader._board()
+        done_id = next((identifier for identifier, title in columns.items() if title == "Done"), None)
+        if done_id is None:
+            raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
+        rows = all_project_cards(self.client, board_id)
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and _text(row.get("reference")) == reference
+            and (task_id is None or _positive_int(row.get("id")) == task_id)
+        ]
+        if not matches:
+            return None
+        if task_id is None:
+            active = [row for row in matches if _task_is_active(row)]
+            if not active:
+                return None
+            matches = active
+        if len(matches) != 1:
+            raise TaskError("backend_error", "Done retention target is ambiguous", 1)
+        raw = matches[0]
+        number = _task_number(raw)
+        return number, raw, _task_metadata(self.client.call("getTaskMetadata", task_id=number)), done_id
+
+    @staticmethod
+    def _check_retention_record(metadata: dict[str, str]) -> None:
+        if metadata.get("record_type") in _TYPED_RECORD_TYPES:
+            raise TaskError(
+                "transition_forbidden", "Product issues and products cannot be retired as Done tasks", 3
+            )
+
+    def _retention_matches(
+        self,
+        raw: dict[str, Any],
+        metadata: dict[str, str],
+        expected_date_moved: int,
+        cutoff: float,
+        done_id: int,
+    ) -> bool:
+        return (
+            _task_is_active(raw)
+            and _positive_int(raw.get("column_id")) == done_id
+            and _positive_int(raw.get("date_moved")) == expected_date_moved
+            and expected_date_moved < cutoff
+            and metadata.get("record_type") not in _TYPED_RECORD_TYPES
+        )
+
+    def _finish_pending_retired(self, event: dict[str, Any]) -> None:
+        """Prove a retained close or repeat it only for its original Done episode."""
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        expected = _positive_int(payload.get("expected_date_moved"))
+        task_id = _positive_int(payload.get("task_id"))
+        try:
+            cutoff = float(payload.get("cutoff"))
+        except (TypeError, ValueError):
+            cutoff = float("nan")
+        ref = _text(event.get("ref"))
+        if not ref or expected is None or task_id is None or cutoff != cutoff:
+            raise TaskError("backend_error", "pending Done retention is incomplete", 1)
+        target = self._retention_card(ref, task_id=task_id)
+        if target is None:
+            raise TaskError("backend_error", "pending Done retention target disappeared", 1)
+        _number, raw, metadata, done_id = target
+        self._check_retention_record(metadata)
+        if _task_is_active(raw):
+            if not self._retention_matches(raw, metadata, expected, cutoff, done_id):
+                raise TaskError("backend_error", "pending Done retention no longer matches its episode", 1)
+            if not self.client.call("closeTask", task_id=task_id):
+                raise TaskError("backend_error", "pending Done retention remains incomplete", 1)
+            target = self._retention_card(ref, task_id=task_id)
+            if target is None:
+                raise TaskError("backend_error", "pending Done retention target disappeared", 1)
+            _number, raw, _metadata, _done_id = target
+        if _task_is_active(raw):
+            raise TaskError("backend_error", "pending Done retention remains incomplete", 1)
+
+    def _prove_retired_closed(self, event: dict[str, Any]) -> None:
+        """Last audit gate: a success event never names a live replacement episode."""
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        task_id = _positive_int(payload.get("task_id"))
+        ref = _text(event.get("ref"))
+        if task_id is None or not ref:
+            raise TaskError("backend_error", "pending Done retention is incomplete", 1)
+        target = self._retention_card(ref, task_id=task_id)
+        if target is None or _task_is_active(target[1]):
+            raise TaskError("backend_error", "pending Done retention is no longer closed", 1)
 
     def _finish_pending_claim(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
         """Complete a claim whose metadata committed before the column move failed."""
@@ -3158,6 +3686,14 @@ class TaskWriter:
             expected_mode = ""
         if expected_mode and normalized["routing"]["codex_launch_mode"] != expected_mode:
             raise TaskError("backend_error", "pending create metadata remains incomplete", 1)
+        if payload.get("steward_report") is True and not (
+            normalized["state"] == "in_progress"
+            and normalized.get("record_type") == "task"
+            and normalized["type"] == "research"
+            and normalized["claim"]["worker"] == _text(payload.get("slug"))
+            and _is_steward_report(normalized)
+        ):
+            raise TaskError("backend_error", "pending steward report metadata remains incomplete", 1)
 
     def _pending_create_task(self, event: dict[str, Any]) -> dict[str, Any]:
         backend = event.get("backend")
@@ -3341,6 +3877,12 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
             continue
         if value:
             values[metadata_key] = value
+    if payload.get("steward_report") is True:
+        slug = _text(payload.get("slug"))
+        # A recovered report must prove the whole accounting identity, not merely
+        # that its row exists.  Keep these in the one metadata write so a retry
+        # repairs a partial backend write as one unit.
+        values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
     return values
 
 

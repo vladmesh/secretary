@@ -44,13 +44,11 @@ from secretary._fsutil import write_text_atomic
 
 SCHEMA_VERSION = 1
 RECEIPT_DIR_NAME = Path("state") / "checks"
-#: Bounds on the stored artifact.  The tail is the only unbounded input, so it is capped in bytes
-#: and in lines; a single pathological line cannot grow the receipt either.
+#: Bound the artifact's only unbounded input by bytes and lines.
 TAIL_BYTES = 8192
 TAIL_LINES = 120
 MAX_COMMAND_CHARS = 4096
-#: Bounds on the streaming parser's own state: a line longer than this cannot be a runner summary,
-#: and a verdict's detail is a handful of counts.
+#: Bound parser state; runner summaries and verdict details fit within these limits.
 _MAX_LINE_BYTES = 4096
 #: The widest normal exit status a POSIX process can hand back.
 _MAX_EXIT_STATUS = 255
@@ -101,11 +99,7 @@ class ContentIdentity:
         return self.resolved and other.resolved and self.as_dict() == other.as_dict()
 
 
-#: The bootstrap runs *inside* the process that then runs the check, so the provenance it records
-#: is the import that check actually performed, not a guess made by a separate probe beforehand.
-#: `python -c` normally puts the working directory first on `sys.path`, exactly as
-#: `python -m unittest` does.  Safe-path mode removes it, so the bootstrap restores the workspace
-#: after recording provenance, preserving any explicitly ordered external import entries.
+#: Record import provenance in the check process, then restore workspace import precedence.
 _PROVENANCE_BOOTSTRAP = """\
 import importlib, json, os, runpy, sys
 
@@ -316,11 +310,7 @@ def content_identity(root: Path) -> ContentIdentity:
         scratch = Path(scratch_dir) / "index"
         try:
             if real_index.exists():
-                # Git compares an entry's stat data with the index file's mtime to detect a
-                # racy-clean file and hash it instead of trusting an equal size and timestamp.
-                # Rewriting the bytes gives the scratch index a newer mtime and disables that
-                # guard: a same-size edit made in the index timestamp window can then retain the
-                # old blob. Preserve the real index metadata along with its contents.
+                # Preserve index metadata to keep Git's racy-clean detection intact.
                 shutil.copy2(real_index, scratch)
         except OSError:
             return ContentIdentity("")
@@ -529,8 +519,7 @@ def run_broad_check(
     sink = sys.stderr if stream is None else stream
 
     with tempfile.TemporaryDirectory(prefix="secretary-broad-check-") as scratch:
-        # The provenance record lives outside the workspace: writing it inside would edit the very
-        # content the receipt claims to describe.
+        # Keep provenance outside the workspace whose contents the receipt names.
         record = Path(scratch) / "provenance.json" if spec.attests_provenance else None
         return _run_and_record(
             spec,
@@ -583,8 +572,7 @@ def _run_and_record(
     tail = _BoundedTail()
     scanner = _SummaryScanner()
     incomplete_reason = ""
-    # stdout and stderr share one pipe on purpose: two pipes would reorder a failing test's
-    # traceback against the dots that located it, and the tail is exactly where that matters.
+    # One pipe preserves stdout/stderr ordering in the diagnostic tail.
     try:
         process = subprocess.Popen(
             spec.argv(record, root),
@@ -995,9 +983,7 @@ def usable_receipt(root: Path, check: CheckSpec | str) -> ReceiptLookup:
     recorded = receipt.get("content_identity")
     if not isinstance(recorded, Mapping):
         return ReceiptLookup(False, "receipt records no content identity", receipt, path)
-    # A receipt written before the identity became a tree id carries `head_sha`, not `tree_sha`, and
-    # its digest cannot be compared with this one: it is read as unresolved, so it never matches.
-    # An identity nobody can resolve is the safe answer; a false match is not.
+    # A non-tree identity is unresolved and must never produce a false match.
     stored = ContentIdentity(str(recorded.get("tree_sha") or ""))
     current = content_identity(root)
     if not current.resolved:

@@ -42,7 +42,6 @@ from secretary._fsutil import (
 from secretary.board.models import Event
 from secretary.data import (
     PIPELINE_STATE_DIR,
-    PIPELINE_WORKTREE,
     export_board,
     export_runs,
 )
@@ -129,15 +128,11 @@ class CheckpointWriter:
         data_dir: Path,
         instance_dir: Path,
         *,
-        pipeline_worktree: Path = PIPELINE_WORKTREE,
         state_dir: Path = PIPELINE_STATE_DIR,
-        command: list[str] | None = None,
     ) -> None:
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.instance_dir = Path(instance_dir).expanduser().resolve()
-        self.pipeline_worktree = Path(pipeline_worktree)
         self.state_dir = Path(state_dir)
-        self.command = command
 
     def write(self) -> CheckpointResult:
         try:
@@ -183,13 +178,11 @@ class CheckpointWriter:
         return self._commit(board_cards=board, run_records=runs)
 
     def _regenerate(self) -> tuple[int, int]:
-        """Rebuild the exports from the live board and pipeline state."""
+        """Rebuild the exports from the live board and pipeline runtime state."""
         try:
             board = export_board(
                 self.data_dir,
                 instance_dir=self.instance_dir,
-                pipeline_worktree=self.pipeline_worktree,
-                command=self.command,
             )
             runs = export_runs(self.data_dir, state_dir=self.state_dir)
         except RuntimeError as exc:

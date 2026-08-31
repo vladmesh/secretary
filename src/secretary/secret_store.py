@@ -169,10 +169,6 @@ class MaterializeResult:
     changed: bool
 
 
-# ---------------------------------------------------------------------------
-# Paths
-
-
 def secrets_dir(instance_dir: Path) -> Path:
     return state_repo.secrets_dir(instance_dir)
 
@@ -213,10 +209,6 @@ def _store_exists(instance_dir: Path) -> bool:
     return values_dir.is_dir() and any(values_dir.iterdir())
 
 
-# ---------------------------------------------------------------------------
-# Recovery phrase
-
-
 def generate_recovery_phrase(words: int = PHRASE_WORDS) -> str:
     """A fresh phrase with `words` * 8 bits of entropy, chosen by the product."""
     if words < 8:
@@ -230,10 +222,6 @@ def normalize_phrase(phrase: str) -> str:
     if not normalized:
         raise SecretStoreValidationError("recovery phrase is empty")
     return normalized
-
-
-# ---------------------------------------------------------------------------
-# Installation key
 
 
 def _new_key_params() -> dict[str, Any]:
@@ -374,10 +362,6 @@ def _read_key_params(instance_dir: Path) -> dict[str, Any]:
     return params
 
 
-# ---------------------------------------------------------------------------
-# Envelope
-
-
 def seal_value(key: bytes, secret_id: str, value: bytes) -> dict[str, Any]:
     """Wrap one value. Everything needed to open it later is in the result."""
     salt = pysecrets.token_bytes(SALT_LENGTH)
@@ -452,10 +436,6 @@ def _header_bytes(header: dict[str, Any]) -> bytes:
     return json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-# ---------------------------------------------------------------------------
-# Catalog
-
-
 def load_catalog(instance_dir: Path) -> dict[str, Any]:
     path = catalog_path(instance_dir)
     try:
@@ -504,14 +484,7 @@ def _catalog_text(catalog: dict[str, Any]) -> str:
     return yaml.safe_dump(catalog, sort_keys=True, allow_unicode=True, default_flow_style=False)
 
 
-# ---------------------------------------------------------------------------
-# Observability
-#
-# `store_health` and `store_findings` are the only two functions in this module
-# that `status` and `doctor` call. Both read the catalog and the key's own
-# metadata (mode, presence, whether it opens the store); neither ever touches
-# `read_secret` or `open_value`, so no value, sealed or otherwise, and no key
-# material can reach either report.
+# `status` and `doctor` use these metadata-only functions; they never read values or key material.
 
 
 def store_health(instance_dir: Path) -> dict[str, Any]:
@@ -617,10 +590,6 @@ def _materialize_summary(secrets: tuple[dict[str, Any], ...]) -> list[dict[str, 
     ]
 
 
-# ---------------------------------------------------------------------------
-# Operations
-
-
 def initialize_store(instance_dir: Path, *, phrase: str, actor: str) -> InitResult:
     """Create the key, the key parameters and an empty catalog. Never overwrites."""
     actor = _clean_actor(actor)
@@ -707,10 +676,7 @@ def set_secret(
         catalog_text = _catalog_text(catalog)
         _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
         envelope_text = json.dumps(seal_value(key, secret_id, bytes(value)), indent=2, sort_keys=True) + "\n"
-        # No redact scan on the envelope. Its body is ciphertext plus the open
-        # parameters needed to decrypt it: a pattern match there would be a
-        # coincidence of base64, and a value that redact happened to recognize is
-        # exactly the kind of value the store exists to hold.
+        # Never redact-scan ciphertext; a base64 coincidence must not erase a secret.
         _publish(
             [
                 (value_path(instance_dir, secret_id), envelope_text),
@@ -767,8 +733,7 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
                 environment = str(entry.get("environment") or "")
                 try:
                     if secret_id in LEGACY_BOARD_SECRET_IDS:
-                        # Retired board values cannot be recovered or materialized, but must keep
-                        # being scrubbed while a running container may still authenticate with one.
+                        # Retired values remain redacted while a running container may use them.
                         key = key if key is not None else load_installation_key(instance_dir)
                         plaintext = _read_value(instance_dir, secret_id, key)
                     else:
@@ -1057,10 +1022,6 @@ def parse_env_file(text: str, *, source: str = "env file") -> dict[str, str]:
 def secret_id_for_variable(name: str) -> str:
     """Map an environment-variable name to its validated store identifier."""
     return _new_secret_id(str(name).strip().lower())
-
-
-# ---------------------------------------------------------------------------
-# Helpers
 
 
 def _entry(

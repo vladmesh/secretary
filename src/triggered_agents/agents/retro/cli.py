@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any, Protocol
 
 from ...runtime.kanboard import KanboardUnreachable
 from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, AgentState
@@ -39,14 +40,27 @@ from . import search_log
 STATE = AgentState("retro")
 
 
+class DoneRetention(Protocol):
+    """The one destructive board operation retro may request during cleanup."""
+
+    def close_old_done(self) -> dict[str, Any]: ...
+
+
+class _LegacyDoneRetention:
+    """Keep the released retro command on the exact legacy board implementation."""
+
+    def close_old_done(self) -> dict[str, Any]:
+        return pipeline_ops.close_old_done_cards()
+
+
 def _batch_window(batch: dict):
     """(min_ts, max_ts) across the batch's turns, for scoping the search-log tail."""
     ts = [t["ts"] for s in batch["sessions"] for t in s["turns"] if t.get("ts")]
     return (min(ts), max(ts)) if ts else (None, None)
 
 
-def _cleanup_done() -> dict:
-    out = pipeline_ops.close_old_done_cards()
+def _cleanup_done(retention: DoneRetention | None = None) -> dict:
+    out = (retention or _LegacyDoneRetention()).close_old_done()
     refs = out["closed"]
     STATE.log_run(
         "done-cleanup",
@@ -57,8 +71,8 @@ def _cleanup_done() -> dict:
     return {"closed_refs": refs, "closed_count": len(refs)}
 
 
-def cmd_harvest(as_json: bool) -> int:
-    cleanup = _cleanup_done()
+def cmd_harvest(as_json: bool, retention: DoneRetention | None = None) -> int:
+    cleanup = _cleanup_done(retention)
     with STATE.lock():
         batch = harvest.harvest(STATE)
         STATE.ensure_dir()
@@ -97,14 +111,14 @@ def cmd_advance() -> int:
     return 0
 
 
-def cmd_precheck() -> int:
+def cmd_precheck(retention: DoneRetention | None = None) -> int:
     """Exit 0 if there are new turns to review, PRECHECK_SKIP (100) to skip a clean run when nothing
     is new, PRECHECK_BOARD_UNREACHABLE (101) when the board never answered, so the gate re-attempts
     the run instead of spending it. Any other code means precheck crashed. An uncaught exception
     exits 1, which the systemd gate treats as an error, not a skip. See runtime/state.py
     PRECHECK_SKIP and scripts/secretary-agent-gate.sh."""
     try:
-        _cleanup_done()
+        _cleanup_done(retention)
         batch = harvest.harvest(STATE)
     except KanboardUnreachable as e:
         # Not retro's failure and not a clean tick: the day's run has not happened yet. Logged so
@@ -141,15 +155,15 @@ def cmd_status() -> int:
     return 0
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, retention: DoneRetention | None = None) -> int:
     argv = list(argv or [])
     cmd = argv[0] if argv else "help"
     if cmd == "harvest":
-        return cmd_harvest("--json" in argv)
+        return cmd_harvest("--json" in argv, retention)
     if cmd == "advance":
         return cmd_advance()
     if cmd == "precheck":
-        return cmd_precheck()
+        return cmd_precheck(retention)
     if cmd == "sessions":
         return cmd_sessions()
     if cmd == "status":

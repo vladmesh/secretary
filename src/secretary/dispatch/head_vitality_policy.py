@@ -85,15 +85,13 @@ class RecoveryIntent(StrEnum):
     NUDGE = "nudge"
     #: Send SIGCONT to the head's process group, identity-fenced at send time. Wired.
     SIGCONT = "sigcont"
-    #: Ask the current head to finish and hand over cleanly. Sprint 2+ vocabulary, unwired:
-    #: drain needs the HeadRuntime admission boundary that does not exist yet.
+    #: Ask the current head to finish and hand over cleanly. Unwired.
     REQUEST_DRAIN = "request_drain"
     #: Escalate to a human, touching nothing. Wired.
     ESCALATE_OPERATOR = "escalate_operator"
-    #: Start a fresh head of the same profile. Sprint 2+ vocabulary, unwired: respawn belongs
-    #: to the ConfirmedStall recovery path, not to this policy's rungs.
+    #: Start a fresh head of the same profile. Unwired.
     RESPAWN = "respawn"
-    #: Stop admitting work to this head entirely. Sprint 4 vocabulary, unwired.
+    #: Stop admitting work to this head entirely. Unwired.
     BLOCK = "block"
 
 
@@ -118,25 +116,13 @@ class DeterministicReasonClass(StrEnum):
 
 #: The authoritative deterministic terminal-reason allowlist.
 #:
-#: Each entry maps a bounded refusal-reason token to the class an operator reads. What
-#: qualifies (plan: "invalid configuration, missing executable, authentication rejected,
-#: resource exhausted и аналогичные terminal facts"): a refusal naming a property of THIS
-#: launch -- a missing file or binary, an invalid request shape, refused credentials, a hard
-#: quota -- which no number of retries can change, because retrying does not edit the world.
-#: What deliberately does NOT qualify: anything describing timing, availability or transport
-#: (a pane that was busy, a journal that was unreadable, a network that was down). Those are
-#: heuristic shapes: they repeat whenever their cause persists, so treating repetition as
-#: authority would let one dark channel fast-track a live head to escalation -- the exact
-#: inversion of ``Unavailable != no progress`` this sprint exists to prevent.
+#: Entries classify immutable launch refusals, not timing, availability or transport failures.
 #:
 #: Matching is token-in-bounded-string, not prose scraping: producers put machine tokens on
 #: the wire (see ``VitalitySnapshot.from_pane_readiness``, which carries the producer's
 #: diagnostic verbatim inside the bounded reason), and this table matches the token wherever
 #: it appears in that string.
 DETERMINISTIC_TERMINAL_REASONS: dict[str, DeterministicReasonClass] = {
-    # codegen-orchestrator-1194: the reviewer split could not be created against a live
-    # terminal -- 45 identical refusals over 49 minutes, each indistinguishable from the
-    # last because nothing about the attempt changed between them.
     "terminal_split_source_not_found": DeterministicReasonClass.SPLIT_SOURCE_NOT_FOUND,
     # Invalid launch configuration: the requested profile/split/adaptor combination does not
     # exist, so every retry of the same request refuses identically.
