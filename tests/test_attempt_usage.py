@@ -717,6 +717,51 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         setattr(audit, step, refuse)
         return lambda: setattr(audit, step, original)
 
+    def production_tick(self) -> dict:
+        """One whole production tick, the way the running dispatcher takes one.
+
+        `self.tick()` drives `_tick_task` for the card under test. A card that has reached Blocked
+        or Done never gets another turn there, so a durability claim about "the next tick" has to be
+        asserted against the tick itself and not against a per-card call the real loop would never
+        make for that card again.
+        """
+        return self.runtime.production_tick()
+
+    def usage_actions(self, tick: dict) -> list[dict]:
+        """What one production tick reported about the usage obligations it found."""
+        return [
+            action
+            for action in (tick.get("actions") or [])
+            if isinstance(action, dict) and action.get("step") == "attempt-usage-recovery"
+        ]
+
+    def unobserved_card(self) -> None:
+        """Take the observer away, so a green verdict retires the card in its own tick."""
+        self.board.metadata[12].pop("sprint_ref", None)
+        self.sprints.rows.clear()
+        self.board.sprints.clear()
+
+    def _report_blocked(self) -> None:
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference=CARD_REF,
+            kind="blocked",
+            body="the card contradicts itself",
+            classification="wrong_task_definition",
+            request_id=self._worker_report_request_id("blocked", "wrong_task_definition"),
+        )
+
+    def _review_green(self, request_id: str = "review-green") -> None:
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference=CARD_REF,
+            kind="green",
+            body="the change is right",
+            request_id=request_id,
+        )
+
     def test_an_accepted_done_report_accounts_the_worker_phase_it_closed(self) -> None:
         self.start_dispatcher()
         self.tick()
@@ -819,15 +864,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self.tick()
         self.bind_source("worker", self.codex_journal("worker-1.jsonl", input_tokens=42, output_tokens=7))
-        self.writer.report(
-            role="worker",
-            actor="worker",
-            reference=CARD_REF,
-            kind="blocked",
-            body="the card contradicts itself",
-            classification="wrong_task_definition",
-            request_id=self._worker_report_request_id("blocked", "wrong_task_definition"),
-        )
+        self._report_blocked()
 
         blocked = self.tick()
 
@@ -843,14 +880,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         session_id = self.bind_source(
             "review", self.codex_journal("review-1.jsonl", input_tokens=5100, output_tokens=210)
         )
-        self.writer.verdict(
-            role="reviewer",
-            actor="reviewer",
-            reference=CARD_REF,
-            kind="green",
-            body="the change is right",
-            request_id="review-green",
-        )
+        self._review_green()
 
         self.tick()
 
@@ -986,6 +1016,9 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         occurrence at all. That is the loss the reviewer found: once the card advanced, nothing ever
         revisited the phase. The contract here is the durability order instead — the card may pass a
         staged obligation, never an absent one — so the old assertion had to go.
+
+        The recovery step drives a whole production tick rather than this card's turn in one: the
+        published record is the same, and where it comes from is the point of this round's repair.
         """
         self.start_dispatcher()
         self.tick()
@@ -1002,7 +1035,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(staged[0]["data"]["tokens"]["input"], 100)
 
         restore()
-        self.tick()
+        self.production_tick()
 
         published = self.usage_events()
         self.assertEqual(len(published), 1, "recovery finishes the staged occurrence, once")
@@ -1021,7 +1054,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         write_jsonl(journal, [codex_token_count(input_tokens=999999, output_tokens=88888)])
         restore()
-        self.tick()
+        self.production_tick()
 
         self.assertEqual(self.usage_events()[0]["tokens"]["input"], 100)
 
@@ -1136,6 +1169,183 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.tick()
 
         self.assertEqual(self.usage_events(), accounted, "the interval is the one the phase earned")
+
+    def test_a_blocked_card_is_still_owed_its_account_by_the_next_production_tick(self) -> None:
+        """The reviewer's reproduction: a terminal card leaves nothing behind that a per-card pass
+        could ever find again.
+
+        Blocked is outside `ACTIVE_STATES` and the dispatcher drops its record on the way, so the
+        tick that follows builds a cycle this card is not in. The obligation is published from the
+        pending set instead, which knows nothing about cards.
+        """
+        self.start_dispatcher()
+        self.tick()
+        self.bind_source("worker", self.codex_journal("worker-1.jsonl", input_tokens=42, output_tokens=7))
+        restore = self.refuse_usage_audit("append")
+        self._report_blocked()
+
+        self.assertEqual(self.tick()["to"], "blocked")
+
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertNotIn(CARD_REF, self.runtime.production_state.load()["records"] or {})
+        staged = self.staged_usage()
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(self.usage_events(), [], "nothing is published while the append is refused")
+
+        restore()
+        tick = self.production_tick()
+
+        self.assertEqual(
+            tick["actions"][0]["step"],
+            "attempt-usage-recovery",
+            "the obligations are settled before the tick does anything else",
+        )
+        self.assertEqual(
+            [action["action"] for action in self.usage_actions(tick)], ["attempt-usage-published"]
+        )
+        self.assertEqual(self.usage_actions(tick)[0]["published"], 1)
+        published = self.usage_events()
+        self.assertEqual(len(published), 1, "exactly one published event for the finished phase")
+        self.assertEqual(published[0], staged[0]["data"], "and it is exactly the record that was staged")
+        self.assertEqual(published[0]["tokens"]["input"], 42)
+        self.assertEqual(self.staged_usage(), [], "zero obligations left owed")
+
+    def test_a_done_card_is_still_owed_its_review_account_by_the_next_production_tick(self) -> None:
+        """The other terminal route: a green verdict with no observer retires the card at once."""
+        self.start_dispatcher()
+        self.unobserved_card()
+        self._run_worker_to_validate()
+        self.tick()
+        self.bind_source("review", self.codex_journal("review-1.jsonl", input_tokens=5100, output_tokens=210))
+        restore = self.refuse_usage_audit("append")
+        self._review_green()
+
+        self.assertEqual(self.tick()["to"], "done")
+
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "done")
+        staged = self.staged_usage()
+        self.assertEqual([record["data"]["phase"] for record in staged], ["review"])
+        self.assertEqual([usage["phase"] for usage in self.usage_events()], ["worker"])
+
+        restore()
+        tick = self.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.usage_actions(tick)], ["attempt-usage-published"]
+        )
+        review = [usage for usage in self.usage_events() if usage["phase"] == "review"]
+        self.assertEqual(len(review), 1, "exactly one published event for the finished review phase")
+        self.assertEqual(review[0], staged[0]["data"])
+        self.assertEqual(review[0]["tokens"]["output"], 210)
+        self.assertEqual(self.staged_usage(), [], "zero obligations left owed")
+
+    def test_a_red_verdict_parked_for_a_decision_is_owed_its_account_the_same_way(self) -> None:
+        """Assessment is an active state, so this one could reach the card again — and still does
+        not have to: the same global pass answers for it."""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()
+        self.bind_source("review", self.codex_journal("review-1.jsonl", input_tokens=310, output_tokens=17))
+        restore = self.refuse_usage_audit("append")
+        self._review_red()
+
+        self.assertEqual(self.tick()["to"], "assessment")
+
+        staged = self.staged_usage()
+        self.assertEqual([record["data"]["phase"] for record in staged], ["review"])
+
+        restore()
+        self.production_tick()
+
+        review = [usage for usage in self.usage_events() if usage["phase"] == "review"]
+        self.assertEqual(len(review), 1)
+        self.assertEqual(review[0], staged[0]["data"])
+        self.assertEqual(self.staged_usage(), [])
+
+    def test_a_dispatcher_that_lost_its_record_still_owes_the_staged_account(self) -> None:
+        """The pass takes no dispatcher record, no board lookup and no card state as input."""
+        self.start_dispatcher()
+        self.tick()
+        self.bind_source("worker", self.codex_journal("worker-1.jsonl", input_tokens=100, output_tokens=10))
+        restore = self.refuse_usage_audit("append")
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        staged = self.staged_usage()
+        self.assertEqual(len(staged), 1)
+        # The dispatcher restarts without its records, the way recovery finds the board.
+        payload = self.runtime.production_state.load()
+        payload["records"] = {}
+        self.runtime.production_state.save(payload)
+
+        restore()
+        self.production_tick()
+
+        self.assertEqual(len(self.usage_events()), 1)
+        self.assertEqual(self.usage_events()[0], staged[0]["data"])
+        self.assertEqual(self.staged_usage(), [])
+
+    def test_an_obligation_stays_pending_and_exact_until_a_tick_can_publish_it(self) -> None:
+        """A publication failure owes the same record again, and fabricates nothing in its place."""
+        self.start_dispatcher()
+        self.tick()
+        self.bind_source("worker", self.codex_journal("worker-1.jsonl", input_tokens=100, output_tokens=10))
+        restore = self.refuse_usage_audit("append")
+        self._report_blocked()
+        self.assertEqual(self.tick()["to"], "blocked")
+        staged = self.staged_usage()
+
+        refused = [self.production_tick(), self.production_tick()]
+
+        for tick in refused:
+            actions = self.usage_actions(tick)
+            self.assertEqual([action["action"] for action in actions], ["attempt-usage-still-pending"])
+            self.assertEqual(actions[0]["status"], "degraded")
+            self.assertEqual(actions[0]["published"], 0)
+            self.assertEqual(actions[0]["pending"], 1)
+            self.assertEqual(actions[0]["pending_refs"], [CARD_REF])
+        self.assertEqual(self.usage_events(), [], "a refused publication publishes nothing at all")
+        self.assertEqual(self.staged_usage(), staged, "the same record, unchanged, still owed")
+
+        restore()
+        tick = self.production_tick()
+
+        self.assertEqual(self.usage_actions(tick)[0]["published"], 1)
+        self.assertEqual(len(self.usage_events()), 1)
+        self.assertEqual(self.usage_events()[0], staged[0]["data"])
+        self.assertEqual(self.staged_usage(), [])
+
+    def test_a_pending_set_that_cannot_be_read_degrades_the_tick_rather_than_ending_it(self) -> None:
+        """The pass runs before everything, so it may not be the thing that kills the tick."""
+        self.start_dispatcher()
+        self.tick()
+
+        def refuse() -> list[dict]:
+            raise OSError("the pending directory is unreadable")
+
+        self.runtime.audit.pending_events = refuse
+
+        tick = self.production_tick()
+
+        actions = self.usage_actions(tick)
+        self.assertEqual([action["action"] for action in actions], ["attempt-usage-pending-unreadable"])
+        self.assertEqual(actions[0]["status"], "degraded")
+        self.assertIn("still owed", actions[0]["reason"])
+
+    def test_a_tick_that_owes_nothing_publishes_nothing_and_says_nothing(self) -> None:
+        """Replay: the pass is idempotent, and a settled occurrence is not re-published."""
+        self.start_dispatcher()
+        self.tick()
+        self.bind_source("worker", self.codex_journal("worker-1.jsonl", input_tokens=100, output_tokens=10))
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        accounted = self.usage_events()
+        self.assertEqual(len(accounted), 1)
+
+        ticks = [self.production_tick(), self.production_tick()]
+
+        self.assertEqual([self.usage_actions(tick) for tick in ticks], [[], []])
+        self.assertEqual(self.usage_events(), accounted)
+        self.assertEqual(self.staged_usage(), [])
 
     def test_the_occurrence_is_readable_by_kind_without_parsing_any_prose(self) -> None:
         self.start_dispatcher()

@@ -2186,13 +2186,18 @@ class TaskWriter:
             ) from None
         return {"action": "attempt_usage", "event_id": event.event_id, "replayed": replayed}
 
-    def finish_attempt_usage(self, *, role: str, reference: str) -> int:
-        """Publish every ``attempt.usage`` occurrence this card has staged but not appended.
+    def finish_attempt_usage(self, *, role: str, reference: str = "") -> int:
+        """Publish staged ``attempt.usage`` occurrences: this card's, or every card's.
 
         The recovery half of the durability order above. It finishes the exact staged record rather
         than a re-derived one, so a session file that has grown since cannot change what the phase
         was accounted for, and it is idempotent: a record already appended is simply gone from the
         pending set.
+
+        Without a ``reference`` it takes the whole pending set. That is the form the production tick
+        calls, because the card whose phase is owed an account may have gone Blocked or Done and be
+        nowhere the tick would otherwise look. A record that cannot be published is left exactly
+        where it is and stays owed.
         """
         self._role(role, {"dispatcher"})
         canon = self.board_host.canon
