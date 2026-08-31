@@ -414,7 +414,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         ):
             dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch", host=host)
 
-        self.assertEqual(host.sends, [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""])
+        self.assertEqual(host.sends, [f"{BRACKETED_PASTE_START}$retro {BRACKETED_PASTE_END}", ""])
         self.assertEqual(host.enters, [False, True])
         self.assertIn(("term-codex", tui_delivery.TUI_IDLE_TIMEOUT_MS), host.waits)
         # The skill itself is never typed the warm-reuse way into a head being brought up.
@@ -435,7 +435,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
                 "retro", None, "term-codex", self.workspace, mock.Mock(), "dispatch", host=host
             )
 
-        self.assertEqual(host.sends, [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""])
+        self.assertEqual(host.sends, [f"{BRACKETED_PASTE_START}$retro {BRACKETED_PASTE_END}", ""])
         self.assertEqual(host.enters, [False, True])
         self.assertNotIn("/retro", host.sends)
 
