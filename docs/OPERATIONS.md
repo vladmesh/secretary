@@ -231,6 +231,29 @@ service reports the actual incremental add/update/delete/reuse result in its own
 The ledger is not `ready` until the export has been published and made readable by that service user;
 an interrupted or failed handoff remains `pending` and is retried by the next upgrade.
 
+### Memory access from Claude and Codex
+
+Install and upgrade reconcile an installation-owned `po_memory` stdio MCP entry in the installation
+user's `~/.claude.json`, `~/.codex/config.toml`, and Orca's managed Codex home. Existing login state,
+preferences, and unrelated MCP entries are preserved. The command is an absolute path to
+`PRODUCT_ROOT/.venv/bin/secretary-memory-po-bridge`; its environment names only the selected installation's
+grant directory and loopback Memory URL. No bearer is stored in client configuration.
+
+The change applies when the next Claude or Codex process starts. Existing provider sessions retain the MCP
+servers with which they were launched and must be restarted to acquire `po_memory`. `secretary shell` and
+dispatcher-launched heads do not inherit that broad bridge: their launch command selects the direct HTTP
+Memory endpoint, and the launcher supplies the role-bound capability. For a worker or reviewer the server
+derives the same scope formula for every product: `project:<card-project> + product:secretary`.
+
+To inspect materialization without exposing credentials:
+
+```bash
+secretary upgrade --dry-run --no-pull --instance INSTANCE
+rg -n 'po_memory|secretary-memory-po-bridge' \
+  ~/.claude.json ~/.codex/config.toml \
+  ~/.config/orca/codex-runtime-home/home/config.toml
+```
+
 ### Read-only checkpoint and quiet-tick check
 
 Use an ordinary, already-authorized semantic board transition as the observation point; do not create a

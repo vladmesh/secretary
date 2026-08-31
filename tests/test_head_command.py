@@ -19,8 +19,10 @@ so — which matters, because the modules that own those things have to explain 
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,6 +53,27 @@ BINDING = (
     "SECRETARY_RUNTIME_ENV_FILE=/opt/inst/runtime.env SECRETARY_INSTANCE=/opt/inst "
     "TA_SECRETARY_REPO=/opt/checkout"
 )
+CLAUDE_MEMORY_CONFIG = json.dumps(
+    {
+        "mcpServers": {
+            "memory": {
+                "type": "http",
+                "url": "http://127.0.0.1:8077/mcp",
+                "headers": {"Authorization": "Bearer ${SECRETARY_MEMORY_ACCESS_TOKEN}"},
+            }
+        }
+    },
+    separators=(",", ":"),
+)
+CLAUDE_BASE = shlex.join(
+    [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--strict-mcp-config",
+        "--mcp-config",
+        CLAUDE_MEMORY_CONFIG,
+    ]
+)
 
 
 class ClaudeShapeTests(unittest.TestCase):
@@ -62,20 +85,20 @@ class ClaudeShapeTests(unittest.TestCase):
     def test_a_profile_that_pins_nothing_is_the_bare_invocation(self) -> None:
         self.assertEqual(
             self.render({"adapter": "claude"}),
-            "claude --dangerously-skip-permissions",
+            CLAUDE_BASE,
         )
 
     def test_a_pinned_model_is_named_on_the_command_line(self) -> None:
         self.assertEqual(
             self.render({"adapter": "claude", "model": "opus"}),
-            "claude --dangerously-skip-permissions --model opus",
+            f"{CLAUDE_BASE} --model opus",
         )
 
     def test_every_supported_effort_renders_and_the_default_renders_nothing(self) -> None:
         """`default` is the CLI's own choice and must not become an explicit `--effort default`."""
         for effort in sorted(CLAUDE_EFFORTS):
             with self.subTest(effort=effort):
-                expected = "claude --dangerously-skip-permissions --model opus"
+                expected = f"{CLAUDE_BASE} --model opus"
                 if effort != "default":
                     expected += f" --effort {effort}"
                 self.assertEqual(
@@ -91,14 +114,14 @@ class ClaudeShapeTests(unittest.TestCase):
     def test_a_prompt_is_carried_on_the_command_line_when_one_is_given(self) -> None:
         self.assertEqual(
             self.render({"adapter": "claude"}, prompt="/steward --card secretary-1"),
-            "claude --dangerously-skip-permissions '/steward --card secretary-1'",
+            f"{CLAUDE_BASE} '/steward --card secretary-1'",
         )
 
     def test_no_prompt_means_the_interactive_shape(self) -> None:
         """The dispatcher's shape: nothing of the task on a command line Orca stores, and
         `prompt_after_start` saying the caller still owes this head its prompt."""
         rendered = render_head_command({"adapter": "claude", "model": "opus"}, prompt=None)
-        self.assertEqual(rendered.command, "claude --dangerously-skip-permissions --model opus")
+        self.assertEqual(rendered.command, f"{CLAUDE_BASE} --model opus")
         self.assertTrue(rendered.prompt_after_start)
         self.assertEqual(rendered.adapter, "claude")
 
@@ -128,6 +151,8 @@ class CodexShapeTests(unittest.TestCase):
             self.render({"model": "gpt-5.5", "effort": "extra"}),
             "CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox "
             "--enable multi_agent_v2 -c features.multi_agent_v2.wait_agent_enabled=false "
+            "-c mcp_servers.po_memory.enabled=false "
+            "-c 'mcp_servers.memory.url=\"http://127.0.0.1:8077/mcp\"' "
             "-c 'mcp_servers.memory.bearer_token_env_var=\"SECRETARY_MEMORY_ACCESS_TOKEN\"' "
             "-m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' "
             f'-c \'projects."{self.workspace}".trust_level="trusted"\'',
@@ -206,12 +231,16 @@ class RoleEnvWrapperTests(unittest.TestCase):
                 ).command,
                 f'{BINDING} PYTHONPATH=/opt/checkout/src"${{PYTHONPATH:+:$PYTHONPATH}}" '
                 "python3 -P -m secretary.role_env exec --role worker -- /bin/sh -lc "
-                "'PATH=/opt/checkout/.venv/bin${PATH:+:$PATH}; export PATH; "
-                "claude --dangerously-skip-permissions'",
+                + shlex.quote("PATH=/opt/checkout/.venv/bin${PATH:+:$PATH}; export PATH; " + CLAUDE_BASE),
             )
 
     def test_the_runtime_entry_point_is_what_a_background_agent_is_launched_under(self) -> None:
         with mock.patch.dict(os.environ, LAUNCH_ENV, clear=True):
+            expected = (
+                f"{BINDING} PYTHONPATH=/opt/checkout/src python3 -P -m "
+                "triggered_agents.runtime.role_env exec --role steward -- /bin/sh -lc "
+                + shlex.quote(f"{CLAUDE_BASE} '/steward'")
+            )
             self.assertEqual(
                 render_head_command(
                     {"adapter": "claude"},
@@ -219,9 +248,7 @@ class RoleEnvWrapperTests(unittest.TestCase):
                     role="steward",
                     binding=RUNTIME_ROLE_ENV,
                 ).command,
-                f"{BINDING} PYTHONPATH=/opt/checkout/src python3 -P -m "
-                "triggered_agents.runtime.role_env exec --role steward -- /bin/sh -lc "
-                "'claude --dangerously-skip-permissions '\"'\"'/steward'\"'\"''",
+                expected,
             )
 
     def test_an_identity_is_rendered_beside_the_installation_binding(self) -> None:
@@ -260,7 +287,7 @@ class RoleEnvWrapperTests(unittest.TestCase):
         bind — and no identity to render into a command nothing launched."""
         self.assertEqual(
             render_head_command({"adapter": "claude"}).command,
-            "claude --dangerously-skip-permissions",
+            CLAUDE_BASE,
         )
         with self.assertRaisesRegex(HeadCommandError, "carries no identity"):
             render_head_command({"adapter": "claude"}, identity={"SECRETARY_OBSERVER_SPRINT": "s"})

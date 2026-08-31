@@ -539,6 +539,24 @@ class UpgradeStepTests(unittest.TestCase):
         )
         return replace(base, **overrides)
 
+    def test_memory_clients_are_materialized_for_the_runtime_owner(self):
+        context = self.context(
+            FakeUnitInstaller(),
+            runtime_home=Path("/home/operator"),
+            report=SimpleNamespace(data_dir=Path("/srv/secretary-data")),
+        )
+        outcome = SimpleNamespace(changed=3)
+        with mock.patch("secretary.upgrade.reconcile_clients", return_value=outcome) as reconcile:
+            result = upgrade.step_memory_clients(context)
+
+        self.assertEqual(result.status, "changed")
+        reconcile.assert_called_once_with(
+            context.product_root,
+            Path("/home/operator"),
+            Path("/srv/secretary-data"),
+            dry_run=False,
+        )
+
     def test_memory_restarts_when_only_the_code_moved(self):
         units = FakeUnitInstaller(active={"secretary-memory.service"})
 

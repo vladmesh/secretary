@@ -25,8 +25,6 @@ from pathlib import Path
 from typing import Any
 
 from secretary import _proc, role_skills, state_repo
-from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
-from secretary.memory.health import MemoryProbeError, probe_memory
 from secretary.automations import (
     AutomationError,
     OrcaAutomationClient,
@@ -69,6 +67,9 @@ from secretary.host_apply import (
     resolve_packaged,
     resolve_runtime_owner,
 )
+from secretary.memory.client_config import ClientConfigError, reconcile_clients
+from secretary.memory.health import MemoryProbeError, probe_memory
+from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
 from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from triggered_agents.runtime.paths import configured_product_root
 
@@ -278,7 +279,7 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
     reason = "; ".join(reasons)
     if context.dry_run:
         return StepResult(
-            "dependencies", "changed", f"would install the product dev extra into .venv: {reason}"
+            "dependencies", "changed", f"would reinstall the product dev extra into .venv: {reason}"
         )
     try:
         _proc.run(
@@ -300,6 +301,40 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
         return StepResult("dependencies", "failed", "pip install could not run")
     context.code_changed = True
     return StepResult("dependencies", "changed", f"installed the product dev extra into .venv: {reason}")
+
+
+def step_memory_clients(context: UpgradeContext) -> StepResult:
+    """Materialize PO bridge entries without changing provider login state."""
+    if not (context.product_root / ".venv").is_dir():
+        return StepResult("memory-clients", "skipped", "no .venv in the product checkout")
+    if context.runtime_home is None:
+        return StepResult("memory-clients", "failed", "installation runtime home is unresolved")
+    data_dir = context.report.data_dir
+    if data_dir is None:
+        return StepResult("memory-clients", "failed", "instance data directory is unresolved")
+    try:
+        result = reconcile_clients(
+            context.product_root,
+            context.runtime_home,
+            data_dir,
+            dry_run=context.dry_run,
+        )
+    except ClientConfigError as exc:
+        return StepResult("memory-clients", "failed", str(exc))
+    if not context.dry_run:
+        managed = context.runtime_home / ".config" / "orca" / "codex-runtime-home" / "home" / "config.toml"
+        user_codex = context.runtime_home / ".codex" / "config.toml"
+        claude = context.runtime_home / ".claude.json"
+        try:
+            _set_runtime_directory_owner(user_codex.parent, context.runtime_user)
+            for path in (managed, user_codex, claude):
+                _set_runtime_owner(path, context.runtime_user)
+        except GitError as exc:
+            return StepResult("memory-clients", "failed", str(exc))
+    if not result.changed:
+        return StepResult("memory-clients", "unchanged", "Claude and Codex PO bridge entries current")
+    action = "would reconcile" if context.dry_run else "reconciled"
+    return StepResult("memory-clients", "changed", f"{action} {result.changed} client config(s)")
 
 
 def _role_skills_manifest(context: UpgradeContext) -> Path:
@@ -339,9 +374,7 @@ def step_registries(context: UpgradeContext) -> StepResult:
     except MemoryPackError as exc:
         return StepResult("registries", "failed", f"memory pack: {exc}")
     sources = ", ".join(str(source.path) for source in registry.sources)
-    return StepResult(
-        "registries", "unchanged", f"{sources}, {canonical}, and memory pack are readable"
-    )
+    return StepResult("registries", "unchanged", f"{sources}, {canonical}, and memory pack are readable")
 
 
 def step_memory_pack(context: UpgradeContext) -> StepResult:
@@ -756,7 +789,9 @@ def step_memory(context: UpgradeContext) -> StepResult:
     try:
         data_dir = report.data_dir
         if data_dir is None:
-            return StepResult("memory", "failed", "authenticated probe: instance has no resolved data directory")
+            return StepResult(
+                "memory", "failed", "authenticated probe: instance has no resolved data directory"
+            )
         probe_memory(
             data_dir,
             runtime_handoff=lambda path: _set_runtime_owner(path, context.runtime_user),
@@ -840,6 +875,7 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_memory_pack,
     step_board_transport,
     step_dependencies,
+    step_memory_clients,
     step_head_registry,
     step_publish_head_registry,
     step_worktrees,
