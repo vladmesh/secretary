@@ -89,7 +89,11 @@ def bindings_dir(data_dir: str | Path | None = None) -> Path:
 
 
 def card_subject(reference: str, project: str) -> dict[str, str]:
-    return {"kind": "card", "ref": _reference(reference, "card reference"), "project": _name(project, "project")}
+    return {
+        "kind": "card",
+        "ref": _reference(reference, "card reference"),
+        "project": _name(project, "project"),
+    }
 
 
 def sprint_subject(reference: str, reservations: list[str] | tuple[str, ...]) -> dict[str, Any]:
@@ -141,17 +145,19 @@ def _scopes(role: str, subject: Mapping[str, Any], run: HeadRun) -> frozenset[st
         if kind != "card" or run.task_ref.kind != "card":
             raise MemoryAccessError("execution memory access requires a card HeadRun")
         project = _name(subject.get("project"), "project")
-        scopes = {f"project:{project}", PRODUCT_SECRETARY_SCOPE}
-        if project == "secretary":
-            scopes.add(PROJECT_SECRETARY_SCOPE)
-        return frozenset(scopes)
+        return frozenset({f"project:{project}", PRODUCT_SECRETARY_SCOPE})
     if role == "observer":
         if kind != "sprint" or run.task_ref.kind != "sprint":
             raise MemoryAccessError("observer memory access requires a sprint HeadRun")
         reservations = subject.get("reservations")
         if not isinstance(reservations, list):
             raise MemoryAccessError("observer memory access has malformed sprint reservations")
-        return frozenset({PRODUCT_SECRETARY_SCOPE, *(f"project:{_name(project, 'reservation')}" for project in reservations)})
+        return frozenset(
+            {
+                PRODUCT_SECRETARY_SCOPE,
+                *(f"project:{_name(project, 'reservation')}" for project in reservations),
+            }
+        )
     if role in {"curator", "retro", "steward"}:
         if kind != "standing" or run.task_ref.kind != "standing":
             raise MemoryAccessError("scheduled memory access requires a standing HeadRun")
@@ -202,7 +208,9 @@ def issue_grant(
     return MemoryAccessGrant(grant_id, token, identity)
 
 
-def resolve_token(token: object, *, data_dir: str | Path | None = None, now: float | None = None) -> MemoryReadIdentity | MemoryAccessDenial:
+def resolve_token(
+    token: object, *, data_dir: str | Path | None = None, now: float | None = None
+) -> MemoryReadIdentity | MemoryAccessDenial:
     if not isinstance(token, str):
         return MemoryAccessDenial("runtime_identity_missing")
     grant_id, separator, _ = token.partition(".")
@@ -211,7 +219,9 @@ def resolve_token(token: object, *, data_dir: str | Path | None = None, now: flo
     return _resolve_payload(_read_payload(grant_id, data_dir), token=token, now=now)
 
 
-def resolve_grant_id(grant_id: object, *, data_dir: str | Path | None = None, now: float | None = None) -> MemoryReadIdentity | MemoryAccessDenial:
+def resolve_grant_id(
+    grant_id: object, *, data_dir: str | Path | None = None, now: float | None = None
+) -> MemoryReadIdentity | MemoryAccessDenial:
     """Re-check a bearer-authenticated grant at each tool call.
 
     FastMCP has already verified the bearer secret.  The second check is intentionally
@@ -222,7 +232,9 @@ def resolve_grant_id(grant_id: object, *, data_dir: str | Path | None = None, no
     return _resolve_payload(_read_payload(grant_id, data_dir), token=None, now=now)
 
 
-def narrow(identity: MemoryReadIdentity, requested_scope: str | None) -> MemoryReadIdentity | MemoryAccessDenial:
+def narrow(
+    identity: MemoryReadIdentity, requested_scope: str | None
+) -> MemoryReadIdentity | MemoryAccessDenial:
     try:
         scope = normalize_scope(requested_scope)
     except MemoryAccessError:
@@ -260,7 +272,9 @@ def _read_payload(grant_id: str, data_dir: str | Path | None) -> dict[str, Any] 
     return payload if isinstance(payload, dict) else None
 
 
-def _resolve_payload(payload: dict[str, Any] | None, *, token: str | None, now: float | None) -> MemoryReadIdentity | MemoryAccessDenial:
+def _resolve_payload(
+    payload: dict[str, Any] | None, *, token: str | None, now: float | None
+) -> MemoryReadIdentity | MemoryAccessDenial:
     if payload is None:
         return MemoryAccessDenial("runtime_identity_unknown")
     if payload.get("version") != GRANT_VERSION or not isinstance(payload.get("grant_id"), str):

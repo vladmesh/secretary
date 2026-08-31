@@ -90,6 +90,7 @@ memory = [
 [project.scripts]
 secretary = "secretary.cli:main"
 secretary-memory-mcp = "secretary.memory_service:main"
+secretary-memory-po-bridge = "secretary.memory.po_bridge:main"
 secretary-memory-reindex = "secretary.memory_reindex:main"
 triggered-agents = "triggered_agents.__main__:main"
 

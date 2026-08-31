@@ -58,9 +58,11 @@ runtime-component tests/test_local_pty_supervisor.py
 runtime-component tests/test_runtime_deadline_contract.py
 integration-memory tests/test_memory_acceptance.py
 integration-memory tests/test_memory_access.py
+integration-memory tests/test_memory_client_config.py
 integration-memory tests/test_memory_flatten.py
 integration-memory tests/test_memory_health.py
 integration-memory tests/test_memory_pack.py
+integration-memory tests/test_memory_po_bridge.py
 integration-memory tests/test_memory_permissions.py
 integration-memory tests/test_memory_service.py
 unit tests/test_observer_metadata.py

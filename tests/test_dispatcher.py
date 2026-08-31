@@ -11223,7 +11223,8 @@ class DispatcherLauncherTests(unittest.TestCase):
 
         self.assertTrue(data["projects"][workspace]["hasTrustDialogAccepted"])
         self.assertEqual(data["theme"], "dark")
-        self.assertIn("claude --dangerously-skip-permissions --model opus", command)
+        self.assertIn("claude --dangerously-skip-permissions --strict-mcp-config", command)
+        self.assertIn("--model opus", command)
         self.assertIn("python3 -P -m secretary.role_env exec --role worker", command)
 
     def test_claude_command_pins_profile_effort(self) -> None:

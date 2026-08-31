@@ -273,7 +273,25 @@ if record.get('leaf') != before:
 
 def _render_claude(profile: Mapping[str, Any], *, prompt: str | None, workspace: str) -> str:
     del workspace
-    args = ["claude", "--dangerously-skip-permissions"]
+    memory = json.dumps(
+        {
+            "mcpServers": {
+                "memory": {
+                    "type": "http",
+                    "url": "http://127.0.0.1:8077/mcp",
+                    "headers": {"Authorization": "Bearer ${SECRETARY_MEMORY_ACCESS_TOKEN}"},
+                }
+            }
+        },
+        separators=(",", ":"),
+    )
+    args = [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--strict-mcp-config",
+        "--mcp-config",
+        memory,
+    ]
     model = profile.get("model")
     if model:
         args += ["--model", str(model)]
@@ -332,6 +350,10 @@ def _render_codex_tui(profile: Mapping[str, Any], *, prompt: str | None, workspa
         "multi_agent_v2",
         "-c",
         "features.multi_agent_v2.wait_agent_enabled=false",
+        "-c",
+        "mcp_servers.po_memory.enabled=false",
+        "-c",
+        'mcp_servers.memory.url="http://127.0.0.1:8077/mcp"',
         "-c",
         'mcp_servers.memory.bearer_token_env_var="SECRETARY_MEMORY_ACCESS_TOKEN"',
     ]

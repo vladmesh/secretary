@@ -1806,13 +1806,20 @@ the launched process, not in `runtime.env`. The service resolves the grant itsel
 HeadRun heartbeat on every read. Missing, expired, malformed, foreign or stopped bindings return a typed
 data-free denial. `caller`, `scope`, and a tool's other arguments are never authority.
 
-The resolved policy is deliberately small: an interactive PO has installation-wide read; a worker or
-reviewer has its card project plus `product:secretary` (and `project:secretary` when that card is the
-Secretary project); an observer has its sprint reservations plus `product:secretary`. The curator and
+The resolved policy is deliberately small: an interactive PO has installation-wide read; every worker or
+reviewer has exactly its card's `project:<id>` plus `product:secretary`, including when the project id is
+`secretary`; an observer has its sprint reservations plus `product:secretary`. The curator and
 retro standing duties have installation-wide read because canonical deduplication and retro's canon-hygiene
 review compare facts across projects. Steward has only `project:secretary` and `product:secretary` for its
 system watch. Other runtime roles have no memory-read grant. A requested scope only narrows that set.
 Search does not retry at a wider scope, and `memory_get` and `memory_list` use the same guard as search.
+
+An ordinary Claude or Codex session reaches that interactive identity through the installation-owned
+`secretary-memory-po-bridge` stdio MCP server in its user configuration. The bridge creates a PO HeadRun,
+keeps the bearer inside the bridge process, and deletes its heartbeat and grant on exit. Dispatcher-launched
+Claude heads use `--strict-mcp-config`; Codex heads disable `po_memory` with a command-line override. Both
+receive only the direct HTTP `memory` server and their launch-bound bearer, so project authority is selected
+by the server-side grant rather than by a client config or a model-supplied argument.
 
 The memory search log is an authorization audit, not a fact transcript: every record identifies its action
 and records the resolved role, subject, scopes and outcome with result ids/scores, never fact text, queries
