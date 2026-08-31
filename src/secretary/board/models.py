@@ -48,6 +48,40 @@ class EventKind(StrEnum):
     CARD_REPORTED = "card.reported"
     CARD_VERDICTED = "card.verdict"
     CARD_DECIDED = "card.decided"
+    # What one completed worker or review phase cost, read from the provider's own structured
+    # records at the moment the phase ended.  It is a Card fact with no backend mutation: the
+    # journal is the only place a finished phase's token counts are durable at all.
+    ATTEMPT_USAGE = "attempt.usage"
+
+
+class AttemptUsageOutcome(StrEnum):
+    """How the collection of one phase's provider usage ended.
+
+    Exactly one value says the counts are real. Every other value is a named degradation, so a
+    reader never has to tell "this phase cost nothing" apart from "nobody could read what it cost".
+    """
+
+    COLLECTED = "collected"
+    # The head ran on an adapter that publishes no structured usage records at all.
+    ADAPTER_UNSUPPORTED = "adapter_unsupported"
+    # The run never bound a provider session identity, so no journal belongs to it.
+    SESSION_UNAVAILABLE = "session_unavailable"
+    # The session is identified but its structured record source was never bound to this run.
+    SOURCE_UNAVAILABLE = "source_unavailable"
+    # The bound source exists and could not be read: permissions, a removed file, an I/O error.
+    SOURCE_UNREADABLE = "source_unreadable"
+    # The source was read and nothing in it parsed as a structured record.
+    RECORDS_MALFORMED = "records_malformed"
+    # The source parsed and carries no usage record for this phase.
+    USAGE_ABSENT = "usage_absent"
+
+
+# The five dimensions a phase is accounted in. A provider that reports none of a dimension leaves
+# it null: an absent dimension is never written down as a zero, because zero is a real count.
+TOKEN_DIMENSIONS = ("input", "cache_input", "cache_read_input", "output", "reasoning")
+
+ATTEMPT_USAGE_ROLES = ("worker", "reviewer")
+ATTEMPT_USAGE_PHASES = ("worker", "review")
 
 
 class ProductState(StrEnum):
@@ -247,6 +281,7 @@ class Event:
         if not isinstance(self.data, dict):
             raise ValueError("event data must be an object")
         _validate_control_marker_event(self.kind, self.entity_kind, self.reason, self.data)
+        _validate_attempt_usage_event(self.kind, self.entity_kind, self.data)
         # The journal spelling is UTC.  Keep the value canonical too, so an
         # event read back from its own record compares equal to the value that
         # was written, even when its caller supplied another aware timezone.
@@ -391,6 +426,65 @@ def _validate_control_marker_event(
     decision = data.get("decision")
     if decision not in {"release", "rework", "reslice"} or marker != f"decision:{decision}":
         raise ValueError("Card decision event has an unsupported marker payload")
+
+
+def _validate_attempt_usage_event(
+    kind: EventKind,
+    entity_kind: EntityKind,
+    data: dict[str, Any],
+) -> None:
+    """Keep an ``attempt.usage`` occurrence self-contained at the typed boundary.
+
+    The point of this event is that a reader never has to reopen a provider session file, so the
+    identity it binds — which round, which role, which head configuration, which provider session —
+    is a precondition of writing it rather than a convention its writers happen to follow.
+    """
+    if kind is not EventKind.ATTEMPT_USAGE:
+        return
+    if entity_kind is not EntityKind.CARD:
+        raise ValueError("attempt usage events require a Card subject")
+    attempt = data.get("attempt")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise ValueError("attempt usage events require a positive attempt number")
+    generation = data.get("report_generation")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        raise ValueError("attempt usage events require a positive report generation")
+    for name in ("attempt_id", "adapter"):
+        value = data.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"attempt usage events require a non-empty {name}")
+    if data.get("role") not in ATTEMPT_USAGE_ROLES:
+        raise ValueError("attempt usage role must be one of " + ", ".join(ATTEMPT_USAGE_ROLES))
+    if data.get("phase") not in ATTEMPT_USAGE_PHASES:
+        raise ValueError("attempt usage phase must be one of " + ", ".join(ATTEMPT_USAGE_PHASES))
+    model = data.get("model")
+    model_source = data.get("model_source")
+    # A model may legitimately be empty — an unpinned profile lets the CLI resolve one — but only
+    # under a source that says so, which is exactly the routing journal's own rule.
+    if not isinstance(model, str) or not isinstance(model_source, str) or not model_source:
+        raise ValueError("attempt usage events carry a model string and where it was resolved")
+    session_id = data.get("session_id")
+    if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
+        raise ValueError("attempt usage session id must be a non-empty string or null")
+    if session_id is None and not str(data.get("session_id_reason") or "").strip():
+        # A typed absence is a fact; a blank one is a reader guessing.
+        raise ValueError("an absent attempt usage session id must record why it is absent")
+    outcome = data.get("outcome")
+    if not isinstance(outcome, str) or outcome not in set(AttemptUsageOutcome):
+        raise ValueError("attempt usage events require a declared collection outcome")
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict) or set(tokens) != set(TOKEN_DIMENSIONS):
+        raise ValueError("attempt usage events carry exactly the declared token dimensions")
+    for name, value in tokens.items():
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"attempt usage token dimension {name} must be a non-negative integer or null")
+    collected = outcome == AttemptUsageOutcome.COLLECTED
+    if collected and all(value is None for value in tokens.values()):
+        raise ValueError("a collected attempt usage outcome reports at least one token dimension")
+    if not collected and any(value is not None for value in tokens.values()):
+        raise ValueError("a degraded attempt usage outcome reports no token totals")
 
 
 def _format_time(value: datetime) -> str:
