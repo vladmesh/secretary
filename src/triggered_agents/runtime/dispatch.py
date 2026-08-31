@@ -1105,6 +1105,17 @@ class _TickReports:
         )
 
 
+def _codex_skill_prompt(skill: str) -> str:
+    """Render the portable slash-named automation skill for Codex's composer."""
+    if not skill.startswith("/"):
+        return skill
+    name, separator, arguments = skill[1:].partition(" ")
+    # A bare `$name` opens Codex's skill picker and consumes Enter by selecting the match instead
+    # of submitting a turn.  The trailing space accepts the exact mention before the delivery
+    # path's one Enter; an invocation with arguments already has that separator.
+    return f"${name} {arguments}" if separator else f"${name} "
+
+
 def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *, host: SessionHost) -> None:
     """Put a service head's skill in front of it, on the product's one interactive delivery path.
 
@@ -1116,7 +1127,7 @@ def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *, host:
     """
     deliver_interactive_prompt(
         handle,
-        skill,
+        _codex_skill_prompt(skill),
         host=host,
         adapter="codex",
         confirm=lambda sent_at: _codex_turn_after(workspace, sent_at),
@@ -1783,7 +1794,7 @@ def _supervised_bring_up(
     # An adapter that takes its prompt on its command line is launched with it, as it is on a pane;
     # one that starts with an empty composer is pointed at its skill across the same boundary that
     # raised it. Neither shape touches a terminal API.
-    pointer = NudgePointer.line(cmd.skill) if cmd.prompt_after_start else None
+    pointer = NudgePointer.line(_codex_skill_prompt(cmd.skill)) if cmd.prompt_after_start else None
     receipt = runtime.start(
         spec,
         ws,
