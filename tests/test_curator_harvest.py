@@ -316,6 +316,24 @@ class CuratorHarvestTests(unittest.TestCase):
         self.assertEqual([entry["session_id"] for entry in batch["sessions"]], ["review"])
         self.assertEqual(set(cutoff["pending"]), {str(review)})
 
+    def test_unknown_selector_is_reserved_and_isolated_from_projects(self) -> None:
+        unknown, alpha = self.root / "unknown.jsonl", self.root / "alpha.jsonl"
+        unknown.write_text(claude("owner unresolved"), encoding="utf-8")
+        alpha.write_text(claude("alpha conclusion"), encoding="utf-8")
+        sessions = [
+            {"head": "claude", "path": str(unknown), "session_id": "u", "cwd": "/tmp", "route": "unknown"},
+            {"head": "claude", "path": str(alpha), "session_id": "a", "cwd": "/alpha", "route": "alpha"},
+        ]
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions), mock.patch(
+            "triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha"}
+        ):
+            batch = harvest.harvest(self.state, self.identity, self.limits, project="unknown")
+            cutoff = harvest.baseline_cutoff(self.state, "unknown", self.limits)
+
+        self.assertEqual(batch["project"], "unknown")
+        self.assertEqual([entry["session_id"] for entry in batch["sessions"]], ["u"])
+        self.assertEqual(set(cutoff["pending"]), {str(unknown)})
+
     def test_backlog_summary_is_metadata_only_and_state_free(self) -> None:
         transcript, beta, memory = self.root / "alpha.jsonl", self.root / "beta.jsonl", self.root / "memory.md"
         transcript.write_text(claude("a secret transcript"), encoding="utf-8")

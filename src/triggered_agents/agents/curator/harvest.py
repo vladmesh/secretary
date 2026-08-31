@@ -37,10 +37,10 @@ def selector(project: str | None) -> str:
 
 
 def validate_project(project: str | None) -> str | None:
-    """Accept a canonical project id or the reserved PO-review selector."""
+    """Accept a canonical project id or a reserved non-project route selector."""
     if project is None:
         return None
-    if project == discover.ROUTE_PO_REVIEW:
+    if project in {discover.ROUTE_PO_REVIEW, discover.ROUTE_UNKNOWN}:
         return project
     if project not in discover.registered_project_ids():
         raise PendingError(f"unknown curator selector {project!r}")
@@ -659,7 +659,7 @@ def baseline_cutoff(st, project: str, limits: Limits | None = None) -> dict:
     """
     project = validate_project(project)
     if project is None:
-        raise PendingError("curator baseline requires one project or review:po selector")
+        raise PendingError("curator baseline requires one project, unknown, or review:po selector")
     mark, limits = _baseline_watermark(st), limits or Limits.from_env()
     sources, pending = _baseline_sources(project), {}
     for key, descriptor in sorted(sources.items()):
@@ -687,7 +687,7 @@ def baseline_pending(st, identity: dict, project: str, batch_id: str) -> dict:
     """Validate an existing matching pending batch as a selector-only settlement plan."""
     project = validate_project(project)
     if project is None:
-        raise PendingError("curator baseline requires one project or review:po selector")
+        raise PendingError("curator baseline requires one project, unknown, or review:po selector")
     record = read_pending(st, identity, project)
     if record["batch_id"] != batch_id:
         raise PendingError("curator baseline batch evidence does not match pending state")
