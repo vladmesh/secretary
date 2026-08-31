@@ -16,6 +16,9 @@ from secretary.codex_provider_events import (
 )
 from secretary.config import DataDirError, instance_data_dir
 from secretary.dispatch.attempt_usage import (
+    ATTEMPT_USAGE_KIND,
+)
+from secretary.dispatch.attempt_usage import (
     attempt_usage_data as _attempt_usage_data,
 )
 from secretary.dispatch.attempt_usage import (
@@ -23,6 +26,9 @@ from secretary.dispatch.attempt_usage import (
 )
 from secretary.dispatch.attempt_usage import (
     collect_usage as _collect_usage,
+)
+from secretary.dispatch.attempt_usage import (
+    durable_phase_boundary as _durable_phase_boundary,
 )
 from secretary.dispatch.attempt_usage import (
     provider_usage_source as _provider_usage_source,
@@ -634,6 +640,10 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        # A usage occurrence staged by a tick that did not live to append it is an obligation this
+        # card still owes. Publish it before anything else reads the journal: it is the durable
+        # boundary the next phase on the same provider session subtracts.
+        self.finish_attempt_usage_obligations(ref)
         # A launch intent can outlive its tick. Re-establish the exact provider source before
         # adoption reads a heartbeat, not after a mismatched session was attributed to this card.
         record = records.get(ref)
@@ -5689,29 +5699,54 @@ class DispatcherRuntime:
             request_id=request_id,
         )
 
+    def finish_attempt_usage_obligations(self, ref: str) -> None:
+        """Publish any usage occurrence this card staged but did not get appended.
+
+        The recovery half of the durability order: a phase may advance past a staged obligation, so
+        something has to finish it, and it has to finish that exact staged record rather than a new
+        read of a session file that has moved on since. Failing here changes nothing — the
+        obligation is durable and stays owed until a later pass publishes it.
+        """
+        try:
+            self.writer.finish_attempt_usage(role="dispatcher", reference=ref)
+        except Exception:  # noqa: BLE001 - a staged obligation survives its own recovery failing
+            return
+
     def record_attempt_usage(self, ref: str, record: DispatcherRecord, *, role: str, attempt_id: str) -> None:
-        """Persist what the phase that just finished cost, and never let that decide anything.
+        """Persist what the phase that just finished cost, before the card can advance past it.
 
         Called on the acceptance paths themselves — a terminal worker report, a reviewer verdict —
         because that is the last point at which the exact run that did the work is still on the
-        record with its bound provider session. Collection is fail-open by construction: a session
-        that was never bound, a journal that cannot be read and an audit that refuses the write all
-        leave the card exactly where the report or verdict was taking it.
+        record with its bound provider session.
+
+        Two failures, and they are not the same failure. Reading the provider never decides
+        anything: an unbound session, an unreadable journal and malformed records are named degraded
+        outcomes inside the occurrence, and the report or verdict is accepted exactly as it would
+        have been. Failing to make the occurrence durable is an audit failure, and this method
+        refuses to swallow it: the control event and the transition may not outrun the account of
+        the phase they close. A staged-but-unappended obligation is durable enough to advance past,
+        because `finish_attempt_usage_obligations` publishes that exact record later.
         """
         try:
             self._write_attempt_usage(ref, record, role=role, attempt_id=attempt_id)
-        except Exception:  # noqa: BLE001 - phase cost is telemetry; it never rejects a report
+        except TaskError as exc:
+            if exc.code != "audit_pending":
+                raise
+            # The exact occurrence is staged in the append-only audit. The phase is accounted for;
+            # only its publication is outstanding, and a later tick finishes it.
             return
 
     def _write_attempt_usage(self, ref: str, record: DispatcherRecord, *, role: str, attempt_id: str) -> None:
         phase = "worker" if role == WORKER_ROLE else "review"
         journal_role = WORKER if role == WORKER_ROLE else REVIEWER
-        attempt = record.attempt_round or self._journal_round(ref)
-        generation = record.report_generation
-        if attempt < 1 or generation < 1:
-            # Without a round there is nothing to bind the occurrence to, and an event that cannot
-            # name its phase is worse than none.
-            return
+        # An obligation from an earlier phase is published first: it is this phase's own starting
+        # boundary, and a boundary that is still staged is a boundary the read below cannot see.
+        self.finish_attempt_usage_obligations(ref)
+        # A round is what binds the occurrence to a phase. Every accepted terminal report has one;
+        # a record rebuilt without one still owes the phase an account, so the first round answers
+        # for it rather than the occurrence being dropped.
+        attempt = max(record.attempt_round or self._journal_round(ref), 1)
+        generation = max(record.report_generation, 1)
         snapshot = dict(record.worker_run if role == WORKER_ROLE else record.review_run)
         lifecycle = dict(record.worker_head_run if role == WORKER_ROLE else record.review_head_run)
         if not snapshot:
@@ -5729,6 +5764,14 @@ class DispatcherRuntime:
         collection = _collect_usage(
             adapter=run.adapter,
             source=_provider_usage_source(lifecycle, adapter=run.adapter),
+            # One phase-accounting rule for both adapters: this phase owns what the session spent
+            # after the boundary the previous phase on that same session made durable. A retained
+            # worker resumed into a second round therefore never pays for its first one again.
+            baseline=_durable_phase_boundary(
+                self.audit.events(ref, kind=ATTEMPT_USAGE_KIND),
+                adapter=run.adapter,
+                session_id=run.session_id or "",
+            ),
         )
         data = _attempt_usage_data(
             attempt=attempt,

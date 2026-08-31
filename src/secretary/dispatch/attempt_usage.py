@@ -5,12 +5,19 @@ configuration and the lifecycle run holds the bound provider source. This module
 that turns those two into a token account, and it is deliberately the whole adapter-specific part
 of the feature — everything downstream of it is one typed board event.
 
-Two provider shapes, two aggregation rules, and the difference matters:
+Both providers write a journal that describes a *session*, not a phase, so the module reads a
+session total and then subtracts the boundary the previous phase on that same session already made
+durable. One rule for both adapters: a phase owns the usage after the previous durable terminal
+boundary for its provider session and through its own terminal boundary, and a session nobody has
+accounted for yet starts at zero. That is what keeps a retained worker — the same conversation
+resumed for a second round — from being charged twice for its first round.
+
+The two session shapes still differ in how the running total is obtained, and the difference matters:
 
 * Codex writes a ``token_count`` event whose ``total_token_usage`` is the session's running total.
-  Summing those snapshots would multiply one phase's tokens by the number of turns, so the last
-  well-formed snapshot *is* the phase total and a repeated or replayed snapshot costs nothing.
-* Claude writes one ``usage`` object per assistant message, so the phase total is their sum. A
+  Summing those snapshots would multiply the session's tokens by the number of turns, so the last
+  well-formed snapshot *is* the session total and a repeated or replayed snapshot costs nothing.
+* Claude writes one ``usage`` object per assistant message, so the session total is their sum. A
   streamed message is written more than once and a resumed session repeats earlier messages, so
   each message id contributes its last usage object exactly once.
 
@@ -26,12 +33,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from secretary.board.models import TOKEN_DIMENSIONS, AttemptUsageOutcome
+from secretary.board.models import TOKEN_DIMENSIONS, AttemptUsageOutcome, EventKind
 
 CODEX_ADAPTER = "codex"
 CLAUDE_ADAPTER = "claude"
 CODEX_SOURCE_KIND = "codex_session_event_jsonl"
 CLAUDE_SOURCE_KIND = "claude_session_jsonl"
+ATTEMPT_USAGE_KIND = EventKind.ATTEMPT_USAGE.value
 # Which fan-out policy key holds the structured record source for each adapter. The same split the
 # routing journal uses to resolve a session id, so both read one run the same way.
 SOURCE_POLICY_KEYS = {
@@ -41,6 +49,15 @@ SOURCE_POLICY_KEYS = {
 SOURCE_KINDS = {
     CODEX_ADAPTER: CODEX_SOURCE_KIND,
     CLAUDE_ADAPTER: CLAUDE_SOURCE_KIND,
+}
+# The Codex snapshot's own spelling of the dimensions it reports. It publishes both cache sides:
+# the tokens written into the cache and the tokens served from it.
+CODEX_TOKEN_FIELDS = {
+    "input": "input_tokens",
+    "cache_input": "cache_write_input_tokens",
+    "cache_read_input": "cached_input_tokens",
+    "output": "output_tokens",
+    "reasoning": "reasoning_output_tokens",
 }
 # The Claude usage object's own spelling of the dimensions it reports. Reasoning tokens are absent
 # from it, and stay unavailable rather than being folded into output.
@@ -54,7 +71,7 @@ CLAUDE_TOKEN_FIELDS = {
 
 @dataclass(frozen=True)
 class TokenTotals:
-    """One phase's account, with ``None`` for a dimension the provider does not report."""
+    """One account, with ``None`` for a dimension the provider does not report."""
 
     input: int | None = None
     cache_input: int | None = None
@@ -69,6 +86,27 @@ class TokenTotals:
     def empty(self) -> bool:
         return all(getattr(self, name) is None for name in TOKEN_DIMENSIONS)
 
+    @classmethod
+    def from_json(cls, source: Mapping[str, Any] | None) -> TokenTotals | None:
+        """One recorded account, or ``None`` when the record carries no usable dimension."""
+        if not isinstance(source, Mapping):
+            return None
+        values = {name: _count(source, name) for name in TOKEN_DIMENSIONS}
+        if all(value is None for value in values.values()):
+            return None
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class SessionUsage:
+    """What a provider journal says about the whole session it describes."""
+
+    totals: TokenTotals = field(default_factory=TokenTotals)
+    # How many usable structured usage records the aggregation counted.
+    records: int = 0
+    # How many records declared themselves usage records and carried no usable schema.
+    invalid: int = 0
+
 
 @dataclass(frozen=True)
 class UsageCollection:
@@ -77,11 +115,17 @@ class UsageCollection:
     outcome: AttemptUsageOutcome
     detail: str = ""
     source_kind: str = ""
-    # How many provider usage records the aggregation actually counted, and how many source lines
-    # were unparseable. Both are evidence about the read, not about the phase.
+    # How many provider usage records the aggregation actually counted, and how many source records
+    # were unusable. Both are evidence about the read, not about the phase.
     records: int = 0
     skipped_records: int = 0
+    # What the phase owns: the session total at its terminal boundary minus the boundary the
+    # previous phase on this session left behind.
     tokens: TokenTotals = field(default_factory=TokenTotals)
+    # The session total this phase ends at, which is the next phase's starting boundary.
+    session_totals: TokenTotals = field(default_factory=TokenTotals)
+    # The boundary this phase started from: zero for a session nobody has accounted for yet.
+    baseline: TokenTotals = field(default_factory=TokenTotals)
 
     @property
     def collected(self) -> bool:
@@ -97,8 +141,74 @@ def provider_usage_source(lifecycle_run: Mapping[str, Any] | None, *, adapter: s
     return dict(source) if isinstance(source, Mapping) else {}
 
 
-def collect_usage(*, adapter: str, source: Mapping[str, Any] | None) -> UsageCollection:
+def durable_phase_boundary(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    adapter: str,
+    session_id: str,
+) -> TokenTotals | None:
+    """The last durable session total already accounted for on this provider session.
+
+    Read from the card's own committed ``attempt.usage`` occurrences, in append order, because the
+    append-only audit is the only place a previous phase's boundary is durable at all: a dispatcher
+    record can be lost and rebuilt, and a retained worker outlives several of them.
+    """
+    if not session_id:
+        return None
+    boundary: TokenTotals | None = None
+    for event in events:
+        if not isinstance(event, Mapping) or event.get("kind") != ATTEMPT_USAGE_KIND:
+            continue
+        data = event.get("data")
+        if not isinstance(data, Mapping):
+            continue
+        if data.get("session_id") != session_id or data.get("adapter") != adapter:
+            continue
+        totals = TokenTotals.from_json(data.get("session_totals"))
+        if totals is not None:
+            boundary = totals
+    return boundary
+
+
+def phase_interval(
+    session_totals: TokenTotals,
+    baseline: TokenTotals | None,
+) -> tuple[TokenTotals, TokenTotals, bool]:
+    """Split a session total into the interval this phase owns and the boundary it started from.
+
+    Returns ``(phase, baseline, rewound)``. ``rewound`` says the session total came back lower than
+    a boundary already made durable — a replaced or rotated session file — in which case the phase
+    owns nothing rather than a negative or an invented number.
+    """
+    phase: dict[str, int | None] = {}
+    start: dict[str, int | None] = {}
+    rewound = False
+    for name in TOKEN_DIMENSIONS:
+        current = getattr(session_totals, name)
+        if current is None:
+            phase[name] = start[name] = None
+            continue
+        previous = getattr(baseline, name) if baseline is not None else None
+        previous = 0 if previous is None else previous
+        start[name] = previous
+        if current < previous:
+            rewound = True
+            phase[name] = 0
+            continue
+        phase[name] = current - previous
+    return TokenTotals(**phase), TokenTotals(**start), rewound
+
+
+def collect_usage(
+    *,
+    adapter: str,
+    source: Mapping[str, Any] | None,
+    baseline: TokenTotals | None = None,
+) -> UsageCollection:
     """Read one finished phase's usage out of its bound provider source.
+
+    ``baseline`` is the previous durable boundary for this same provider session, so what comes back
+    is the interval this phase owns rather than everything the session has ever spent.
 
     Never raises: every way this can fail is one of the declared degraded outcomes, because the
     caller runs on the path that accepts a worker report or a reviewer verdict.
@@ -131,7 +241,7 @@ def collect_usage(*, adapter: str, source: Mapping[str, Any] | None) -> UsageCol
             source_kind=kind,
         )
     try:
-        records, skipped = read_jsonl(Path(path))
+        records, unparsed = read_jsonl(Path(path))
     except OSError as exc:
         return UsageCollection(
             AttemptUsageOutcome.SOURCE_UNREADABLE,
@@ -139,19 +249,39 @@ def collect_usage(*, adapter: str, source: Mapping[str, Any] | None) -> UsageCol
             source_kind=kind,
         )
     aggregate = codex_usage if adapter == CODEX_ADAPTER else claude_usage
-    totals, counted = aggregate(records)
-    if counted:
+    session = aggregate(records)
+    skipped = unparsed + session.invalid
+    if session.records:
+        tokens, start, rewound = phase_interval(session.totals, baseline)
         return UsageCollection(
             AttemptUsageOutcome.COLLECTED,
+            detail=(
+                f"the {adapter} session total fell below the durable boundary of an earlier phase; "
+                "this phase is accounted as owning none of it"
+                if rewound
+                else ""
+            ),
             source_kind=kind,
-            records=counted,
+            records=session.records,
             skipped_records=skipped,
-            tokens=totals,
+            tokens=tokens,
+            session_totals=session.totals,
+            baseline=start,
         )
-    if skipped and not records:
+    if session.invalid:
         return UsageCollection(
             AttemptUsageOutcome.RECORDS_MALFORMED,
-            detail=f"{skipped} {adapter} session record(s) could not be parsed and none were usable",
+            detail=(
+                f"{session.invalid} {adapter} record(s) declare a usage record whose schema is not "
+                "the one this adapter publishes, and none were usable"
+            ),
+            source_kind=kind,
+            skipped_records=skipped,
+        )
+    if unparsed and not records:
+        return UsageCollection(
+            AttemptUsageOutcome.RECORDS_MALFORMED,
+            detail=f"{unparsed} {adapter} session record(s) could not be parsed and none were usable",
             source_kind=kind,
             skipped_records=skipped,
         )
@@ -182,56 +312,55 @@ def read_jsonl(path: Path) -> tuple[list[Any], int]:
     return records, skipped
 
 
-def codex_usage(records: Iterable[Any]) -> tuple[TokenTotals, int]:
+def codex_usage(records: Iterable[Any]) -> SessionUsage:
     """Aggregate Codex ``token_count`` events, whose totals are cumulative for the session.
 
-    Returns the totals and how many snapshots were seen. The count is evidence about the read; the
-    totals come from the last snapshot alone, so a journal replayed or re-read from its start
-    reports the same account rather than a multiple of it.
+    The session total comes from the last well-formed snapshot alone, so a journal replayed or
+    re-read from its start reports the same account rather than a multiple of it. A record that
+    announces itself as a ``token_count`` and then carries no usable total is counted as a malformed
+    structured record: a provider schema change must not read as a session that spent nothing.
     """
     latest: dict[str, Any] | None = None
     seen = 0
+    invalid = 0
     for record in records:
-        snapshot = _codex_snapshot(record)
+        snapshot, malformed = _codex_snapshot(record)
         if snapshot is None:
+            invalid += malformed
             continue
         seen += 1
         latest = snapshot
     if latest is None:
-        return TokenTotals(), 0
-    return (
-        TokenTotals(
-            input=_count(latest, "input_tokens"),
-            # Codex reports the cached share of its input and never a separate cache write, so the
-            # cache-input dimension stays unavailable instead of being invented as zero.
-            cache_input=None,
-            cache_read_input=_count(latest, "cached_input_tokens"),
-            output=_count(latest, "output_tokens"),
-            reasoning=_count(latest, "reasoning_output_tokens"),
-        ),
-        seen,
+        return SessionUsage(invalid=invalid)
+    return SessionUsage(
+        totals=TokenTotals(**{name: _count(latest, field) for name, field in CODEX_TOKEN_FIELDS.items()}),
+        records=seen,
+        invalid=invalid,
     )
 
 
-def claude_usage(records: Iterable[Any]) -> tuple[TokenTotals, int]:
+def claude_usage(records: Iterable[Any]) -> SessionUsage:
     """Aggregate Claude assistant ``usage`` objects, which are per message and additive.
 
-    Returns the totals and how many distinct messages were counted. A message id contributes once:
-    its last usage object, because a streamed message is written repeatedly and only the final
-    record carries the finished counts. A dimension no counted message reported stays unavailable.
+    A message id contributes once: its last usage object, because a streamed message is written
+    repeatedly and only the final record carries the finished counts. A dimension no counted message
+    reported stays unavailable, and an assistant record whose declared ``usage`` is not the object
+    this adapter publishes is a malformed structured record rather than a message that cost nothing.
     """
     latest: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    invalid = 0
     for index, record in enumerate(records):
-        usage = _claude_usage_object(record)
+        usage, malformed = _claude_usage_object(record)
         if usage is None:
+            invalid += malformed
             continue
         key = _claude_message_key(record, index)
         if key not in latest:
             order.append(key)
         latest[key] = usage
     if not order:
-        return TokenTotals(), 0
+        return SessionUsage(invalid=invalid)
     sums: dict[str, int | None] = dict.fromkeys(CLAUDE_TOKEN_FIELDS, None)
     for key in order:
         usage = latest[key]
@@ -241,7 +370,7 @@ def claude_usage(records: Iterable[Any]) -> tuple[TokenTotals, int]:
                 continue
             sums[name] = value if sums[name] is None else (sums[name] or 0) + value
     # Claude's session records expose no separate reasoning-token dimension.
-    return TokenTotals(**sums, reasoning=None), len(order)
+    return SessionUsage(totals=TokenTotals(**sums, reasoning=None), records=len(order), invalid=invalid)
 
 
 def attempt_usage_data(
@@ -280,6 +409,8 @@ def attempt_usage_data(
         "records": int(collection.records),
         "skipped_records": int(collection.skipped_records),
         "tokens": collection.tokens.to_json(),
+        "session_totals": collection.session_totals.to_json(),
+        "phase_baseline": collection.baseline.to_json(),
     }
 
 
@@ -293,26 +424,36 @@ def attempt_usage_reason(data: Mapping[str, Any]) -> str:
     return f"{line} — {detail}" if detail else line
 
 
-def _codex_snapshot(record: Any) -> dict[str, Any] | None:
+def _codex_snapshot(record: Any) -> tuple[dict[str, Any] | None, bool]:
+    """One session total, and whether the record declared a total it did not actually carry."""
     if not isinstance(record, dict):
-        return None
+        return None, False
     payload = record.get("payload")
     if not isinstance(payload, dict) or payload.get("type") != "token_count":
-        return None
+        return None, False
     info = payload.get("info")
     holder = info if isinstance(info, dict) else payload
-    total = holder.get("total_token_usage")
-    return dict(total) if isinstance(total, dict) else None
+    total = holder.get("total_token_usage") if isinstance(holder, dict) else None
+    if not isinstance(total, dict):
+        return None, True
+    if not any(_count(total, field) is not None for field in CODEX_TOKEN_FIELDS.values()):
+        return None, True
+    return dict(total), False
 
 
-def _claude_usage_object(record: Any) -> dict[str, Any] | None:
+def _claude_usage_object(record: Any) -> tuple[dict[str, Any] | None, bool]:
+    """One message's usage object, and whether the record declared one it did not actually carry."""
     if not isinstance(record, dict) or record.get("type") != "assistant":
-        return None
+        return None, False
     message = record.get("message")
-    if not isinstance(message, dict):
-        return None
+    if not isinstance(message, dict) or "usage" not in message:
+        return None, False
     usage = message.get("usage")
-    return dict(usage) if isinstance(usage, dict) else None
+    if not isinstance(usage, dict):
+        return None, True
+    if not any(_count(usage, field) is not None for field in CLAUDE_TOKEN_FIELDS.values()):
+        return None, True
+    return dict(usage), False
 
 
 def _claude_message_key(record: Mapping[str, Any], index: int) -> str:

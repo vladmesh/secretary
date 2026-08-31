@@ -70,7 +70,9 @@ class AttemptUsageOutcome(StrEnum):
     SOURCE_UNAVAILABLE = "source_unavailable"
     # The bound source exists and could not be read: permissions, a removed file, an I/O error.
     SOURCE_UNREADABLE = "source_unreadable"
-    # The source was read and nothing in it parsed as a structured record.
+    # The source was read and its structured usage records were not usable: a record that declared
+    # itself a usage record and carried a schema this adapter does not publish, or a journal in
+    # which nothing parsed at all. Distinct from USAGE_ABSENT, which is a journal that parsed.
     RECORDS_MALFORMED = "records_malformed"
     # The source parsed and carries no usage record for this phase.
     USAGE_ABSENT = "usage_absent"
@@ -79,6 +81,10 @@ class AttemptUsageOutcome(StrEnum):
 # The five dimensions a phase is accounted in. A provider that reports none of a dimension leaves
 # it null: an absent dimension is never written down as a zero, because zero is a real count.
 TOKEN_DIMENSIONS = ("input", "cache_input", "cache_read_input", "output", "reasoning")
+
+# The three accounts one occurrence carries, each in the same five dimensions: what this phase
+# owns, the running session total it ended at, and the durable boundary it started from.
+ATTEMPT_USAGE_ACCOUNTS = ("tokens", "session_totals", "phase_baseline")
 
 ATTEMPT_USAGE_ROLES = ("worker", "reviewer")
 ATTEMPT_USAGE_PHASES = ("worker", "review")
@@ -472,19 +478,25 @@ def _validate_attempt_usage_event(
     outcome = data.get("outcome")
     if not isinstance(outcome, str) or outcome not in set(AttemptUsageOutcome):
         raise ValueError("attempt usage events require a declared collection outcome")
-    tokens = data.get("tokens")
-    if not isinstance(tokens, dict) or set(tokens) != set(TOKEN_DIMENSIONS):
-        raise ValueError("attempt usage events carry exactly the declared token dimensions")
-    for name, value in tokens.items():
-        if value is None:
-            continue
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"attempt usage token dimension {name} must be a non-negative integer or null")
     collected = outcome == AttemptUsageOutcome.COLLECTED
-    if collected and all(value is None for value in tokens.values()):
-        raise ValueError("a collected attempt usage outcome reports at least one token dimension")
-    if not collected and any(value is not None for value in tokens.values()):
-        raise ValueError("a degraded attempt usage outcome reports no token totals")
+    # The interval this phase owns, the session total it ended at, and the boundary it started
+    # from. The last two are what makes the interval checkable and what the next phase on the same
+    # provider session subtracts, so they are as much a part of the occurrence as the interval.
+    for account in ATTEMPT_USAGE_ACCOUNTS:
+        counts = data.get(account)
+        if not isinstance(counts, dict) or set(counts) != set(TOKEN_DIMENSIONS):
+            raise ValueError(f"attempt usage {account} carry exactly the declared token dimensions")
+        for name, value in counts.items():
+            if value is None:
+                continue
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(
+                    f"attempt usage {account} dimension {name} must be a non-negative integer or null"
+                )
+        if collected and all(value is None for value in counts.values()):
+            raise ValueError(f"a collected attempt usage outcome reports at least one {account} dimension")
+        if not collected and any(value is not None for value in counts.values()):
+            raise ValueError("a degraded attempt usage outcome reports no token totals")
 
 
 def _format_time(value: datetime) -> str:
