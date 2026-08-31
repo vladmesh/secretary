@@ -10882,6 +10882,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 "account": "openai-subscription",
                 "session_id": None,
                 "session_id_reason": "",
+                "launch_id": "",
                 "prompt_path": "",
                 "prompt_version": "",
             },
