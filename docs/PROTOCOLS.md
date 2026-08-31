@@ -1178,6 +1178,67 @@ a new attempt id at that moment, otherwise a repeat claim would land on an alrea
 id, return the old event and leave the card in Ready. The previous attempt's heads are stopped, because the
 new round enters the same workspace.
 
+### What a finished phase cost
+
+Every completed worker phase and every completed review phase leaves one `attempt.usage` event on the
+card, so phase cost is answerable from the Secretary journal alone and nobody has to reopen a provider
+session file to get it. It is a typed board protocol event (`kind: "attempt.usage"`, a Card subject) with
+no backend mutation, written through the same append-only audit as every other event: the normal
+board/audit export therefore carries it, and a reader selects it by kind rather than by parsing marker
+prose. There is no backfill. Cards that finished before this event existed have no usage record, and that
+absence is not a zero.
+
+**When it is written.** On the acceptance path itself, and only for an accepted terminal outcome: a
+`report:done` or `report:blocked` the dispatcher accepts, and a `review:green` or `review:red` verdict it
+acts on. A done report bounced at an already-rejected checkout is not an acceptance and writes nothing.
+The write sits where the exact completed run is still on the record with its bound provider session — a
+retained worker before its freeze, a reviewer after its pane is confirmed closed but while its run and
+session are still recorded — so relaunch, rework and a later recovery cannot re-attribute the account to a
+different session.
+
+**What it binds.** The event is self-contained: card ref and subject, the numeric attempt and the attempt
+id, the report generation the phase closed, the role (`worker`/`reviewer`) and phase (`worker`/`review`),
+the head id, adapter, resolved model and `model_source`, the launch id, the provider `session_id` or its
+typed absence with the reason for it, the collection outcome, and the token totals. The identity fields
+are the routing journal's own launch snapshot, resolved the same way a routing event resolves them; this
+is not a second journal and does not re-read `heads.toml` for a head launched hours ago.
+
+**Token fields.** Five dimensions — `input`, `cache_input`, `cache_read_input`, `output`, `reasoning` —
+each a non-negative integer or `null`. `null` means the provider did not report that dimension for this
+phase, and is deliberately not `0`: a zero is a real count. A `collected` outcome reports at least one
+dimension; every degraded outcome reports none, so no reader can mistake an unreadable phase for a free
+one. There is no price table and no monetary conversion here.
+
+**Adapter aggregation.** Codex writes a `token_count` event whose `total_token_usage` is the session's
+running total, so the phase total is the **last** well-formed snapshot and the snapshots are never summed:
+a repeated or replayed snapshot names the same total rather than adding to it. Codex reports the cached
+share of its input (`cached_input_tokens` → `cache_read_input`) and no separate cache write, so
+`cache_input` stays unavailable. Claude writes one `usage` object per assistant message, so the phase total
+is their **sum** over distinct messages: a message id contributes its last usage object exactly once, which
+is what keeps a streamed message and a resumed session's repeated records from being counted twice. Claude
+publishes no separate reasoning dimension, so `reasoning` stays unavailable there.
+
+**Degraded outcomes.** One value says the counts are real and the rest name a specific failure:
+`collected`; `adapter_unsupported` (the head ran on an adapter with no structured usage records);
+`session_unavailable` (no provider session identity was bound to the run); `source_unavailable` (the
+structured record source was never bound, or names no journal); `source_unreadable` (the journal exists and
+could not be read); `records_malformed` (nothing in the journal parsed); `usage_absent` (the journal parsed
+and holds no usage record). A truncated tail — the normal shape of a journal read while its writer is still
+around — is one skipped line, not a failed read: the complete records before it are still counted, and
+`skipped_records` says how many lines were dropped.
+
+**Idempotency.** One occurrence per completed phase, keyed by attempt id, phase and the round it closed
+(attempt number and report generation). A replayed request or a re-entered acceptance commits the event
+that already owns that id rather than a freshly computed one, so a recovery reading a session that has
+since grown can neither add a second occurrence nor overwrite the first. A repeated done report inside one
+round — the infrastructure-classified gate retry — returns the occurrence that round already owns.
+
+**Non-blocking.** Collection never decides anything. A missing session, an unreadable journal, malformed
+records and a refused journal write all leave the worker report or reviewer verdict accepted, the cleanup
+and freeze unchanged, the card moving exactly where it was going, and later dispatcher recovery
+unaffected. The failure is either a named degraded outcome inside the event or, for a write that could not
+happen at all, no event.
+
 ### The report generation
 
 A worker round is identified by a report generation: a counter in the dispatcher's own record that

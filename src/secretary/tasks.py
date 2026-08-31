@@ -2105,6 +2105,60 @@ class TaskWriter:
             identity=dict(payload),
         )
 
+    def attempt_usage(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        data: dict[str, Any],
+        reason: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Append one durable ``attempt.usage`` occurrence for a finished worker or review phase.
+
+        Journal-only, like routing telemetry: what a phase cost is not a board mutation, and the
+        card carries no field it could disagree with. Unlike routing it is a typed protocol event,
+        so the schema is checked at this boundary and the audit export exposes it without any
+        marker prose to parse.
+
+        The request id names one occurrence and owns it. A replay — a re-entered tick, a dispatcher
+        recovering the same acceptance — commits the event that already owns the id rather than a
+        freshly computed one, so a later read of a changed session file can neither add a second
+        occurrence nor overwrite the first.
+        """
+        self._role(role, {"dispatcher"})
+        if not request_id.strip():
+            raise TaskError("validation", "an attempt usage event needs the request id it owns", 2)
+        canon = self.board_host.canon
+        if canon is None:
+            raise TaskError("backend_unavailable", "board event canon is unavailable", 1)
+        try:
+            existing = canon.event(request_id)
+            if existing is not None:
+                canon.commit(request_id, existing)
+                return {
+                    "action": "attempt_usage",
+                    "event_id": existing.event_id,
+                    "replayed": True,
+                }
+            event = Event(
+                event_id="evt_" + uuid.uuid4().hex,
+                kind=EventKind.ATTEMPT_USAGE,
+                entity_kind=EntityKind.CARD,
+                ref=reference,
+                actor=Actor(role, actor),
+                reason=reason,
+                occurred_at=datetime.now(UTC),
+                data=dict(data),
+            )
+            canon.commit(request_id, event)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except OSError:
+            raise TaskError("audit_pending", "attempt usage event was not durably written", 4) from None
+        return {"action": "attempt_usage", "event_id": event.event_id, "replayed": False}
+
     def claim(
         self,
         *,
