@@ -6169,6 +6169,66 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         attempt = self.routing_history()[-1]
         self.assertEqual(len(attempt.worker_runs), 1)
 
+    def test_unbound_claude_launch_ids_distinguish_respawns_without_a_late_bind_event(self) -> None:
+        """Claude's transcript may arrive after routing, so lifecycle identity fences the launch."""
+        self.start_dispatcher()
+        task = self.reader.show("secretary-510-pilot")
+        record = DispatcherRecord(
+            worker="secretary-510-pilot-pilot",
+            workspace=str(self.data_dir / "workspaces" / "pilot"),
+            handle="",
+            head="claude-opus",
+            review_head="claude-opus",
+            attempt_id="claude-launch-identities",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            attempt_round=1,
+        )
+
+        def lifecycle(role: str, launch_id: str, *, session_id: str = "") -> dict:
+            policy: dict[str, object] = {
+                "version": 1,
+                "state": "unknown",
+                "terminal_state": "unknown",
+                "events": [],
+            }
+            if session_id:
+                policy["provider_progress_source"] = {"state": "bound", "session_id": session_id}
+            return HeadRun(
+                run_id=launch_id,
+                spec=HeadSpec(profile_id="claude-opus", adapter="claude"),
+                workspace=record.workspace,
+                task_ref=TaskRef.card(task["ref"]),
+                role=role,
+                fanout_policy=policy,
+            ).to_json()
+
+        record.worker_head_run = lifecycle("worker", "claude-worker-first")
+        self.runtime.record_worker_routing(task, record)
+        record.worker_head_run = lifecycle("worker", "claude-worker-second")
+        self.runtime.record_worker_routing(task, record)
+        record.worker_head_run = lifecycle("worker", "claude-worker-second", session_id="late-worker")
+        self.runtime.record_worker_routing(task, record)
+
+        record.review_head_run = lifecycle("reviewer", "claude-review-first")
+        self.runtime.record_review_routing(task, record)
+        record.review_head_run = lifecycle("reviewer", "claude-review-second")
+        self.runtime.record_review_routing(task, record)
+        record.review_head_run = lifecycle("reviewer", "claude-review-second", session_id="late-review")
+        self.runtime.record_review_routing(task, record)
+
+        attempt = self.routing_history()[-1]
+        self.assertEqual(
+            [run.launch_id for run in attempt.worker_runs],
+            ["claude-worker-first", "claude-worker-second"],
+        )
+        self.assertEqual(
+            [run.launch_id for run in attempt.reviewer_runs],
+            ["claude-review-first", "claude-review-second"],
+        )
+
     def test_worker_respawned_onto_a_repinned_profile_is_a_second_record(self) -> None:
         """A respawn after a registry repin runs a different configuration, and the round's verdict
         belongs to that one. Both bring-ups stay in the journal."""

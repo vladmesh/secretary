@@ -67,6 +67,9 @@ class HeadRun:
     # Old records remain readable with a null value; new launch records say why it was unavailable.
     session_id: str | None = None
     session_id_reason: str = ""
+    # The dispatcher's durable identity for this exact pane bring-up. It fences two real launches
+    # before an asynchronous provider has created its own session journal.
+    launch_id: str = ""
     # The exact document delivered to the role and its content address at bring-up.
     prompt_path: str = ""
     prompt_version: str = ""
@@ -94,6 +97,7 @@ class HeadRun:
             "account": self.account,
             "session_id": self.session_id,
             "session_id_reason": self.session_id_reason,
+            "launch_id": self.launch_id,
             "prompt_path": self.prompt_path,
             "prompt_version": self.prompt_version,
         }
@@ -119,6 +123,7 @@ class HeadRun:
             account=str(payload.get("account") or ""),
             session_id=(str(payload["session_id"]) if payload.get("session_id") else None),
             session_id_reason=str(payload.get("session_id_reason") or ""),
+            launch_id=str(payload.get("launch_id") or ""),
             prompt_path=str(payload.get("prompt_path") or ""),
             prompt_version=str(payload.get("prompt_version") or ""),
         )
@@ -194,6 +199,9 @@ def launched_head_run_snapshot(
         session_id_reason = str(snapshot.get("session_id_reason") or "")
     snapshot["session_id"] = session_id
     snapshot["session_id_reason"] = session_id_reason
+    launch_id = str(lifecycle.get("run_id") or "")
+    if launch_id and not snapshot.get("launch_id"):
+        snapshot["launch_id"] = launch_id
     prompt_path, prompt_version = _prompt_identity(lifecycle)
     if prompt_path:
         # This is captured before the head is started, rather than read from a mutable TASK.md
@@ -258,10 +266,12 @@ def run_key(run: HeadRun | dict[str, Any] | None) -> str:
     and still appends an event for the latter.
     """
     payload = run.to_json() if isinstance(run, HeadRun) else dict(run or {})
-    # A provider session is a bring-up identity. A crash retry returns the same one and therefore
-    # keeps its request id, while a respawn that opened a fresh provider conversation must append a
-    # second event even when the profile configuration did not change. Prompt facts remain evidence
-    # rather than a routing key: one launch can be recovered without rereading its document.
+    # The durable lifecycle run id is the primary bring-up identity. It is present before Claude
+    # writes a JSONL/session id, so two fresh panes cannot collapse into one crash retry. Once a
+    # run later binds its provider session, keep that same key: it is new evidence, not a third
+    # launch. Old routing history has no launch id, and retains its session-id fallback.
+    if payload.get("launch_id"):
+        payload.pop("session_id", None)
     for field in ("session_id_reason", "prompt_path", "prompt_version"):
         payload.pop(field, None)
     material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
