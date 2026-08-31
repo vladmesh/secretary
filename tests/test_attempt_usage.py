@@ -27,28 +27,38 @@ from secretary.board.models import (
 from secretary.dispatch.attempt_usage import (
     CLAUDE_SOURCE_KIND,
     CODEX_SOURCE_KIND,
+    TokenTotals,
     claude_usage,
     codex_usage,
     collect_usage,
+    durable_phase_boundary,
+    phase_interval,
     provider_usage_source,
 )
-from secretary.tasks import is_significant_card_event
+from secretary.tasks import TaskError, is_significant_card_event
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 
 DIGEST = "a" * 64
+# The three accounts one occurrence carries, in the event's own spelling.
+ACCOUNTS = ("tokens", "session_totals", "phase_baseline")
 
 
 def codex_token_count(
     *,
     input_tokens: int | None = None,
     cached_input_tokens: int | None = None,
+    cache_write_input_tokens: int | None = None,
     output_tokens: int | None = None,
     reasoning_output_tokens: int | None = None,
 ) -> dict:
-    """One Codex ``token_count`` event carrying the session's running total."""
+    """One Codex ``token_count`` event carrying the session's running total.
+
+    The field names are the ones a real rollout writes, including both cache sides.
+    """
     total = {
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input_tokens,
+        "cache_write_input_tokens": cache_write_input_tokens,
         "output_tokens": output_tokens,
         "reasoning_output_tokens": reasoning_output_tokens,
     }
@@ -114,64 +124,96 @@ def write_jsonl(path: Path, records: list, *, tail: str = "") -> Path:
 
 
 class CodexAggregationTests(unittest.TestCase):
-    """Codex reports a running total, so the phase total is the last one and never their sum."""
+    """Codex reports a running session total, so the session total is the last one, never a sum."""
 
-    def test_the_last_cumulative_snapshot_is_the_whole_phase(self) -> None:
-        totals, counted = codex_usage(
+    def test_the_last_cumulative_snapshot_is_the_whole_session(self) -> None:
+        session = codex_usage(
             [
                 codex_token_count(input_tokens=100, output_tokens=10, reasoning_output_tokens=4),
                 codex_token_count(input_tokens=450, output_tokens=61, reasoning_output_tokens=25),
             ]
         )
 
-        self.assertEqual(counted, 2)
-        self.assertEqual(totals.input, 450)
-        self.assertEqual(totals.output, 61)
-        self.assertEqual(totals.reasoning, 25)
+        self.assertEqual(session.records, 2)
+        self.assertEqual(session.totals.input, 450)
+        self.assertEqual(session.totals.output, 61)
+        self.assertEqual(session.totals.reasoning, 25)
 
     def test_a_repeated_snapshot_names_the_same_total_rather_than_adding_to_it(self) -> None:
-        """A re-read or replayed journal reports what the phase cost, not a multiple of it."""
+        """A re-read or replayed journal reports what the session cost, not a multiple of it."""
         snapshot = codex_token_count(input_tokens=450, output_tokens=61)
 
-        once, _ = codex_usage([snapshot])
-        again, counted = codex_usage([snapshot, snapshot, snapshot])
+        once = codex_usage([snapshot])
+        again = codex_usage([snapshot, snapshot, snapshot])
 
-        self.assertEqual(once, again)
-        self.assertEqual(counted, 3, "the read is still described honestly")
+        self.assertEqual(once.totals, again.totals)
+        self.assertEqual(again.records, 3, "the read is still described honestly")
 
-    def test_the_cached_share_of_input_is_read_and_cache_writes_stay_unavailable(self) -> None:
-        totals, _ = codex_usage(
-            [codex_token_count(input_tokens=900, cached_input_tokens=768, output_tokens=12)]
-        )
-
-        self.assertEqual(totals.cache_read_input, 768)
-        self.assertIsNone(totals.cache_input, "Codex reports no separate cache write to record")
-
-    def test_a_dimension_the_snapshot_omits_is_unavailable_rather_than_zero(self) -> None:
-        totals, _ = codex_usage([codex_token_count(input_tokens=10, output_tokens=2)])
-
-        self.assertIsNone(totals.reasoning)
-        self.assertIsNone(totals.cache_read_input)
-        self.assertEqual(totals.input, 10)
-
-    def test_a_malformed_snapshot_is_not_a_usage_record(self) -> None:
-        totals, counted = codex_usage(
+    def test_both_cache_sides_are_read_from_the_snapshot_that_publishes_them(self) -> None:
+        """A real rollout publishes `cache_write_input_tokens`, so it is a dimension, not a null."""
+        session = codex_usage(
             [
-                {"type": "event_msg", "payload": {"type": "token_count", "info": None}},
-                {"type": "event_msg", "payload": {"type": "task_started"}},
-                "not an object",
+                codex_token_count(
+                    input_tokens=594168,
+                    cached_input_tokens=546048,
+                    cache_write_input_tokens=41772,
+                    output_tokens=6524,
+                    reasoning_output_tokens=2494,
+                )
             ]
         )
 
-        self.assertEqual(counted, 0)
-        self.assertTrue(totals.empty)
+        self.assertEqual(session.totals.cache_input, 41772)
+        self.assertEqual(session.totals.cache_read_input, 546048)
+        self.assertEqual(session.totals.input, 594168)
+        self.assertEqual(session.totals.reasoning, 2494)
+
+    def test_a_cache_write_of_zero_is_the_provider_count_and_not_an_absence(self) -> None:
+        session = codex_usage([codex_token_count(input_tokens=900, cache_write_input_tokens=0)])
+
+        self.assertEqual(session.totals.cache_input, 0)
+
+    def test_a_dimension_the_snapshot_omits_is_unavailable_rather_than_zero(self) -> None:
+        session = codex_usage([codex_token_count(input_tokens=10, output_tokens=2)])
+
+        self.assertIsNone(session.totals.reasoning)
+        self.assertIsNone(session.totals.cache_read_input)
+        self.assertIsNone(session.totals.cache_input)
+        self.assertEqual(session.totals.input, 10)
+
+    def test_a_record_that_declares_no_token_count_is_simply_not_a_usage_record(self) -> None:
+        session = codex_usage([{"type": "event_msg", "payload": {"type": "task_started"}}, "not an object"])
+
+        self.assertEqual(session.records, 0)
+        self.assertEqual(session.invalid, 0)
+        self.assertTrue(session.totals.empty)
+
+    def test_a_declared_token_count_with_the_wrong_schema_is_malformed(self) -> None:
+        """A provider schema change must not read as a session that spent nothing."""
+        session = codex_usage(
+            [
+                {"type": "event_msg", "payload": {"type": "token_count", "info": None}},
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": [1, 2]}},
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": {"tokens": "many"}}},
+                },
+            ]
+        )
+
+        self.assertEqual(session.records, 0)
+        self.assertEqual(session.invalid, 3)
+        self.assertTrue(session.totals.empty)
 
 
 class ClaudeAggregationTests(unittest.TestCase):
-    """Claude reports per message, so the phase total is a sum over distinct messages."""
+    """Claude reports per message, so the session total is a sum over distinct messages."""
 
-    def test_usage_objects_sum_across_the_messages_of_one_phase(self) -> None:
-        totals, counted = claude_usage(
+    def test_usage_objects_sum_across_the_messages_of_one_session(self) -> None:
+        session = claude_usage(
             [
                 claude_assistant(
                     "msg_1",
@@ -190,39 +232,39 @@ class ClaudeAggregationTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(counted, 2)
-        self.assertEqual(totals.input, 10)
-        self.assertEqual(totals.cache_input, 1500)
-        self.assertEqual(totals.cache_read_input, 1200)
-        self.assertEqual(totals.output, 135)
-        self.assertIsNone(totals.reasoning, "Claude publishes no separate reasoning dimension")
+        self.assertEqual(session.records, 2)
+        self.assertEqual(session.totals.input, 10)
+        self.assertEqual(session.totals.cache_input, 1500)
+        self.assertEqual(session.totals.cache_read_input, 1200)
+        self.assertEqual(session.totals.output, 135)
+        self.assertIsNone(session.totals.reasoning, "Claude publishes no separate reasoning dimension")
 
     def test_one_message_counts_once_however_many_times_it_was_written(self) -> None:
         """A streamed message is written repeatedly and a resumed session repeats earlier ones."""
         partial = claude_assistant("msg_1", input_tokens=4, output_tokens=1)
         final = claude_assistant("msg_1", input_tokens=4, output_tokens=90)
 
-        totals, counted = claude_usage([partial, final, final])
+        session = claude_usage([partial, final, final])
 
-        self.assertEqual(counted, 1)
-        self.assertEqual(totals.output, 90, "the finished record of the message, not the partial")
-        self.assertEqual(totals.input, 4)
+        self.assertEqual(session.records, 1)
+        self.assertEqual(session.totals.output, 90, "the finished record of the message, not the partial")
+        self.assertEqual(session.totals.input, 4)
 
     def test_a_zero_a_provider_reports_is_kept_and_a_field_it_omits_is_not(self) -> None:
-        totals, _ = claude_usage(
+        session = claude_usage(
             [
                 claude_assistant("msg_1", input_tokens=0, output_tokens=90),
                 claude_assistant("msg_2", input_tokens=5, output_tokens=10),
             ]
         )
 
-        self.assertEqual(totals.input, 5)
-        self.assertEqual(totals.output, 100)
-        self.assertIsNone(totals.cache_input)
-        self.assertIsNone(totals.cache_read_input)
+        self.assertEqual(session.totals.input, 5)
+        self.assertEqual(session.totals.output, 100)
+        self.assertIsNone(session.totals.cache_input)
+        self.assertIsNone(session.totals.cache_read_input)
 
-    def test_records_that_are_not_assistant_usage_are_not_counted(self) -> None:
-        totals, counted = claude_usage(
+    def test_records_that_declare_no_usage_are_not_counted_and_are_not_malformed(self) -> None:
+        session = claude_usage(
             [
                 {"type": "user", "message": {"role": "user", "content": "go"}},
                 {"type": "assistant", "message": {"id": "msg_1"}},
@@ -230,8 +272,117 @@ class ClaudeAggregationTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(counted, 0)
-        self.assertTrue(totals.empty)
+        self.assertEqual(session.records, 0)
+        self.assertEqual(session.invalid, 0)
+        self.assertTrue(session.totals.empty)
+
+    def test_a_declared_usage_object_with_the_wrong_schema_is_malformed(self) -> None:
+        session = claude_usage(
+            [
+                {"type": "assistant", "message": {"id": "msg_1", "usage": ["input", 5]}},
+                {"type": "assistant", "message": {"id": "msg_2", "usage": {"input_tokens": "many"}}},
+            ]
+        )
+
+        self.assertEqual(session.records, 0)
+        self.assertEqual(session.invalid, 2)
+        self.assertTrue(session.totals.empty)
+
+
+class PhaseIntervalTests(unittest.TestCase):
+    """One phase-accounting rule for both adapters: what the session spent since the last boundary."""
+
+    def test_a_session_nobody_has_accounted_for_yet_starts_at_zero(self) -> None:
+        totals, baseline, rewound = phase_interval(TokenTotals(input=450, output=61), None)
+
+        self.assertEqual(totals, TokenTotals(input=450, output=61))
+        self.assertEqual(baseline, TokenTotals(input=0, output=0))
+        self.assertFalse(rewound)
+
+    def test_a_second_phase_owns_only_what_the_session_spent_after_the_first(self) -> None:
+        totals, baseline, _ = phase_interval(
+            TokenTotals(input=1000, cache_input=40, output=200),
+            TokenTotals(input=450, cache_input=10, output=61),
+        )
+
+        self.assertEqual(totals, TokenTotals(input=550, cache_input=30, output=139))
+        self.assertEqual(baseline, TokenTotals(input=450, cache_input=10, output=61))
+
+    def test_a_dimension_the_boundary_never_recorded_is_owned_from_zero(self) -> None:
+        totals, baseline, _ = phase_interval(TokenTotals(input=1000, reasoning=7), TokenTotals(input=450))
+
+        self.assertEqual(totals.reasoning, 7)
+        self.assertEqual(baseline.reasoning, 0)
+
+    def test_a_dimension_this_session_stopped_reporting_stays_unavailable(self) -> None:
+        totals, baseline, _ = phase_interval(TokenTotals(input=1000), TokenTotals(input=450, output=61))
+
+        self.assertIsNone(totals.output)
+        self.assertIsNone(baseline.output)
+
+    def test_a_session_total_below_its_own_durable_boundary_owns_nothing(self) -> None:
+        """A replaced or rotated session file is not a phase that earned a negative account."""
+        totals, _baseline, rewound = phase_interval(TokenTotals(input=10), TokenTotals(input=450))
+
+        self.assertTrue(rewound)
+        self.assertEqual(totals.input, 0)
+
+
+class DurableBoundaryTests(unittest.TestCase):
+    """The boundary comes out of the card's own committed occurrences, not a second journal."""
+
+    @staticmethod
+    def occurrence(session_id: str, adapter: str = "codex", **totals: int | None) -> dict:
+        return {
+            "kind": "attempt.usage",
+            "data": {
+                "adapter": adapter,
+                "session_id": session_id,
+                "session_totals": dict.fromkeys(TOKEN_DIMENSIONS, None) | totals,
+            },
+        }
+
+    def test_the_last_boundary_recorded_for_this_session_is_the_one_that_counts(self) -> None:
+        boundary = durable_phase_boundary(
+            [
+                self.occurrence("session-1", input=100),
+                self.occurrence("session-1", input=450),
+            ],
+            adapter="codex",
+            session_id="session-1",
+        )
+
+        self.assertEqual(boundary, TokenTotals(input=450))
+
+    def test_another_session_and_another_adapter_leave_no_boundary_here(self) -> None:
+        events = [
+            self.occurrence("session-2", input=999),
+            self.occurrence("session-1", adapter="claude", input=888),
+        ]
+
+        self.assertIsNone(durable_phase_boundary(events, adapter="codex", session_id="session-1"))
+
+    def test_a_degraded_occurrence_records_no_boundary_and_the_earlier_one_still_stands(self) -> None:
+        """An unreadable phase cannot lower the boundary its predecessor already made durable."""
+        events = [
+            self.occurrence("session-1", input=450),
+            self.occurrence("session-1"),
+        ]
+
+        self.assertEqual(
+            durable_phase_boundary(events, adapter="codex", session_id="session-1"),
+            TokenTotals(input=450),
+        )
+
+    def test_a_run_with_no_session_identity_has_no_boundary_to_find(self) -> None:
+        events = [self.occurrence("", input=450)]
+
+        self.assertIsNone(durable_phase_boundary(events, adapter="codex", session_id=""))
+
+    def test_events_of_other_kinds_are_ignored(self) -> None:
+        events = [{"kind": "routing", "data": {"session_id": "session-1", "adapter": "codex"}}]
+
+        self.assertIsNone(durable_phase_boundary(events, adapter="codex", session_id="session-1"))
 
 
 class SourceCollectionTests(unittest.TestCase):
@@ -280,11 +431,65 @@ class SourceCollectionTests(unittest.TestCase):
         self.assertEqual(result.skipped_records, 2)
 
     def test_a_readable_journal_with_no_usage_record_says_the_usage_is_absent(self) -> None:
-        path = write_jsonl(self.root / "quiet.jsonl", [{"type": "user", "message": {}}])
+        for adapter, source, record in (
+            ("claude", bound_claude_source, {"type": "user", "message": {}}),
+            ("codex", bound_codex_source, {"type": "event_msg", "payload": {"type": "task_started"}}),
+        ):
+            with self.subTest(adapter=adapter):
+                path = write_jsonl(self.root / f"quiet-{adapter}.jsonl", [record])
 
-        result = collect_usage(adapter="claude", source=bound_claude_source(path))
+                result = collect_usage(adapter=adapter, source=source(path))
 
-        self.assertIs(result.outcome, AttemptUsageOutcome.USAGE_ABSENT)
+                self.assertIs(result.outcome, AttemptUsageOutcome.USAGE_ABSENT)
+                self.assertEqual(result.skipped_records, 0)
+
+    def test_a_declared_usage_record_with_the_wrong_schema_is_malformed_not_absent(self) -> None:
+        """A provider schema change reads as a broken record, never as a phase that cost nothing."""
+        for adapter, source, record in (
+            (
+                "codex",
+                bound_codex_source,
+                {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": []}}},
+            ),
+            (
+                "claude",
+                bound_claude_source,
+                {"type": "assistant", "message": {"id": "msg_1", "usage": []}},
+            ),
+        ):
+            with self.subTest(adapter=adapter):
+                path = write_jsonl(self.root / f"broken-schema-{adapter}.jsonl", [record])
+
+                result = collect_usage(adapter=adapter, source=source(path))
+
+                self.assertIs(result.outcome, AttemptUsageOutcome.RECORDS_MALFORMED)
+                self.assertEqual(result.skipped_records, 1)
+                self.assertTrue(result.tokens.empty)
+
+    def test_a_phase_after_a_durable_boundary_is_read_as_the_interval_since_it(self) -> None:
+        path = write_jsonl(self.root / "grown.jsonl", [codex_token_count(input_tokens=450, output_tokens=61)])
+
+        result = collect_usage(
+            adapter="codex",
+            source=bound_codex_source(path),
+            baseline=TokenTotals(input=100, output=10),
+        )
+
+        self.assertIs(result.outcome, AttemptUsageOutcome.COLLECTED)
+        self.assertEqual(result.tokens, TokenTotals(input=350, output=51))
+        self.assertEqual(result.session_totals, TokenTotals(input=450, output=61))
+        self.assertEqual(result.baseline, TokenTotals(input=100, output=10))
+
+    def test_a_session_that_lost_its_history_is_collected_as_owning_nothing_and_says_so(self) -> None:
+        path = write_jsonl(self.root / "reset.jsonl", [codex_token_count(input_tokens=5)])
+
+        result = collect_usage(
+            adapter="codex", source=bound_codex_source(path), baseline=TokenTotals(input=450)
+        )
+
+        self.assertIs(result.outcome, AttemptUsageOutcome.COLLECTED)
+        self.assertEqual(result.tokens.input, 0)
+        self.assertIn("fell below the durable boundary", result.detail)
 
     def test_a_truncated_tail_still_reports_the_complete_records_before_it(self) -> None:
         """The normal shape of a journal read while its writer is still around."""
@@ -338,6 +543,8 @@ def usage_event(**overrides) -> Event:
         "records": 3,
         "skipped_records": 0,
         "tokens": dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 100, "output": 20},
+        "session_totals": dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 550, "output": 81},
+        "phase_baseline": dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 450, "output": 61},
     }
     data.update(overrides)
     return Event(
@@ -364,29 +571,44 @@ class AttemptUsageEventTests(unittest.TestCase):
         self.assertEqual(restored.kind, EventKind.ATTEMPT_USAGE)
         self.assertEqual(restored.data["tokens"]["input"], 100)
 
+    def test_the_interval_its_boundary_and_its_baseline_all_round_trip(self) -> None:
+        """The interval is checkable only if the two totals it was derived from are recorded too."""
+        restored = Event.from_record(usage_event().to_record("request-boundary"))
+
+        self.assertEqual(restored.data["session_totals"]["input"], 550)
+        self.assertEqual(restored.data["phase_baseline"]["input"], 450)
+        self.assertEqual(
+            restored.data["tokens"]["input"],
+            restored.data["session_totals"]["input"] - restored.data["phase_baseline"]["input"],
+        )
+
     def test_a_degraded_outcome_may_not_carry_token_totals(self) -> None:
         """Fabricating a zero for an unreadable phase is exactly the confusion this event exists
         to remove."""
-        with self.assertRaises(ValueError):
-            usage_event(
-                outcome="source_unreadable",
-                tokens=dict.fromkeys(TOKEN_DIMENSIONS, 0),
-            )
+        for account in ACCOUNTS:
+            degraded = {name: dict.fromkeys(TOKEN_DIMENSIONS, None) for name in ACCOUNTS}
+            degraded[account] = dict.fromkeys(TOKEN_DIMENSIONS, 0)
+            with self.subTest(account=account), self.assertRaises(ValueError):
+                usage_event(outcome="source_unreadable", **degraded)
 
     def test_a_collected_outcome_must_report_at_least_one_dimension(self) -> None:
-        with self.assertRaises(ValueError):
-            usage_event(tokens=dict.fromkeys(TOKEN_DIMENSIONS, None))
+        for account in ACCOUNTS:
+            with self.subTest(account=account), self.assertRaises(ValueError):
+                usage_event(**{account: dict.fromkeys(TOKEN_DIMENSIONS, None)})
 
     def test_the_declared_dimensions_are_the_whole_token_object(self) -> None:
-        with self.assertRaises(ValueError):
-            usage_event(tokens={"input": 5})
-        with self.assertRaises(ValueError):
-            usage_event(tokens=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 5, "extra": 1})
+        for account in ACCOUNTS:
+            with self.subTest(account=account):
+                with self.assertRaises(ValueError):
+                    usage_event(**{account: {"input": 5}})
+                with self.assertRaises(ValueError):
+                    usage_event(**{account: dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 5, "extra": 1}})
 
     def test_a_count_is_a_non_negative_integer_or_nothing(self) -> None:
-        for value in (-1, "5", True, 1.5):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                usage_event(tokens=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": value})
+        for account in ACCOUNTS:
+            for value in (-1, "5", True, 1.5):
+                with self.subTest(account=account, value=value), self.assertRaises(ValueError):
+                    usage_event(**{account: dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": value}})
 
     def test_an_absent_session_id_has_to_say_why_it_is_absent(self) -> None:
         with self.assertRaises(ValueError):
@@ -470,11 +692,40 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         """Put a Claude head on the worker role, so both adapters are exercised at this seam."""
         self.catalog.role_defaults["new_card"] = "claude-opus"
 
+    def staged_usage(self) -> list[dict]:
+        """Usage occurrences that are durable in the audit but not published yet."""
+        return [
+            record
+            for record in self.writer.audit.pending_events()
+            if record.get("kind") == EventKind.ATTEMPT_USAGE.value
+        ]
+
+    def refuse_usage_audit(self, step: str):
+        """Break exactly one audit step, and only for usage records; hand back its repair.
+
+        `claim` is the staging write and `append` is the publication, and the point of the two
+        tests below is that the seam owes the card something different in each case.
+        """
+        audit = self.writer.audit
+        original = getattr(audit, step)
+
+        def refuse(request_id, event, **kwargs):
+            if event.get("kind") == EventKind.ATTEMPT_USAGE.value:
+                raise OSError("the audit journal is unwritable")
+            return original(request_id, event, **kwargs)
+
+        setattr(audit, step, refuse)
+        return lambda: setattr(audit, step, original)
+
     def test_an_accepted_done_report_accounts_the_worker_phase_it_closed(self) -> None:
         self.start_dispatcher()
         self.tick()
         journal = self.codex_journal(
-            "worker-1.jsonl", input_tokens=8100, cached_input_tokens=7000, output_tokens=320
+            "worker-1.jsonl",
+            input_tokens=8100,
+            cached_input_tokens=7000,
+            cache_write_input_tokens=1024,
+            output_tokens=320,
         )
         session_id = self.bind_source("worker", journal)
         self._report_done()
@@ -498,10 +749,20 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
             usage["tokens"],
             {
                 "input": 8100,
-                "cache_input": None,
+                "cache_input": 1024,
                 "cache_read_input": 7000,
                 "output": 320,
                 "reasoning": None,
+            },
+        )
+        self.assertEqual(
+            usage["phase_baseline"],
+            dict.fromkeys(TOKEN_DIMENSIONS, None)
+            | {
+                "input": 0,
+                "cache_input": 0,
+                "cache_read_input": 0,
+                "output": 0,
             },
         )
 
@@ -717,20 +978,164 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(usage["outcome"], AttemptUsageOutcome.SOURCE_UNAVAILABLE.value)
         self.assertTrue(usage["detail"])
 
-    def test_a_refused_usage_write_leaves_the_report_and_the_transition_alone(self) -> None:
-        """The one failure the seam owns itself: the journal write, not the provider read."""
+    def test_a_staged_occurrence_the_journal_cannot_publish_yet_still_advances_the_card(self) -> None:
+        """A staged obligation is durable: the phase is accounted for, only its append is owed.
+
+        This replaces the previous round's `test_a_refused_usage_write_leaves_the_report_and_the
+        _transition_alone`, which asserted that a refused write left an accepted phase with no
+        occurrence at all. That is the loss the reviewer found: once the card advanced, nothing ever
+        revisited the phase. The contract here is the durability order instead — the card may pass a
+        staged obligation, never an absent one — so the old assertion had to go.
+        """
         self.start_dispatcher()
         self.tick()
-
-        def refuse(**_kwargs):
-            raise OSError("the audit journal is unwritable")
-
-        self.writer.attempt_usage = refuse  # type: ignore[method-assign]
+        self.bind_source("worker", self.codex_journal("worker-1.jsonl", input_tokens=100, output_tokens=10))
+        restore = self.refuse_usage_audit("append")
         self._report_done()
+
         advanced = self.tick()
 
-        self.assertEqual(advanced["to"], "validate")
+        self.assertEqual(advanced["to"], "validate", "a staged obligation does not hold the card")
+        self.assertEqual(self.usage_events(), [], "nothing is published yet")
+        staged = self.staged_usage()
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0]["data"]["tokens"]["input"], 100)
+
+        restore()
+        self.tick()
+
+        published = self.usage_events()
+        self.assertEqual(len(published), 1, "recovery finishes the staged occurrence, once")
+        self.assertEqual(published[0], staged[0]["data"], "and finishes exactly the staged one")
+        self.assertEqual(self.staged_usage(), [])
+
+    def test_recovery_publishes_the_staged_occurrence_and_not_a_re_read_of_the_session(self) -> None:
+        """The session file has moved on by then; the phase's own interval is what is owed."""
+        self.start_dispatcher()
+        self.tick()
+        journal = self.codex_journal("worker-1.jsonl", input_tokens=100, output_tokens=10)
+        self.bind_source("worker", journal)
+        restore = self.refuse_usage_audit("append")
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+
+        write_jsonl(journal, [codex_token_count(input_tokens=999999, output_tokens=88888)])
+        restore()
+        self.tick()
+
+        self.assertEqual(self.usage_events()[0]["tokens"]["input"], 100)
+
+    def test_a_phase_never_advances_past_an_occurrence_that_could_not_be_staged(self) -> None:
+        """An audit that cannot take the occurrence at all is an audit failure, not a token count."""
+        self.start_dispatcher()
+        self.tick()
+        self.bind_source("worker", self.codex_journal("worker-1.jsonl", input_tokens=100, output_tokens=10))
+        restore = self.refuse_usage_audit("claim")
+        self._report_done()
+
+        with self.assertRaises(TaskError) as refused:
+            self.tick()
+
+        self.assertEqual(refused.exception.code, "audit_unavailable")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress", "the card did not advance")
         self.assertEqual(self.usage_events(), [])
+        self.assertEqual(self.staged_usage(), [])
+
+        restore()
+
+        self.assertEqual(self.tick()["to"], "validate", "the retry accepts the same report")
+        self.assertEqual(len(self.usage_events()), 1)
+
+    def test_two_worker_phases_on_one_retained_codex_session_split_it_at_the_boundary(self) -> None:
+        """The ordinary rework route keeps the conversation, so its journal keeps growing."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        journal = self.codex_journal("worker.jsonl", input_tokens=100, output_tokens=10)
+        session_id = self.bind_source("worker", journal)
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()
+        self._review_red()
+
+        self.assertEqual(self._park_and_decide("rework")["action"], "review-red-reused-worker")
+        # The retained head goes on writing into the session it already had.
+        write_jsonl(
+            journal,
+            [
+                codex_token_count(input_tokens=100, output_tokens=10),
+                codex_token_count(input_tokens=450, output_tokens=61),
+            ],
+        )
+        self.host.commit = "retained-rework-c0ffee"
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+
+        phases = [usage for usage in self.usage_events() if usage["role"] == "worker"]
+        self.assertEqual([usage["session_id"] for usage in phases], [session_id, session_id])
+        self.assertEqual([usage["report_generation"] for usage in phases], [1, 2])
+        self.assertEqual([usage["tokens"]["input"] for usage in phases], [100, 350])
+        self.assertEqual([usage["tokens"]["output"] for usage in phases], [10, 51])
+        self.assertEqual([usage["session_totals"]["input"] for usage in phases], [100, 450])
+        self.assertEqual([usage["phase_baseline"]["input"] for usage in phases], [0, 100])
+
+    def test_two_worker_phases_on_one_retained_claude_session_split_it_at_the_boundary(self) -> None:
+        """Claude sums its messages, so a resumed session's earlier messages are the same risk."""
+        self.claude_worker()
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        journal = self.claude_journal("worker.jsonl", "msg_1", input_tokens=8, output_tokens=90)
+        session_id = self.bind_source("worker", journal, adapter="claude")
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()
+        self._review_red()
+
+        self.assertEqual(self._park_and_decide("rework")["action"], "review-red-reused-worker")
+        write_jsonl(
+            journal,
+            [
+                claude_assistant("msg_1", input_tokens=8, output_tokens=90),
+                claude_assistant("msg_2", input_tokens=5, output_tokens=40),
+            ],
+        )
+        self.host.commit = "retained-rework-c0ffee"
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+
+        phases = [usage for usage in self.usage_events() if usage["role"] == "worker"]
+        self.assertEqual([usage["session_id"] for usage in phases], [session_id, session_id])
+        self.assertEqual([usage["tokens"]["input"] for usage in phases], [8, 5])
+        self.assertEqual([usage["tokens"]["output"] for usage in phases], [90, 40])
+        self.assertEqual([usage["session_totals"]["output"] for usage in phases], [90, 130])
+        self.assertEqual([usage["phase_baseline"]["output"] for usage in phases], [0, 90])
+
+    def test_a_replayed_second_phase_reproduces_its_interval_rather_than_the_session_total(
+        self,
+    ) -> None:
+        """Recovery re-enters the acceptance after the retained session has grown again."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        journal = self.codex_journal("worker.jsonl", input_tokens=100, output_tokens=10)
+        self.bind_source("worker", journal)
+        self._report_done()
+        self.tick()
+        self.tick()
+        self._review_red()
+        self._park_and_decide("rework")
+        write_jsonl(journal, [codex_token_count(input_tokens=450, output_tokens=61)])
+        self.host.commit = "retained-rework-c0ffee"
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        accounted = self.usage_events()
+
+        write_jsonl(journal, [codex_token_count(input_tokens=900000, output_tokens=70000)])
+        self.tick()
+        self.tick()
+
+        self.assertEqual(self.usage_events(), accounted, "the interval is the one the phase earned")
 
     def test_the_occurrence_is_readable_by_kind_without_parsing_any_prose(self) -> None:
         self.start_dispatcher()

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.events import BoardEventPending
+from secretary.board.events import BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.models import (
     Actor,
@@ -2126,6 +2126,12 @@ class TaskWriter:
         recovering the same acceptance — commits the event that already owns the id rather than a
         freshly computed one, so a later read of a changed session file can neither add a second
         occurrence nor overwrite the first.
+
+        Two durability steps, and the caller is told which one it reached. The exact occurrence is
+        staged first, so a card cannot advance past a finished phase with nothing owed for it; the
+        append then publishes it. An append that fails leaves the staged obligation, which is what
+        ``finish_attempt_usage`` completes later — nothing is recomputed from a session file that has
+        moved on. A stage that fails is an audit failure, and the caller has to treat it as one.
         """
         self._role(role, {"dispatcher"})
         if not request_id.strip():
@@ -2135,13 +2141,13 @@ class TaskWriter:
             raise TaskError("backend_unavailable", "board event canon is unavailable", 1)
         try:
             existing = canon.event(request_id)
-            if existing is not None:
-                canon.commit(request_id, existing)
-                return {
-                    "action": "attempt_usage",
-                    "event_id": existing.event_id,
-                    "replayed": True,
-                }
+        except (OSError, ValueError) as exc:
+            raise TaskError(
+                "audit_unavailable", f"attempt usage occurrence is unreadable: {exc}", 4
+            ) from None
+        if existing is not None:
+            return self._commit_attempt_usage(canon, request_id, existing, replayed=True)
+        try:
             event = Event(
                 event_id="evt_" + uuid.uuid4().hex,
                 kind=EventKind.ATTEMPT_USAGE,
@@ -2152,12 +2158,64 @@ class TaskWriter:
                 occurred_at=datetime.now(UTC),
                 data=dict(data),
             )
+            canon.stage(request_id, event)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except OSError:
+            raise TaskError("audit_unavailable", "attempt usage occurrence could not be staged", 4) from None
+        return self._commit_attempt_usage(canon, request_id, event, replayed=False)
+
+    def _commit_attempt_usage(
+        self,
+        canon: BoardEventCanon,
+        request_id: str,
+        event: Event,
+        *,
+        replayed: bool,
+    ) -> dict[str, Any]:
+        """Publish the staged occurrence, or report that its obligation is still owed."""
+        try:
             canon.commit(request_id, event)
         except ValueError as exc:
             raise TaskError("validation", str(exc), 2) from None
         except OSError:
-            raise TaskError("audit_pending", "attempt usage event was not durably written", 4) from None
-        return {"action": "attempt_usage", "event_id": event.event_id, "replayed": False}
+            raise TaskError(
+                "audit_pending",
+                "attempt usage occurrence is staged and awaits its journal append",
+                4,
+            ) from None
+        return {"action": "attempt_usage", "event_id": event.event_id, "replayed": replayed}
+
+    def finish_attempt_usage(self, *, role: str, reference: str) -> int:
+        """Publish every ``attempt.usage`` occurrence this card has staged but not appended.
+
+        The recovery half of the durability order above. It finishes the exact staged record rather
+        than a re-derived one, so a session file that has grown since cannot change what the phase
+        was accounted for, and it is idempotent: a record already appended is simply gone from the
+        pending set.
+        """
+        self._role(role, {"dispatcher"})
+        canon = self.board_host.canon
+        if canon is None:
+            return 0
+        finished = 0
+        for record in self.audit.pending_events():
+            if record.get("record_type") != Event.RECORD_TYPE:
+                continue
+            if record.get("kind") != EventKind.ATTEMPT_USAGE.value:
+                continue
+            if reference and record.get("ref") != reference:
+                continue
+            request_id = str(record.get("request_id") or "")
+            if not request_id:
+                continue
+            try:
+                canon.commit(request_id, Event.from_record(record))
+            except (OSError, ValueError, TaskError):
+                # The obligation stays exactly where it is: still staged, still owed, still exact.
+                continue
+            finished += 1
+        return finished
 
     def claim(
         self,
