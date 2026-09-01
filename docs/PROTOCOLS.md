@@ -1207,13 +1207,57 @@ resolves them; this is not a second journal and does not re-read `heads.toml` fo
 creation/write input), `cache_read_input` (input served from cache), `output` (total generated output,
 including reasoning), and `reasoning` (the reasoning subset of `output`) — each a non-negative integer or
 `null`. The additive token total is `input + cache_input + cache_read_input + output`; consumers must not
-add `reasoning` again. `null` means the provider did not report that dimension, and is deliberately not
-`0`: a zero is a real count. The occurrence carries them three
-times: `tokens` is the interval this phase owns, `session_totals` is the running provider-session total the phase ended at, and
-`phase_baseline` is the boundary it started from, so `tokens = session_totals - phase_baseline` dimension by
-dimension and any reader can check it. A `collected` outcome reports at least one dimension in each of the
-three; every degraded outcome reports none anywhere, so no reader can mistake an unreadable phase for a
-free one. There is no price table and no monetary conversion here.
+add `reasoning` again, because `output` is inclusive of it in both adapters and `reasoning` is a contained
+subset: in every account where both are known, `reasoning <= output`. `null` means the provider did not
+report that dimension, and is deliberately not `0`: a zero is a real count. The occurrence carries them
+three times: `tokens` is the interval this phase owns, `session_totals` is the running provider-session
+total the phase ended at, and `phase_baseline` is the boundary it started from.
+
+The three accounts are nullable **per dimension and independently of each other**, because a provider
+dimension can be absent from the predecessor and present here, or the reverse. What is *attributed* stays
+checkable: for every dimension the phase owns, `tokens = session_totals - phase_baseline`, and a dimension
+it owns names both the boundary it was measured from and the total it was measured to. A dimension nobody
+could attribute says so as `null` in **both** `tokens` and `phase_baseline` — never as a zero — while
+`session_totals` keeps whatever the provider did report. A `collected` outcome reports at least one
+`session_totals` dimension, which is what makes it a read at all; `tokens` and `phase_baseline` may be
+entirely null under it, and that is a phase which read a real total and could own none of it. Every degraded
+outcome reports no dimension in any account, so no reader can mistake an unreadable phase for a free one.
+Occurrences written before this rule existed carry every dimension in all three accounts or in none of
+them, which is a special case of it: they remain readable unchanged, and there is no migration or backfill.
+There is no price table and no monetary conversion here.
+
+**The phase-attribution lattice.** One rule produces all three accounts, for every provider and every
+lifecycle path — first phase and retained phase, Codex and Claude, a live acceptance, a staged obligation
+and a replayed one. No adapter, replay or recovery path does missingness or zero-baseline arithmetic of its
+own. It turns on two independent questions, and conflating them is the defect it exists to prevent: whether
+a predecessor *occurrence* exists at all, and whether that predecessor and this read each know a given
+*dimension*.
+
+* **No predecessor occurrence.** Every dimension this phase knows begins at a boundary of zero and the
+  phase owns its whole current value; a dimension the provider did not report stays `null` in `tokens` and
+  `phase_baseline` alike.
+* **A predecessor, both values known and nondecreasing.** The phase owns their difference. This is the
+  ordinary retained-session case.
+* **A predecessor, and either value unavailable.** Phase ownership for that dimension is `null` in both
+  `tokens` and `phase_baseline`, and no zero is invented in either: the phase cannot be charged for work
+  whose starting point nobody recorded, and the predecessor cannot be retroactively credited with a zero it
+  never reported. The `session_totals` value this phase actually read is preserved, so the dimension
+  re-establishes a boundary here and the phase after it subtracts from that boundary normally. An
+  unattributable dimension is therefore a gap of one phase, never a permanent poisoning of the dimension.
+* **A predecessor, and the current value is numerically below it.** That contradicts an immutable earlier
+  occurrence, so the whole occurrence takes the typed `arithmetic_contradiction` outcome and publishes no
+  account at all rather than disguising the contradiction as a zero interval.
+
+Containment is validated where the accounts are produced as well as where they are written: if `reasoning`
+escapes `output` in any of the three, the occurrence degrades the same way a decrease does.
+
+This matters because an optional provider dimension is genuinely optional. Claude publishes its reasoning
+subset in `output_tokens_details`, and a real session journal streams a detail-less record of an assistant
+message before the completed duplicate that carries it — a terminal report tool can run inside that gap. So
+phase 1 can end having seen a complete usage object with no reasoning in it, while phase 2 on the same
+retained session sees the whole of it. Reading phase 1's missing dimension as a zero boundary would charge
+phase 2 for the entire session's reasoning; nulling phase 2's own session total would leave the dimension
+unusable for every phase after it. The lattice does neither.
 
 **Canonical occurrence projection and phase accounting.** One repository projection is the source of
 truth for usage. It reads the card's committed and staged TaskAudit records under the audit lock, validates
@@ -1231,15 +1275,22 @@ same card, role, adapter and provider `session_id`, through its own terminal bou
 selected by the explicit causal identity in the events — numeric attempt, attempt id ownership, report
 generation and phase — never by committed or pending iteration order and never by append time. Delayed or
 reversed publication therefore cannot change an interval already staged. A session with no matching prior
-occurrence starts at zero. When the current provider read produces totals that need subtraction, a matching
-predecessor whose typed degraded outcome carries no `session_totals` is an audit failure: the later phase
-stays in place and no zero baseline is invented. An unreadable or conflicting projection is likewise an
-audit failure. This does not change provider-read failure precedence for the phase being recorded. If its
-own provider read is degraded, it needs no interval arithmetic, writes that named outcome and proceeds
-normally without rereading the provider. If a readable session
-total comes back *below* an authoritative boundary, the evidence contradicts the immutable earlier
-occurrence. The later phase writes the typed degraded `arithmetic_contradiction` outcome with no totals and
-continues through its lifecycle; it never disguises the contradiction as a collected all-zero interval.
+occurrence starts at zero. A matching predecessor whose whole typed degraded occurrence carries no
+`session_totals` at all is an audit failure rather than a session that starts over: reading it as "no
+predecessor" would be indistinguishable from there having been none, so the later phase stays in place and
+no zero baseline is invented. That is a different thing from a predecessor which recorded *some* dimensions
+and not others, which the lattice above owns dimension by dimension. An unreadable or conflicting
+projection is likewise an audit failure.
+
+**Order and failure precedence.** One order, for every provider and every lifecycle path. Projection
+integrity and causal identity are settled **first**, because neither depends on what a provider journal
+says: the projection is read and the causal predecessor selected, and a phase slot already owned by a
+conflicting attempt id fails closed whatever the read that follows would have produced. The provider read
+is **second**, and is only a read: a whole-session total with no boundary subtracted and no account
+attributed. Attribution and cross-account validation are **third**, in the one place that does either.
+Immutable staging is **fourth**, and publication recovery **last**. Provider-read failure precedence is
+unchanged by this: a degraded read needs no interval arithmetic, does not consult the predecessor's
+boundary, writes its named outcome and proceeds normally without rereading the provider.
 
 **Adapter aggregation.** Codex writes cumulative `token_count` snapshots, but a new user turn can reset
 `total_token_usage` while retaining the same session and rollout file. A decrease in any raw counter starts
@@ -1259,11 +1310,17 @@ session's repeated records from being counted twice. Claude's `output_tokens` ma
 inclusive `output` meaning as Codex. After message-id deduplication, the adapter reads
 `output_tokens_details.thinking_tokens` as the contained `reasoning` subset. It sums reasoning only when
 every contributing usage object supplies a valid detail, including an explicit zero; if any omits the
-detail, aggregate `reasoning` is `null` while the known total `output` remains available. A malformed detail
-or thinking count greater than that message's output is a malformed usage record.
+detail, aggregate `reasoning` is `null` while the known total `output` remains available. `output_tokens_details`
+is optional metadata about a usage object that is otherwise complete, so it can only ever cost the reasoning
+subset: a detail that is missing, malformed or out of range — not an object, or a thinking count that is not
+a non-negative integer contained in that message's output — makes aggregate `reasoning` unavailable and is
+counted in `skipped_records`, while that message's `input`, cache and total `output` counts are still
+retained. Malformed *core* usage is unchanged and still follows the malformed outcome below: a `usage`
+object that is not an object, or that carries no usable count at all, contributes nothing.
 
 **Degraded outcomes.** One value says the counts are real and the rest name a specific failure:
-`collected`; `arithmetic_contradiction` (a readable current total is below an immutable earlier boundary);
+`collected`; `arithmetic_contradiction` (a readable current total is below an immutable earlier boundary, or
+an attributed account's reasoning escapes its own output);
 `adapter_unsupported` (the head ran on an adapter with no structured usage records);
 `session_unavailable` (no provider session identity was bound to the run); `source_unavailable` (the
 structured record source was never bound, or names no journal); `source_unreadable` (the journal exists and

@@ -16,16 +16,16 @@ from secretary.codex_provider_events import (
 )
 from secretary.config import DataDirError, instance_data_dir
 from secretary.dispatch.attempt_usage import (
-    apply_phase_boundary as _apply_phase_boundary,
-)
-from secretary.dispatch.attempt_usage import (
     attempt_usage_data as _attempt_usage_data,
 )
 from secretary.dispatch.attempt_usage import (
     attempt_usage_reason as _attempt_usage_reason,
 )
 from secretary.dispatch.attempt_usage import (
-    causal_phase_boundary as _causal_phase_boundary,
+    attribute_phase as _attribute_phase,
+)
+from secretary.dispatch.attempt_usage import (
+    causal_predecessor as _causal_predecessor,
 )
 from secretary.dispatch.attempt_usage import (
     collect_usage as _collect_usage,
@@ -5815,33 +5815,37 @@ class DispatcherRuntime:
             # below still reports its own adapter, model and whatever session identity it holds.
             pass
         run = HeadRun.from_json(snapshot)
+        # One order, for every provider and every lifecycle path. Projection integrity and causal
+        # identity first, because neither depends on what a provider journal says and a phase slot
+        # owned by another attempt may not be written whatever that journal would have said.
         try:
             occurrences = self.writer.board_host.canon.attempt_usage_occurrences(ref=ref)
+            predecessor = _causal_predecessor(
+                occurrences,
+                adapter=run.adapter,
+                session_id=run.session_id or "",
+                attempt=attempt,
+                attempt_id=record.attempt_id or attempt_id,
+                report_generation=generation,
+                phase=phase,
+                role=journal_role,
+            )
         except (OSError, TypeError, ValueError, TaskError) as exc:
             raise TaskError(
                 "audit_unavailable", f"attempt usage projection is unreadable: {exc}", 4
             ) from None
+        # The provider read second: a whole-session total, with no arithmetic of its own.
         collection = _collect_usage(
             adapter=run.adapter,
             source=_provider_usage_source(lifecycle, adapter=run.adapter),
         )
-        if collection.collected:
-            try:
-                baseline = _causal_phase_boundary(
-                    occurrences,
-                    adapter=run.adapter,
-                    session_id=run.session_id or "",
-                    attempt=attempt,
-                    attempt_id=record.attempt_id or attempt_id,
-                    report_generation=generation,
-                    phase=phase,
-                    role=journal_role,
-                )
-            except (TypeError, ValueError) as exc:
-                raise TaskError(
-                    "audit_unavailable", f"attempt usage projection is unreadable: {exc}", 4
-                ) from None
-            collection = _apply_phase_boundary(collection, baseline)
+        # Attribution and cross-account validation third, in the one place that does either.
+        try:
+            collection = _attribute_phase(collection, predecessor)
+        except (TypeError, ValueError) as exc:
+            raise TaskError(
+                "audit_unavailable", f"attempt usage projection is unreadable: {exc}", 4
+            ) from None
         data = _attempt_usage_data(
             attempt=attempt,
             attempt_id=record.attempt_id or attempt_id,

@@ -21,6 +21,15 @@ The two session shapes still differ in how the running total is obtained, and th
   streamed message is written more than once and a resumed session repeats earlier messages, so
   each message id contributes its last usage object exactly once.
 
+A provider dimension is optional in a way a session total is not: Claude publishes its reasoning
+subset in ``output_tokens_details``, and a real journal streams a detail-less record of a message
+before the completed duplicate that carries it. A phase can therefore end inside that gap and see no
+reasoning at all while the next phase on the same retained session sees the whole of it. So the
+attribution rule is per dimension and lives in exactly one place, :func:`phase_interval`: absence of a
+predecessor *occurrence* is not absence of one predecessor *dimension*, and neither is ever spelled
+zero. What a phase cannot own it owns as ``null``, while the session total it did read stays on the
+occurrence so the phase after it has a boundary to subtract from again.
+
 Nothing here reads report or verdict prose, and nothing here decides anything: every failure is a
 named degraded outcome, never an exception the caller has to survive.
 """
@@ -126,7 +135,8 @@ class UsageCollection:
     tokens: TokenTotals = field(default_factory=TokenTotals)
     # The session total this phase ends at, which is the next phase's starting boundary.
     session_totals: TokenTotals = field(default_factory=TokenTotals)
-    # The boundary this phase started from: zero for a session nobody has accounted for yet.
+    # The boundary this phase started from: zero for a session nobody has accounted for yet, and
+    # null for a dimension whose starting point no predecessor occurrence actually recorded.
     baseline: TokenTotals = field(default_factory=TokenTotals)
 
     @property
@@ -143,7 +153,7 @@ def provider_usage_source(lifecycle_run: Mapping[str, Any] | None, *, adapter: s
     return dict(source) if isinstance(source, Mapping) else {}
 
 
-def causal_phase_boundary(
+def causal_predecessor(
     occurrences: Sequence[AttemptUsageOccurrence],
     *,
     adapter: str,
@@ -153,12 +163,14 @@ def causal_phase_boundary(
     report_generation: int,
     phase: str,
     role: str,
-) -> TokenTotals | None:
-    """The causal predecessor's boundary for this provider session.
+) -> AttemptUsageOccurrence | None:
+    """The occurrence that causally precedes this phase on this provider session, if there is one.
 
     Committed and staged occurrences have equal semantic authority. Their append order is irrelevant:
-    the phase identity carried by each event decides which occurrence precedes this one. A matching
-    predecessor without a usable boundary is an audit failure, not permission to restart at zero.
+    the phase identity carried by each event decides which occurrence precedes this one. Selecting
+    the predecessor is causal-identity validation and nothing else — it reads no provider journal and
+    no token count — so it runs before the provider is read at all, and a phase slot already owned by
+    a conflicting attempt id fails closed whatever that read would have said.
     """
     if not session_id:
         return None
@@ -181,6 +193,20 @@ def causal_phase_boundary(
     if not predecessors:
         return None
     _order, predecessor = max(predecessors, key=lambda item: item[0])
+    return predecessor
+
+
+def predecessor_boundary(predecessor: AttemptUsageOccurrence | None) -> TokenTotals | None:
+    """The boundary one causal predecessor left behind, or ``None`` when there is no predecessor.
+
+    A predecessor whose whole occurrence carries no session total is a degraded phase, not a session
+    that starts over: reading it as ``None`` here would be indistinguishable from having no
+    predecessor at all, so it is an audit failure rather than permission to restart at zero. A
+    predecessor that recorded *some* dimensions and not others is a different thing entirely, and
+    :func:`phase_interval` owns it dimension by dimension.
+    """
+    if predecessor is None:
+        return None
     boundary = TokenTotals.from_json(predecessor.event.data.get("session_totals"))
     if boundary is None:
         identity = predecessor.event.data
@@ -191,33 +217,79 @@ def causal_phase_boundary(
     return boundary
 
 
+@dataclass(frozen=True)
+class PhaseAttribution:
+    """The three accounts one phase publishes, or the contradiction that voids all three."""
+
+    tokens: TokenTotals
+    phase_baseline: TokenTotals
+    session_totals: TokenTotals
+    # Empty when the accounts are consistent; otherwise why they may not be published at all.
+    contradiction: str = ""
+
+
 def phase_interval(
     session_totals: TokenTotals,
     baseline: TokenTotals | None,
-) -> tuple[TokenTotals, TokenTotals, bool]:
-    """Split a session total into the interval this phase owns and the boundary it started from.
+) -> PhaseAttribution:
+    """The one phase-attribution rule, applied per dimension to every provider and lifecycle path.
 
-    Returns ``(phase, baseline, rewound)``. ``rewound`` says the session total came back lower than
-    a boundary already made durable. The tentative interval contains no negative number; the caller
-    turns the contradiction into a typed degraded outcome rather than publishing this interval.
+    The lattice has one axis for the predecessor and one for each dimension, and the two are not the
+    same question:
+
+    * No predecessor occurrence at all. Every dimension this phase knows begins at a boundary of
+      zero and the phase owns its whole current value, because nothing before it was ever accounted
+      for. A dimension the provider did not report stays ``null`` — an unknown is not a zero.
+    * A predecessor, and both its value and the current one are known and nondecreasing. The phase
+      owns the difference, which is the ordinary retained-session case.
+    * A predecessor, and either value is unavailable. The phase owns ``null`` for that dimension and
+      no zero is invented in either account: it cannot be charged for work whose starting point
+      nobody recorded, and the predecessor cannot be retroactively credited with a zero it never
+      reported. The session total this phase actually read is kept exactly as read, so the dimension
+      re-establishes a boundary here and the next phase subtracts from it normally.
+    * A predecessor, and the current value is numerically below it. That is contradictory evidence
+      about an immutable earlier occurrence, so the whole occurrence degrades and publishes no
+      account rather than disguising the contradiction as a zero interval.
+
+    Cross-account containment is checked here too, because it is a property of the attributed
+    accounts rather than of either provider read: ``reasoning`` is a subset of ``output`` in each of
+    the three accounts wherever both are known.
     """
-    phase: dict[str, int | None] = {}
+    tokens: dict[str, int | None] = {}
     start: dict[str, int | None] = {}
-    rewound = False
+    decreased: list[str] = []
     for name in TOKEN_DIMENSIONS:
         current = getattr(session_totals, name)
+        previous = None if baseline is None else getattr(baseline, name)
         if current is None:
-            phase[name] = start[name] = None
-            continue
-        previous = getattr(baseline, name) if baseline is not None else None
-        previous = 0 if previous is None else previous
-        start[name] = previous
-        if current < previous:
-            rewound = True
-            phase[name] = 0
-            continue
-        phase[name] = current - previous
-    return TokenTotals(**phase), TokenTotals(**start), rewound
+            # Nothing to own and nothing to say about where it would have started.
+            tokens[name] = start[name] = None
+        elif baseline is None:
+            tokens[name], start[name] = current, 0
+        elif previous is None:
+            tokens[name] = start[name] = None
+        elif current < previous:
+            decreased.append(name)
+            tokens[name] = start[name] = None
+        else:
+            tokens[name], start[name] = current - previous, previous
+    attribution = PhaseAttribution(
+        tokens=TokenTotals(**tokens),
+        phase_baseline=TokenTotals(**start),
+        session_totals=session_totals,
+    )
+    if decreased:
+        return replace(
+            attribution,
+            contradiction=(
+                "the provider session total fell below the authoritative boundary of an earlier "
+                f"phase in {', '.join(decreased)}"
+            ),
+        )
+    uncontained = _uncontained_reasoning(attribution)
+    if uncontained:
+        return replace(attribution, contradiction=uncontained)
+    return attribution
 
 
 def apply_phase_boundary(
@@ -232,34 +304,61 @@ def apply_phase_boundary(
     """
     if not collection.collected:
         return collection
-    tokens, start, rewound = phase_interval(collection.session_totals, baseline)
-    if rewound:
+    attribution = phase_interval(collection.session_totals, baseline)
+    if attribution.contradiction:
         return replace(
             collection,
             outcome=AttemptUsageOutcome.ARITHMETIC_CONTRADICTION,
-            detail=("the provider session total fell below the authoritative boundary of an earlier phase"),
+            detail=attribution.contradiction,
             tokens=TokenTotals(),
             session_totals=TokenTotals(),
             baseline=TokenTotals(),
         )
     return replace(
         collection,
-        detail=collection.detail,
-        tokens=tokens,
-        baseline=start,
+        tokens=attribution.tokens,
+        session_totals=attribution.session_totals,
+        baseline=attribution.phase_baseline,
     )
 
 
-def collect_usage(
-    *,
-    adapter: str,
-    source: Mapping[str, Any] | None,
-    baseline: TokenTotals | None = None,
+def attribute_phase(
+    collection: UsageCollection,
+    predecessor: AttemptUsageOccurrence | None,
 ) -> UsageCollection:
+    """Turn one provider read plus its already-selected causal predecessor into the three accounts.
+
+    The single attribution site every lifecycle path goes through: first phase and retained phase,
+    Codex and Claude, a live acceptance and a replayed one. A degraded read is returned untouched, so
+    the predecessor's boundary is not even consulted for a phase that has no interval to compute.
+    """
+    if not collection.collected:
+        return collection
+    return apply_phase_boundary(collection, predecessor_boundary(predecessor))
+
+
+def _uncontained_reasoning(attribution: PhaseAttribution) -> str:
+    """The first account whose reasoning escapes its own output, or an empty string."""
+    accounts = (
+        ("tokens", attribution.tokens),
+        ("phase_baseline", attribution.phase_baseline),
+        ("session_totals", attribution.session_totals),
+    )
+    for name, account in accounts:
+        if account.output is None or account.reasoning is None:
+            continue
+        if account.reasoning > account.output:
+            return f"the {name} reasoning is not contained in its own output total"
+    return ""
+
+
+def collect_usage(*, adapter: str, source: Mapping[str, Any] | None) -> UsageCollection:
     """Read one finished phase's usage out of its bound provider source.
 
-    ``baseline`` is the previous authoritative boundary for this same provider session, so what comes back
-    is the interval this phase owns rather than everything the session has ever spent.
+    Collection is the provider read and only the provider read: what comes back is the whole session
+    total this phase ended at, with no boundary subtracted and no account attributed. Attribution is
+    :func:`attribute_phase`, one step later and in one place, so no adapter path can grow arithmetic
+    of its own.
 
     Never raises: every way this can fail is one of the declared degraded outcomes, because the
     caller runs on the path that accepts a worker report or a reviewer verdict.
@@ -303,15 +402,12 @@ def collect_usage(
     session = aggregate(records)
     skipped = unparsed + session.invalid
     if session.records:
-        return apply_phase_boundary(
-            UsageCollection(
-                AttemptUsageOutcome.COLLECTED,
-                source_kind=kind,
-                records=session.records,
-                skipped_records=skipped,
-                session_totals=session.totals,
-            ),
-            baseline,
+        return UsageCollection(
+            AttemptUsageOutcome.COLLECTED,
+            source_kind=kind,
+            records=session.records,
+            skipped_records=skipped,
+            session_totals=session.totals,
         )
     if session.invalid:
         return UsageCollection(
@@ -407,6 +503,12 @@ def claude_usage(records: Iterable[Any]) -> SessionUsage:
     repeatedly and only the final record carries the finished counts. A dimension no counted message
     reported stays unavailable, and an assistant record whose declared ``usage`` is not the object
     this adapter publishes is a malformed structured record rather than a message that cost nothing.
+
+    ``output_tokens_details`` is optional metadata about an otherwise valid usage object, so it can
+    only ever cost the reasoning subset. A message whose detail is missing, malformed or out of range
+    still contributes its input, cache and total-output counts; it makes aggregate ``reasoning``
+    unavailable for the session and is reported as a skipped record. Malformed *core* usage is the
+    documented malformed outcome and is unchanged: there, the whole record carries nothing usable.
     """
     latest: dict[str, dict[str, Any]] = {}
     order: list[str] = []
@@ -430,8 +532,8 @@ def claude_usage(records: Iterable[Any]) -> SessionUsage:
         usage = latest[key]
         thinking, malformed = _claude_thinking_tokens(usage)
         if malformed:
+            # Optional reasoning metadata may not discard usage the provider did report.
             invalid += 1
-            continue
         for name, provider_field in CLAUDE_TOKEN_FIELDS.items():
             value = _count(usage, provider_field)
             if value is None:
@@ -586,8 +688,9 @@ def _claude_usage_object(record: Any) -> tuple[dict[str, Any] | None, bool]:
 def _claude_thinking_tokens(usage: Mapping[str, Any]) -> tuple[int | None, bool]:
     """One deduplicated message's reasoning subset and whether its detail is malformed.
 
-    An omitted detail makes aggregate reasoning unavailable without losing the known total output.
-    A present detail must be a non-negative integer contained in that message's output total.
+    An omitted detail makes aggregate reasoning unavailable without losing the known total output,
+    and so does a malformed one: the caller keeps this message's additive counts either way. A
+    present detail must be a non-negative integer contained in that message's output total.
     """
     details = usage.get("output_tokens_details")
     if details is None:

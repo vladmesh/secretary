@@ -496,26 +496,42 @@ def _validate_attempt_usage_event(
                 raise ValueError(
                     f"attempt usage {account} dimension {name} must be a non-negative integer or null"
                 )
-        if collected and all(value is None for value in counts.values()):
-            raise ValueError(f"a collected attempt usage outcome reports at least one {account} dimension")
         if not collected and any(value is not None for value in counts.values()):
             raise ValueError("a degraded attempt usage outcome reports no token totals")
+        # `reasoning` is a contained subset of the inclusive `output`, in whichever accounts happen
+        # to know both. It is a property of each account on its own, so it holds for a historical
+        # all-three-or-none occurrence and for an independently attributed one alike.
+        comparable = counts["output"] is not None and counts["reasoning"] is not None
+        if comparable and counts["reasoning"] > counts["output"]:
+            raise ValueError(f"attempt usage {account} reasoning must be contained in its output")
     if collected:
         tokens = data["tokens"]
         totals = data["session_totals"]
         baseline = data["phase_baseline"]
+        if all(value is None for value in totals.values()):
+            raise ValueError("a collected attempt usage outcome reports at least one session total")
+        # The three accounts are nullable per dimension and independently of each other, because a
+        # provider dimension can be absent from a predecessor and present here, or the reverse. What
+        # is *attributed* is still checkable: a dimension this phase owns names the boundary it was
+        # measured from and the total it was measured to. A dimension it does not own says so in both
+        # `tokens` and `phase_baseline` and never as a zero, while `session_totals` keeps whatever the
+        # provider did report so the next phase on this session has a boundary to subtract from.
         for name in TOKEN_DIMENSIONS:
-            values = (tokens[name], totals[name], baseline[name])
-            if all(value is None for value in values):
+            owned, total, start = tokens[name], totals[name], baseline[name]
+            if owned is None and start is None:
                 continue
-            if any(value is None for value in values):
+            if owned is None or start is None:
                 raise ValueError(
-                    f"attempt usage dimension {name} must be available in all three accounts or none"
+                    f"attempt usage dimension {name} attributes its interval and its baseline together"
                 )
-            if totals[name] < baseline[name]:
+            if total is None:
+                raise ValueError(
+                    f"attempt usage dimension {name} attributes an interval with no session total"
+                )
+            if total < start:
                 raise ValueError(f"attempt usage dimension {name} has a session total below its baseline")
-            expected = totals[name] - baseline[name]
-            if tokens[name] != expected:
+            expected = total - start
+            if owned != expected:
                 raise ValueError(f"attempt usage dimension {name} does not match its session-total interval")
 
 
