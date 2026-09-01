@@ -13,7 +13,9 @@ keeps their index operations from overlapping.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import subprocess
 import tempfile
 import time
@@ -55,9 +57,14 @@ from secretary.state_repo import BOARD_RUNS_PATHSPEC
 from secretary.tasks import TaskAudit, TaskError
 from triggered_agents.runtime.redact import redact
 
-# Canonical checkpoint entries per component. `events.ndjson` is optional: an
-# instance that has never appended a task event has no audit log yet.
-BOARD_ENTRIES = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json")
+# Canonical checkpoint entries per component. New board cuts always include an
+# empty events journal when no event has been written. Older checkpoints remain
+# readable without either events.ndjson or the analytics seal.
+ANALYTICS_MANIFEST = "analytics-manifest.json"
+ANALYTICS_SCHEMA = "secretary.board.analytics-checkpoint"
+ANALYTICS_VERSION = 1
+ANALYTICS_FILES = ("events.ndjson", "cards.ndjson", "sprints.ndjson", "export.json")
+BOARD_ENTRIES = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json", ANALYTICS_MANIFEST)
 BOARD_REQUIRED = ("cards.ndjson", "sprints.ndjson", "export.json")
 RUNS_ENTRIES = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")
 RUNS_REQUIRED = RUNS_ENTRIES
@@ -81,6 +88,206 @@ PUSH_TIMEOUT_SECONDS = 60
 
 class CheckpointBlocked(Exception):
     """The snapshot did not pass the gate; nothing is committed this tick."""
+
+
+class AnalyticsManifestError(ValueError):
+    """A directory is not a sealed analytics checkpoint input."""
+
+
+@dataclass(frozen=True)
+class AnalyticsCheckpoint:
+    """Verified metadata for one immutable analytics input, never analytics rows."""
+
+    checkpoint_id: str
+    directory: Path
+
+
+def _write_analytics_manifest(directory: Path) -> None:
+    """Seal the already validated board files; publication places this file last."""
+    entries: list[dict[str, Any]] = []
+    for name in ANALYTICS_FILES:
+        path = directory / name
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            raise CheckpointBlocked(f"could not read board/{name} for analytics manifest: {exc}") from None
+        entry: dict[str, Any] = {
+            "path": name,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "bytes": len(payload),
+        }
+        if name.endswith(".ndjson"):
+            try:
+                entry["line_count"] = _analytics_line_count(payload, path)
+            except AnalyticsManifestError as exc:
+                raise CheckpointBlocked(str(exc)) from None
+        entries.append(entry)
+    payload = {
+        "schema": ANALYTICS_SCHEMA,
+        "version": ANALYTICS_VERSION,
+        "checkpoint_id": _analytics_checkpoint_id(entries),
+        "files": entries,
+    }
+    try:
+        _write_text_atomic(
+            directory / ANALYTICS_MANIFEST, json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        )
+    except RuntimeError as exc:
+        raise CheckpointBlocked(f"could not write board analytics manifest: {exc}") from None
+
+
+def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
+    """Verify a sealed board cut using only files beneath ``directory``.
+
+    This deliberately has no board, dispatcher, provider, transcript, comment,
+    or runtime dependency. It returns only the sealed-cut identity; a later
+    projection must call it before it parses analytics rows.
+    """
+    root = Path(directory).expanduser().resolve()
+    if not root.is_dir():
+        _analytics_failure(root, "analytics checkpoint directory is missing")
+
+    manifest_path = root / ANALYTICS_MANIFEST
+    manifest = _read_analytics_json(manifest_path)
+    expected_top_level = {"schema", "version", "checkpoint_id", "files"}
+    if set(manifest) != expected_top_level:
+        _analytics_failure(
+            manifest_path, "manifest must contain exactly schema, version, checkpoint_id, files"
+        )
+    if manifest["schema"] != ANALYTICS_SCHEMA:
+        _analytics_failure(manifest_path, f"unknown manifest schema {manifest['schema']!r}")
+    if not _is_int(manifest["version"]) or manifest["version"] != ANALYTICS_VERSION:
+        _analytics_failure(manifest_path, f"unknown manifest version {manifest['version']!r}")
+    checkpoint_id = manifest["checkpoint_id"]
+    if not isinstance(checkpoint_id, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_id):
+        _analytics_failure(manifest_path, "checkpoint_id must be a lowercase SHA-256 digest")
+
+    entries = manifest["files"]
+    if not isinstance(entries, list):
+        _analytics_failure(manifest_path, "files must be a list")
+    indexed: dict[str, dict[str, Any]] = {}
+    for number, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            _analytics_failure(manifest_path, f"files[{number}] entry must be an object")
+        relative = entry.get("path")
+        if not isinstance(relative, str) or relative not in ANALYTICS_FILES:
+            _analytics_failure(manifest_path, f"files[{number}].path must name a required analytics file")
+        if relative in indexed:
+            _analytics_failure(manifest_path, f"files[{number}] duplicate manifest entry for {relative}")
+        required_fields = {"path", "sha256", "bytes"}
+        if relative.endswith(".ndjson"):
+            required_fields.add("line_count")
+        if set(entry) != required_fields:
+            _analytics_failure(manifest_path, f"files[{number}] entry for {relative} has invalid fields")
+        digest = entry["sha256"]
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            _analytics_failure(manifest_path, f"files[{number}] entry for {relative} has malformed sha256")
+        if not _is_int(entry["bytes"]) or entry["bytes"] < 0:
+            _analytics_failure(manifest_path, f"files[{number}] entry for {relative} has malformed bytes")
+        if relative.endswith(".ndjson") and (not _is_int(entry["line_count"]) or entry["line_count"] < 0):
+            _analytics_failure(manifest_path, f"files[{number}] entry for {relative} has malformed line_count")
+        indexed[relative] = entry
+
+    missing_entries = [name for name in ANALYTICS_FILES if name not in indexed]
+    if missing_entries:
+        _analytics_failure(manifest_path, f"missing manifest entry for {', '.join(missing_entries)}")
+    if len(entries) != len(ANALYTICS_FILES):
+        _analytics_failure(manifest_path, "files must list each required analytics file exactly once")
+    _verify_analytics_directory_files(root)
+
+    canonical_entries: list[dict[str, Any]] = []
+    for name in ANALYTICS_FILES:
+        path = root / name
+        if not path.is_file() or path.is_symlink():
+            _analytics_failure(path, "required analytics file is missing or is not a regular file")
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            _analytics_failure(path, f"could not read analytics file: {exc}")
+        entry = indexed[name]
+        actual_digest = hashlib.sha256(payload).hexdigest()
+        if entry["sha256"] != actual_digest:
+            _analytics_failure(path, "sha256 does not match manifest")
+        if entry["bytes"] != len(payload):
+            _analytics_failure(path, "byte count does not match manifest")
+        canonical = {"path": name, "sha256": actual_digest, "bytes": len(payload)}
+        if name.endswith(".ndjson"):
+            line_count = _analytics_line_count(payload, path)
+            if entry["line_count"] != line_count:
+                _analytics_failure(path, "line count does not match manifest")
+            canonical["line_count"] = line_count
+        canonical_entries.append(canonical)
+
+    expected_id = _analytics_checkpoint_id(canonical_entries)
+    if checkpoint_id != expected_id:
+        _analytics_failure(manifest_path, "checkpoint_id does not match manifest file entries")
+    _verify_analytics_export_summary(root)
+    return AnalyticsCheckpoint(checkpoint_id=checkpoint_id, directory=root)
+
+
+def _analytics_failure(path: Path, detail: str) -> None:
+    raise AnalyticsManifestError(f"{path}: {detail}")
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _read_analytics_json(path: Path) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink():
+        _analytics_failure(path, "manifest is missing or is not a regular file")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        _analytics_failure(path, f"could not parse manifest: {exc}")
+    if not isinstance(payload, dict):
+        _analytics_failure(path, "manifest must be an object")
+    return payload
+
+
+def _analytics_line_count(payload: bytes, path: Path | None = None) -> int:
+    try:
+        return sum(1 for line in payload.decode("utf-8").splitlines() if line.strip())
+    except UnicodeDecodeError as exc:
+        if path is not None:
+            _analytics_failure(path, f"could not decode analytics NDJSON as UTF-8: {exc}")
+        raise AnalyticsManifestError(f"analytics NDJSON: could not decode UTF-8: {exc}") from None
+
+
+def _analytics_checkpoint_id(entries: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(entries, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _verify_analytics_directory_files(root: Path) -> None:
+    allowed = {*ANALYTICS_FILES, ANALYTICS_MANIFEST, ".gitignore"}
+    try:
+        entries = list(root.iterdir())
+    except OSError as exc:
+        _analytics_failure(root, f"could not list analytics checkpoint directory: {exc}")
+    for entry in entries:
+        if entry.name not in allowed:
+            _analytics_failure(entry, "unlisted file in analytics checkpoint directory")
+
+
+def _verify_analytics_export_summary(root: Path) -> None:
+    export_path = root / "export.json"
+    try:
+        summary = json.loads(export_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        _analytics_failure(export_path, f"could not parse export summary: {exc}")
+    if not isinstance(summary, dict):
+        _analytics_failure(export_path, "export summary must be an object")
+    for key, name in (("card_count", "cards.ndjson"), ("sprint_count", "sprints.ndjson")):
+        declared = summary.get(key)
+        if not _is_int(declared) or declared < 0:
+            _analytics_failure(export_path, f"export summary has malformed {key}")
+        try:
+            actual = _analytics_line_count((root / name).read_bytes(), root / name)
+        except OSError as exc:
+            _analytics_failure(root / name, f"could not read analytics file: {exc}")
+        if declared != actual:
+            _analytics_failure(export_path, f"stale {key}: export.json={declared} {name}={actual}")
 
 
 def _canonical_run_journals(path: Path, label: str) -> dict[str, list[str]]:
@@ -228,7 +435,7 @@ class CheckpointWriter:
         _ensure_dir(destination, f"checkpoint {component} dir")
         try:
             staging = Path(
-                tempfile.mkdtemp(prefix=f".{component}-checkpoint-", suffix=".tmp", dir=destination)
+                tempfile.mkdtemp(prefix=f".{component}-checkpoint-", suffix=".tmp", dir=destination.parent)
             )
         except OSError as exc:
             raise CheckpointBlocked(f"could not stage checkpoint {component}: {exc}") from None
@@ -236,6 +443,13 @@ class CheckpointWriter:
         try:
             staged = self._stage(source, staging, entries, required, component)
             validate(staging)
+            if component == "board":
+                _write_analytics_manifest(staging)
+                try:
+                    verify_analytics_checkpoint(staging)
+                except AnalyticsManifestError as exc:
+                    raise CheckpointBlocked(str(exc)) from None
+                staged = (*staged, ANALYTICS_MANIFEST)
             _scan_for_secrets(
                 staging,
                 staged,
@@ -243,7 +457,13 @@ class CheckpointWriter:
                 runtime_env=self.instance_dir / "runtime.env",
                 secret_values=secret_values,
             )
-            _publish_component_entries(staging, destination, list(staged), f"checkpoint {component}")
+            _publish_component_entries(
+                staging,
+                destination,
+                list(staged),
+                f"checkpoint {component}",
+                publish_last=ANALYTICS_MANIFEST if component == "board" else None,
+            )
             _drop_vanished(destination, entries, staged)
         except RuntimeError as exc:
             _cleanup_staging_dir(staging)
@@ -264,8 +484,17 @@ class CheckpointWriter:
     ) -> tuple[str, ...]:
         staged: list[str] = []
         for entry in entries:
+            if component == "board" and entry == ANALYTICS_MANIFEST:
+                continue
             origin = source / entry
             if not origin.exists():
+                if component == "board" and entry == "events.ndjson":
+                    try:
+                        _write_text_atomic(staging / entry, "")
+                    except RuntimeError as exc:
+                        raise CheckpointBlocked(f"could not stage {component}/{entry}: {exc}") from None
+                    staged.append(entry)
+                    continue
                 if entry in required:
                     raise CheckpointBlocked(f"checkpoint {component} export is missing {entry}")
                 continue
@@ -612,7 +841,7 @@ def _age_minutes(stamp: str, now: float) -> int | None:
     if not stamp:
         return 0
     try:
-        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        moment = datetime.fromisoformat(stamp)
     except ValueError:
         return None
     if moment.tzinfo is None:

@@ -38,7 +38,8 @@ The canon, the normalised minimum needed to resume work:
   and product ref the installation was running; bringing the snapshot up to a new checkout is
   `secretary upgrade`'s job;
 - board export: `state/board/cards.ndjson`, `state/board/sprints.ndjson`,
-  `state/board/events.ndjson`, `state/board/export.json`;
+  `state/board/events.ndjson`, `state/board/export.json`, and the analytics seal
+  `state/board/analytics-manifest.json`;
 - run and audit state: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
 - memory facts: `state/memory/facts/**`;
 - knowledge documents: `state/knowledge/**` (free-form markdown, see
@@ -68,8 +69,9 @@ archive:
   `secretary upgrade` re-materialise them idempotently during provisioning and recovery, matching
   automations by name and editing in place so ids and unit names stay stable.
 
-The board export is kept only as NDJSON, for line-wise diffs. The JSON duplicates are not part of the
-checkpoint.
+Board records are kept as NDJSON for line-wise diffs. The checkpoint also carries the small
+`export.json` summary and, for newly published cuts, the analytics seal; derived JSON card and sprint
+duplicates are not part of the checkpoint.
 
 Pipeline cards, including Product and Issue records, and sprint entities go into the checkpoint as separate sets: sprints live on their own
 board and are not part of the card export, so the writer reads them in its own pass instead of
@@ -88,7 +90,7 @@ configuration.
 <private repository>/
   instance.yaml, persona/, projects/, adapters/, heads/, policies/   config, committed by the operator
   state/                                                             state, committed by the auto-writer
-    board/   cards.ndjson, sprints.ndjson, events.ndjson, export.json
+    board/   cards.ndjson, sprints.ndjson, events.ndjson, export.json, analytics-manifest.json
     runs/    runs.ndjson, claims.json, watermarks.json, export.json
     memory/facts/**
     knowledge/**   brainstorms, decision logs, incident write-ups
@@ -152,6 +154,29 @@ history.
 - the secret scan of `state/` is clean. `state/` goes to the remote and is the one place a secret could
   leak, for example a token pasted into a card or a log. The memory and knowledge writers run the same
   scan over their own text before committing, since their path does not go through the tick gate.
+
+### Analytics checkpoint seal v1
+
+`analytics-manifest.json` is `secretary.board.analytics-checkpoint` version 1. It is the boundary for
+a later offline analytics projection, not a replacement for recovery validation. Its object has exactly
+`schema`, `version`, `checkpoint_id`, and `files`. `files` has exactly one entry for each of
+`events.ndjson`, `cards.ndjson`, `sprints.ndjson`, and `export.json`. Every entry records its path,
+lowercase SHA-256 digest and byte count; the three NDJSON entries also record their non-blank line count.
+`checkpoint_id` is the lowercase SHA-256 digest of those canonical file-entry values. `export.json`
+continues to be a card/sprint summary, never proof of the cut by itself.
+
+The writer validates all four files first, synthesizing an empty `events.ndjson` when there are no board
+events, then hashes and validates the staged manifest. It removes any prior manifest before replacing the
+four files and renames the new manifest last. A directory copied during that interval therefore has no
+manifest, or after the final rename has a complete matching cut; it cannot carry a manifest authenticating
+the prior files mixed with the new ones.
+
+`verify_analytics_checkpoint(directory)` is directory-only and read-only. It does not read a live board,
+dispatcher, provider, transcript, comment or runtime state, returns only verified checkpoint metadata and
+rejects unknown schemas, missing or extra files, duplicate entries, malformed metadata, digest/count
+mismatches and stale card/sprint summaries. A projection must call it before parsing any analytics rows.
+Eventless or unsealed historical checkpoints remain valid recovery input under the existing restore rules,
+but are deliberately not analytics v1 input; the writer does not backfill seals into history.
 
 ## Failure and divergence
 

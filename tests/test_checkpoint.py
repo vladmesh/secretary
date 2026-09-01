@@ -1,5 +1,6 @@
 import contextlib
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import secret_store
+from secretary._fsutil import publish_component_entries
 from secretary.board import (
     Actor,
     BoardEventCanon,
@@ -18,11 +20,16 @@ from secretary.board import (
 )
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import (
+    ANALYTICS_MANIFEST,
     PUSH_INTERVAL_SECONDS,
+    AnalyticsManifestError,
     CheckpointPusher,
     CheckpointWriter,
+    _validate_board,
+    _write_analytics_manifest,
     checkpoint_snapshot,
     render_checkpoint_lines,
+    verify_analytics_checkpoint,
 )
 from secretary.data import DataExport
 from secretary.routing_journal import attempts
@@ -158,9 +165,11 @@ class CheckpointWriterTests(unittest.TestCase):
             lines = (Path(data_dir) / "runs" / "runs.ndjson").read_text(encoding="utf-8")
             return DataExport(path=Path(data_dir), count=len(lines.splitlines()), source="test")
 
-        with mock.patch("secretary.checkpoint.export_board", side_effect=board_export):
-            with mock.patch("secretary.checkpoint.export_runs", side_effect=runs_export):
-                return self.writer().write()
+        with (
+            mock.patch("secretary.checkpoint.export_board", side_effect=board_export),
+            mock.patch("secretary.checkpoint.export_runs", side_effect=runs_export),
+        ):
+            return self.writer().write()
 
     def head_files(self) -> list[str]:
         return git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split()
@@ -174,22 +183,48 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("state/board/cards.ndjson", files)
         self.assertIn("state/board/events.ndjson", files)
         self.assertIn("state/board/export.json", files)
+        self.assertIn("state/board/analytics-manifest.json", files)
         self.assertIn("state/runs/runs.ndjson", files)
         self.assertIn("state/runs/claims.json", files)
         self.assertIn("state/runs/watermarks.json", files)
         self.assertIn("state/runs/export.json", files)
         self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), result.commit)
 
-    def test_optional_entry_that_vanished_from_the_source_leaves_the_checkpoint(self):
+    def test_missing_live_events_publish_as_an_empty_sealed_journal(self):
         self.write()
         self.assertIn("state/board/events.ndjson", self.head_files())
 
         (self.data_dir / "board" / "events.ndjson").unlink()
         result = self.write()
 
-        self.assertEqual(result.status, "committed")
-        self.assertNotIn("state/board/events.ndjson", self.head_files())
+        self.assertEqual(result.status, "unchanged")
+        self.assertIn("state/board/events.ndjson", self.head_files())
+        self.assertEqual((self.instance_dir / "state" / "board" / "events.ndjson").read_text(), "")
         self.assertIn("state/board/cards.ndjson", self.head_files())
+
+    def test_board_publication_exposes_no_seal_during_its_copy_window(self):
+        self.assertEqual(self.write().status, "committed")
+        changed = dict(CARD, title="new cut")
+        self.seed_board([changed])
+
+        from secretary import checkpoint as checkpoint_module
+
+        publish = checkpoint_module._publish_component_entries
+        observed: list[str] = []
+
+        def copy_with_window(staging, destination, entries, label, **kwargs):
+            if label == "checkpoint board":
+                (destination / ANALYTICS_MANIFEST).unlink()
+                with self.assertRaisesRegex(AnalyticsManifestError, "manifest is missing"):
+                    verify_analytics_checkpoint(destination)
+                observed.append("no manifest")
+            return publish(staging, destination, entries, label, **kwargs)
+
+        with mock.patch("secretary.checkpoint._publish_component_entries", side_effect=copy_with_window):
+            self.assertEqual(self.write().status, "committed")
+
+        self.assertEqual(observed, ["no manifest"])
+        verify_analytics_checkpoint(self.instance_dir / "state" / "board")
 
     def test_live_typed_event_is_staged_as_a_board_checkpoint_artifact(self):
         host = FakeBoardHost(data_dir=self.data_dir)
@@ -683,6 +718,196 @@ class CheckpointWriterTests(unittest.TestCase):
         committed = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
         self.assertNotIn("instance.yaml", committed)
         self.assertIn("state/board/cards.ndjson", committed)
+
+
+class AnalyticsManifestTests(unittest.TestCase):
+    """The analytics boundary verifies only a sealed board directory."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.board = Path(self.tmpdir.name) / "board"
+        self.board.mkdir()
+        (self.board / "cards.ndjson").write_text('{"reference":"secretary-1"}\n', encoding="utf-8")
+        (self.board / "sprints.ndjson").write_text('{"reference":"sprint:1"}\n', encoding="utf-8")
+        (self.board / "events.ndjson").write_text('{"event_id":"event-1"}\n', encoding="utf-8")
+        (self.board / "export.json").write_text(
+            json.dumps({"version": 1, "card_count": 1, "sprint_count": 1}) + "\n",
+            encoding="utf-8",
+        )
+        _write_analytics_manifest(self.board)
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    def copy_board(self) -> Path:
+        copied = self.board.parent / f"copy-{len(list(self.board.parent.glob('copy-*')))}"
+        shutil.copytree(self.board, copied)
+        return copied
+
+    def manifest(self, board: Path) -> dict:
+        return json.loads((board / ANALYTICS_MANIFEST).read_text(encoding="utf-8"))
+
+    def write_manifest(self, board: Path, payload: dict) -> None:
+        (board / ANALYTICS_MANIFEST).write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    def test_baseline_seal_returns_only_checkpoint_metadata(self):
+        verified = verify_analytics_checkpoint(self.board)
+
+        self.assertEqual(verified.directory, self.board.resolve())
+        self.assertRegex(verified.checkpoint_id, r"^[0-9a-f]{64}$")
+        manifest = self.manifest(self.board)
+        self.assertEqual(manifest["schema"], "secretary.board.analytics-checkpoint")
+        self.assertEqual(manifest["version"], 1)
+        self.assertEqual(
+            [entry["path"] for entry in manifest["files"]],
+            [
+                "events.ndjson",
+                "cards.ndjson",
+                "sprints.ndjson",
+                "export.json",
+            ],
+        )
+        self.assertNotIn("line_count", manifest["files"][-1])
+
+    def test_empty_events_are_a_valid_sealed_cut(self):
+        board = self.copy_board()
+        (board / "events.ndjson").write_text("", encoding="utf-8")
+        _write_analytics_manifest(board)
+
+        verify_analytics_checkpoint(board)
+
+    def test_publish_helper_removes_the_old_seal_before_copying_and_adds_the_new_one_last(self):
+        destination = self.copy_board()
+        staging = self.board.parent / "staging"
+        shutil.copytree(self.board, staging)
+        (staging / "cards.ndjson").write_text('{"reference":"secretary-2"}\n', encoding="utf-8")
+        _write_analytics_manifest(staging)
+
+        from secretary import _fsutil
+
+        replace = _fsutil.os.replace
+        observations: list[str] = []
+
+        def observe_replace(source, target):
+            replace(source, target)
+            if not (destination / ANALYTICS_MANIFEST).exists():
+                with self.assertRaisesRegex(AnalyticsManifestError, "manifest is missing"):
+                    verify_analytics_checkpoint(destination)
+                observations.append("no manifest")
+            elif target == destination / ANALYTICS_MANIFEST:
+                verify_analytics_checkpoint(destination)
+                observations.append("sealed")
+
+        with mock.patch("secretary._fsutil.os.replace", side_effect=observe_replace):
+            publish_component_entries(
+                staging,
+                destination,
+                ["cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json", ANALYTICS_MANIFEST],
+                "test board",
+                publish_last=ANALYTICS_MANIFEST,
+            )
+
+        self.assertIn("no manifest", observations)
+        self.assertEqual(observations[-1], "sealed")
+
+    def test_stale_export_summary_is_rejected_even_when_resealed(self):
+        board = self.copy_board()
+        (board / "export.json").write_text(
+            json.dumps({"version": 1, "card_count": 2, "sprint_count": 1}) + "\n",
+            encoding="utf-8",
+        )
+        _write_analytics_manifest(board)
+
+        with self.assertRaisesRegex(AnalyticsManifestError, "stale card_count"):
+            verify_analytics_checkpoint(board)
+
+    def test_valid_event_truncation_is_rejected_before_analytics_parsing(self):
+        board = self.copy_board()
+        (board / "events.ndjson").write_text("", encoding="utf-8")
+
+        # The legacy structural reader accepts this eventless directory. The
+        # analytics boundary does not accept it because its old seal is stale.
+        _validate_board(board, registered_project_ids=set())
+        with self.assertRaisesRegex(AnalyticsManifestError, "events.ndjson: sha256"):
+            verify_analytics_checkpoint(board)
+
+    def test_extra_or_unlisted_files_are_rejected(self):
+        board = self.copy_board()
+        (board / "events-copy.ndjson").write_text("{}\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(AnalyticsManifestError, "events-copy.ndjson: unlisted"):
+            verify_analytics_checkpoint(board)
+
+    def test_missing_or_unknown_manifest_is_rejected(self):
+        board = self.copy_board()
+        (board / ANALYTICS_MANIFEST).unlink()
+        with self.assertRaisesRegex(AnalyticsManifestError, "analytics-manifest.json: manifest is missing"):
+            verify_analytics_checkpoint(board)
+
+        board = self.copy_board()
+        manifest = self.manifest(board)
+        manifest["schema"] = "secretary.board.unknown"
+        self.write_manifest(board, manifest)
+        with self.assertRaisesRegex(AnalyticsManifestError, "unknown manifest schema"):
+            verify_analytics_checkpoint(board)
+
+        board = self.copy_board()
+        manifest = self.manifest(board)
+        manifest["version"] = 2
+        self.write_manifest(board, manifest)
+        with self.assertRaisesRegex(AnalyticsManifestError, "unknown manifest version"):
+            verify_analytics_checkpoint(board)
+
+        board = self.copy_board()
+        (board / "events.ndjson").unlink()
+        with self.assertRaisesRegex(
+            AnalyticsManifestError, "events.ndjson: required analytics file is missing"
+        ):
+            verify_analytics_checkpoint(board)
+
+    def test_malformed_manifest_duplicate_entry_and_bad_file_metadata_are_rejected(self):
+        board = self.copy_board()
+        (board / ANALYTICS_MANIFEST).write_text("not json\n", encoding="utf-8")
+        with self.assertRaisesRegex(AnalyticsManifestError, "could not parse manifest"):
+            verify_analytics_checkpoint(board)
+
+        cases = {
+            "duplicate": lambda manifest: manifest["files"].append(dict(manifest["files"][0])),
+            "malformed-id": lambda manifest: manifest.update(checkpoint_id="not-a-digest"),
+            "malformed-digest": lambda manifest: manifest["files"][0].update(sha256="not-a-digest"),
+            "malformed-bytes": lambda manifest: manifest["files"][0].update(bytes=True),
+            "malformed-lines": lambda manifest: manifest["files"][0].update(line_count=-1),
+            "digest": lambda manifest: manifest["files"][0].update(sha256="0" * 64),
+            "bytes": lambda manifest: manifest["files"][0].update(bytes=999),
+            "lines": lambda manifest: manifest["files"][0].update(line_count=999),
+        }
+        expected = {
+            "duplicate": "duplicate manifest entry",
+            "malformed-id": "checkpoint_id must be",
+            "malformed-digest": "malformed sha256",
+            "malformed-bytes": "malformed bytes",
+            "malformed-lines": "malformed line_count",
+            "digest": "sha256 does not match",
+            "bytes": "byte count does not match",
+            "lines": "line count does not match",
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                board = self.copy_board()
+                manifest = self.manifest(board)
+                mutate(manifest)
+                self.write_manifest(board, manifest)
+                with self.assertRaisesRegex(AnalyticsManifestError, expected[name]):
+                    verify_analytics_checkpoint(board)
+
+    def test_legacy_eventless_unsealed_directory_remains_restorable_but_not_analytics_input(self):
+        board = self.copy_board()
+        (board / ANALYTICS_MANIFEST).unlink()
+        (board / "events.ndjson").unlink()
+
+        _validate_board(board, registered_project_ids=set())
+        with self.assertRaisesRegex(AnalyticsManifestError, "analytics-manifest.json: manifest is missing"):
+            verify_analytics_checkpoint(board)
 
 
 class FakeClock:

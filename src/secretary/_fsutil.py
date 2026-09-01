@@ -220,19 +220,36 @@ def publish_component_entries(
     destination: Path,
     entries: list[str],
     label: str,
+    *,
+    publish_last: str | None = None,
 ) -> None:
+    """Replace component files, optionally removing one proof file before all others.
+
+    A proof file such as a manifest must disappear before a reader can observe
+    any replaced input, but must be the final new file readers can observe.
+    """
+    if publish_last is not None and publish_last not in entries:
+        raise RuntimeError(f"could not publish {label}: publish-last entry is not being published")
+    remove_entries = entries
+    publish_entries = entries
+    if publish_last is not None:
+        other_entries = [entry for entry in entries if entry != publish_last]
+        remove_entries = [publish_last, *other_entries]
+        publish_entries = [*other_entries, publish_last]
     try:
-        backup = Path(tempfile.mkdtemp(prefix=f".{destination.name}-old-", suffix=".tmp", dir=destination))
+        backup = Path(
+            tempfile.mkdtemp(prefix=f".{destination.name}-old-", suffix=".tmp", dir=destination.parent)
+        )
     except OSError as exc:
         raise RuntimeError(f"could not publish {label}: {exc}") from None
 
     try:
-        for entry in entries:
+        for entry in remove_entries:
             current = destination / entry
             if current.exists():
                 os.replace(current, backup / entry)
 
-        for entry in entries:
+        for entry in publish_entries:
             source = staging / entry
             target = destination / entry
             if source.exists():
