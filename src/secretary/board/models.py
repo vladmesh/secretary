@@ -62,6 +62,9 @@ class AttemptUsageOutcome(StrEnum):
     """
 
     COLLECTED = "collected"
+    # The provider read succeeded, but its derived session total is below an immutable earlier
+    # phase boundary. Recording a zero interval would disguise contradictory accounting evidence.
+    ARITHMETIC_CONTRADICTION = "arithmetic_contradiction"
     # The head ran on an adapter that publishes no structured usage records at all.
     ADAPTER_UNSUPPORTED = "adapter_unsupported"
     # The run never bound a provider session identity, so no journal belongs to it.
@@ -509,7 +512,9 @@ def _validate_attempt_usage_event(
                 raise ValueError(
                     f"attempt usage dimension {name} must be available in all three accounts or none"
                 )
-            expected = max(0, totals[name] - baseline[name])
+            if totals[name] < baseline[name]:
+                raise ValueError(f"attempt usage dimension {name} has a session total below its baseline")
+            expected = totals[name] - baseline[name]
             if tokens[name] != expected:
                 raise ValueError(f"attempt usage dimension {name} does not match its session-total interval")
 

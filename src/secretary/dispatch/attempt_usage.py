@@ -14,9 +14,9 @@ resumed for a second round — from being charged twice for its first round.
 
 The two session shapes still differ in how the running total is obtained, and the difference matters:
 
-* Codex writes a ``token_count`` event whose ``total_token_usage`` is the session's running total.
-  Summing those snapshots would multiply the session's tokens by the number of turns, so the last
-  well-formed snapshot *is* the session total and a repeated or replayed snapshot costs nothing.
+* Codex writes cumulative ``token_count`` snapshots, but can reset those counters after a new user
+  turn without changing the session or journal. The session total is the sum of each reset segment's
+  last snapshot. Repeated snapshots within a segment still cost nothing.
 * Claude writes one ``usage`` object per assistant message, so the session total is their sum. A
   streamed message is written more than once and a resumed session repeats earlier messages, so
   each message id contributes its last usage object exactly once.
@@ -51,8 +51,9 @@ SOURCE_KINDS = {
     CODEX_ADAPTER: CODEX_SOURCE_KIND,
     CLAUDE_ADAPTER: CLAUDE_SOURCE_KIND,
 }
-# The Codex snapshot's own spelling of the dimensions it reports. It publishes both cache sides:
-# the tokens written into the cache and the tokens served from it.
+# The Codex snapshot's own spelling of the dimensions it reports. Its input and output totals include
+# their cache and reasoning subcounts, respectively; ``_canonical_codex_totals`` removes those
+# contained counts so every exported bucket is non-overlapping.
 CODEX_TOKEN_FIELDS = {
     "input": "input_tokens",
     "cache_input": "cache_write_input_tokens",
@@ -197,8 +198,8 @@ def phase_interval(
     """Split a session total into the interval this phase owns and the boundary it started from.
 
     Returns ``(phase, baseline, rewound)``. ``rewound`` says the session total came back lower than
-    a boundary already made durable — a replaced or rotated session file — in which case the phase
-    owns nothing rather than a negative or an invented number.
+    a boundary already made durable. The tentative interval contains no negative number; the caller
+    turns the contradiction into a typed degraded outcome rather than publishing this interval.
     """
     phase: dict[str, int | None] = {}
     start: dict[str, int | None] = {}
@@ -232,14 +233,20 @@ def apply_phase_boundary(
     if not collection.collected:
         return collection
     tokens, start, rewound = phase_interval(collection.session_totals, baseline)
+    if rewound:
+        return replace(
+            collection,
+            outcome=AttemptUsageOutcome.ARITHMETIC_CONTRADICTION,
+            detail=(
+                "the provider session total fell below the authoritative boundary of an earlier phase"
+            ),
+            tokens=TokenTotals(),
+            session_totals=TokenTotals(),
+            baseline=TokenTotals(),
+        )
     return replace(
         collection,
-        detail=(
-            "the provider session total fell below the authoritative boundary of an earlier phase; "
-            "this phase is accounted as owning none of it"
-            if rewound
-            else collection.detail
-        ),
+        detail=collection.detail,
         tokens=tokens,
         baseline=start,
     )
@@ -353,14 +360,16 @@ def read_jsonl(path: Path) -> tuple[list[Any], int]:
 
 
 def codex_usage(records: Iterable[Any]) -> SessionUsage:
-    """Aggregate Codex ``token_count`` events, whose totals are cumulative for the session.
+    """Aggregate cumulative Codex snapshots into a monotone whole-session total.
 
-    The session total comes from the last well-formed snapshot alone, so a journal replayed or
-    re-read from its start reports the same account rather than a multiple of it. A record that
-    announces itself as a ``token_count`` and then carries no usable total is counted as a malformed
-    structured record: a provider schema change must not read as a session that spent nothing.
+    Counters are cumulative only until Codex starts a new reset segment, which can happen after a
+    new user turn in the same session and rollout. A decrease in any reported raw counter closes the
+    prior segment; summing segment endpoints produces a monotone session total. Equal/replayed
+    snapshots remain in one segment. The canonical buckets are derived at each endpoint because
+    Codex's raw input includes cache counts and raw output includes reasoning counts.
     """
     latest: dict[str, Any] | None = None
+    completed: list[TokenTotals] = []
     seen = 0
     invalid = 0
     for record in records:
@@ -368,12 +377,26 @@ def codex_usage(records: Iterable[Any]) -> SessionUsage:
         if snapshot is None:
             invalid += malformed
             continue
+        canonical = _canonical_codex_totals(snapshot)
+        if canonical is None:
+            invalid += 1
+            continue
+        if latest is not None and _codex_snapshot_reset(latest, snapshot):
+            endpoint = _canonical_codex_totals(latest)
+            if endpoint is None:  # Every assigned ``latest`` was validated above.
+                invalid += 1
+            else:
+                completed.append(endpoint)
         seen += 1
         latest = snapshot
     if latest is None:
         return SessionUsage(invalid=invalid)
+    endpoint = _canonical_codex_totals(latest)
+    if endpoint is None:
+        return SessionUsage(invalid=invalid + 1)
+    completed.append(endpoint)
     return SessionUsage(
-        totals=TokenTotals(**{name: _count(latest, field) for name, field in CODEX_TOKEN_FIELDS.items()}),
+        totals=_sum_token_totals(completed),
         records=seen,
         invalid=invalid,
     )
@@ -479,6 +502,51 @@ def _codex_snapshot(record: Any) -> tuple[dict[str, Any] | None, bool]:
     if not any(_count(total, field) is not None for field in CODEX_TOKEN_FIELDS.values()):
         return None, True
     return dict(total), False
+
+
+def _canonical_codex_totals(snapshot: Mapping[str, Any]) -> TokenTotals | None:
+    """Convert one Codex endpoint to the five non-overlapping protocol buckets.
+
+    Codex defines both cache counts inside ``input_tokens`` and reasoning inside ``output_tokens``.
+    All five raw fields must be present to make the canonical account self-sufficient. Impossible
+    containment is a malformed provider snapshot rather than a negative or silently clamped bucket.
+    """
+    raw = {name: _count(snapshot, field) for name, field in CODEX_TOKEN_FIELDS.items()}
+    if any(value is None for value in raw.values()):
+        return None
+    values = {name: int(value) for name, value in raw.items()}
+    uncached = values["input"] - values["cache_input"] - values["cache_read_input"]
+    non_reasoning = values["output"] - values["reasoning"]
+    if uncached < 0 or non_reasoning < 0:
+        return None
+    return TokenTotals(
+        input=uncached,
+        cache_input=values["cache_input"],
+        cache_read_input=values["cache_read_input"],
+        output=non_reasoning,
+        reasoning=values["reasoning"],
+    )
+
+
+def _codex_snapshot_reset(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    """Whether a later usable snapshot starts a new cumulative-counter segment."""
+    return any(
+        current_value < previous_value
+        for field in CODEX_TOKEN_FIELDS.values()
+        if (previous_value := _count(previous, field)) is not None
+        and (current_value := _count(current, field)) is not None
+    )
+
+
+def _sum_token_totals(parts: Sequence[TokenTotals]) -> TokenTotals:
+    """Sum segment endpoints, keeping a dimension unavailable if any segment lacks it."""
+    totals: dict[str, int | None] = {}
+    for name in TOKEN_DIMENSIONS:
+        values = [getattr(part, name) for part in parts]
+        totals[name] = (
+            None if any(value is None for value in values) else sum(value for value in values if value is not None)
+        )
+    return TokenTotals(**totals)
 
 
 def _claude_usage_object(record: Any) -> tuple[dict[str, Any] | None, bool]:

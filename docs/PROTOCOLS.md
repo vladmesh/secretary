@@ -1203,10 +1203,12 @@ typed absence with the reason for it, the collection outcome, and the three toke
 identity fields are the routing journal's own launch snapshot, resolved the same way a routing event
 resolves them; this is not a second journal and does not re-read `heads.toml` for a head launched hours ago.
 
-**Token fields.** Five dimensions — `input`, `cache_input`, `cache_read_input`, `output`, `reasoning` —
-each a non-negative integer or `null`. `null` means the provider did not report that dimension, and is
-deliberately not `0`: a zero is a real count. The occurrence carries them three times: `tokens` is the
-interval this phase owns, `session_totals` is the running provider-session total the phase ended at, and
+**Token fields.** Five canonical, non-overlapping dimensions — `input` (uncached input), `cache_input`
+(cache creation/write input), `cache_read_input` (input served from cache), `output` (non-reasoning
+output), and `reasoning` (reasoning output) — each a non-negative integer or `null`. Adding the available
+dimensions therefore does not double count provider containment. `null` means the provider did not report
+that dimension, and is deliberately not `0`: a zero is a real count. The occurrence carries them three
+times: `tokens` is the interval this phase owns, `session_totals` is the running provider-session total the phase ended at, and
 `phase_baseline` is the boundary it started from, so `tokens = session_totals - phase_baseline` dimension by
 dimension and any reader can check it. A `collected` outcome reports at least one dimension in each of the
 three; every degraded outcome reports none anywhere, so no reader can mistake an unreadable phase for a
@@ -1234,21 +1236,30 @@ stays in place and no zero baseline is invented. An unreadable or conflicting pr
 audit failure. This does not change provider-read failure precedence for the phase being recorded. If its
 own provider read is degraded, it needs no interval arithmetic, writes that named outcome and proceeds
 normally without rereading the provider. If a readable session
-total comes back *below* an authoritative boundary — a replaced or rotated session file — the phase is
-accounted as owning none of it (zeros, not a negative), and the occurrence says so in `detail`.
+total comes back *below* an authoritative boundary, the evidence contradicts the immutable earlier
+occurrence. The later phase writes the typed degraded `arithmetic_contradiction` outcome with no totals and
+continues through its lifecycle; it never disguises the contradiction as a collected all-zero interval.
 
-**Adapter aggregation.** Codex writes a `token_count` event whose `total_token_usage` is the session's
-running total, so the session total is the **last** well-formed snapshot and the snapshots are never summed:
-a repeated or replayed snapshot names the same total rather than adding to it. Codex publishes both cache
-sides — `cache_write_input_tokens` → `cache_input` and `cached_input_tokens` → `cache_read_input` — and
-`input_tokens`, `output_tokens` and `reasoning_output_tokens` for the rest. Claude writes one `usage` object
-per assistant message, so the session total is their **sum** over distinct messages: a message id
+**Adapter aggregation.** Codex writes cumulative `token_count` snapshots, but a new user turn can reset
+`total_token_usage` while retaining the same session and rollout file. A decrease in any raw counter starts
+a new segment. The session total is the sum of each segment's final snapshot, so it is monotone across one
+or many resets; repeated or replayed snapshots within a segment still add nothing. Codex's
+`cached_input_tokens` and `cache_write_input_tokens` are contained in `input_tokens`, while
+`reasoning_output_tokens` is contained in `output_tokens`. At each segment endpoint the adapter exports
+`input_tokens - cached_input_tokens - cache_write_input_tokens` as `input`, and
+`output_tokens - reasoning_output_tokens` as `output`; the contained counts become their separate cache and
+reasoning buckets. All five raw fields and valid containment are required for a usable Codex snapshot, so
+missing or impossible relations degrade as malformed instead of creating an ambiguous immutable event.
+Claude writes one `usage` object per assistant message, and its `input_tokens` is already exclusive of
+`cache_creation_input_tokens` and `cache_read_input_tokens`. Those three values map directly to `input`,
+`cache_input`, and `cache_read_input`. The session total is their **sum** over distinct messages: a message id
 contributes its last usage object exactly once, which is what keeps a streamed message and a resumed
 session's repeated records from being counted twice. Claude publishes no separate reasoning dimension, so
-`reasoning` stays unavailable there.
+`reasoning` stays unavailable there; its `output_tokens` maps directly to non-reasoning `output`.
 
 **Degraded outcomes.** One value says the counts are real and the rest name a specific failure:
-`collected`; `adapter_unsupported` (the head ran on an adapter with no structured usage records);
+`collected`; `arithmetic_contradiction` (a readable current total is below an immutable earlier boundary);
+`adapter_unsupported` (the head ran on an adapter with no structured usage records);
 `session_unavailable` (no provider session identity was bound to the run); `source_unavailable` (the
 structured record source was never bound, or names no journal); `source_unreadable` (the journal exists and
 could not be read); `records_malformed`; `usage_absent` (the journal parsed and holds no usage record).

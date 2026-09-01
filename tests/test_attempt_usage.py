@@ -41,6 +41,7 @@ from secretary.tasks import TaskAudit, TaskError, is_significant_card_event
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 
 DIGEST = "a" * 64
+USAGE_FIXTURES = Path(__file__).parent / "fixtures" / "attempt_usage"
 # The three accounts one occurrence carries, in the event's own spelling.
 ACCOUNTS = ("tokens", "session_totals", "phase_baseline")
 
@@ -48,10 +49,10 @@ ACCOUNTS = ("tokens", "session_totals", "phase_baseline")
 def codex_token_count(
     *,
     input_tokens: int | None = None,
-    cached_input_tokens: int | None = None,
-    cache_write_input_tokens: int | None = None,
+    cached_input_tokens: int | None = 0,
+    cache_write_input_tokens: int | None = 0,
     output_tokens: int | None = None,
-    reasoning_output_tokens: int | None = None,
+    reasoning_output_tokens: int | None = 0,
 ) -> dict:
     """One Codex ``token_count`` event carrying the session's running total.
 
@@ -126,7 +127,7 @@ def write_jsonl(path: Path, records: list, *, tail: str = "") -> Path:
 
 
 class CodexAggregationTests(unittest.TestCase):
-    """Codex reports a running session total, so the session total is the last one, never a sum."""
+    """Codex snapshot segments produce one monotone, non-overlapping session account."""
 
     def test_the_last_cumulative_snapshot_is_the_whole_session(self) -> None:
         session = codex_usage(
@@ -138,7 +139,7 @@ class CodexAggregationTests(unittest.TestCase):
 
         self.assertEqual(session.records, 2)
         self.assertEqual(session.totals.input, 450)
-        self.assertEqual(session.totals.output, 61)
+        self.assertEqual(session.totals.output, 36)
         self.assertEqual(session.totals.reasoning, 25)
 
     def test_a_repeated_snapshot_names_the_same_total_rather_than_adding_to_it(self) -> None:
@@ -167,21 +168,48 @@ class CodexAggregationTests(unittest.TestCase):
 
         self.assertEqual(session.totals.cache_input, 41772)
         self.assertEqual(session.totals.cache_read_input, 546048)
-        self.assertEqual(session.totals.input, 594168)
+        self.assertEqual(session.totals.input, 6348)
+        self.assertEqual(session.totals.output, 4030)
         self.assertEqual(session.totals.reasoning, 2494)
 
     def test_a_cache_write_of_zero_is_the_provider_count_and_not_an_absence(self) -> None:
-        session = codex_usage([codex_token_count(input_tokens=900, cache_write_input_tokens=0)])
+        session = codex_usage([codex_token_count(input_tokens=900, cache_write_input_tokens=0, output_tokens=0)])
 
         self.assertEqual(session.totals.cache_input, 0)
 
-    def test_a_dimension_the_snapshot_omits_is_unavailable_rather_than_zero(self) -> None:
-        session = codex_usage([codex_token_count(input_tokens=10, output_tokens=2)])
+    def test_a_snapshot_missing_containment_fields_is_malformed(self) -> None:
+        session = codex_usage(
+            [
+                codex_token_count(
+                    input_tokens=10,
+                    cached_input_tokens=None,
+                    cache_write_input_tokens=None,
+                    output_tokens=2,
+                    reasoning_output_tokens=None,
+                )
+            ]
+        )
 
-        self.assertIsNone(session.totals.reasoning)
-        self.assertIsNone(session.totals.cache_read_input)
-        self.assertIsNone(session.totals.cache_input)
-        self.assertEqual(session.totals.input, 10)
+        self.assertEqual(session.records, 0)
+        self.assertEqual(session.invalid, 1)
+        self.assertTrue(session.totals.empty)
+
+    def test_reset_segments_sum_to_a_monotone_canonical_session_total(self) -> None:
+        records = [json.loads(line) for line in (USAGE_FIXTURES / "codex-reset-session.jsonl").read_text().splitlines()]
+
+        session = codex_usage(records)
+
+        self.assertEqual(session.records, 6)
+        self.assertEqual(
+            session.totals,
+            TokenTotals(
+                input=789388,
+                cache_input=100000,
+                cache_read_input=8900000,
+                output=24873,
+                reasoning=13000,
+            ),
+        )
 
     def test_a_record_that_declares_no_token_count_is_simply_not_a_usage_record(self) -> None:
         session = codex_usage([{"type": "event_msg", "payload": {"type": "task_started"}}, "not an object"])
@@ -240,6 +268,16 @@ class ClaudeAggregationTests(unittest.TestCase):
         self.assertEqual(session.totals.cache_read_input, 1200)
         self.assertEqual(session.totals.output, 135)
         self.assertIsNone(session.totals.reasoning, "Claude publishes no separate reasoning dimension")
+
+    def test_realistic_fixture_keeps_claude_input_exclusive_of_both_cache_buckets(self) -> None:
+        records = [json.loads(line) for line in (USAGE_FIXTURES / "claude-cache-session.jsonl").read_text().splitlines()]
+
+        session = claude_usage(records)
+
+        self.assertEqual(session.totals.input, 10258)
+        self.assertEqual(session.totals.cache_input, 12174)
+        self.assertEqual(session.totals.cache_read_input, 44196)
+        self.assertEqual(session.totals.output, 1412)
 
     def test_one_message_counts_once_however_many_times_it_was_written(self) -> None:
         """A streamed message is written repeatedly and a resumed session repeats earlier ones."""
@@ -506,19 +544,31 @@ class SourceCollectionTests(unittest.TestCase):
         )
 
         self.assertIs(result.outcome, AttemptUsageOutcome.COLLECTED)
-        self.assertEqual(result.tokens, TokenTotals(input=350, output=51))
-        self.assertEqual(result.session_totals, TokenTotals(input=450, output=61))
-        self.assertEqual(result.baseline, TokenTotals(input=100, output=10))
+        self.assertEqual(
+            result.tokens,
+            TokenTotals(input=350, cache_input=0, cache_read_input=0, output=51, reasoning=0),
+        )
+        self.assertEqual(
+            result.session_totals,
+            TokenTotals(input=450, cache_input=0, cache_read_input=0, output=61, reasoning=0),
+        )
+        self.assertEqual(
+            result.baseline,
+            TokenTotals(input=100, cache_input=0, cache_read_input=0, output=10, reasoning=0),
+        )
 
-    def test_a_session_that_lost_its_history_is_collected_as_owning_nothing_and_says_so(self) -> None:
-        path = write_jsonl(self.root / "reset.jsonl", [codex_token_count(input_tokens=5)])
+    def test_a_session_total_below_the_boundary_is_a_typed_contradiction(self) -> None:
+        path = write_jsonl(
+            self.root / "reset.jsonl", [codex_token_count(input_tokens=5, output_tokens=0)]
+        )
 
         result = collect_usage(
             adapter="codex", source=bound_codex_source(path), baseline=TokenTotals(input=450)
         )
 
-        self.assertIs(result.outcome, AttemptUsageOutcome.COLLECTED)
-        self.assertEqual(result.tokens.input, 0)
+        self.assertIs(result.outcome, AttemptUsageOutcome.ARITHMETIC_CONTRADICTION)
+        self.assertTrue(result.tokens.empty)
+        self.assertTrue(result.session_totals.empty)
         self.assertIn("fell below the authoritative boundary", result.detail)
 
     def test_a_truncated_tail_still_reports_the_complete_records_before_it(self) -> None:
@@ -615,6 +665,14 @@ class AttemptUsageEventTests(unittest.TestCase):
     def test_a_collected_interval_must_match_its_total_and_baseline(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not match"):
             usage_event(tokens=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 99, "output": 20})
+
+    def test_a_collected_total_may_not_be_below_its_baseline(self) -> None:
+        with self.assertRaisesRegex(ValueError, "below its baseline"):
+            usage_event(
+                tokens=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 0},
+                session_totals=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 10},
+                phase_baseline=dict.fromkeys(TOKEN_DIMENSIONS, None) | {"input": 450},
+            )
 
     def test_a_dimension_is_available_in_all_three_accounts_or_none(self) -> None:
         with self.assertRaisesRegex(ValueError, "all three accounts"):
@@ -923,11 +981,11 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(
             usage["tokens"],
             {
-                "input": 8100,
+                "input": 76,
                 "cache_input": 1024,
                 "cache_read_input": 7000,
                 "output": 320,
-                "reasoning": None,
+                "reasoning": 0,
             },
         )
         self.assertEqual(
@@ -938,6 +996,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
                 "cache_input": 0,
                 "cache_read_input": 0,
                 "output": 0,
+                "reasoning": 0,
             },
         )
 
@@ -1241,6 +1300,66 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual([usage["tokens"]["output"] for usage in phases], [10, 51])
         self.assertEqual([usage["session_totals"]["input"] for usage in phases], [100, 450])
         self.assertEqual([usage["phase_baseline"]["input"] for usage in phases], [0, 100])
+
+    def test_retained_codex_phases_straddling_resets_sum_to_the_derived_session_total(self) -> None:
+        """New user turns reset raw counters without replacing the retained session or rollout."""
+        records = [
+            json.loads(line)
+            for line in (USAGE_FIXTURES / "codex-reset-session.jsonl").read_text().splitlines()
+        ]
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        journal = write_jsonl(self.data_dir / "sessions" / "reset-retained.jsonl", records[:2])
+        session_id = self.bind_source("worker", journal)
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()
+        self._review_red()
+        self.assertEqual(self._park_and_decide("rework")["action"], "review-red-reused-worker")
+
+        write_jsonl(journal, records)
+        self.host.commit = "retained-reset-rework-c0ffee"
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+
+        phases = [
+            usage
+            for usage in self.usage_events()
+            if usage["role"] == "worker" and usage["session_id"] == session_id
+        ]
+        self.assertEqual(len(phases), 2)
+        expected = {
+            "input": 789388,
+            "cache_input": 100000,
+            "cache_read_input": 8900000,
+            "output": 24873,
+            "reasoning": 13000,
+        }
+        for dimension, total in expected.items():
+            self.assertEqual(sum(usage["tokens"][dimension] for usage in phases), total)
+            self.assertEqual(phases[-1]["session_totals"][dimension], total)
+
+    def test_a_contradictory_retained_total_is_degraded_without_holding_the_lifecycle(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        journal = self.codex_journal("replaced.jsonl", input_tokens=100, output_tokens=10)
+        self.bind_source("worker", journal)
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()
+        self._review_red()
+        self._park_and_decide("rework")
+
+        write_jsonl(journal, [codex_token_count(input_tokens=5, output_tokens=1)])
+        self.host.commit = "retained-replaced-c0ffee"
+        self._report_done()
+
+        self.assertEqual(self.tick()["to"], "validate")
+        phases = [usage for usage in self.usage_events() if usage["role"] == "worker"]
+        self.assertEqual(phases[-1]["outcome"], "arithmetic_contradiction")
+        self.assertTrue(all(value is None for value in phases[-1]["tokens"].values()))
 
     def test_two_worker_phases_on_one_retained_claude_session_split_it_at_the_boundary(self) -> None:
         """Claude sums its messages, so a resumed session's earlier messages are the same risk."""

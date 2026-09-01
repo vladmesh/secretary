@@ -1,0 +1,2 @@
+{"type":"assistant","uuid":"record-msg_1","message":{"id":"msg_1","role":"assistant","usage":{"input_tokens":2,"cache_creation_input_tokens":12174,"cache_read_input_tokens":16011,"output_tokens":512}}}
+{"type":"assistant","uuid":"record-msg_2","message":{"id":"msg_2","role":"assistant","usage":{"input_tokens":10256,"cache_creation_input_tokens":0,"cache_read_input_tokens":28185,"output_tokens":900}}}
