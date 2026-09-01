@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.events import BoardEventPending
+from secretary.board.events import BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.models import (
     Actor,
@@ -612,9 +612,7 @@ class TaskReader:
         if not isinstance(raw, list) or any(not isinstance(card, dict) for card in raw):
             raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
         done = [
-            card
-            for card in raw
-            if _positive_int(card.get("column_id")) == done_id and _task_is_active(card)
+            card for card in raw if _positive_int(card.get("column_id")) == done_id and _task_is_active(card)
         ]
         metadata = self._metadata_of(done)
         candidates: list[dict[str, Any]] = []
@@ -1133,6 +1131,45 @@ class TaskAudit:
                     result.append(json.load(source))
             except (OSError, ValueError):
                 continue
+        return result
+
+    def _occurrence_projection_records(self) -> list[tuple[dict[str, Any], bool]]:
+        """Read committed and pending audit records atomically for a fail-closed projection.
+
+        Generic audit readers retain their released best-effort behaviour. The usage projection
+        cannot skip an unreadable record, because that record may be the causal boundary a later
+        phase must subtract.
+        """
+        result: list[tuple[dict[str, Any], bool]] = []
+        with self._locked_audit():
+            try:
+                with open(self.events_path, encoding="utf-8") as events:
+                    for line_number, line in enumerate(events, 1):
+                        if not line.strip():
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except ValueError as exc:
+                            raise ValueError(f"audit journal record {line_number} is unreadable") from exc
+                        if not isinstance(record, dict):
+                            raise TypeError(f"audit journal record {line_number} is not an object")
+                        result.append((record, False))
+            except FileNotFoundError:
+                pass
+            if not os.path.isdir(self.pending_dir):
+                return result
+            for name in sorted(os.listdir(self.pending_dir)):
+                if not name.endswith(".json"):
+                    continue
+                path = os.path.join(self.pending_dir, name)
+                try:
+                    with open(path, encoding="utf-8") as source:
+                        record = json.load(source)
+                except (OSError, ValueError) as exc:
+                    raise ValueError(f"pending audit record {name} is unreadable") from exc
+                if not isinstance(record, dict):
+                    raise TypeError(f"pending audit record {name} is not an object")
+                result.append((record, True))
         return result
 
     def status(self) -> dict[str, int | bool]:
@@ -2105,6 +2142,116 @@ class TaskWriter:
             identity=dict(payload),
         )
 
+    def attempt_usage(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        data: dict[str, Any],
+        reason: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Append one durable ``attempt.usage`` occurrence for a finished worker or review phase.
+
+        Journal-only, like routing telemetry: what a phase cost is not a board mutation, and the
+        card carries no field it could disagree with. Unlike routing it is a typed protocol event,
+        so the schema is checked at this boundary and the audit export exposes it without any
+        marker prose to parse.
+
+        The request id names one occurrence and owns it. A replay — a re-entered tick, a dispatcher
+        recovering the same acceptance — commits the event that already owns the id rather than a
+        freshly computed one, so a later read of a changed session file can neither add a second
+        occurrence nor overwrite the first.
+
+        Two durability steps, and the caller is told which one it reached. The exact occurrence is
+        staged first, so a card cannot advance past a finished phase with nothing owed for it; the
+        append then publishes it. An append that fails leaves the staged obligation, which is what
+        ``finish_attempt_usage`` completes later — nothing is recomputed from a session file that has
+        moved on. A stage that fails is an audit failure, and the caller has to treat it as one.
+        """
+        self._role(role, {"dispatcher"})
+        if not request_id.strip():
+            raise TaskError("validation", "an attempt usage event needs the request id it owns", 2)
+        canon = self.board_host.canon
+        if canon is None:
+            raise TaskError("backend_unavailable", "board event canon is unavailable", 1)
+        try:
+            existing = canon.event(request_id)
+        except (OSError, ValueError) as exc:
+            raise TaskError(
+                "audit_unavailable", f"attempt usage occurrence is unreadable: {exc}", 4
+            ) from None
+        if existing is not None:
+            return self._commit_attempt_usage(canon, request_id, existing, replayed=True)
+        try:
+            event = Event(
+                event_id="evt_" + uuid.uuid4().hex,
+                kind=EventKind.ATTEMPT_USAGE,
+                entity_kind=EntityKind.CARD,
+                ref=reference,
+                actor=Actor(role, actor),
+                reason=reason,
+                occurred_at=datetime.now(UTC),
+                data=dict(data),
+            )
+            canon.stage(request_id, event)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except OSError:
+            raise TaskError("audit_unavailable", "attempt usage occurrence could not be staged", 4) from None
+        return self._commit_attempt_usage(canon, request_id, event, replayed=False)
+
+    def _commit_attempt_usage(
+        self,
+        canon: BoardEventCanon,
+        request_id: str,
+        event: Event,
+        *,
+        replayed: bool,
+    ) -> dict[str, Any]:
+        """Publish the staged occurrence, or report that its obligation is still owed."""
+        try:
+            canon.commit(request_id, event)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except OSError:
+            raise TaskError(
+                "audit_pending",
+                "attempt usage occurrence is staged and awaits its journal append",
+                4,
+            ) from None
+        return {"action": "attempt_usage", "event_id": event.event_id, "replayed": replayed}
+
+    def finish_attempt_usage(self, *, role: str, reference: str = "") -> int:
+        """Publish staged ``attempt.usage`` occurrences: this card's, or every card's.
+
+        The recovery half of the durability order above. It finishes the exact staged record rather
+        than a re-derived one, so a session file that has grown since cannot change what the phase
+        was accounted for, and it is idempotent: a record already appended is simply gone from the
+        pending set.
+
+        Without a ``reference`` it takes the whole pending set. That is the form the production tick
+        calls, because the card whose phase is owed an account may have gone Blocked or Done and be
+        nowhere the tick would otherwise look. A record that cannot be published is left exactly
+        where it is and stays owed.
+        """
+        self._role(role, {"dispatcher"})
+        canon = self.board_host.canon
+        if canon is None:
+            return 0
+        finished = 0
+        for occurrence in canon.attempt_usage_occurrences(ref=reference):
+            if not occurrence.pending:
+                continue
+            try:
+                canon.commit(occurrence.request_id, occurrence.event)
+            except (OSError, TypeError, ValueError, TaskError):
+                # The obligation stays exactly where it is: still staged, still owed, still exact.
+                continue
+            finished += 1
+        return finished
+
     def claim(
         self,
         *,
@@ -3062,7 +3209,9 @@ class TaskWriter:
             # A transport error after close is ambiguous; leave its pending
             # evidence.  A definite local guard/validation failure is not.
             if exc.code == "backend_unavailable":
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+                raise TaskError(
+                    "audit_pending", "backend write committed; audit repair is required", 4
+                ) from None
             current = self.audit.pending_event(request_id)
             if current == event:
                 try:

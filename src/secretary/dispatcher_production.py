@@ -346,13 +346,21 @@ def _production_tick_work(
     payload.setdefault("owner_acquired_at", now_rfc3339())
     payload["last_tick_started_at"] = now_rfc3339()
 
+    # Nothing in this tick precedes the usage obligations already staged in the audit. Each one is
+    # a phase that finished and was accounted for but whose account was never appended, and the card
+    # it belongs to may be Blocked or Done by now — outside `ACTIVE_STATES`, outside the records,
+    # outside everything below. Publishing them from the pending set is the only pass that reaches
+    # those, and it runs before the fence, the cycle, reconciliation and any claim, because all of
+    # them read a journal these records belong in.
+    usage_outcomes = runtime.publish_pending_attempt_usage()
+
     observer_errors: list[dict[str, str]] = []
     # Fence unhealthy sprint observers before advancing any reserved cards.
     try:
         fence = observer_fence(runtime, payload)
     except Exception as exc:
         # An unfinished fence authorizes no downstream work.
-        return _fence_failed_tick(runtime, payload, exc)
+        return _fence_failed_tick(runtime, payload, exc, usage_outcomes)
     fence_outcomes = list(fence.get("outcomes") or [])
 
     cycle = _production_tasks(runtime, set(ACTIVE_STATES))
@@ -371,7 +379,7 @@ def _production_tick_work(
     # on the strength of a field that predates the reconciliation pass itself.
     payload["last_reconciled_at"] = now_rfc3339()
     outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
-    outcomes = fence_outcomes + reconcile_outcomes + outcomes
+    outcomes = usage_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     try:
         outcomes += _reconcile_sprint_budget(runtime)
     except Exception as exc:
@@ -879,11 +887,18 @@ def _advance_active(
     return outcomes, errors, blocked_scopes
 
 
-def _fence_failed_tick(runtime: Any, payload: dict[str, Any], exc: Exception) -> dict[str, Any]:
+def _fence_failed_tick(
+    runtime: Any,
+    payload: dict[str, Any],
+    exc: Exception,
+    usage_outcomes: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """End the tick without touching a card, and leave a durable record of why.
 
     The state is still saved: the fence may have opened or cleared fences and refreshed its snapshot
-    before it raised, and those are what the next tick reads.
+    before it raised, and those are what the next tick reads. The usage obligations settled before
+    the fence ran are reported too: they were published, and a tick that reported nothing about them
+    would read as if they were still owed.
     """
     result = {
         "status": "critical",
@@ -894,7 +909,7 @@ def _fence_failed_tick(runtime: Any, payload: dict[str, Any], exc: Exception) ->
             "the observer fence could not be evaluated, so no card was advanced, reconciled or "
             f"claimed this tick: {type(exc).__name__}: {exc}"
         ),
-        "actions": [],
+        "actions": list(usage_outcomes or []),
         "errors": [_unexpected_error("", exc)],
     }
     payload["last_tick_finished_at"] = now_rfc3339()

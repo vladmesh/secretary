@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import hashlib
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -16,6 +17,15 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptUsageOccurrence:
+    """One validated usage occurrence and whether its export append is still owed."""
+
+    request_id: str
+    event: Event
+    pending: bool
 
 
 @contextlib.contextmanager
@@ -125,6 +135,85 @@ class BoardEventCanon:
                 continue
             result.append(Event.from_record(record))
         return tuple(result)
+
+    def attempt_usage_occurrences(self, *, ref: str = "") -> Sequence[AttemptUsageOccurrence]:
+        """Project committed and staged ``attempt.usage`` records into one canonical view.
+
+        The audit supplies both sets under its lock so publication cannot make an occurrence vanish
+        between two reads. Every usage-shaped record crosses the typed boundary here. Request and
+        event ids each own one immutable payload; an exact committed-plus-pending duplicate is one
+        occurrence whose export is already visible, while conflicting ownership fails closed.
+        """
+        records = self.audit._occurrence_projection_records()
+        by_request: dict[str, tuple[Event, bool]] = {}
+        request_claims: dict[str, tuple[dict[str, Any], bool]] = {}
+        event_claims: dict[str, tuple[str, bool]] = {}
+        phase_owners: dict[tuple[str, str, int, int, str], tuple[str, str]] = {}
+        order: list[str] = []
+        for record, pending in records:
+            usage_shaped = record.get("kind") == EventKind.ATTEMPT_USAGE.value
+            request_id = record.get("request_id")
+            if isinstance(request_id, str) and request_id:
+                previous_claim = request_claims.get(request_id)
+                if (
+                    previous_claim is not None
+                    and previous_claim[0] != record
+                    and (previous_claim[1] or usage_shaped)
+                ):
+                    raise ValueError(
+                        f"attempt usage request id {request_id!r} has conflicting event payloads"
+                    )
+                request_claims[request_id] = (
+                    record,
+                    usage_shaped or bool(previous_claim and previous_claim[1]),
+                )
+            event_id = record.get("event_id")
+            if isinstance(event_id, str) and event_id and isinstance(request_id, str):
+                previous_event_claim = event_claims.get(event_id)
+                if (
+                    previous_event_claim is not None
+                    and previous_event_claim[0] != request_id
+                    and (previous_event_claim[1] or usage_shaped)
+                ):
+                    raise ValueError(f"attempt usage event id {event_id!r} has conflicting request owners")
+                event_claims[event_id] = (
+                    request_id,
+                    usage_shaped or bool(previous_event_claim and previous_event_claim[1]),
+                )
+            if not usage_shaped:
+                continue
+            event = self._typed(record)
+            if ref and event.ref != ref:
+                continue
+            if not isinstance(request_id, str) or not request_id:
+                raise ValueError("attempt usage occurrence has no request id")
+            phase = (
+                event.ref,
+                str(event.data["role"]),
+                int(event.data["attempt"]),
+                int(event.data["report_generation"]),
+                str(event.data["phase"]),
+            )
+            owner = (str(event.data["attempt_id"]), request_id)
+            previous_owner = phase_owners.get(phase)
+            if previous_owner is not None and previous_owner != owner:
+                raise ValueError(f"attempt usage phase {phase!r} has conflicting occurrence owners")
+            phase_owners[phase] = owner
+            existing = by_request.get(request_id)
+            if existing is None:
+                by_request[request_id] = (event, pending)
+                order.append(request_id)
+                continue
+            previous, was_pending = existing
+            if previous != event:
+                raise ValueError(f"attempt usage request id {request_id!r} changed after validation")
+            # A committed copy makes the occurrence exported even if an exact stale pending copy
+            # remains. Conversely, duplicate pending reads remain pending.
+            by_request[request_id] = (event, was_pending and pending)
+        return tuple(
+            AttemptUsageOccurrence(request_id, by_request[request_id][0], by_request[request_id][1])
+            for request_id in order
+        )
 
     def _claim(self, request_id: str, record: dict[str, Any]) -> dict[str, Any] | None:
         # Kept local for the same reason as the TaskAudit import above: secretary.tasks

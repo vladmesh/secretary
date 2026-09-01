@@ -1178,6 +1178,202 @@ a new attempt id at that moment, otherwise a repeat claim would land on an alrea
 id, return the old event and leave the card in Ready. The previous attempt's heads are stopped, because the
 new round enters the same workspace.
 
+### What a finished phase cost
+
+Every completed worker phase and every completed review phase leaves one `attempt.usage` event on the
+card, so phase cost is answerable from the Secretary journal alone and nobody has to reopen a provider
+session file to get it. It is a typed board protocol event (`kind: "attempt.usage"`, a Card subject) with
+no backend mutation, written through the same append-only audit as every other event: the normal
+board/audit export therefore carries it, and a reader selects it by kind rather than by parsing marker
+prose. There is no backfill. Cards that finished before this event existed have no usage record, and that
+absence is not a zero.
+
+**When it is written.** On the acceptance path itself, and only for an accepted terminal outcome: a
+`report:done` or `report:blocked` the dispatcher accepts, and a `review:green` or `review:red` verdict it
+acts on. A done report bounced at an already-rejected checkout is not an acceptance and writes nothing.
+The write sits where the exact completed run is still on the record with its bound provider session — a
+retained worker before its freeze, a reviewer after its pane is confirmed closed but while its run and
+session are still recorded — so relaunch, rework and a later recovery cannot re-attribute the account to a
+different session.
+
+**What it binds.** The event is self-contained: card ref and subject, the numeric attempt and the attempt
+id, the report generation the phase closed, the role (`worker`/`reviewer`) and phase (`worker`/`review`),
+the head id, adapter, resolved model and `model_source`, the launch id, the provider `session_id` or its
+typed absence with the reason for it, the collection outcome, and the three token accounts below. The
+identity fields are the routing journal's own launch snapshot, resolved the same way a routing event
+resolves them; this is not a second journal and does not re-read `heads.toml` for a head launched hours ago.
+
+**Token fields.** Five canonical dimensions — `input` (uncached input), `cache_input` (cache
+creation/write input), `cache_read_input` (input served from cache), `output` (total generated output,
+including reasoning), and `reasoning` (the reasoning subset of `output`) — each a non-negative integer or
+`null`. The additive token total is `input + cache_input + cache_read_input + output`; consumers must not
+add `reasoning` again, because `output` is inclusive of it in both adapters and `reasoning` is a contained
+subset: in every account where both are known, `reasoning <= output`. `null` means the provider did not
+report that dimension, and is deliberately not `0`: a zero is a real count. The occurrence carries them
+three times: `tokens` is the interval this phase owns, `session_totals` is the running provider-session
+total the phase ended at, and `phase_baseline` is the boundary it started from.
+
+The three accounts are nullable **per dimension and independently of each other**, because a provider
+dimension can be absent from the predecessor and present here, or the reverse. What is *attributed* stays
+checkable: for every dimension the phase owns, `tokens = session_totals - phase_baseline`, and a dimension
+it owns names both the boundary it was measured from and the total it was measured to. A dimension nobody
+could attribute says so as `null` in **both** `tokens` and `phase_baseline` — never as a zero — while
+`session_totals` keeps whatever the provider did report. A `collected` outcome reports at least one
+`session_totals` dimension, which is what makes it a read at all; `tokens` and `phase_baseline` may be
+entirely null under it, and that is a phase which read a real total and could own none of it. Every degraded
+outcome reports no dimension in any account, so no reader can mistake an unreadable phase for a free one.
+Occurrences written before this rule existed carry every dimension in all three accounts or in none of
+them, which is a special case of it: they remain readable unchanged, and there is no migration or backfill.
+There is no price table and no monetary conversion here.
+
+**The phase-attribution lattice.** One rule produces all three accounts, for every provider and every
+lifecycle path — first phase and retained phase, Codex and Claude, a live acceptance, a staged obligation
+and a replayed one. No adapter, replay or recovery path does missingness or zero-baseline arithmetic of its
+own. It turns on two independent questions, and conflating them is the defect it exists to prevent: whether
+a predecessor *occurrence* exists at all, and whether that predecessor and this read each know a given
+*dimension*.
+
+* **No predecessor occurrence.** Every dimension this phase knows begins at a boundary of zero and the
+  phase owns its whole current value; a dimension the provider did not report stays `null` in `tokens` and
+  `phase_baseline` alike.
+* **A predecessor, both values known and nondecreasing.** The phase owns their difference. This is the
+  ordinary retained-session case.
+* **A predecessor, and either value unavailable.** Phase ownership for that dimension is `null` in both
+  `tokens` and `phase_baseline`, and no zero is invented in either: the phase cannot be charged for work
+  whose starting point nobody recorded, and the predecessor cannot be retroactively credited with a zero it
+  never reported. The `session_totals` value this phase actually read is preserved, so the dimension
+  re-establishes a boundary here and the phase after it subtracts from that boundary normally. An
+  unattributable dimension is therefore a gap of one phase, never a permanent poisoning of the dimension.
+* **A predecessor, and the current value is numerically below it.** That contradicts an immutable earlier
+  occurrence, so the whole occurrence takes the typed `arithmetic_contradiction` outcome and publishes no
+  account at all rather than disguising the contradiction as a zero interval.
+
+Containment is validated where the accounts are produced as well as where they are written: if `reasoning`
+escapes `output` in any of the three, the occurrence degrades the same way a decrease does.
+
+This matters because an optional provider dimension is genuinely optional. Claude publishes its reasoning
+subset in `output_tokens_details`, and a real session journal streams a detail-less record of an assistant
+message before the completed duplicate that carries it — a terminal report tool can run inside that gap. So
+phase 1 can end having seen a complete usage object with no reasoning in it, while phase 2 on the same
+retained session sees the whole of it. Reading phase 1's missing dimension as a zero boundary would charge
+phase 2 for the entire session's reasoning; nulling phase 2's own session total would leave the dimension
+unusable for every phase after it. The lattice does neither.
+
+**Canonical occurrence projection and phase accounting.** One repository projection is the source of
+truth for usage. It reads the card's committed and staged TaskAudit records under the audit lock, validates
+every `attempt.usage` record through the typed event schema, and returns each immutable occurrence with a
+separate `pending` publication flag. An exact committed-plus-pending copy is one occurrence. A request id
+with another payload, an event id with another request owner, an unreadable record, or conflicting phase
+ownership makes the projection unavailable; readers fail closed instead of silently dropping evidence.
+The flag changes only export visibility. It never changes the event's identity, payload or semantic
+authority: a successful stage is immediately an accounted occurrence even before its journal append.
+
+Both providers journal a *session*, not a phase, and one session can serve several phases: the ordinary
+red-review rework retains the worker and resumes the same conversation into the next round. One rule covers
+both adapters. A phase owns the usage recorded after the previous authoritative terminal boundary for that
+same card, role, adapter and provider `session_id`, through its own terminal boundary. The predecessor is
+selected by the explicit causal identity in the events — numeric attempt, attempt id ownership, report
+generation and phase — never by committed or pending iteration order and never by append time. Delayed or
+reversed publication therefore cannot change an interval already staged. A session with no matching prior
+occurrence starts at zero. A matching predecessor whose whole typed degraded occurrence carries no
+`session_totals` at all is an audit failure rather than a session that starts over: reading it as "no
+predecessor" would be indistinguishable from there having been none, so the later phase stays in place and
+no zero baseline is invented. That is a different thing from a predecessor which recorded *some* dimensions
+and not others, which the lattice above owns dimension by dimension. An unreadable or conflicting
+projection is likewise an audit failure.
+
+**Order and failure precedence.** One order, for every provider and every lifecycle path. Projection
+integrity and causal identity are settled **first**, because neither depends on what a provider journal
+says: the projection is read and the causal predecessor selected, and a phase slot already owned by a
+conflicting attempt id fails closed whatever the read that follows would have produced. The provider read
+is **second**, and is only a read: a whole-session total with no boundary subtracted and no account
+attributed. Attribution and cross-account validation are **third**, in the one place that does either.
+Immutable staging is **fourth**, and publication recovery **last**. Provider-read failure precedence is
+unchanged by this: a degraded read needs no interval arithmetic, does not consult the predecessor's
+boundary, writes its named outcome and proceeds normally without rereading the provider.
+
+**Adapter aggregation.** Codex writes cumulative `token_count` snapshots, but a new user turn can reset
+`total_token_usage` while retaining the same session and rollout file. A decrease in any raw counter starts
+a new segment. The session total is the sum of each segment's final snapshot, so it is monotone across one
+or many resets; repeated or replayed snapshots within a segment still add nothing. Codex's
+`cached_input_tokens` and `cache_write_input_tokens` are contained in `input_tokens`, while
+`reasoning_output_tokens` is contained in `output_tokens`. At each segment endpoint the adapter exports
+`input_tokens - cached_input_tokens - cache_write_input_tokens` as `input`, retains `output_tokens` as the
+inclusive `output`, and exposes `reasoning_output_tokens` as its contained `reasoning` subset. All five raw
+fields and valid containment are required for a usable Codex snapshot, so
+missing or impossible relations degrade as malformed instead of creating an ambiguous immutable event.
+Claude writes one `usage` object per assistant message, and its `input_tokens` is already exclusive of
+`cache_creation_input_tokens` and `cache_read_input_tokens`. Those three values map directly to `input`,
+`cache_input`, and `cache_read_input`. The session total is their **sum** over distinct messages: a message id
+contributes its last usage object exactly once, which is what keeps a streamed message and a resumed
+session's repeated records from being counted twice. Claude's `output_tokens` maps directly to the same
+inclusive `output` meaning as Codex. After message-id deduplication, the adapter reads
+`output_tokens_details.thinking_tokens` as the contained `reasoning` subset. It sums reasoning only when
+every contributing usage object supplies a valid detail, including an explicit zero; if any omits the
+detail, aggregate `reasoning` is `null` while the known total `output` remains available. `output_tokens_details`
+is optional metadata about a usage object that is otherwise complete, so it can only ever cost the reasoning
+subset: a detail that is missing, malformed or out of range — not an object, or a thinking count that is not
+a non-negative integer contained in that message's output — makes aggregate `reasoning` unavailable and is
+counted in `skipped_records`, while that message's `input`, cache and total `output` counts are still
+retained. Malformed *core* usage is unchanged and still follows the malformed outcome below: a `usage`
+object that is not an object, or that carries no usable count at all, contributes nothing.
+
+**Degraded outcomes.** One value says the counts are real and the rest name a specific failure:
+`collected`; `arithmetic_contradiction` (a readable current total is below an immutable earlier boundary, or
+an attributed account's reasoning escapes its own output);
+`adapter_unsupported` (the head ran on an adapter with no structured usage records);
+`session_unavailable` (no provider session identity was bound to the run); `source_unavailable` (the
+structured record source was never bound, or names no journal); `source_unreadable` (the journal exists and
+could not be read); `records_malformed`; `usage_absent` (the journal parsed and holds no usage record).
+`records_malformed` and `usage_absent` are deliberately different answers: a record that *declares* itself a
+usage record — a Codex `token_count`, an assistant message with a `usage` field — and then carries a schema
+this adapter does not publish is malformed, and so is a journal in which nothing parsed at all. A journal
+that simply holds no usage record is absent. A provider schema change is therefore visible as a broken read
+rather than as a phase that cost nothing. A truncated tail — the normal shape of a journal read while its
+writer is still around — is one skipped line, not a failed read: the complete records before it are still
+counted. `skipped_records` counts everything unusable, both unparseable lines and schema-invalid declared
+usage records; `records` counts what the aggregation used.
+
+**Idempotency.** One occurrence per completed phase, keyed by attempt id, phase and the round it closed
+(attempt number and report generation). A replayed request or a re-entered acceptance commits the event
+that already owns that id rather than a freshly computed one, so a recovery reading a session that has
+since grown can neither add a second occurrence nor overwrite the first, and a second phase on a retained
+session reproduces its original interval instead of re-reading a larger whole-session total. A repeated done
+report inside one round — the infrastructure-classified gate retry — returns the occurrence that round
+already owns.
+
+**Durability order.** A completed phase never advances past its own account. On every worker-report and
+reviewer-verdict path the occurrence is made durable in the append-only audit *before* the control event and
+the transition: it is staged under its request id and then appended. A card may advance past a staged
+obligation, because the exact staged record is still owed and a later tick publishes it; it may not advance
+past nothing at all.
+
+**Where a staged obligation is settled.** One site, and it is not the card's own tick. A phase can finish
+and take its card out of the pipeline in the same breath — `report:blocked` moves it to Blocked, a green
+verdict with no observer moves it to Done — and the dispatcher drops that card's record on the way out.
+Nothing that walks active cards, dispatcher records or the board would ever reach it again. So every
+production tick *begins*, once the singleton, pause and mutation guards have permitted work and before
+observer fencing, `ACTIVE_STATES` selection, active-card reconciliation, any phase-boundary read and any new
+claim, by publishing every occurrence the canonical projection marks pending. That pass takes no dispatcher
+record, no board lookup and no card state as input, and pending usage publication
+takes precedence over every piece of card lifecycle work in the tick. A publication failure publishes
+nothing in the record's place: the exact staged occurrence stays pending, the tick reports it as a degraded
+`attempt-usage-recovery` action naming the cards still owed, and it is eligible again on every later
+permitted tick whatever state its card has reached by then. Phase-boundary selection consumes the same
+projection, so it sees a staged predecessor directly and does not depend on recovery winning a publication
+race first. Publication always finishes the exact staged occurrence, never a re-derived one, so a session file
+that grew in between cannot change what the phase was accounted for, and it is idempotent: a record already
+appended is simply not in the pending set, and a tick that owes nothing does nothing and reports nothing.
+
+**Non-blocking, and what is not.** Reading the provider never decides anything: a missing session, an
+unreadable journal and malformed records are named degraded outcomes inside the occurrence, and the worker
+report or reviewer verdict is accepted, the cleanup and freeze unchanged, the card moving exactly where it
+was going, and later dispatcher recovery unaffected. Failing to make the occurrence durable is not a
+collection outcome — it is an audit failure, and it is raised rather than swallowed. That ends the card's
+tick with the phase unadvanced and the report or verdict still standing on the board; the dispatcher's
+per-card error handling records it and the next tick retries the same acceptance, which is what keeps the
+control event and the transition from outrunning the account of the phase they close.
+
 ### The report generation
 
 A worker round is identified by a report generation: a counter in the dispatcher's own record that

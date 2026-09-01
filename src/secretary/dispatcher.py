@@ -15,6 +15,24 @@ from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
 from secretary.config import DataDirError, instance_data_dir
+from secretary.dispatch.attempt_usage import (
+    attempt_usage_data as _attempt_usage_data,
+)
+from secretary.dispatch.attempt_usage import (
+    attempt_usage_reason as _attempt_usage_reason,
+)
+from secretary.dispatch.attempt_usage import (
+    attribute_phase as _attribute_phase,
+)
+from secretary.dispatch.attempt_usage import (
+    causal_predecessor as _causal_predecessor,
+)
+from secretary.dispatch.attempt_usage import (
+    collect_usage as _collect_usage,
+)
+from secretary.dispatch.attempt_usage import (
+    provider_usage_source as _provider_usage_source,
+)
 from secretary.dispatch.head_vitality import (
     SnapshotSource as _SnapshotSource,
 )
@@ -317,6 +335,8 @@ from secretary.projects.contract import (
 )
 from secretary.routing_journal import (
     MODEL_UNKNOWN,
+    REVIEWER,
+    WORKER,
     HeadRun,
 )
 from secretary.routing_journal import (
@@ -365,6 +385,29 @@ def default_data_dir(instance_path: Path) -> Path:
 
 def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
+
+
+def _usage_fallback_snapshot(
+    journal_role: str,
+    record: DispatcherRecord,
+    lifecycle_run: dict[str, Any],
+    *,
+    role: str,
+) -> dict[str, Any]:
+    """A minimal routing-shaped snapshot for a phase whose launch record was lost.
+
+    Everything here comes from the head's own attested run, never from the registry as it reads
+    now: the model is recorded as unresolved rather than as a value some later edit supplied.
+    """
+    spec = lifecycle_run.get("spec") if isinstance(lifecycle_run, dict) else None
+    spec = spec if isinstance(spec, dict) else {}
+    return HeadRun(
+        role=journal_role,
+        head=record.head if role == WORKER_ROLE else record.review_head,
+        adapter=str(spec.get("adapter") or ""),
+        model=str(spec.get("model") or ""),
+        model_source=MODEL_UNKNOWN,
+    ).to_json()
 
 
 class DispatcherRuntime:
@@ -597,6 +640,11 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        # Staged usage obligations are deliberately not settled here: a card can finish its last
+        # phase and leave `ACTIVE_STATES` in the same tick, so no per-card pass can be the site that
+        # guarantees publication. `publish_pending_attempt_usage` owns that, over the whole pending
+        # set, at the top of the production tick.
+        #
         # A launch intent can outlive its tick. Re-establish the exact provider source before
         # adoption reads a heartbeat, not after a mismatched session was attributed to this card.
         record = records.get(ref)
@@ -1544,6 +1592,9 @@ class DispatcherRuntime:
         if marker == "report:done":
             if continuation.validation_move_pending:
                 # Frozen and recorded before a tick died mid-move; the replay never wakes the worker.
+                # The phase this report closed is the same one the dying tick accepted, so its
+                # usage occurrence is finished here rather than lost with that tick.
+                self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
                 self.writer.move(
                     role="dispatcher",
                     actor=self.owner,
@@ -1614,6 +1665,9 @@ class DispatcherRuntime:
             # cannot reopen this exception forever: the next unchanged done report must still
             # reach _reject_stale_done's human-escalation bound.
             record.rejected_done_reports = 1 if retry_stale_no_diff_gate else 0
+            # The report is accepted from here on. Account the worker phase it closes while the
+            # head that wrote it is still on the record with its bound provider session.
+            self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
             record.review_baseline = len(task.get("comments") or [])
             # Freeze before moving the board. A later tick may finish the idempotent move, but it
             # never leaves a completed worker writing while CI or a reviewer owns this checkout.
@@ -1660,6 +1714,8 @@ class DispatcherRuntime:
                 "to": "validate",
             }
         if marker == "report:blocked":
+            # Before the stop, so the phase is accounted while its head is still described here.
+            self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
             unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
@@ -1781,6 +1837,9 @@ class DispatcherRuntime:
                 attempt_id,
                 sha,
             )
+        # The report is accepted here, for the same round the first one opened: the occurrence
+        # that round already owns is what a repeated report returns, not a second account.
+        self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
         try:
             self.host.retain_worker(record)
             record.worker_continuation.begin_retention(time.time())
@@ -2049,6 +2108,9 @@ class DispatcherRuntime:
             )
             if unconfirmed is not None:
                 return unconfirmed
+            # The verdict is accepted here, whichever of the three red outcomes it takes: the
+            # reviewer's pane is closed but its run, and the session it names, are still recorded.
+            self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
             record.rejected_sha = reviewed
             record.rejected_failure_class = "substantive"
             record.rejected_failure_reason = "red-review"
@@ -4934,6 +4996,7 @@ class DispatcherRuntime:
         ref = task["ref"]
         # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
         self._record_verdict_routing(ref, record, "green")
+        self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
         kind, result, detail = self._merge_readiness(task, record)
         if kind == "transport":
             retry = self._gate_transport_retry(
@@ -5635,6 +5698,186 @@ class DispatcherRuntime:
                 outcome=outcome,
             ),
             request_id=request_id,
+        )
+
+    def pending_attempt_usage(self) -> list[str]:
+        """Card refs whose canonical usage occurrence still awaits export publication."""
+        canon = self.writer.board_host.canon
+        if canon is None:
+            return []
+        return [
+            occurrence.event.ref for occurrence in canon.attempt_usage_occurrences() if occurrence.pending
+        ]
+
+    def publish_pending_attempt_usage(self) -> list[dict[str, Any]]:
+        """Publish every staged `attempt.usage` occurrence the installation still owes.
+
+        The single enforcement site of the durability order. A phase is accounted for as soon as its
+        occurrence is staged, and the card is then free to advance — including into Blocked or Done,
+        which no later step of the tick looks at again. So the obligation is finished from the
+        pending set itself: no dispatcher record, no board lookup, no card state, nothing a terminal
+        card has already given up. It runs before observer fencing, before the active cycle is read
+        and before any phase boundary is, because every one of those reads a journal these records
+        belong in.
+
+        The canonical committed-plus-pending projection is also the source of recovery obligations;
+        recovery does not interpret the pending directory independently. Publishing the exact staged
+        record is the whole of it. A failure publishes nothing in its
+        place: the record stays pending, stays exact, and is eligible again on every later permitted
+        tick, whatever state its card has reached by then.
+        """
+        try:
+            owed = self.pending_attempt_usage()
+        except Exception as exc:  # noqa: BLE001 - an unreadable pending set is reported, not raised
+            return [
+                {
+                    "status": "degraded",
+                    "step": "attempt-usage-recovery",
+                    "action": "attempt-usage-pending-unreadable",
+                    "reason": (
+                        "staged usage occurrences could not be read, so any obligation among them "
+                        f"is still owed: {type(exc).__name__}: {exc}"
+                    ),
+                }
+            ]
+        if not owed:
+            return []
+        failure = ""
+        try:
+            self.writer.finish_attempt_usage(role="dispatcher")
+        except Exception as exc:  # noqa: BLE001 - the obligation outlives its own recovery failing
+            failure = f"{type(exc).__name__}: {exc}"
+        try:
+            remaining = self.pending_attempt_usage()
+        except Exception as exc:  # noqa: BLE001 - unknown is owed, not settled
+            remaining = list(owed)
+            failure = failure or f"{type(exc).__name__}: {exc}"
+        outcome: dict[str, Any] = {
+            "status": "degraded" if remaining else "ok",
+            "step": "attempt-usage-recovery",
+            "action": "attempt-usage-still-pending" if remaining else "attempt-usage-published",
+            "published": max(0, len(owed) - len(remaining)),
+            "pending": len(remaining),
+            "refs": sorted({ref for ref in owed if ref}),
+        }
+        if remaining:
+            outcome["pending_refs"] = sorted({ref for ref in remaining if ref})
+            outcome["reason"] = (
+                f"{len(remaining)} staged usage occurrence(s) could not be published and stay owed"
+                + (f": {failure}" if failure else "")
+            )
+        return [outcome]
+
+    def record_attempt_usage(self, ref: str, record: DispatcherRecord, *, role: str, attempt_id: str) -> None:
+        """Persist what the phase that just finished cost, before the card can advance past it.
+
+        Called on the acceptance paths themselves — a terminal worker report, a reviewer verdict —
+        because that is the last point at which the exact run that did the work is still on the
+        record with its bound provider session.
+
+        Two failures, and they are not the same failure. Reading the provider never decides
+        anything: an unbound session, an unreadable journal and malformed records are named degraded
+        outcomes inside the occurrence, and the report or verdict is accepted exactly as it would
+        have been. Failing to make the occurrence durable is an audit failure, and this method
+        refuses to swallow it: the control event and the transition may not outrun the account of
+        the phase they close. A staged-but-unappended obligation is durable enough to advance past,
+        because the canonical occurrence projection makes it authoritative immediately and the global
+        publication reconciler later appends that exact record.
+        """
+        try:
+            self._write_attempt_usage(ref, record, role=role, attempt_id=attempt_id)
+        except TaskError as exc:
+            if exc.code != "audit_pending":
+                raise
+            # The exact occurrence is staged in the append-only audit. The phase is accounted for;
+            # only its publication is outstanding, and a later tick finishes it.
+            return
+
+    def _write_attempt_usage(self, ref: str, record: DispatcherRecord, *, role: str, attempt_id: str) -> None:
+        phase = "worker" if role == WORKER_ROLE else "review"
+        journal_role = WORKER if role == WORKER_ROLE else REVIEWER
+        # A round is what binds the occurrence to a phase. Every accepted terminal report has one;
+        # a record rebuilt without one still owes the phase an account, so the first round answers
+        # for it rather than the occurrence being dropped.
+        attempt = max(record.attempt_round or self._journal_round(ref), 1)
+        generation = max(record.report_generation, 1)
+        snapshot = dict(record.worker_run if role == WORKER_ROLE else record.review_run)
+        lifecycle = dict(record.worker_head_run if role == WORKER_ROLE else record.review_head_run)
+        if not snapshot:
+            # A recovered record can hold the head's own run without the routing snapshot of its
+            # configuration. The head's attested launch spec answers for the adapter; re-reading
+            # today's `heads.toml` for a head launched hours ago would not.
+            snapshot = _usage_fallback_snapshot(journal_role, record, lifecycle, role=role)
+        try:
+            snapshot = _launched_head_run_snapshot(snapshot, lifecycle_run=lifecycle)
+        except ValueError:
+            # An incomplete launch attestation is not a reason to drop the occurrence: the run
+            # below still reports its own adapter, model and whatever session identity it holds.
+            pass
+        run = HeadRun.from_json(snapshot)
+        # One order, for every provider and every lifecycle path. Projection integrity and causal
+        # identity first, because neither depends on what a provider journal says and a phase slot
+        # owned by another attempt may not be written whatever that journal would have said.
+        try:
+            occurrences = self.writer.board_host.canon.attempt_usage_occurrences(ref=ref)
+            predecessor = _causal_predecessor(
+                occurrences,
+                adapter=run.adapter,
+                session_id=run.session_id or "",
+                attempt=attempt,
+                attempt_id=record.attempt_id or attempt_id,
+                report_generation=generation,
+                phase=phase,
+                role=journal_role,
+            )
+        except (OSError, TypeError, ValueError, TaskError) as exc:
+            raise TaskError(
+                "audit_unavailable", f"attempt usage projection is unreadable: {exc}", 4
+            ) from None
+        # The provider read second: a whole-session total, with no arithmetic of its own.
+        collection = _collect_usage(
+            adapter=run.adapter,
+            source=_provider_usage_source(lifecycle, adapter=run.adapter),
+        )
+        # Attribution and cross-account validation third, in the one place that does either.
+        try:
+            collection = _attribute_phase(collection, predecessor)
+        except (TypeError, ValueError) as exc:
+            raise TaskError(
+                "audit_unavailable", f"attempt usage projection is unreadable: {exc}", 4
+            ) from None
+        data = _attempt_usage_data(
+            attempt=attempt,
+            attempt_id=record.attempt_id or attempt_id,
+            phase=phase,
+            role=journal_role,
+            report_generation=generation,
+            head=run.head,
+            adapter=run.adapter or "unknown",
+            model=run.model,
+            model_source=run.model_source,
+            session_id=run.session_id,
+            session_id_reason=(
+                run.session_id_reason
+                or ("" if run.session_id else "no provider session identity was recorded for this run")
+            ),
+            launch_id=run.launch_id,
+            collection=collection,
+        )
+        self.writer.attempt_usage(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            data=data,
+            reason=_attempt_usage_reason(data),
+            # One occurrence per completed phase: the round it closed names it, so a re-entered
+            # acceptance and a replayed request commit the same event rather than a second one.
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id,
+                f"attempt-usage-{phase}",
+                ref,
+                f"{attempt}-{generation}",
+            ),
         )
 
     def _record_verdict_routing(self, ref: str, record: DispatcherRecord, outcome: str) -> None:
