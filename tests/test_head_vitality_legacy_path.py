@@ -163,12 +163,16 @@ class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
         self.report_done()
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
+        context = self.runtime.production_state.load()["records"][CARD_REF]["review_context"]
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
             reference=CARD_REF,
             kind="red",
             body="fix it",
+            candidate_sha=context["candidate_sha"],
+            base_sha=context["base_sha"],
+            blocker_findings=[{"finding_id": "BLOCKER-test-finding", "kind": "correctness"}],
             request_id="review-red",
         )
         parked = self.tick()

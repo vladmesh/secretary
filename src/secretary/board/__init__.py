@@ -11,9 +11,14 @@ from secretary.board.card_transitions import (
 )
 from secretary.board.events import (
     AttemptUsageOccurrence,
+    BlockerFinding,
     BoardEventCanon,
     BoardEventPending,
     MutationEventTransaction,
+    VerdictHeader,
+    VerdictProjection,
+    normalize_verdict_header,
+    project_verdict,
 )
 from secretary.board.fake import FakeBoardHost
 from secretary.board.host import (
@@ -40,6 +45,7 @@ from secretary.board.models import (
     RelatedRefs,
     Sprint,
     SprintState,
+    VerdictBlockerKind,
 )
 from secretary.board.transitions import (
     TRANSITIONS,
@@ -63,6 +69,7 @@ __all__ = [
     "TRANSITIONS",
     "Actor",
     "AttemptUsageOccurrence",
+    "BlockerFinding",
     "BoardEntity",
     "BoardEventCanon",
     "BoardEventPending",
@@ -91,6 +98,11 @@ __all__ = [
     "SprintState",
     "SprintSupplement",
     "TransitionRequest",
+    "VerdictBlockerKind",
+    "VerdictHeader",
+    "VerdictProjection",
     "card_transition",
+    "normalize_verdict_header",
+    "project_verdict",
     "transition",
 ]

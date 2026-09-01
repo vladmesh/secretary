@@ -1015,7 +1015,8 @@ through the board host, which records each occurrence as a typed protocol event 
 `events.ndjson`: `record_type` is `board.protocol_event`, the lifecycle edge is the object
 `transition: {source, target}`, and the reason is carried as text rather than as a digest. Released
 generic `moved` and `claimed` rows stay readable exactly as they were written, and every other operation
-(`report`, `verdict`, `decide`, `routing`, comments, create/edit/archive) keeps its generic record. A
+(`routing`, comments, create/edit/archive) keeps its generic record. The control-marker operations
+`report`, `verdict` and `decide` use their typed Card occurrences as described below. A
 reader that cares about card transitions therefore has to handle both shapes explicitly; `record_type` is
 what tells them apart. A request id written before the migration also keeps the operation it named: a
 retry of a released generic `move` or `claim` id replays that record and finishes its released cleanup,
@@ -1088,6 +1089,92 @@ a card field that silently disagrees with the audit. `--kind done` takes no clas
 given one. An observer moving a card out of Blocked must give a non-empty reason, the same requirement the
 steward carries moving one into it; the reason is a comment on the card and is carried by the card's
 transition event, so how a Blocked card was disposed of stays answerable.
+
+### Structured review verdicts
+
+Every newly accepted `task verdict` is one typed `card.verdict` occurrence. Its existing marker, free-form
+`body`, `body_sha256`, `description_sha256`, `specification_revision` and rendered `[review:green]` or
+`[review:red]` comment are unchanged. Four additive data fields form the machine-readable header:
+
+```json
+{
+  "verdict": "red",
+  "candidate_sha": "<exact lowercase 40-hex commit>",
+  "base_sha": "<exact lowercase 40-hex commit>",
+  "blocker_findings": [
+    {"finding_id": "BLOCKER-stable-slug", "kind": "correctness"}
+  ]
+}
+```
+
+Finding order is significant. Each `finding_id` is unique within the verdict and matches
+`BLOCKER-<lowercase-short-slug>`. A green verdict carries no findings; a red verdict carries at least one.
+The closed finding-kind vocabulary is:
+
+- `correctness`: observable behaviour is wrong.
+- `architecture`: a required structural or ownership boundary is violated.
+- `verification`: required evidence is absent, invalid or does not cover the claim.
+- `security`: confidentiality, integrity, authorization or access control is at risk.
+- `data_loss`: state can be destroyed or lost irrecoverably.
+- `compatibility`: a supported interface or compatibility promise is broken.
+- `operability`: deployment, recovery, monitoring or routine operation is unsafe.
+- `authorship`: commit attribution violates the authorship policy.
+- `other`: no more specific member applies.
+
+The dispatcher writes the exact candidate and base into the generated review document, and the reviewer's
+two generated verdict commands carry them. The reviewer repeats `--blocker-finding BLOCKER-id:kind` for red
+findings and still owes the prose evidence for each of them. Request replay compares the entire event,
+including the verdict, both revisions and the ordered findings, so a request id cannot change any of them.
+
+The canonical projection of a `card.verdict` is `structured` only when the whole header validates, is in its
+normalized lowercase spelling, and agrees with the marker and status the verdict was published as. An event
+with no header — including every historical verdict — or with a malformed one projects as `unstructured`.
+The projection retains the original event and body unchanged; it does not migrate, discard or repair
+history. Generic event consumers and released marker comments therefore stay readable, and normal
+board/audit export exposes all four fields without parsing prose.
+
+### The review round context
+
+The candidate/base identity of a review round is owned by one typed, immutable `ReviewRoundContext` on the
+dispatcher record. It holds the exact pair given to the current reviewer, plus the attempt and review
+baseline that name the round, and it is the single authority every consumer reads: reviewer prompt
+generation, reviewer launch, launch-intent adoption, respawn, verdict selection, Assessment parking and the
+no-observer release. No path compares an accepted verdict against a gate receipt to rediscover what that
+verdict was about.
+
+It is bound once per round, and the precedence is fixed:
+
+1. the context already bound for this round, which no later evidence replaces;
+2. the durable launch this dispatcher recorded for this round — the generated verdict commands in the
+   round's own reviewer document — when the dispatcher has independently established that the launch was
+   recorded. Quoted prose, including a previous round's blockers echoed into the document, is not recovery
+   evidence;
+3. the applicable initial exact-SHA gate receipt, at the one boundary that owns it;
+4. the pinned checkout with a freshly resolved remote base, and only for an explicitly non-attesting gate
+   (`ci:none`, or a noop host);
+5. otherwise nothing is bound, and the card is moved to Blocked naming the contradiction. That includes
+   launch-intent adoption, which routes a context it cannot establish to the same visible outcome rather
+   than to a tick that repeats a generic failure.
+
+A round ends by clearing the context together with the baseline that says where its verdict is read from:
+the worker report that opens the next round, the red transition that hands the checkout back, the stale-done
+bounce and the infrastructure retry all move both in one step. A new round can therefore bind a different
+candidate and a different base without inheriting either half, and a context that names a round the record
+has left is a contradiction that fails closed rather than being reused. Ending the reviewer's pane — a
+verdict, a respawn, a park — forgets where that head was and nothing else: the context outlives it, which is
+what lets a parked verdict still be checked against the candidate it judged.
+
+Mechanical gate receipts are unchanged and remain dispatcher-owned exact-SHA evidence for their own stages.
+The initial receipt validates a newly bound context once; the assessment and release receipts govern
+mechanical progression only, may overwrite their predecessor and may legitimately name a base that moved
+after this round was opened. Neither the round context nor the verdict header is ever a substitute for a
+valid executed dispatcher-owned exact-SHA broad-gate receipt: an explicit `none`/`noop` gate, or a missing
+receipt, attests nothing however exactly the round is identified.
+
+Two consequences are deliberate. A verdict standing on a round whose context cannot be established blocks
+the card instead of being merged — the dispatcher can neither name the code that verdict judged nor prove
+the checkout still holds it. And a review round recovered without its durable document in an attesting
+project blocks as well, rather than opening a round over a base no receipt covers.
 
 The `reported` events are the authoritative copy and keep the classification of every block, so counting how
 often one head blocks is a question for the audit. The retired `triggered_agents pipeline` CLI is no longer a

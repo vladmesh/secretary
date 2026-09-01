@@ -1211,7 +1211,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
 
     def _review_green(self, request_id: str = "review-green") -> None:
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference=CARD_REF,

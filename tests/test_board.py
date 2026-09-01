@@ -37,7 +37,11 @@ from secretary.board import (
     SprintState,
     SprintSupplement,
     TransitionRequest,
+    normalize_verdict_header,
+    project_verdict,
 )
+from secretary.board.events import render_marker_comment
+from secretary.board.models import VERDICT_BLOCKER_KINDS
 from secretary.board.card_transitions import (
     CARD_TRANSITIONS,
     CardTransitionForbidden,
@@ -522,6 +526,192 @@ class BoardHostContractTests(unittest.TestCase):
                 [event.event_id for event in recorded],
                 [first.event.event_id, second.event.event_id],
             )
+
+
+class VerdictProjectionTests(unittest.TestCase):
+    """The one canonical reading of a `card.verdict`, and everything it refuses to read."""
+
+    def event(self, **changes) -> Event:
+        data = {
+            "marker": "review:red",
+            "status": "red",
+            "verdict": "red",
+            "candidate_sha": "c" * 40,
+            "base_sha": "b" * 40,
+            "blocker_findings": [
+                {"finding_id": "BLOCKER-first", "kind": "correctness"},
+                {"finding_id": "BLOCKER-second", "kind": "verification"},
+            ],
+            "body": "BLOCKER-first and BLOCKER-second both have evidence",
+        }
+        data.update(changes)
+        return Event(
+            "event-verdict",
+            EventKind.CARD_VERDICTED,
+            EntityKind.CARD,
+            "secretary-1527",
+            Actor("reviewer", "reviewer"),
+            data["body"],
+            datetime(2026, 9, 1, tzinfo=UTC),
+            data=data,
+        )
+
+    def test_a_red_header_keeps_its_findings_in_order(self) -> None:
+        projection = project_verdict(self.event())
+
+        self.assertEqual(projection.structure, "structured")
+        assert projection.header is not None
+        self.assertEqual(projection.header.verdict, "red")
+        self.assertEqual(projection.header.candidate_sha, "c" * 40)
+        self.assertEqual(projection.header.base_sha, "b" * 40)
+        self.assertEqual(
+            [(finding.finding_id, finding.kind) for finding in projection.header.blocker_findings],
+            [("BLOCKER-first", "correctness"), ("BLOCKER-second", "verification")],
+        )
+
+    def test_a_green_header_carries_no_findings_and_still_projects(self) -> None:
+        green = self.event(marker="review:green", status="green", verdict="green", blocker_findings=[])
+        projection = project_verdict(green)
+
+        self.assertEqual(projection.structure, "structured")
+        assert projection.header is not None
+        self.assertEqual(projection.header.blocker_findings, ())
+
+    def test_every_documented_kind_is_accepted_and_nothing_else_is(self) -> None:
+        self.assertEqual(
+            VERDICT_BLOCKER_KINDS,
+            (
+                "correctness",
+                "architecture",
+                "verification",
+                "security",
+                "data_loss",
+                "compatibility",
+                "operability",
+                "authorship",
+                "other",
+            ),
+        )
+        for kind in VERDICT_BLOCKER_KINDS:
+            with self.subTest(kind=kind):
+                header = normalize_verdict_header(
+                    "red",
+                    "c" * 40,
+                    "b" * 40,
+                    [{"finding_id": f"BLOCKER-kind-{kind.replace('_', '-')}", "kind": kind}],
+                )
+                self.assertEqual(header.blocker_findings[0].kind, kind)
+        with self.assertRaisesRegex(ValueError, "kind must be one of"):
+            normalize_verdict_header(
+                "red", "c" * 40, "b" * 40, [{"finding_id": "BLOCKER-x", "kind": "style"}]
+            )
+
+    def test_cardinality_and_finding_shape_are_part_of_the_header(self) -> None:
+        for findings, message in (
+            ([], "at least one"),
+            (
+                [
+                    {"finding_id": "BLOCKER-first", "kind": "correctness"},
+                    {"finding_id": "BLOCKER-first", "kind": "security"},
+                ],
+                "duplicate",
+            ),
+            ([{"finding_id": "blocker-lower", "kind": "correctness"}], "BLOCKER-"),
+            ([{"finding_id": "BLOCKER-first"}], "exactly finding_id and kind"),
+            (
+                [{"finding_id": "BLOCKER-first", "kind": "correctness", "note": "extra"}],
+                "exactly finding_id and kind",
+            ),
+        ):
+            with self.subTest(findings=findings), self.assertRaises(ValueError):
+                normalize_verdict_header("red", "c" * 40, "b" * 40, findings)
+        with self.assertRaisesRegex(ValueError, "no blocker findings"):
+            normalize_verdict_header(
+                "green", "c" * 40, "b" * 40, [{"finding_id": "BLOCKER-first", "kind": "other"}]
+            )
+        with self.assertRaises(TypeError):
+            normalize_verdict_header("red", "c" * 40, "b" * 40, "BLOCKER-first:correctness")
+
+    def test_both_revisions_must_be_exact_commits(self) -> None:
+        for candidate, base in (
+            (("c" * 39), "b" * 40),
+            ("c" * 40, "b" * 41),
+            ("HEAD", "b" * 40),
+            (None, "b" * 40),
+        ):
+            with self.subTest(candidate=candidate, base=base), self.assertRaises(ValueError):
+                normalize_verdict_header(
+                    "red", candidate, base, [{"finding_id": "BLOCKER-x", "kind": "other"}]
+                )
+
+    def test_a_malformed_or_denormalized_header_preserves_the_unstructured_event(self) -> None:
+        for event in (
+            self.event(candidate_sha=None),
+            self.event(candidate_sha="C" * 40),
+            self.event(base_sha="b" * 39),
+            self.event(blocker_findings=[]),
+            self.event(blocker_findings=[{"finding_id": "BLOCKER-first", "kind": "unknown"}]),
+            self.event(
+                blocker_findings=[
+                    {"finding_id": "BLOCKER-first", "kind": "correctness"},
+                    {"finding_id": "BLOCKER-first", "kind": "security"},
+                ]
+            ),
+        ):
+            with self.subTest(data=event.data):
+                projection = project_verdict(event)
+                self.assertEqual(projection.structure, "unstructured")
+                self.assertIs(projection.event, event)
+                self.assertIsNone(projection.header)
+                self.assertIn("evidence", projection.event.reason)
+
+    def test_a_header_that_disagrees_with_its_marker_is_not_structured(self) -> None:
+        self.assertEqual(project_verdict(self.event(verdict="green")).structure, "unstructured")
+        # The other direction cannot even be built: the event model already refuses a marker and a
+        # status that disagree, which is why the projection only has to compare the header to them.
+        with self.assertRaisesRegex(ValueError, "unsupported marker payload"):
+            self.event(status="green")
+
+    def test_a_legacy_verdict_keeps_its_body_and_its_rendered_comment(self) -> None:
+        legacy = self.event()
+        for name in ("verdict", "candidate_sha", "base_sha", "blocker_findings"):
+            legacy.data.pop(name)
+        partial = self.event()
+        partial.data.pop("base_sha")
+
+        for event in (legacy, partial):
+            with self.subTest(data=event.data):
+                projection = project_verdict(event)
+                self.assertEqual(projection.structure, "unstructured")
+                self.assertEqual(projection.event.data["body"], event.data["body"])
+                self.assertEqual(
+                    render_marker_comment(projection.event),
+                    "[review:red]\nBLOCKER-first and BLOCKER-second both have evidence",
+                )
+
+    def test_the_rendered_comment_is_the_same_with_or_without_a_header(self) -> None:
+        """The header is additive data, not prose: the board comment must not gain a word."""
+        structured = self.event()
+        legacy = self.event()
+        for name in ("verdict", "candidate_sha", "base_sha", "blocker_findings"):
+            legacy.data.pop(name)
+
+        self.assertEqual(render_marker_comment(structured), render_marker_comment(legacy))
+        self.assertNotIn("candidate_sha", render_marker_comment(structured))
+
+    def test_only_a_verdict_can_be_projected(self) -> None:
+        reported = Event(
+            "event-report",
+            EventKind.CARD_REPORTED,
+            EntityKind.CARD,
+            "secretary-1527",
+            Actor("worker", "worker"),
+            "done",
+            datetime(2026, 9, 1, tzinfo=UTC),
+            data={"marker": "report:done", "status": "done", "body": "done"},
+        )
+        with self.assertRaisesRegex(ValueError, "not a Card verdict"):
+            project_verdict(reported)
 
 
 class BoardMutationTransactionTests(unittest.TestCase):

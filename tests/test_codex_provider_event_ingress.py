@@ -1294,8 +1294,16 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
-    def _run(self, args: list[str], _label: str, **_kwargs) -> subprocess.CompletedProcess:
-        return subprocess.CompletedProcess(args, 0, stdout="contract-sha\n", stderr="")
+    # Git only ever answers a revision query with an exact object id, and the review round
+    # context refuses anything else, so this stub answers like Git does.
+    CONTRACT_SHA = "c0" * 20
+    CONTRACT_BASE = "ba" * 20
+
+    def _run(self, args: list[str], label: str, **_kwargs) -> subprocess.CompletedProcess:
+        stdout = self.CONTRACT_SHA
+        if "review base sha" in label:
+            stdout = self.CONTRACT_BASE
+        return subprocess.CompletedProcess(args, 0, stdout=f"{stdout}\n", stderr="")
 
     def _run_json(self, args: list[str]) -> dict:
         if args[:3] == ["orca", "terminal", "wait"]:
