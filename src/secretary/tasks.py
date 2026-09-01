@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.events import BoardEventCanon, BoardEventPending
+from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.models import (
     Actor,
@@ -2252,6 +2252,101 @@ class TaskWriter:
             finished += 1
         return finished
 
+    def attempt_outcome(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        data: dict[str, Any],
+        reason: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Stage then append one immutable observational terminal occurrence.
+
+        This writer intentionally has no board effect.  Its caller is required
+        to call it only after the lifecycle owner has confirmed the terminal
+        move; a retry can only append the exact staged object.
+        """
+        self._role(role, {"dispatcher"})
+        if not request_id.strip():
+            raise TaskError("validation", "an attempt outcome needs the request id it owns", 2)
+        canon = self.board_host.canon
+        if canon is None:
+            raise TaskError("backend_unavailable", "board event canon is unavailable", 1)
+        try:
+            occurrences = canon.attempt_outcome_occurrences(ref=reference)
+            key = (reference, data.get("attempt_id"), data.get("report_generation"))
+            existing_occurrence = next(
+                (
+                    occurrence
+                    for occurrence in occurrences
+                    if (
+                        occurrence.event.ref,
+                        occurrence.event.data.get("attempt_id"),
+                        occurrence.event.data.get("report_generation"),
+                    )
+                    == key
+                ),
+                None,
+            )
+            if existing_occurrence is not None:
+                if existing_occurrence.event.data != data:
+                    raise AnalyticsOutcomeConflict(
+                        f"attempt outcome natural key {key!r} has conflicting payloads"
+                    )
+                return self._commit_attempt_outcome(
+                    canon, existing_occurrence.request_id, existing_occurrence.event, replayed=True
+                )
+            event = Event(
+                event_id="evt_" + uuid.uuid4().hex,
+                kind=EventKind.ATTEMPT_OUTCOME,
+                entity_kind=EntityKind.CARD,
+                ref=reference,
+                actor=Actor(role, actor),
+                reason=reason,
+                occurred_at=datetime.now(UTC),
+                data=dict(data),
+            )
+            canon.stage(request_id, event)
+        except AnalyticsOutcomeConflict as exc:
+            raise TaskError("analytics_outcome_conflict", str(exc), 3) from None
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except OSError:
+            raise TaskError("audit_unavailable", "attempt outcome could not be staged", 4) from None
+        return self._commit_attempt_outcome(canon, request_id, event, replayed=False)
+
+    def _commit_attempt_outcome(
+        self, canon: BoardEventCanon, request_id: str, event: Event, *, replayed: bool
+    ) -> dict[str, Any]:
+        try:
+            canon.commit(request_id, event)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except OSError:
+            raise TaskError(
+                "audit_pending", "attempt outcome is staged and awaits its journal append", 4
+            ) from None
+        return {"action": "attempt_outcome", "event_id": event.event_id, "replayed": replayed}
+
+    def finish_attempt_outcomes(self, *, role: str, reference: str = "") -> int:
+        """Append staged outcomes only; it never derives or changes lifecycle facts."""
+        self._role(role, {"dispatcher"})
+        canon = self.board_host.canon
+        if canon is None:
+            return 0
+        finished = 0
+        for occurrence in canon.attempt_outcome_occurrences(ref=reference):
+            if not occurrence.pending:
+                continue
+            try:
+                canon.commit(occurrence.request_id, occurrence.event)
+            except (OSError, TypeError, ValueError, TaskError):
+                continue
+            finished += 1
+        return finished
+
     def claim(
         self,
         *,
@@ -2376,11 +2471,14 @@ class TaskWriter:
         sprint_override: bool = False,
         sprint_override_reason: str = "",
         request_id: str | None = None,
+        outcome_owed: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._role(role, _ROLES)
         reason = self._redact_for_board(reason)
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
+        if outcome_owed is not None and not isinstance(outcome_owed, dict):
+            raise TaskError("validation", "attempt outcome obligation must be an object", 2)
         task = self.reader.show(reference)
         if (
             role == "steward"
@@ -2411,6 +2509,17 @@ class TaskWriter:
         existing = self._typed_event(request_id)
         # Resolve replays before guards: their request id already owns a typed event.
         if existing is not None:
+            # A transition written before outcome obligations were introduced
+            # remains a valid lifecycle replay. It cannot be rewritten to add
+            # telemetry, but the caller still finishes its observation
+            # best-effort after the confirmed effect.
+            if outcome_owed is not None:
+                stored_obligation = existing.data.get("attempt_outcome_owed")
+                # The committed lifecycle fact owns the telemetry identity on
+                # a replay. A later dispatcher record may already describe
+                # the next generation, so re-deriving it here would turn an
+                # exact effect retry into a conflicting payload.
+                outcome_owed = dict(stored_obligation) if isinstance(stored_obligation, dict) else None
             try:
                 target_state = CardState(target)
             except ValueError:
@@ -2430,6 +2539,7 @@ class TaskWriter:
                 actor=actor,
                 reason=_transition_reason(reason, target),
                 request_id=request_id,
+                outcome_owed=outcome_owed,
                 finish=self._transition_cleanup(
                     task,
                     source=str(existing.source_state or ""),
@@ -2438,12 +2548,15 @@ class TaskWriter:
                     role=role,
                 ),
             )
-            return {
+            replay = {
                 "action": "moved",
                 "task": self.reader.show(reference),
                 "event_id": result.event.event_id,
                 "replayed": True,
             }
+            if outcome_owed is not None:
+                replay["outcome_owed"] = outcome_owed
+            return replay
         override_payload = self._guard_sprint_write(
             role=role,
             actor=actor,
@@ -2483,6 +2596,7 @@ class TaskWriter:
             actor=actor,
             reason=_transition_reason(reason, target),
             request_id=request_id,
+            outcome_owed=outcome_owed,
             finish=self._transition_cleanup(
                 task,
                 source=source,
@@ -2491,12 +2605,15 @@ class TaskWriter:
                 role=role,
             ),
         )
-        return {
+        moved = {
             "action": "moved",
             "task": self.reader.show(reference),
             "event_id": result.event.event_id,
             "replayed": False,
         }
+        if outcome_owed is not None:
+            moved["outcome_owed"] = outcome_owed
+        return moved
 
     def _legacy_move(
         self,
@@ -2609,6 +2726,7 @@ class TaskWriter:
         actor: str,
         reason: str,
         request_id: str,
+        outcome_owed: dict[str, Any] | None = None,
         finish: Callable[[Any], None] | None = None,
     ) -> MutationResult:
         """Run one state edge through the typed adapter and its shared journal.
@@ -2626,6 +2744,7 @@ class TaskWriter:
                     reason,
                     RelatedRefs(()),
                     request_id,
+                    data={"attempt_outcome_owed": dict(outcome_owed)} if outcome_owed is not None else {},
                 ),
                 finish=finish,
             )

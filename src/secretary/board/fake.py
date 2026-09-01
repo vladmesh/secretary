@@ -257,6 +257,13 @@ def _supplement_data(operation: Create | Replace | TransitionRequest) -> dict[st
         data = operation.sprint.event_data()
     else:
         data = {}
+    if isinstance(operation, TransitionRequest):
+        if not isinstance(operation.data, dict):
+            raise ValueError("transition data must be an object")
+        overlap = set(data).intersection(operation.data)
+        if overlap:
+            raise ValueError(f"transition data collides with supplement: {sorted(overlap)!r}")
+        data.update(operation.data)
     if isinstance(operation, TransitionRequest) and operation.kind is EntityKind.SPRINT:
         data["request_related_refs"] = list(operation.related_refs.refs)
     return data

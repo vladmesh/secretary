@@ -4,6 +4,7 @@
 component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
 integration-board tests/test_attempt_usage.py
+integration-board tests/test_attempt_outcome.py
 integration-recovery tests/test_backup.py
 integration-board tests/test_board.py
 integration-board tests/test_board_batch_transport.py

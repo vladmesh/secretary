@@ -79,6 +79,15 @@ class TransitionRequest:
     related_refs: RelatedRefs = field(default_factory=RelatedRefs)
     request_id: str | None = None
     sprint: SprintSupplement | None = None
+    # A transition may carry immutable, non-control-plane evidence that is
+    # needed to repair observational work after the effect is confirmed.
+    # Card outcome obligations are deliberately kept with the effect they
+    # describe, rather than in a second dispatcher-state journal.
+    data: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, dict):
+            raise ValueError("transition data must be an object")
 
 
 @dataclass(frozen=True, slots=True)

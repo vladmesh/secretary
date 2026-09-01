@@ -353,6 +353,9 @@ def _production_tick_work(
     # those, and it runs before the fence, the cycle, reconciliation and any claim, because all of
     # them read a journal these records belong in.
     usage_outcomes = runtime.publish_pending_attempt_usage()
+    # Outcome recovery is journal-only and reports its own degradation.  It
+    # cannot delay the fence or any lifecycle work below.
+    outcome_outcomes = runtime.publish_pending_attempt_outcomes()
 
     observer_errors: list[dict[str, str]] = []
     # Fence unhealthy sprint observers before advancing any reserved cards.
@@ -360,7 +363,7 @@ def _production_tick_work(
         fence = observer_fence(runtime, payload)
     except Exception as exc:
         # An unfinished fence authorizes no downstream work.
-        return _fence_failed_tick(runtime, payload, exc, usage_outcomes)
+        return _fence_failed_tick(runtime, payload, exc, usage_outcomes + outcome_outcomes)
     fence_outcomes = list(fence.get("outcomes") or [])
 
     cycle = _production_tasks(runtime, set(ACTIVE_STATES))
@@ -379,7 +382,7 @@ def _production_tick_work(
     # on the strength of a field that predates the reconciliation pass itself.
     payload["last_reconciled_at"] = now_rfc3339()
     outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
-    outcomes = usage_outcomes + fence_outcomes + reconcile_outcomes + outcomes
+    outcomes = usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     try:
         outcomes += _reconcile_sprint_budget(runtime)
     except Exception as exc:

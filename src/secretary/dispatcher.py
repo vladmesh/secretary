@@ -540,10 +540,9 @@ class DispatcherRuntime:
                 return
 
         def block(evidence: dict[str, Any]) -> None:
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=reference,
+            self.terminal_effect(
+                {"ref": reference},
+                record,
                 target="blocked",
                 reason=(
                     "Codex provider fan-out policy blocked this head: "
@@ -552,6 +551,9 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(
                     record.attempt_id, "codex-provider-event-blocked", reference, role, run.run_id
                 ),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="provider",
             )
 
         self.host.configure_codex_provider_ingress(run, persist=persist, stop=stop, block=block)
@@ -1099,13 +1101,15 @@ class DispatcherRuntime:
             if failure.startswith("codex-fanout-policy:"):
                 # No terminal was created. This is policy evidence, not a transient failure worth
                 # retrying: a later tick with the same schema is the same prohibited launch.
-                self.writer.move(
-                    role="dispatcher",
-                    actor=self.owner,
-                    reference=ref,
+                self.terminal_effect(
+                    claimed,
+                    record,
                     target="blocked",
                     reason=f"Codex provider fan-out policy refused worker preflight: {failure}",
                     request_id=_attempt_request_id(record.attempt_id, "codex-fanout-blocked", ref),
+                    terminal_state="blocked",
+                    disposition="blocked",
+                    blocked_reason="provider",
                 )
                 records.pop(ref, None)
                 self.save_records(payload, records)
@@ -1166,15 +1170,17 @@ class DispatcherRuntime:
             reason = _bring_up_blocked_reason(
                 "dispatcher bring-up failed", exc, record, WORKER_ROLE, failure=failure
             )
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
+            self.terminal_effect(
+                claimed,
+                record,
                 target="blocked",
                 reason=reason,
                 request_id=_attempt_request_id(
                     record.attempt_id, _bring_up_blocked_action("bringup-blocked", failure), ref
                 ),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="infrastructure",
             )
             records.pop(ref, None)
             self.save_records(payload, records)
@@ -1623,15 +1629,17 @@ class DispatcherRuntime:
                 unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
                 if unconfirmed is not None:
                     return unconfirmed
-                self.writer.move(
-                    role="dispatcher",
-                    actor=self.owner,
-                    reference=ref,
+                self.terminal_effect(
+                    task,
+                    record,
                     target="blocked",
                     reason=f"worker result is not durable: {scrub_host_output(str(exc))}",
                     request_id=_attempt_request_id(
                         record.attempt_id or attempt_id, "worker-result-blocked", ref
                     ),
+                    terminal_state="blocked",
+                    disposition="blocked",
+                    blocked_reason="infrastructure",
                 )
                 records.pop(ref, None)
                 return {
@@ -1719,13 +1727,16 @@ class DispatcherRuntime:
             unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
+            self.terminal_effect(
+                task,
+                record,
                 target="blocked",
                 reason="worker report:blocked",
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-blocked", ref),
+                terminal_state="blocked",
+                disposition="blocked",
+                verdict="blocked",
+                blocked_reason="other",
             )
             records.pop(ref, None)
             return {
@@ -1920,10 +1931,9 @@ class DispatcherRuntime:
         if unconfirmed is not None:
             return unconfirmed
         reports = record.rejected_done_reports + 1
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=(
                 f"The worker reported done {reports} times on unchanged infrastructure-classified "
@@ -1937,6 +1947,9 @@ class DispatcherRuntime:
                 ref,
                 str(reports),
             ),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="infrastructure",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -1965,10 +1978,9 @@ class DispatcherRuntime:
             if unconfirmed is not None:
                 return unconfirmed
             record.rejected_done_reports = rejected
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
+            self.terminal_effect(
+                task,
+                record,
                 target="blocked",
                 reason=(
                     f"The worker reported done twice with no new work: HEAD {sha} was already "
@@ -1981,6 +1993,9 @@ class DispatcherRuntime:
                     ref,
                     str(record.rejected_done_reports),
                 ),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="implementation",
             )
             records.pop(ref, None)
             self.save_records(payload, records)
@@ -3446,15 +3461,17 @@ class DispatcherRuntime:
             unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
         if unconfirmed is not None:
             return unconfirmed
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=(f"wait watchdog: {trigger} after respawn (ceiling {stall}s), blocked for the operator"),
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id, f"{kind}-wait-stall", ref, _wait_cycle_token(record)
             ),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="operator",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -3502,13 +3519,15 @@ class DispatcherRuntime:
             )
         except HostError as exc:
             self.host.stop(record)
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
+            self.terminal_effect(
+                task,
+                record,
                 target="blocked",
                 reason=f"validation gate failed: {scrub_host_output(str(exc))}",
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-blocked", ref),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="gate",
             )
             records.pop(ref, None)
             self.save_records(payload, records)
@@ -3606,16 +3625,18 @@ class DispatcherRuntime:
         """
         ref = task["ref"]
         self.host.stop(record)
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=(
                 "validation gate reported green but did not provide a valid exact-SHA receipt "
                 "(SHA, base SHA and terminal checks); blocked rather than treating it as attested"
             ),
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-receipt-blocked", ref),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="gate",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -3845,10 +3866,9 @@ class DispatcherRuntime:
             f"{record.gate_infrastructure_reruns_sha or self.host.head_commit(record)}; "
             "the bounded automatic recovery is exhausted."
         )
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=reason,
             request_id=_attempt_request_id(
@@ -3857,6 +3877,9 @@ class DispatcherRuntime:
                 ref,
                 str(record.gate_infrastructure_reruns),
             ),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="infrastructure",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -3889,15 +3912,17 @@ class DispatcherRuntime:
             f"run could not be rerun: {scrub_host_output(str(exc))}. Blocked rather than rereading "
             "the same terminal result."
         )
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=reason,
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id, f"{phase}-infrastructure-rerun-blocked", ref
             ),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="infrastructure",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -3973,10 +3998,9 @@ class DispatcherRuntime:
             # A transition performing a decision is the second half of a round whose verdict was
             # already recorded at the park; recording it again would overwrite that outcome.
             self._record_verdict_routing(ref, record, continuation.verdict_outcome)
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="in_progress",
             reason=continuation.move_reason,
             # The board refuses to take a card out of Assessment without a decision; a red gate
@@ -3984,6 +4008,15 @@ class DispatcherRuntime:
             decision=continuation.decision,
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id, f"{phase}-red", ref, str(baseline)
+            ),
+            terminal_state="in_progress",
+            disposition="rework",
+            verdict=(
+                "red"
+                if continuation.verdict_outcome.endswith("_red")
+                else continuation.verdict_outcome
+                if continuation.verdict_outcome in {"green", "red"}
+                else "missing"
             ),
         )
         moved = self.reader.show(ref)
@@ -4297,10 +4330,9 @@ class DispatcherRuntime:
             )
         ref = task["ref"]
         reason = record.worker_continuation_liveness.reason or "provider source was not admitted"
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=(
                 "retained continuation liveness is unprovable; preserving the exact HeadRun "
@@ -4312,6 +4344,9 @@ class DispatcherRuntime:
                 ref,
                 phase,
             ),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="provider",
         )
         records[ref] = record
         self.save_records(payload, records)
@@ -4611,14 +4646,29 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """A claimed card the dispatcher cannot pick back up on the head it was claimed with."""
         ref = task["ref"]
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            target="blocked",
-            reason=f"claimed head is unavailable: {scrub_host_output(str(error))}",
-            request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
-        )
+        record = records.get(ref)
+        if record is not None and record.attempt_id == attempt_id:
+            self.terminal_effect(
+                task,
+                record,
+                target="blocked",
+                reason=f"claimed head is unavailable: {scrub_host_output(str(error))}",
+                request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="infrastructure",
+            )
+        else:
+            # A lost record that cannot be adopted has no durable round context.
+            # The lifecycle effect still wins, but v1 cannot manufacture its key.
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                target="blocked",
+                reason=f"claimed head is unavailable: {scrub_host_output(str(error))}",
+                request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
+            )
         records.pop(ref, None)
         self.save_records(payload, records)
         return {
@@ -4649,10 +4699,9 @@ class DispatcherRuntime:
             error, record, WORKER_ROLE, stage=stage, attempt_id=record.attempt_id or attempt_id
         )
         blocked_reason = _bring_up_blocked_reason(reason, error, record, WORKER_ROLE, failure=failure)
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            {"ref": ref},
+            record,
             target="blocked",
             reason=blocked_reason,
             request_id=_attempt_request_id(
@@ -4661,6 +4710,9 @@ class DispatcherRuntime:
                 ref,
                 request_suffix,
             ),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="infrastructure",
         )
         resume_workspaces = payload.setdefault("resume_workspaces", {})
         if isinstance(resume_workspaces, dict):
@@ -4883,10 +4935,9 @@ class DispatcherRuntime:
                 "action": action,
             }
         self.host.stop(record)
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=(
                 f"Mechanical gate: {scrub_host_output(result.summary)}. CI has been hanging with "
@@ -4894,6 +4945,9 @@ class DispatcherRuntime:
                 f"({GATE_PENDING_STALL_SECONDS}s). Card moved to Blocked for a human."
             ),
             request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{action}-stall", ref),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="gate",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -5323,14 +5377,19 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return unconfirmed
         self.host.stop(record)
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=f"Observer decision: reslice. {reason}".strip(),
             decision="reslice",
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "assessment-reslice", ref),
+            terminal_state="blocked",
+            disposition="reslice",
+            verdict=record.worker_continuation.verdict_outcome
+            if record.worker_continuation.verdict_outcome in {"green", "red", "blocked"}
+            else "missing",
+            blocked_reason=None,
         )
         resume_workspaces = payload.setdefault("resume_workspaces", {})
         if isinstance(resume_workspaces, dict):
@@ -5363,14 +5422,19 @@ class DispatcherRuntime:
         """A merge path that cannot finish leaves the card Blocked with its heads down."""
         ref = task["ref"]
         self.host.stop(record)
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=reason,
             decision=decision,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, action, ref),
+            terminal_state="blocked",
+            disposition="blocked",
+            verdict=record.worker_continuation.verdict_outcome
+            if record.worker_continuation.verdict_outcome in {"green", "red", "blocked"}
+            else "missing",
+            blocked_reason="infrastructure",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -5546,14 +5610,16 @@ class DispatcherRuntime:
                 outcome="merge failed",
             )
         self.host.teardown(record)
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            record,
             target="done",
             reason=move_reason,
             decision=decision,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
+            terminal_state="done",
+            disposition="release",
+            verdict="green",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -5708,6 +5774,167 @@ class DispatcherRuntime:
         return [
             occurrence.event.ref for occurrence in canon.attempt_usage_occurrences() if occurrence.pending
         ]
+
+    def _attempt_outcome_obligation(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        *,
+        terminal_state: str,
+        disposition: str,
+        verdict: str = "missing",
+        blocked_reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        """The durable, pre-effect facts a terminal transition owes.
+
+        No identity is guessed for a stop/drop path.  The ordinal is observed
+        from the live attempt record and remains outside the outcome key.
+        """
+        attempt_id = record.attempt_id
+        attempt = record.attempt_round
+        generation = record.report_generation
+        if not attempt_id or attempt < 1 or generation < 1:
+            return None
+        return {
+            "version": 1,
+            "attempt_id": attempt_id,
+            "attempt": attempt,
+            "report_generation": generation,
+            "sprint_ref": task.get("sprint") or None,
+            "specification_revision": None,
+            "terminal_state": terminal_state,
+            "verdict": verdict,
+            "disposition": disposition,
+            "blocked_reason": blocked_reason,
+        }
+
+    def _finish_attempt_outcome(self, obligation: dict[str, Any], effect_event_id: str) -> dict[str, Any]:
+        """Stage/append one owed row, reporting degradation without lifecycle work."""
+        try:
+            canon = self.writer.board_host.canon
+            if canon is None:
+                raise RuntimeError("board event canon is unavailable")
+            reference = str(obligation.get("card_ref") or "")
+            # Transition obligations inherit their Card subject; immediate
+            # callers add it below so recovery never consults live card state.
+            if not reference:
+                raise ValueError("attempt outcome obligation has no card ref")
+            attempt_id = str(obligation["attempt_id"])
+            generation = int(obligation["report_generation"])
+            usages = {
+                str(occurrence.event.data["role"]): occurrence.event
+                for occurrence in canon.attempt_usage_occurrences(ref=reference)
+                if occurrence.event.data.get("attempt_id") == attempt_id
+                and occurrence.event.data.get("report_generation") == generation
+            }
+            source: dict[str, str | None] = {
+                "report": None,
+                "verdict": None,
+                "decision": None,
+                "effect": effect_event_id,
+                "worker_usage": None,
+                "review_usage": None,
+            }
+            completeness: dict[str, str] = {}
+            for role, ledger_role in (("worker", "worker"), ("review", "reviewer")):
+                usage = usages.get(ledger_role)
+                if usage is None:
+                    completeness[role] = "missing"
+                    continue
+                source[f"{role}_usage"] = usage.event_id
+                completeness[role] = "collected" if usage.data.get("outcome") == "collected" else "degraded"
+            data = {
+                **{key: value for key, value in obligation.items() if key != "card_ref"},
+                "source_event_ids": source,
+                "usage_completeness": completeness,
+            }
+            return self.writer.attempt_outcome(
+                role="dispatcher",
+                actor=self.owner,
+                reference=reference,
+                data=data,
+                reason="confirmed terminal lifecycle effect",
+                request_id=_attempt_request_id(attempt_id, "attempt-outcome", reference, str(generation)),
+            )
+        except Exception as exc:  # noqa: BLE001 - analytics never gates a lifecycle effect
+            return {
+                "status": "degraded",
+                "step": "attempt-outcome",
+                "action": "attempt-outcome-owed",
+                "reason": f"outcome remains owed: {type(exc).__name__}: {exc}",
+            }
+
+    def terminal_effect(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        *,
+        target: str,
+        reason: str,
+        request_id: str,
+        terminal_state: str,
+        disposition: str,
+        verdict: str = "missing",
+        blocked_reason: str | None = None,
+        decision: str = "",
+    ) -> dict[str, Any]:
+        """The lifecycle-owned terminal effect and its non-blocking finisher."""
+        obligation = self._attempt_outcome_obligation(
+            task,
+            record,
+            terminal_state=terminal_state,
+            disposition=disposition,
+            verdict=verdict,
+            blocked_reason=blocked_reason,
+        )
+        if obligation is not None:
+            obligation = {"card_ref": task["ref"], **obligation}
+        effect = self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=task["ref"],
+            target=target,
+            reason=reason,
+            decision=decision,
+            request_id=request_id,
+            outcome_owed=obligation,
+        )
+        effect_obligation = effect.get("outcome_owed") if isinstance(effect, dict) else None
+        if isinstance(effect_obligation, dict):
+            self._finish_attempt_outcome(effect_obligation, str(effect["event_id"]))
+        elif obligation is not None:
+            self._finish_attempt_outcome(obligation, str(effect["event_id"]))
+        return effect
+
+    def publish_pending_attempt_outcomes(self) -> list[dict[str, Any]]:
+        """Recover committed terminal-effect obligations, then exact staged rows.
+
+        This is journal-only and fail-open: malformed analytics history is a
+        diagnostic, never a reason to abort the production tick.
+        """
+        try:
+            canon = self.writer.board_host.canon
+            if canon is None:
+                return []
+            outcomes: list[dict[str, Any]] = []
+            for effect in canon.attempt_outcome_effects():
+                obligation = effect.data.get("attempt_outcome_owed")
+                if not isinstance(obligation, dict):
+                    continue
+                outcome = self._finish_attempt_outcome(obligation, effect.event_id)
+                if outcome.get("status") == "degraded":
+                    outcomes.append(outcome)
+            self.writer.finish_attempt_outcomes(role="dispatcher")
+            return outcomes
+        except Exception as exc:  # noqa: BLE001 - no analytics reader may gate a tick
+            return [
+                {
+                    "status": "degraded",
+                    "step": "attempt-outcome-recovery",
+                    "action": "attempt-outcome-pending-unreadable",
+                    "reason": f"outcome recovery remains owed: {type(exc).__name__}: {exc}",
+                }
+            ]
 
     def publish_pending_attempt_usage(self) -> list[dict[str, Any]]:
         """Publish every staged `attempt.usage` occurrence the installation still owes.
