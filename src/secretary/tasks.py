@@ -2471,11 +2471,14 @@ class TaskWriter:
         sprint_override: bool = False,
         sprint_override_reason: str = "",
         request_id: str | None = None,
+        outcome_owed: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._role(role, _ROLES)
         reason = self._redact_for_board(reason)
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
+        if outcome_owed is not None and not isinstance(outcome_owed, dict):
+            raise TaskError("validation", "attempt outcome obligation must be an object", 2)
         task = self.reader.show(reference)
         if (
             role == "steward"
@@ -2506,6 +2509,17 @@ class TaskWriter:
         existing = self._typed_event(request_id)
         # Resolve replays before guards: their request id already owns a typed event.
         if existing is not None:
+            # A transition written before outcome obligations were introduced
+            # remains a valid lifecycle replay. It cannot be rewritten to add
+            # telemetry, but the caller still finishes its observation
+            # best-effort after the confirmed effect.
+            if outcome_owed is not None:
+                stored_obligation = existing.data.get("attempt_outcome_owed")
+                # The committed lifecycle fact owns the telemetry identity on
+                # a replay. A later dispatcher record may already describe
+                # the next generation, so re-deriving it here would turn an
+                # exact effect retry into a conflicting payload.
+                outcome_owed = dict(stored_obligation) if isinstance(stored_obligation, dict) else None
             try:
                 target_state = CardState(target)
             except ValueError:
@@ -2525,6 +2539,7 @@ class TaskWriter:
                 actor=actor,
                 reason=_transition_reason(reason, target),
                 request_id=request_id,
+                outcome_owed=outcome_owed,
                 finish=self._transition_cleanup(
                     task,
                     source=str(existing.source_state or ""),
@@ -2533,12 +2548,15 @@ class TaskWriter:
                     role=role,
                 ),
             )
-            return {
+            replay = {
                 "action": "moved",
                 "task": self.reader.show(reference),
                 "event_id": result.event.event_id,
                 "replayed": True,
             }
+            if outcome_owed is not None:
+                replay["outcome_owed"] = outcome_owed
+            return replay
         override_payload = self._guard_sprint_write(
             role=role,
             actor=actor,
@@ -2578,6 +2596,7 @@ class TaskWriter:
             actor=actor,
             reason=_transition_reason(reason, target),
             request_id=request_id,
+            outcome_owed=outcome_owed,
             finish=self._transition_cleanup(
                 task,
                 source=source,
@@ -2586,12 +2605,15 @@ class TaskWriter:
                 role=role,
             ),
         )
-        return {
+        moved = {
             "action": "moved",
             "task": self.reader.show(reference),
             "event_id": result.event.event_id,
             "replayed": False,
         }
+        if outcome_owed is not None:
+            moved["outcome_owed"] = outcome_owed
+        return moved
 
     def _legacy_move(
         self,
@@ -2704,6 +2726,7 @@ class TaskWriter:
         actor: str,
         reason: str,
         request_id: str,
+        outcome_owed: dict[str, Any] | None = None,
         finish: Callable[[Any], None] | None = None,
     ) -> MutationResult:
         """Run one state edge through the typed adapter and its shared journal.
@@ -2721,6 +2744,7 @@ class TaskWriter:
                     reason,
                     RelatedRefs(()),
                     request_id,
+                    data={"attempt_outcome_owed": dict(outcome_owed)} if outcome_owed is not None else {},
                 ),
                 finish=finish,
             )

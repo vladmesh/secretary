@@ -1178,8 +1178,6 @@ a new attempt id at that moment, otherwise a repeat claim would land on an alrea
 id, return the old event and leave the card in Ready. The previous attempt's heads are stopped, because the
 new round enters the same workspace.
 
-### What a finished phase cost
-
 ### Attempt outcome ledger v1
 
 `attempt.outcome` version 1 is append-only observational telemetry. It is written by the dispatcher
@@ -1209,9 +1207,20 @@ nor backfilled.
 
 The exact replay returns the staged or committed immutable occurrence. A retry that proposes a different
 payload for the same natural key raises the named `AnalyticsOutcomeConflict` diagnostic. A crash after the
-stage reuses that exact pending event; recovery only appends it. A crash before stage remains owed from the
-confirmed lifecycle effect and may be staged by the lifecycle owner from durable facts, never by an
-analytics reader. Unknown versions, fields and enums are rejected by the ordinary typed board-event reader.
+stage reuses that exact pending event. A crash before stage remains owed on the confirmed terminal
+lifecycle event, whose immutable outcome obligation carries the round identity and disposition; the
+lifecycle owner reconstructs the occurrence from that durable event and other typed journal occurrences,
+never from request-id grammar, time, marker prose, live state or a control-plane reader. Any unreadable,
+conflicting, staging or append failure is reported as a degraded analytics diagnostic and leaves the
+lifecycle effect and teardown unchanged. Unknown versions, fields and enums are rejected by the ordinary
+typed board-event reader.
+
+Only a dispatcher-owned transition that closes a started round carries an outcome obligation. Waiting,
+reviewer-launch and pre-claim refusal/retry paths are not terminal rounds. Operator stop/drop produces an
+outcome only where the stopping lifecycle record already carries a durable attempt id and positive round
+and generation; it never invents one for analytics.
+
+### What a finished phase cost
 
 Every completed worker phase and every completed review phase leaves one `attempt.usage` event on the
 card, so phase cost is answerable from the Secretary journal alone and nobody has to reopen a provider

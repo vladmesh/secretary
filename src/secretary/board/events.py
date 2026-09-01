@@ -264,6 +264,29 @@ class BoardEventCanon:
             AttemptOutcomeOccurrence(by_key[key][0], by_key[key][1], by_key[key][2]) for key in order
         )
 
+    def attempt_outcome_effects(self) -> Sequence[Event]:
+        """Committed lifecycle effects that still carry an outcome obligation.
+
+        This intentionally reads only the typed effect records that opt in to
+        the recovery seam. It neither consults live Card state nor walks the
+        generic event reader, so unrelated observer work is not made to poll
+        the audit merely because outcome recovery exists.
+        """
+        effects: list[Event] = []
+        seen: set[str] = set()
+        for record, pending in self.audit._occurrence_projection_records():
+            if pending:
+                continue
+            data = record.get("data")
+            if not isinstance(data, dict) or not isinstance(data.get("attempt_outcome_owed"), dict):
+                continue
+            event = self._typed(record)
+            if event.event_id in seen:
+                continue
+            seen.add(event.event_id)
+            effects.append(event)
+        return tuple(effects)
+
     def _claim(self, request_id: str, record: dict[str, Any]) -> dict[str, Any] | None:
         # Kept local for the same reason as the TaskAudit import above: secretary.tasks
         # imports this package for its transition registry.

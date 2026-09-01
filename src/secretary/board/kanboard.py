@@ -294,6 +294,7 @@ class KanboardBoardHost:
                 or existing.actor != operation.actor
                 or existing.reason != operation.reason
                 or existing.target_state != operation.target.value
+                or existing.data != operation.data
             ):
                 raise ValueError("request id belongs to another operation or payload")
             event = existing
@@ -1206,6 +1207,7 @@ class KanboardBoardHost:
                 "related_refs": list(related.refs),
                 "source": card.state.value,
                 "target": operation.target.value,
+                "data": operation.data,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -1221,6 +1223,7 @@ class KanboardBoardHost:
             related,
             card.state.value,
             operation.target.value,
+            dict(operation.data),
         )
 
     def _product_issues(self) -> ProductIssueStore:
