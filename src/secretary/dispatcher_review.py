@@ -27,7 +27,7 @@ from secretary.dispatcher_launch import (
     reset_launch_attempts,
     write_launch_intent,
 )
-from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatcher_state import DispatcherRecord, bind_review_context
 from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
 from secretary.dispatcher_tui import (
     READINESS_BLOCKED,
@@ -503,9 +503,11 @@ def _pane_work_state(host: Any, handle: str) -> str:
 
 
 def end_review_pane(host: Any, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:
-    """Close the reviewer's pane and forget it. Used wherever the reviewer's lifecycle ends on its own
-    — a red verdict, a respawn after a silent reviewer — so the next bring-up cannot mistake a stale
-    handle for a live pane, and so the worker's workspace survives untouched.
+    """Close the reviewer's pane and forget its address, preserving the round's immutable context.
+
+    Used wherever the reviewer's lifecycle ends on its own, including a verdict and a respawn after
+    a silent reviewer. The next bring-up cannot mistake a stale handle for a live pane, while its
+    candidate/base pair survives respawn and remains available to a parked verdict.
 
     `initiator` is who is ending it and every caller names one. The pane pointers are dropped
     afterwards; the run itself stays on the record, because the initiator it carries is what makes
@@ -518,7 +520,6 @@ def end_review_pane(host: Any, record: DispatcherRecord, initiator: str = STOPPE
     record.review_handle = ""
     record.review_leaf = ""
     record.review_pid_file = ""
-    record.review_commit = ""
 
 
 def recover_review_launch(
@@ -850,6 +851,13 @@ def start_review(
 ) -> dict[str, Any]:
     ref = task["ref"]
     try:
+        bind_review_context(runtime.host, task, record)
+    except HostError as exc:
+        block = getattr(runtime, "_block_review_context", None)
+        if not callable(block):
+            raise
+        return block(task, record, records, payload, attempt_id, scrub_host_output(str(exc)))
+    try:
         readiness = runtime.head_readiness(record.review_head)
     except HostError as exc:
         if record.gate_state != "green":
@@ -1043,6 +1051,25 @@ def start_review(
             "reason": "host review failed",
             **failure.outcome_fields(blocked_reason),
         }
+    if launch.commit and launch.commit != record.review_commit:
+        return _reviewer_launch_aborted(
+            runtime,
+            task,
+            records,
+            ref,
+            record,
+            attempt_id,
+            HeadLaunchAborted(
+                "review launch checkout moved off the bound candidate",
+                handle=launch.handle,
+                leaf=launch.leaf,
+                workspace=record.workspace,
+                pid_file=str(launch.head_run.get("pid_file") or ""),
+                evidence=dict(launch.delivery_evidence),
+                head_run=dict(launch.head_run),
+            ),
+            payload=payload,
+        )
     # Persist reviewer pane, launch snapshot, and HeadRun together before record adoption.
     confirm_launch_intent(
         runtime,
@@ -1057,7 +1084,6 @@ def start_review(
     )
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf
-    record.review_commit = launch.commit
     if launch.delivery_evidence:
         # Successful and refused reviewer launches use the same durable, metadata-only receipt.
         # A later recovery therefore sees the actual transport version and submit count instead

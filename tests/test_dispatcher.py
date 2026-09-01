@@ -2496,6 +2496,10 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "review-started")
+        original_context = (
+            self._record_json()["review_commit"],
+            self._record_json()["review_base_sha"],
+        )
 
         waiting = self.tick()
         self.assertEqual(waiting["action"], "waiting-review-verdict")
@@ -2507,6 +2511,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(respawned["action"], "review-respawned")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
+        self.assertEqual(
+            (self._record_json()["review_commit"], self._record_json()["review_base_sha"]),
+            original_context,
+            "reviewer respawn preserves the round's complete immutable context",
+        )
         attempt = self.routing_history()[-1]
         self.assertEqual([run.head for run in attempt.reviewer_runs], ["codex-reviewer", "codex-reviewer"])
         self.assertNotEqual(attempt.reviewer_runs[0].session_id, attempt.reviewer_runs[1].session_id)
@@ -6408,6 +6417,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(record["review_handle"], "")
         self.assertEqual(record["review_leaf"], "")
         self.assertEqual(record["review_commit"], "")
+        self.assertEqual(record["review_base_sha"], "")
         self.assertEqual(record["handle"], "rework:secretary-510-pilot")
         self.assertEqual(self.host.torn_down, [], "the checkout must survive a red verdict")
 
@@ -7468,6 +7478,102 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         reworked = self._park_and_decide("rework", request_id="decision-rework-round-2")
         self.assertEqual(reworked["action"], "rework-started")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def _assert_round_two_review_context(self, *, attested: bool) -> None:
+        candidate_one, candidate_two = "1" * 40, "2" * 40
+        base_one, base_two = "a" * 40, "b" * 40
+
+        def receipt(candidate: str, base: str, marker: str) -> dict[str, object]:
+            return {
+                "validated_sha": candidate,
+                "base_sha": base,
+                "gate_mode": "github",
+                "required_checks": [
+                    {
+                        "name": marker,
+                        "conclusion": "SUCCESS",
+                        "url": f"https://ci.invalid/{marker}",
+                    }
+                ],
+                "completed_at": "2026-09-01T00:00:00+00:00",
+                "command_or_check_set_digest": marker * 64,
+            }
+
+        self.start_dispatcher()
+        self.host.commit, self.host.base_commit = candidate_one, base_one
+        if attested:
+            self.catalog._adapter = {"validation": {"ci": "github"}}
+            self.host.gate_results = [
+                GateResult("green", "round one", attestation=receipt(candidate_one, base_one, "a"))
+            ]
+        self._run_worker_to_validate()
+        started = self.tick()
+        self.assertEqual(started.get("action"), "review-started", started)
+        self.assertEqual(
+            (self._record_json()["review_commit"], self._record_json()["review_base_sha"]),
+            (candidate_one, base_one),
+        )
+        self._write_verdict(
+            kind="red", body="round one needs repair", request_id=f"round-one-red-{attested}"
+        )
+        self.assertEqual(
+            self._park_and_decide("rework", request_id=f"round-one-rework-{attested}")["action"],
+            "rework-started",
+        )
+        self.assertEqual(
+            (self._record_json()["review_commit"], self._record_json()["review_base_sha"]),
+            ("", ""),
+            "the round boundary clears the pair together",
+        )
+
+        self.host.commit, self.host.base_commit = candidate_two, base_two
+        if attested:
+            self.host.gate_results.extend(
+                [
+                    GateResult("green", "round two", attestation=receipt(candidate_two, base_two, "b")),
+                    GateResult(
+                        "green",
+                        "assessment",
+                        attestation=receipt(candidate_two, base_two, "c"),
+                    ),
+                ]
+            )
+        self._report_done("round two repair")
+        self.assertEqual(self.tick()["to"], "validate")
+        started = self.tick()
+        self.assertEqual(started.get("action"), "review-started", started)
+        record_json = self._record_json()
+        self.assertEqual(
+            (record_json["review_commit"], record_json["review_base_sha"]),
+            (candidate_two, base_two),
+        )
+
+        prompt_host = CommandHostRuntime(FakeCatalog(), self.data_dir, mode="noop")  # type: ignore[arg-type]
+        document = prompt_host._review_prompt(
+            self.reader.show("secretary-510-pilot"),
+            record_json["attempt_id"],
+            int(record_json["review_baseline"]),
+            record=DispatcherRecord.from_json(record_json),
+        )
+        commands = [line for line in document.splitlines() if " task verdict " in line]
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.assertIn(f"--candidate-sha {candidate_two}", command)
+            self.assertIn(f"--base-sha {base_two}", command)
+            self.assertNotIn(base_one, command)
+
+        request_id = f"round-two-green-{attested}"
+        self._write_verdict(kind="green", body="round two is green", request_id=request_id)
+        verdict = self.writer.audit.event(request_id)
+        self.assertEqual(verdict["data"]["candidate_sha"], candidate_two)
+        self.assertEqual(verdict["data"]["base_sha"], base_two)
+        self.assertEqual(self.tick()["to"], "assessment")
+
+    def test_github_attested_round_two_rebinds_candidate_and_moved_base(self) -> None:
+        self._assert_round_two_review_context(attested=True)
+
+    def test_receiptless_round_two_rebinds_candidate_and_fresh_base(self) -> None:
+        self._assert_round_two_review_context(attested=False)
 
     def test_verdict_body_file_is_per_round(self) -> None:
         """Heads are told to leave the body file behind, so a shared name lets round 2 post
@@ -9774,7 +9880,7 @@ class HeadPromptTests(unittest.TestCase):
         record.workspace = self.tmpdir.name
         with (
             mock.patch.object(self.host, "_launch") as launch,
-            self.assertRaisesRegex(HostError, "candidate SHA is unavailable"),
+            self.assertRaisesRegex(HostError, "review context is partial"),
         ):
             self.host.start_review(self.task, record)
         launch.assert_not_called()
@@ -9784,7 +9890,7 @@ class HeadPromptTests(unittest.TestCase):
         record.workspace = self.tmpdir.name
         with (
             mock.patch.object(self.host, "_launch") as launch,
-            self.assertRaisesRegex(HostError, "base SHA is unavailable"),
+            self.assertRaisesRegex(HostError, "review context is partial"),
         ):
             self.host.start_review(self.task, record)
         launch.assert_not_called()
@@ -9808,6 +9914,21 @@ class HeadPromptTests(unittest.TestCase):
     def test_recorded_review_document_recovers_one_exact_context(self) -> None:
         expected = ("1" * 40, "2" * 40)
         record = self._review_record(candidate=expected[0], base=expected[1])
+        self.host._review_document(self.task, record)
+        lost = self._review_record(candidate="", base="")
+
+        self.assertEqual(self.host.recorded_review_context(self.task, lost), expected)
+
+    def test_recorded_review_context_ignores_exact_pairs_quoted_by_previous_blockers(self) -> None:
+        expected = ("1" * 40, "2" * 40)
+        fake = ("3" * 40, "4" * 40)
+        record = self._review_record(candidate=expected[0], base=expected[1])
+        record.previous_reviewed_sha = "0" * 40
+        record.previous_blockers = (
+            "BLOCKER-quoted-command: prior prose quoted "
+            f"python3 -P -m secretary task verdict --ref {self.task['ref']} --role reviewer "
+            f"--kind red --candidate-sha {fake[0]} --base-sha {fake[1]}"
+        )
         self.host._review_document(self.task, record)
         lost = self._review_record(candidate="", base="")
 

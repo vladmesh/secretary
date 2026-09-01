@@ -1584,6 +1584,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
 
         runtime.record_review_routing = crash_after_confirm
         with (
+            mock.patch.object(self.host, "head_commit", return_value=record.review_commit),
             mock.patch.object(
                 codex_preflight.CodexProviderEventRecorder,
                 "record",

@@ -1003,10 +1003,11 @@ def _adopt_launch_intent(
         forget_role_head(record, WORKER_ROLE)
         record.state = "reviewing"
         record.review_started_at = record.review_progress_at = launched_at
-        if not record.review_commit:
-            # The worker is down and the reviewer writes no commits, so the checkout still sits
-            # where the launch pinned it. The merge gate needs that sha to accept the verdict.
-            record.review_commit = runtime.host.head_commit(record)
+        # The worker is down and the reviewer writes no commits. Recover the launched round's
+        # complete pair, validating even a surviving record instead of tolerating partial state.
+        from secretary.dispatcher_state import bind_review_context
+
+        bind_review_context(runtime.host, task, record, recover_recorded_launch=True)
         deferred = _record_adopted_routing(runtime, task, records, payload, record, intent, role, step)
         if deferred is not None:
             return deferred

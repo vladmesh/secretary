@@ -94,7 +94,6 @@ from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     _report_nudge_prompt,
     _same_repo,
     _watchdog_kind,
-    establish_review_context,
 )
 from secretary.dispatcher_gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
@@ -235,7 +234,9 @@ from secretary.dispatcher_state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
     CLAIM_SKIP_RESOURCE_NOT_READY,
     DispatcherRecord,
+    bind_review_context,
     now_rfc3339,
+    reset_review_context,
 )
 from secretary.dispatcher_state import (
     attempt_request_id as _attempt_request_id,
@@ -1610,6 +1611,7 @@ class DispatcherRuntime:
                         str(record.report_generation),
                     ),
                 )
+                reset_review_context(record)
                 record.state = "validate"
                 self.save_records(payload, records)
                 return {
@@ -1670,6 +1672,9 @@ class DispatcherRuntime:
             # The report is accepted from here on. Account the worker phase it closes while the
             # head that wrote it is still on the record with its bound provider session.
             self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
+            # This is the sole fresh worker-to-review round boundary. The next gate or receiptless
+            # bind must not inherit either half of the preceding review's context.
+            reset_review_context(record)
             record.review_baseline = len(task.get("comments") or [])
             # Freeze before moving the board. A later tick may finish the idempotent move, but it
             # never leaves a completed worker writing while CI or a reviewer owns this checkout.
@@ -1853,6 +1858,7 @@ class DispatcherRuntime:
         # report is enough to return it to the real gate rerun path; another identical report has
         # no new evidence and must not reuse the same request id as a silent no-op tick.
         record.rejected_done_reports = 1
+        reset_review_context(record)
         record.gate_state = ""
         record.gate_pending_since = 0.0
         record.gate_transport_failures = 0
@@ -2096,8 +2102,8 @@ class DispatcherRuntime:
         if marker == "review:red":
             # Only the reviewer's lifecycle ends here: a full `stop` would take the worktree's
             # terminals down, and this checkout is about to be parked and is never re-created from
-            # base. An unconfirmed stop ends the tick before the card moves. The commit is read
-            # first: ending the reviewer forgets the commit it judged and the park has to keep it.
+            # base. An unconfirmed stop ends the tick before the card moves. The context remains
+            # bound while the pane address is forgotten.
             reviewed = record.review_commit or self.host.head_commit(record)
             unconfirmed = self._end_review_pane_confirmed(
                 record,
@@ -3605,7 +3611,7 @@ class DispatcherRuntime:
         record.gate_attestation = accepted.persisted_payload()
         if stage == "initial":
             try:
-                establish_review_context(self.host, task, record)
+                bind_review_context(self.host, task, record)
             except HostError as exc:
                 return self._block_review_context(
                     task, record, records, payload, attempt_id, scrub_host_output(str(exc))
@@ -3661,6 +3667,7 @@ class DispatcherRuntime:
             reason=f"review context unavailable before reviewer launch: {reason}",
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-context-blocked", ref),
         )
+        reset_review_context(record)
         records.pop(ref, None)
         self.save_records(payload, records)
         return {
@@ -4089,8 +4096,8 @@ class DispatcherRuntime:
             record.gate_transport_failures = 0
             record.gate_transport_error = ""
             self._reset_infrastructure_reruns(record)
-        # The judged round ends here: a stale review pin would refuse the rework's merge.
-        record.review_commit = ""
+        # The judged round ends here: neither half of its review context reaches the rework.
+        reset_review_context(record)
         _reset_wait(record, "review")
         _reset_wait(record, "worker")
         records[ref] = record
@@ -4744,6 +4751,7 @@ class DispatcherRuntime:
         resume_workspaces = payload.setdefault("resume_workspaces", {})
         if isinstance(resume_workspaces, dict):
             resume_workspaces[ref] = record.attempt_id or attempt_id
+        reset_review_context(record)
         records.pop(ref, None)
         self.save_records(payload, records)
         return {
@@ -5190,8 +5198,8 @@ class DispatcherRuntime:
                 step="review",
                 move_reason="review:green",
             )
-        # The checkout must be quiet while the card waits, so the reviewer's pane goes here — but
-        # its commit is read first, because ending the reviewer forgets the commit it judged.
+        # The checkout must be quiet while the card waits, so the reviewer's pane goes here. Pane
+        # teardown preserves the immutable context the later release decision must still match.
         reviewed = record.review_commit or self.host.head_commit(record)
         unconfirmed = self._end_review_pane_confirmed(
             record,
@@ -5236,9 +5244,8 @@ class DispatcherRuntime:
         card is moving, before anything observable moves. Nothing comes after the move — the card waits.
         """
         ref = task["ref"]
-        # Re-pinned after the reviewer's pane was forgotten: the merge gate refuses a release for
-        # a checkout that moved off the reviewed commit, and the park is exactly that window.
-        record.review_commit = reviewed_commit or record.review_commit
+        if reviewed_commit and reviewed_commit != record.review_commit:
+            raise HostError("parked verdict does not match the bound review candidate")
         record.worker_continuation.begin_park(
             "review", len(task.get("comments") or []), move_reason, verdict_outcome
         )
@@ -5414,6 +5421,7 @@ class DispatcherRuntime:
         resume_workspaces = payload.setdefault("resume_workspaces", {})
         if isinstance(resume_workspaces, dict):
             resume_workspaces[ref] = record.attempt_id or attempt_id
+        reset_review_context(record)
         records.pop(ref, None)
         self.save_records(payload, records)
         return {
@@ -5451,6 +5459,7 @@ class DispatcherRuntime:
             decision=decision,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, action, ref),
         )
+        reset_review_context(record)
         records.pop(ref, None)
         self.save_records(payload, records)
         return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": outcome}
@@ -5634,6 +5643,7 @@ class DispatcherRuntime:
             decision=decision,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
         )
+        reset_review_context(record)
         records.pop(ref, None)
         self.save_records(payload, records)
         return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
@@ -6017,7 +6027,7 @@ class DispatcherRuntime:
             review_run=round_record.reviewer.to_json() if round_record and round_record.reviewer else {},
         )
         if launched:
-            establish_review_context(self.host, task, record, recover_recorded_launch=True)
+            bind_review_context(self.host, task, record, recover_recorded_launch=True)
         # A lost record may be recovered from the worker's own heartbeat, but only after its
         # self-described run, role and card binding are promoted into a HeadRun and checked again.
         # A legacy pid or another card's process stays unbound and is never signalled.

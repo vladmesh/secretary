@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from secretary.dispatcher_types import DispatcherError
+from secretary.dispatcher_types import DispatcherError, HostError
 from secretary.dispatcher_worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationLiveness,
@@ -32,6 +32,71 @@ CLAIM_SKIP_ACTIONS = frozenset(
         CLAIM_SKIP_FAILOVER_COLLAPSE,
     }
 )
+
+_REVIEW_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def reset_review_context(record: "DispatcherRecord") -> None:
+    """End a review round by clearing its candidate/base pair atomically."""
+    record.review_commit = ""
+    record.review_base_sha = ""
+
+
+def bind_review_context(
+    host: Any,
+    task: dict[str, Any],
+    record: "DispatcherRecord",
+    *,
+    recover_recorded_launch: bool = False,
+) -> tuple[str, str]:
+    """Bind one immutable candidate/base pair for the current review round."""
+    existing_candidate = str(record.review_commit or "")
+    existing_base = str(record.review_base_sha or "")
+    if bool(existing_candidate) != bool(existing_base):
+        raise HostError("review context is partial; candidate and base must be bound together")
+
+    recovered: tuple[str, str] | None = None
+    if recover_recorded_launch:
+        recover = getattr(host, "recorded_review_context", None)
+        if callable(recover):
+            recovered = recover(task, record)
+        if recovered:
+            recovered_candidate, recovered_base = map(str, recovered)
+            if existing_candidate and (existing_candidate, existing_base) != recovered:
+                raise HostError("recorded review context conflicts with the active review round")
+            candidate, base = recovered_candidate, recovered_base
+        elif existing_candidate:
+            candidate, base = existing_candidate, existing_base
+        else:
+            candidate = base = ""
+    elif existing_candidate:
+        candidate, base = existing_candidate, existing_base
+    else:
+        candidate = base = ""
+
+    attestation = record.gate_attestation if isinstance(record.gate_attestation, dict) else {}
+    attested_candidate = str(attestation.get("validated_sha") or "")
+    attested_base = str(attestation.get("base_sha") or "")
+    if not candidate and _REVIEW_SHA_RE.fullmatch(attested_candidate) and _REVIEW_SHA_RE.fullmatch(
+        attested_base
+    ):
+        candidate, base = attested_candidate, attested_base
+    if not candidate:
+        candidate = str(host.head_commit(record) or "")
+        base = str(host.review_base_commit(task, record) or "")
+
+    if not _REVIEW_SHA_RE.fullmatch(candidate):
+        raise HostError("review candidate SHA is unavailable or is not an exact 40-hex revision")
+    if not _REVIEW_SHA_RE.fullmatch(base):
+        raise HostError("review base SHA is unavailable or is not an exact 40-hex revision")
+    current = str(host.head_commit(record) or "")
+    if _REVIEW_SHA_RE.fullmatch(current) and current != candidate:
+        raise HostError("recorded review candidate does not match the pinned checkout")
+    if existing_candidate and (existing_candidate, existing_base) != (candidate, base):
+        raise HostError("review context is immutable within a round")
+
+    record.review_commit, record.review_base_sha = candidate, base
+    return candidate, base
 
 
 def is_claim_skip(outcome: dict[str, Any]) -> bool:

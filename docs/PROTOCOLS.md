@@ -1126,10 +1126,13 @@ The dispatcher writes the exact candidate and base into the generated review doc
 candidate is the checkout pinned when the reviewer starts. The base comes from the applicable gate
 receipt, or from the refreshed remote base in the exact review context for an explicitly
 non-attesting `none`/`noop` gate. The revision pair is established before launch and is immutable
-for that review round. A recorded launch whose dispatcher record was lost recovers the same pair
-from its durable review document and pinned checkout; an adoption with no recorded launch has no
-such authority. If either revision is unavailable or contradictory, document generation and reviewer
-launch fail closed rather than substituting a synthetic SHA. The
+for that review round. It is one atomic field: partial candidate/base state is invalid, reviewer
+launch, respawn, adoption and parking cannot replace either half, and every fresh worker-to-Validate
+or red-continuation round boundary clears both before rebinding. A recorded launch whose dispatcher
+record was lost recovers the same pair only from the generated verdict-command section of its
+durable review document; quoted re-review prose is not recovery evidence. An adoption with no
+recorded launch has no such authority. If either revision is unavailable, ambiguous or contradictory,
+document generation and reviewer launch fail closed rather than substituting a synthetic SHA. The
 reviewer repeats `--blocker-finding BLOCKER-id:kind` for red findings. Request replay compares the
 entire event, including verdict, both SHAs and the ordered findings, so a request id cannot change
 any of them.
