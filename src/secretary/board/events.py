@@ -5,12 +5,13 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from secretary.board.models import Event, EventKind
+from secretary.board.models import VERDICT_BLOCKER_KINDS, Event, EventKind
 
 if TYPE_CHECKING:
     from secretary.tasks import TaskAudit
@@ -26,6 +27,124 @@ class AttemptUsageOccurrence:
     request_id: str
     event: Event
     pending: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BlockerFinding:
+    """One ordered blocker a RED verdict is owed: a stable id and the invariant it violates."""
+
+    finding_id: str
+    kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictHeader:
+    """The complete machine-readable statement one accepted reviewer verdict makes."""
+
+    verdict: str
+    candidate_sha: str
+    base_sha: str
+    blocker_findings: tuple[BlockerFinding, ...]
+
+    def to_data(self) -> dict[str, Any]:
+        """The exact additive event fields this header is persisted as."""
+        return {
+            "verdict": self.verdict,
+            "candidate_sha": self.candidate_sha,
+            "base_sha": self.base_sha,
+            "blocker_findings": [
+                {"finding_id": finding.finding_id, "kind": finding.kind} for finding in self.blocker_findings
+            ],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictProjection:
+    """A verdict occurrence and, when its whole header validates, that header."""
+
+    event: Event
+    structure: str
+    header: VerdictHeader | None = None
+
+
+VERDICT_HEADER_FIELDS = ("verdict", "candidate_sha", "base_sha", "blocker_findings")
+_EXACT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_FINDING_ID_RE = re.compile(r"^BLOCKER-[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def normalize_verdict_header(
+    verdict: object,
+    candidate_sha: object,
+    base_sha: object,
+    blocker_findings: object,
+) -> VerdictHeader:
+    """Validate and normalize the one structured header a new reviewer verdict carries.
+
+    Both revisions are normalized to lowercase here, which is the only spelling the projection
+    below accepts back: the writer normalizes once, so a persisted header and its validated
+    reading are the same bytes rather than two representations that could drift.
+    """
+    if verdict not in {"green", "red"}:
+        raise ValueError("verdict header verdict must be green or red")
+    candidate = candidate_sha.lower() if isinstance(candidate_sha, str) else ""
+    base = base_sha.lower() if isinstance(base_sha, str) else ""
+    if not _EXACT_SHA_RE.fullmatch(candidate):
+        raise ValueError("verdict header candidate_sha must be an exact 40-hex commit")
+    if not _EXACT_SHA_RE.fullmatch(base):
+        raise ValueError("verdict header base_sha must be an exact 40-hex commit")
+    if not isinstance(blocker_findings, (list, tuple)):
+        raise TypeError("verdict header blocker_findings must be a list")
+    findings: list[BlockerFinding] = []
+    seen: set[str] = set()
+    for raw in blocker_findings:
+        if isinstance(raw, BlockerFinding):
+            finding_id: object = raw.finding_id
+            kind: object = raw.kind
+        elif isinstance(raw, dict):
+            if set(raw) != {"finding_id", "kind"}:
+                raise ValueError("each blocker finding carries exactly finding_id and kind")
+            finding_id, kind = raw.get("finding_id"), raw.get("kind")
+        else:
+            raise TypeError("each blocker finding must be an object")
+        if not isinstance(finding_id, str) or not _FINDING_ID_RE.fullmatch(finding_id):
+            raise ValueError("blocker finding ids must match BLOCKER-<lowercase-short-slug>")
+        if finding_id in seen:
+            raise ValueError(f"duplicate blocker finding id {finding_id!r}")
+        if kind not in VERDICT_BLOCKER_KINDS:
+            raise ValueError("blocker finding kind must be one of " + ", ".join(VERDICT_BLOCKER_KINDS))
+        seen.add(finding_id)
+        findings.append(BlockerFinding(finding_id, str(kind)))
+    if verdict == "green" and findings:
+        raise ValueError("a green verdict carries no blocker findings")
+    if verdict == "red" and not findings:
+        raise ValueError("a red verdict carries at least one blocker finding")
+    return VerdictHeader(str(verdict), candidate, base, tuple(findings))
+
+
+def project_verdict(event: Event) -> VerdictProjection:
+    """The one canonical reading of a ``card.verdict`` occurrence.
+
+    ``structured`` requires the complete header, in its normalized spelling, agreeing with the
+    marker this verdict was published as. Everything else — a historical verdict written before
+    the header existed, a partial header, an unknown finding kind — is ``unstructured`` and keeps
+    the original event and body exactly as they were written. Nothing here repairs history.
+    """
+    if event.kind is not EventKind.CARD_VERDICTED:
+        raise ValueError("event is not a Card verdict")
+    data = event.data
+    if not all(name in data for name in VERDICT_HEADER_FIELDS):
+        return VerdictProjection(event, "unstructured")
+    try:
+        header = normalize_verdict_header(*(data[name] for name in VERDICT_HEADER_FIELDS))
+    except (TypeError, ValueError):
+        return VerdictProjection(event, "unstructured")
+    if header.to_data() != {name: data[name] for name in VERDICT_HEADER_FIELDS}:
+        return VerdictProjection(event, "unstructured")
+    # The marker is already tied to the status by the event model, so this is the one comparison
+    # left to make: the additive header must say what the verdict was published as.
+    if data.get("status") != header.verdict:
+        return VerdictProjection(event, "unstructured")
+    return VerdictProjection(event, "structured", header)
 
 
 @contextlib.contextmanager

@@ -1013,6 +1013,9 @@ class TaskWriterTests(unittest.TestCase):
             reference="secretary-468",
             kind="red",
             body=ordinary,
+            candidate_sha="c" * 40,
+            base_sha="b" * 40,
+            blocker_findings=[{"finding_id": "BLOCKER-long-body", "kind": "other"}],
             request_id="ordinary-long-verdict",
         )
 
@@ -2523,12 +2526,122 @@ class TaskWriterTests(unittest.TestCase):
             reference="secretary-468",
             kind="green",
             body="ok",
+            candidate_sha="c" * 40,
+            base_sha="b" * 40,
+            blocker_findings=[],
             request_id="green",
         )
 
         self.assertEqual(result["action"], "verdict")
         comment = [call for call in self.client.calls if call[0] == "createComment"][-1]
         self.assertEqual(comment[1]["content"], "[review:green]\nok")
+
+    def test_reviewer_verdict_persists_the_complete_structured_header(self) -> None:
+        findings = [
+            {"finding_id": "BLOCKER-first", "kind": "correctness"},
+            {"finding_id": "BLOCKER-second", "kind": "operability"},
+        ]
+        self.writer.verdict(
+            role="reviewer",
+            actor="r",
+            reference="secretary-468",
+            kind="red",
+            body="evidence for both blocker ids",
+            candidate_sha="C" * 40,
+            base_sha="b" * 40,
+            blocker_findings=findings,
+            request_id="structured-red",
+        )
+
+        data = self.writer.audit.committed_event("structured-red")["data"]
+        self.assertEqual(data["verdict"], "red")
+        self.assertEqual(data["candidate_sha"], "c" * 40, "the persisted header is normalized once")
+        self.assertEqual(data["base_sha"], "b" * 40)
+        self.assertEqual(data["blocker_findings"], findings)
+        self.assertEqual(data["body"], "evidence for both blocker ids")
+
+    def test_a_verdict_header_is_data_and_never_reaches_the_comment_prose(self) -> None:
+        """An auditor reads the four fields off the event; the board comment is unchanged."""
+        self.writer.verdict(
+            role="reviewer",
+            actor="r",
+            reference="secretary-468",
+            kind="red",
+            body="the prose says nothing about revisions",
+            candidate_sha="c" * 40,
+            base_sha="b" * 40,
+            blocker_findings=[{"finding_id": "BLOCKER-only", "kind": "security"}],
+            request_id="exported-red",
+        )
+
+        comment = [call for call in self.client.calls if call[0] == "createComment"][-1]
+        self.assertEqual(comment[1]["content"], "[review:red]\nthe prose says nothing about revisions")
+        for field in ("candidate_sha", "base_sha", "BLOCKER-only"):
+            self.assertNotIn(field, comment[1]["content"])
+        exported = next(
+            card["comments"]
+            for card in TaskReader(self.client).export()
+            if card["reference"] == "secretary-468"
+        )
+        self.assertTrue(all("candidate_sha" not in row["text"] for row in exported))
+        event = next(
+            row for row in self.writer.audit.events("secretary-468") if row.get("kind") == "card.verdict"
+        )
+        self.assertEqual(event["data"]["candidate_sha"], "c" * 40)
+        self.assertEqual(
+            event["data"]["blocker_findings"], [{"finding_id": "BLOCKER-only", "kind": "security"}]
+        )
+
+    def test_an_unreadable_header_is_a_refused_verdict_not_a_published_one(self) -> None:
+        for changes, message in (
+            ({"candidate_sha": "not-a-sha"}, "candidate_sha"),
+            ({"base_sha": ""}, "base_sha"),
+            ({"blocker_findings": []}, "at least one"),
+            ({"blocker_findings": [{"finding_id": "nope", "kind": "correctness"}]}, "BLOCKER-"),
+            ({"blocker_findings": [{"finding_id": "BLOCKER-x", "kind": "style"}]}, "kind must be one of"),
+        ):
+            arguments = {
+                "role": "reviewer",
+                "actor": "r",
+                "reference": "secretary-468",
+                "kind": "red",
+                "body": "evidence",
+                "candidate_sha": "c" * 40,
+                "base_sha": "b" * 40,
+                "blocker_findings": [{"finding_id": "BLOCKER-x", "kind": "correctness"}],
+                "request_id": f"refused-{len(self.client.calls)}",
+            }
+            with self.subTest(changes=changes), self.assertRaisesRegex(TaskError, message):
+                self.writer.verdict(**dict(arguments, **changes))
+        self.assertEqual([call for call in self.client.calls if call[0] == "createComment"], [])
+
+    def test_verdict_replay_compares_the_whole_header(self) -> None:
+        arguments = {
+            "role": "reviewer",
+            "actor": "r",
+            "reference": "secretary-468",
+            "kind": "green",
+            "body": "ok",
+            "candidate_sha": "c" * 40,
+            "base_sha": "b" * 40,
+            "blocker_findings": [],
+            "request_id": "same-verdict",
+        }
+        first = self.writer.verdict(**arguments)
+        self.assertFalse(first["replayed"])
+        self.assertTrue(self.writer.verdict(**arguments)["replayed"])
+
+        for changes in (
+            {"candidate_sha": "d" * 40},
+            {"base_sha": "a" * 40},
+            {
+                "kind": "red",
+                "body": "the gate is red",
+                "blocker_findings": [{"finding_id": "BLOCKER-new", "kind": "correctness"}],
+            },
+        ):
+            with self.subTest(changes=changes), self.assertRaisesRegex(TaskError, "another operation"):
+                self.writer.verdict(**dict(arguments, **changes))
 
     def test_validate_to_in_progress_rework_is_dispatcher_only(self) -> None:
         self.client.tasks[0]["column_id"] = 4
@@ -4694,6 +4807,9 @@ class RequestIdOwnershipTests(unittest.TestCase):
             reference="secretary-468",
             kind="green",
             body="ok",
+            candidate_sha="c" * 40,
+            base_sha="b" * 40,
+            blocker_findings=[],
             request_id="round-1",
         )
 
@@ -4704,6 +4820,9 @@ class RequestIdOwnershipTests(unittest.TestCase):
                 reference="secretary-468",
                 kind="red",
                 body="the gate is red",
+                candidate_sha="c" * 40,
+                base_sha="b" * 40,
+                blocker_findings=[{"finding_id": "BLOCKER-gate-red", "kind": "verification"}],
                 request_id="round-1",
             )
 
@@ -4772,6 +4891,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 reference="secretary-468",
                 kind="green",
                 body=body,
+                candidate_sha="c" * 40,
+                base_sha="b" * 40,
+                blocker_findings=[],
                 request_id=request_id,
             )
         self.client.tasks[0]["column_id"] = 7  # Assessment for observer decisions.
