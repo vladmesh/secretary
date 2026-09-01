@@ -323,6 +323,8 @@ from secretary.dispatcher_watchdog import (
 from secretary.dispatcher_worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
+    PARK_EFFECT_ASSESSMENT,
+    PARK_EFFECT_RELEASE,
     ContinuationLivenessState,
     ContinuationProviderCondition,
     ContinuationRecoveryRung,
@@ -2109,9 +2111,10 @@ class DispatcherRuntime:
                 return self._block_unresumable(task, records, payload, attempt_id, "review", exc)
             records[ref] = record
         if record.worker_continuation.parked:
-            # The park's move or its checkpoint did not commit: the card is still in Validate with
-            # the verdict recorded. Finish the park before the gate or any review marker is read.
-            return self._complete_park(record, records, payload, attempt_id, ref=ref)
+            # The park's effect did not commit: the card is still in Validate with the verdict
+            # recorded. Finish that effect before the gate or any review marker is read — through
+            # the one boundary, which re-establishes this round's identity from disk first.
+            return self._complete_park(task, record, records, payload, attempt_id, ref=ref)
         if record.worker_continuation.red_transition_pending:
             # A red transition whose move did not commit is finished before the gate is read again,
             # before any review marker and before a reviewer starts: a rollup that has turned green
@@ -5195,9 +5198,11 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """A green review verdict parks the card; it does not merge it.
 
-        Except on a card with nobody to park it for, where this is also the merge path — so the
-        identity is the validated one the caller already had to obtain to read the verdict at all,
-        carried here rather than looked up again from a record the same tick has not changed.
+        Everything mechanical happens here — the readiness re-check and the exact-SHA green receipt
+        — over the validated identity the caller already had to obtain to read the verdict at all,
+        carried here rather than looked up again from a record the same tick has not changed. The
+        durable effect is not: both endings open a park intent and are performed by the one
+        boundary below, which re-establishes the identity from disk before it moves or merges.
         """
         ref = task["ref"]
         # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
@@ -5307,17 +5312,19 @@ class DispatcherRuntime:
         if blocked is not None:
             return blocked
         if not parks:
-            # No observer to release it, so the green verdict merges on its own tick — over the
-            # same validated identity the park would have carried, because this is the merge.
-            return self._release_effect(
+            # No observer to release it, so the green verdict merges on its own tick. It still goes
+            # through the park boundary: the merge is this park's effect, the intent for it is on
+            # disk before anything irreversible happens, and the identity the merge runs on is the
+            # one that boundary re-establishes rather than the one this tick happens to hold.
+            return self._begin_park(
                 task,
                 record,
                 records,
                 payload,
                 attempt_id,
-                identity,
-                step="review",
+                verdict_outcome="green",
                 move_reason="review:green",
+                effect=PARK_EFFECT_RELEASE,
             )
         # The checkout must be quiet while the card waits, so the reviewer's pane goes here. Its
         # pane address is all that is forgotten: the round's context outlives it, and is what the
@@ -5356,26 +5363,30 @@ class DispatcherRuntime:
         *,
         verdict_outcome: str,
         move_reason: str,
+        effect: str = PARK_EFFECT_ASSESSMENT,
     ) -> dict[str, Any]:
         """The only way a substantive verdict leaves Validate.
 
         The red transition's order, for the same reason: the intent is on disk, with the reason the
-        card is moving, before anything observable moves. Nothing comes after the move — the card waits.
+        card is moving and the effect it is owed, before anything observable happens. Nothing comes
+        after the effect — the card waits, or it is merged and gone.
 
-        Nothing is re-pinned here. The park is exactly the window in which the reviewer's pane is
-        gone while the merge gate must still refuse a checkout that moved off the reviewed
-        candidate, and the round's bound context is what carries that candidate across it.
+        Nothing is re-pinned here, and nothing validated is carried across the save. The park is
+        exactly the window in which the reviewer's pane is gone while the merge gate must still
+        refuse a checkout that moved off the reviewed candidate, and the round's bound context is
+        what carries that candidate across it — read back below, on the far side of the intent.
         """
         ref = task["ref"]
         record.worker_continuation.begin_park(
-            "review", len(task.get("comments") or []), move_reason, verdict_outcome
+            "review", len(task.get("comments") or []), move_reason, verdict_outcome, effect
         )
         records[ref] = record
         self.save_records(payload, records)
-        return self._complete_park(record, records, payload, attempt_id, ref=ref)
+        return self._complete_park(task, record, records, payload, attempt_id, ref=ref)
 
     def _complete_park(
         self,
+        task: dict[str, Any],
         record: DispatcherRecord,
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
@@ -5383,12 +5394,54 @@ class DispatcherRuntime:
         *,
         ref: str,
     ) -> dict[str, Any]:
-        """Finish an open park from the board as it is now.
+        """The one boundary that performs a park's durable effect: the Assessment move, or the
+        no-observer merge. Nothing else moves a verdict to Assessment or finishes that release.
 
-        Keyed on the baseline the intent was opened against, so the tick that already moved the card
-        and the tick recovering from a crash before that move run the same call and it moves once.
+        Every invocation re-establishes the round's identity before it acts, the first tick and the
+        recovery of a crash after the intent alike. The saved intent says an effect is pending; it
+        never says the identity behind it was validated, because the value that says so is in
+        memory and cannot cross a crash boundary. So the standing verdict and the round's durable
+        sources are read again here and handed to the one post-verdict authority: a context that is
+        absent, damaged, foreign or in conflict with the verdict or the recorded reviewer document
+        lands the card on Blocked with that reason, before the board move, before the merge and
+        before this record is saved any further.
+
+        A validated round keeps the behaviour a park has always had: the move is keyed on the
+        baseline the intent was opened against, so the tick that already moved the card and the tick
+        recovering from a crash before that move run the same call and it moves once.
         """
         continuation = record.worker_continuation
+        standing = self._standing_verdict(task, record)
+        if standing is None:
+            # The park was opened on a verdict, so this is not a round waiting for an answer: the
+            # occurrence it was opened over is no longer readable on the card.
+            return self.block_review_context(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="review",
+                reason="no accepted reviewer verdict stands on the review round this park was opened for",
+            )
+        identity = self._post_verdict_identity(
+            task, record, records, payload, attempt_id, standing, step="review"
+        )
+        if not isinstance(identity, ValidatedReviewIdentity):
+            return identity
+        if continuation.releases_on_park:
+            # A card nobody parks it for: the effect this intent opened is the merge itself, run
+            # over the identity just re-established rather than one the opening tick held.
+            return self._release_effect(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                identity,
+                step="review",
+                move_reason=continuation.move_reason,
+            )
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
@@ -5437,8 +5490,10 @@ class DispatcherRuntime:
             # A rework decision whose move did not commit: finish it before any decision is read.
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
         if continuation.assessment_pending:
-            # The move landed but the checkpoint did not; re-issuing is a no-op by request id.
-            return self._complete_park(record, records, payload, attempt_id, ref=ref)
+            # The move may not have landed, or landed with its checkpoint lost; re-issuing it is a
+            # no-op by request id. The same boundary runs it, so this recovery validates the
+            # round's identity exactly as the first attempt did.
+            return self._complete_park(task, record, records, payload, attempt_id, ref=ref)
         if not continuation.parked:
             # A record lost while parked, or a card an operator parked by hand: the board is the
             # fact. A session this record cannot prove is held is not held, so it owns no worker.
