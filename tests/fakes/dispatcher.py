@@ -44,6 +44,13 @@ from tests.fakes.board import BatchedCalls
 from tests.head_registry import write_installed_pair
 from triggered_agents.runtime.head import operations as head_ops
 
+# The base half of a scripted gate receipt, asking to be read rather than decided in advance. An
+# executed gate mints its receipt from the base branch as it is at that moment, so a test that
+# advances the base branch and then lets a stage gate run should get a receipt about the advanced
+# base. Spelling it out here keeps the alternative — an exact base a test pins on purpose, to model
+# a receipt about another pair — visible as the deliberate thing it is.
+GATE_BASE_AS_READ = "the base branch as this gate reads it"
+
 
 def _legacy_unbound_v1_run(run_json: dict[str, Any], *, root: Path) -> dict[str, Any]:
     """Give a production-shaped Codex HeadRun its exact, still-unbound v1 descriptor."""
@@ -1473,8 +1480,23 @@ class FakeHost:
             # raised where the real gate would have raised it.
             if isinstance(scripted, Exception):
                 raise scripted
-            return scripted
+            return self._gate_receipt_base(scripted)
         return GateResult("green", "gate green")
+
+    def _gate_receipt_base(self, result: GateResult) -> GateResult:
+        """Resolve a scripted receipt's base the way an executed gate resolves its own.
+
+        The real gate fetches the base branch and rev-parses it at the moment it runs, so the base
+        half of its receipt is whatever the branch is then — not a value a caller chose in advance.
+        A scripted attestation asking for that reads it here, from the same base this fake answers
+        `read_base_revision` with, so a test that advances the base branch gets a receipt about the
+        advanced base rather than a stale one it never asked for. An attestation naming an exact
+        base keeps it: that is how a test says "this receipt is about another pair".
+        """
+        attestation = result.attestation
+        if not attestation or attestation.get("base_sha") != GATE_BASE_AS_READ:
+            return result
+        return replace(result, attestation={**attestation, "base_sha": self.base_commit})
 
     def rerun_failed_ci(self, task: dict, record, result: GateResult) -> None:
         self.calls.append("rerun_failed_ci")

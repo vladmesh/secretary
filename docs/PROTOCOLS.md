@@ -1229,8 +1229,9 @@ what lets a parked verdict still be checked against the candidate it judged.
 Mechanical gate receipts are unchanged and remain dispatcher-owned exact-SHA evidence for their own stages.
 The initial receipt validates a newly bound context once; the assessment and release receipts govern
 mechanical progression only, may overwrite their predecessor and may legitimately name a base that advanced
-after this round was opened — advanced, and so still descending from the base the round was judged over,
-which is what the executor's own receipt check below requires of them. Neither the round context, nor the validated identity, nor the verdict header,
+after this round was opened — the base the effect they attest would actually land on, which is exactly what
+the executor's own receipt check below requires of them: the resolved current base, not the round's own and
+not merely something the round's own can reach. Neither the round context, nor the validated identity, nor the verdict header,
 nor a worker-local broad receipt is ever a substitute for a valid executed dispatcher-owned exact-SHA
 broad-gate receipt: an explicit `none`/`noop` gate, or a missing receipt, attests nothing however exactly
 the round is identified.
@@ -1327,8 +1328,8 @@ On every invocation, immediately before the requested effect, the executor:
 4. refuses a candidate that has drifted off the reviewed one, and a base branch whose history no longer
    contains the base this round was judged over;
 5. executes the gate this stage requires;
-6. accepts and persists a fresh dispatcher-owned exact-SHA receipt, and refuses one that names a different
-   candidate or a base the reviewed base does not reach;
+6. accepts and persists a fresh dispatcher-owned exact-SHA receipt, and refuses one that names anything
+   other than the candidate and the base step 3 resolved;
 7. and only then moves the card to Assessment, or merges it, as the intent permits.
 
 A prior receipt, an identity value or a worker-local broad receipt is never carried across the intent
@@ -1393,6 +1394,20 @@ candidate that is neither the reviewed one nor a publish recovery, and a base re
 refused before any board move, gate or merge. A base that merely advanced is the documented supported route
 and does not weaken the exact candidate check — the candidate must still be exactly the reviewed one.
 
+The resolved pair is also the receipt authority. A stage receipt is the evidence for the effect that is about
+to happen, so it has to describe the pair that effect will act on, and both halves are compared exactly
+against the resolved pair immediately before the preconditions are constructed and before publication. The
+sealed identity settles which round is being answered and whether the candidate drifted; it does not settle
+which base a receipt may attest. A receipt naming the sealed base after the base branch advanced normally is a
+check executed over a history the merge would no longer land on, and an ancestral relation to the resolved
+base is not equivalence: it is refused like any other foreign receipt.
+
+Requiring that equality does not refuse the supported advance, because of the order rather than any allowance
+in the comparison. The pair is resolved first and the stage gate is executed after it, in the same workspace,
+so an executed gate mints its receipt from the base the resolver has just read. If the base branch moves again
+between the resolution and the gate, the receipt describes a third pair, and the effect fails closed through
+the same blocked outcome — never a merge onto a pair this invocation never resolved.
+
 The pre-verdict binding path keeps its own string-shaped reads of the checkout and the base, and it is safe
 for the reason the executor's were not: the value goes straight into `ReviewRoundContext`, whose constructor
 requires an exact lowercase 40-hex revision, so an unreadable answer is refused where it is produced instead
@@ -1419,15 +1434,18 @@ drifted hands the round back to the worker in In progress and never reaches Asse
 Where the project's gate mode is explicitly non-attesting — `ci:none`, or a noop host — the stage still runs
 its documented route and mints no receipt, and nothing calls that route attested. Where a gate mode promises
 execution, a green answer without a valid exact-SHA receipt cannot park and cannot merge: none, noop, missing
-and invalid all fail closed, and so does a receipt that names another candidate or a base the round never
-had.
+and invalid all fail closed, and so does a receipt that names another candidate, or any base other than the
+one this invocation resolved — a stale ancestral base included. Release stages therefore require a fresh
+executed dispatcher-owned exact-SHA receipt for the resolved candidate/base, and can reuse neither a
+worker-local receipt nor a prior stage's.
 
 #### Crash recovery and failure outcomes
 
 An identity that is by then absent, null, damaged, foreign, or in conflict with the verdict header or the
 recorded reviewer document blocks the card with that specific reason and performs no Assessment move and no
 merge — green parks, red parks and both releases alike. So does every unresolved current pair, a gate that
-could not produce the receipt its stage requires, and a merge the host refuses. A checkout that moved and a
+could not produce the receipt its stage requires, a receipt that does not name the resolved pair exactly, and
+a merge the host refuses. A checkout that moved and a
 rewritten base are resolved successfully and refused by the comparison, which is why they keep the
 worker-facing rework disposition described below rather than blocking from Validate.
 

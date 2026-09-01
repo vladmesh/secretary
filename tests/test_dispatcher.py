@@ -178,6 +178,7 @@ from tests.dispatcher_fixtures import (
     clear_env as _clear_env,
 )
 from tests.fakes.dispatcher import (
+    GATE_BASE_AS_READ,
     FakeCatalog,
     FakeCheckpoint,
     FakeKanboard,
@@ -3533,9 +3534,12 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.commit = "c" * 40
 
         def receipt(marker: str) -> dict[str, object]:
+            # Each stage's receipt is told apart by its own check set and digest, which is what this
+            # test is about. The base is the one the gate minting it reads: a receipt naming some
+            # other base is a receipt about another pair, and secretary-1530 stops an effect on one.
             return {
                 "validated_sha": self.host.commit,
-                "base_sha": marker * 40,
+                "base_sha": GATE_BASE_AS_READ,
                 "gate_mode": "github",
                 "required_checks": [
                     {
@@ -8559,10 +8563,17 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.catalog._adapter = {"validation": {"ci": mode}}
 
     def _receipt(self, marker: str, *, candidate: str = "", base: str = "", mode: str = "github") -> dict:
-        """One exact-SHA receipt, spelled the way an executed gate hands it back."""
+        """One exact-SHA receipt, spelled the way an executed gate hands it back.
+
+        The base half is read by the gate that mints it unless a caller pins one, because that is
+        what an executed gate does: it fetches the base branch and rev-parses it when it runs. A
+        receipt scripted with a base frozen at the moment the test wrote it would describe whatever
+        the branch was before the test moved it, which is a stale receipt rather than the one this
+        gate would have produced.
+        """
         return {
             "validated_sha": candidate or self.host.commit,
-            "base_sha": base or self.host.base_commit,
+            "base_sha": base or GATE_BASE_AS_READ,
             "gate_mode": mode,
             "required_checks": [{"name": marker, "conclusion": "SUCCESS", "url": ""}],
             "completed_at": "2026-09-01T00:00:00+00:00",
@@ -9369,7 +9380,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_a_release_receipt_over_a_base_the_round_never_had_cannot_merge(self) -> None:
         """The base half of the same rule, and the half the dispersed version of this check missed:
-        a receipt whose base the reviewed base does not reach is evidence about another history."""
+        a receipt naming a base that is not the one this effect resolved is evidence about another
+        history, whatever that base's relation to the round's own."""
         self.start_dispatcher()
         self._attesting("local")
         self.host.commit = "c" * 40
@@ -9387,6 +9399,221 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(blocked["reason"], "release gate receipt does not name this round")
         self.assertEqual(self.host.completed, [])
+
+    # secretary-1530 rework: whose base a stage receipt has to name.
+    #
+    # A round is sealed over candidate C and base B0, and then it waits — for an observer, for a
+    # decision, for a dispatcher to come back up. Other cards land on the base branch while it
+    # waits, so by the time the effect runs the base is B1, with B0 an ancestor of it. That advance
+    # is the supported route: a release that refused it would refuse every release the pipeline
+    # makes, and the resolver says so by answering `advanced`.
+    #
+    # What the effect lands on is C over B1, so that is what its executed gate has to have checked.
+    # The first cut of this executor compared the receipt's base with the *sealed* base instead, and
+    # accepted anything the sealed base could reach — so a receipt for C/B0, executed over a history
+    # this merge would no longer touch, attested a merge onto C/B1. The resolved pair is the
+    # authority now, and these are the three bases a receipt can name against it.
+    _RECEIPT_BASES: ClassVar[tuple[str, ...]] = ("sealed", "resolved", "moved")
+
+    #: B0 — the base the round below is sealed over, which the branch has advanced past.
+    _SEALED_BASE = "a" * 40
+    #: A third base, newer than both: the base branch moving again between the resolution and the
+    #: gate, so the gate's own fetch mints a receipt about a pair this invocation never resolved.
+    _MOVED_BASE = "9" * 40
+
+    def _stage_receipt_base(self, which: str, marker: str) -> dict:
+        """One stage receipt for candidate C, over the base named, spelled as a gate hands it back."""
+        if which == "sealed":
+            return self._receipt(marker, base=self._SEALED_BASE, mode="local")
+        if which == "resolved":
+            # Read by the gate that mints it, which in this round is the advanced base B1.
+            return self._receipt(marker, mode="local")
+        if which == "moved":
+            return self._receipt(marker, base=self._MOVED_BASE, mode="local")
+        raise AssertionError(f"unknown stage receipt base {which}")
+
+    #: One distinct check set per scripted stage gate, so an audit names the receipt it stood on.
+    _STAGE_MARKERS: ClassVar[str] = "bdef"
+
+    def _sealed_over_an_earlier_base(self, *stages: str) -> None:
+        """Put this card on an attesting gate, sealed over B0, with the branch already at B1.
+
+        The initial gate is the one that binds the round, so its receipt names B0 and every later
+        read of the base branch answers B1 — the ordinary advance, with B0 still an ancestor. Each
+        stage gate after it is scripted with the base its own receipt will name.
+        """
+        self._attesting("local")
+        self.host.commit = "c" * 40
+        self.assertNotEqual(
+            self._SEALED_BASE, self.host.base_commit, "the base branch has to have actually advanced"
+        )
+        self.host.gate_results = [
+            GateResult(
+                "green", "initial", attestation=self._receipt("a", base=self._SEALED_BASE, mode="local")
+            )
+        ]
+        for index, which in enumerate(stages):
+            marker = self._STAGE_MARKERS[index]
+            self.host.gate_results.append(
+                GateResult("green", f"stage {marker}", attestation=self._stage_receipt_base(which, marker))
+            )
+
+    def _assert_sealed_base_receipt_refused(self, answered: dict, moves: list[str], stage: str) -> None:
+        """The refusal every stale or moved receipt takes: blocked, unmerged, and specific.
+
+        Not a rework and not a retry — the pair resolved cleanly and the gate ran green, so what is
+        wrong is the evidence, and an operator repairs that by re-running the stage over the pair
+        this effect would land on.
+        """
+        self.assertEqual(answered["status"], "blocked", answered)
+        self.assertEqual(answered["reason"], f"{stage} gate receipt does not name this round")
+        self.assertEqual(self.host.completed, [], "nothing was merged on a receipt about another base")
+        self.assertEqual(
+            [target for target in moves if target in {"assessment", "done"}],
+            [],
+            "no board effect was performed",
+        )
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        blocked = self.reader.show(CARD_REF)["comments"][-1]["body"]
+        self.assertIn("this effect resolved", blocked)
+        self.assertIn(self.host.base_commit[:12], blocked, "the card names the base it would land on")
+
+    def test_a_green_park_refuses_a_receipt_for_any_base_but_the_resolved_one(self) -> None:
+        """The assessment stage, where the receipt the observer reads beside the report is minted.
+
+        The park is what hands the observer a checked pair, so a receipt about the sealed base — or
+        about a base the branch reached after this invocation resolved it — is exactly the evidence
+        the observer would be misled by. Only the resolved base parks the card.
+        """
+        for base in self._RECEIPT_BASES:
+            with self.subTest(base=base):
+                self.setUp()
+                self.start_dispatcher()
+                self._sealed_over_an_earlier_base(base)
+                sealed = self._green_verdict_in_validate(f"park-receipt-base-{base}")
+                self.assertEqual(sealed["base_sha"], self._SEALED_BASE, "the round is sealed over B0")
+
+                answered, moves = self._moves_of(self.tick)
+
+                if base == "resolved":
+                    self.assertEqual(answered["to"], "assessment")
+                    self.assertEqual(moves, ["assessment"], "the supported advance still parks once")
+                    self.assertEqual(
+                        self._parked_record()["gate_attestation"]["base_sha"],
+                        self.host.base_commit,
+                        "and the receipt it parked on is about the base it resolved",
+                    )
+                    continue
+                self._assert_sealed_base_receipt_refused(answered, moves, "assessment")
+
+    def test_an_observer_release_refuses_a_receipt_for_any_base_but_the_resolved_one(self) -> None:
+        """The finding itself. The card waited in Assessment while the base branch advanced, the
+        resolver answered C/B1, and the release gate produced an otherwise valid dispatcher-owned
+        receipt for C/B0. That receipt attests a check over a history this merge no longer touches:
+        it cannot be the evidence the merge stands on, however normal the advance that outdated it.
+        """
+        for base in self._RECEIPT_BASES:
+            with self.subTest(base=base):
+                self.setUp()
+                self.start_dispatcher()
+                self._sealed_over_an_earlier_base("resolved", base)
+                sealed = self._green_verdict_in_validate(f"release-receipt-base-{base}")
+                self.assertEqual(sealed["base_sha"], self._SEALED_BASE)
+                self.assertEqual(self.tick()["to"], "assessment")
+                self._decide("release")
+
+                answered, moves = self._moves_of(self.tick)
+
+                if base == "resolved":
+                    self.assertEqual(answered["to"], "done")
+                    self.assertEqual(self.host.completed, [CARD_REF], "the supported advance merges")
+                    continue
+                self._assert_sealed_base_receipt_refused(answered, moves, "release")
+
+    def test_a_no_observer_release_refuses_a_receipt_for_any_base_but_the_resolved_one(self) -> None:
+        """The route that merges inside the verdict tick, where nobody stands between a receipt and
+        a commit on the base branch. The same rule, decided in the same place."""
+        for base in self._RECEIPT_BASES:
+            with self.subTest(base=base):
+                self.setUp()
+                self.start_dispatcher()
+                self.unobserved_card()
+                self._sealed_over_an_earlier_base(base)
+                sealed = self._green_verdict_with_no_observer(f"solo-receipt-base-{base}")
+                self.assertEqual(sealed["base_sha"], self._SEALED_BASE)
+
+                answered, moves = self._moves_of(self.tick)
+
+                if base == "resolved":
+                    self.assertEqual(answered["to"], "done")
+                    self.assertEqual(self.host.completed, [CARD_REF])
+                    continue
+                self._assert_sealed_base_receipt_refused(answered, moves, "release")
+
+    def test_a_replayed_release_refuses_a_receipt_for_any_base_but_the_resolved_one(self) -> None:
+        """And on the far side of the crash window that reaches the merge.
+
+        The intent that survived records that a release is owed and nothing about the pair it is
+        owed over, so the recovering tick resolves the pair and executes the release stage itself.
+        The receipt that stage hands back is judged against the pair this invocation resolved —
+        never against the sealed identity, and never against anything the dead tick had accepted.
+        """
+        for base in self._RECEIPT_BASES:
+            with self.subTest(base=base):
+                self.setUp()
+                self.start_dispatcher()
+                self._sealed_over_an_earlier_base("resolved", "resolved", base)
+                self._green_verdict_in_validate(f"replay-receipt-base-{base}")
+                self.assertEqual(self.tick()["to"], "assessment")
+                self._decide("release")
+                with (
+                    mock.patch.object(
+                        self.host, "complete_green", side_effect=OSError("died on the way into the merge")
+                    ),
+                    self.assertRaises(OSError),
+                ):
+                    self.tick()
+                self.assertEqual(
+                    self._parked_record()["worker_continuation"]["stage"],
+                    WorkerContinuationStage.RELEASE_PENDING.value,
+                )
+                self.assertEqual(self.host.completed, [], "the merge did not publish")
+
+                recovered, moves = self._moves_of(self.tick)
+
+                if base == "resolved":
+                    self.assertEqual(recovered["to"], "done")
+                    self.assertEqual(self.host.completed, [CARD_REF], "the replay merged once")
+                    continue
+                self._assert_sealed_base_receipt_refused(recovered, moves, "release")
+
+    def test_the_release_gate_is_executed_for_the_pair_the_resolver_read(self) -> None:
+        """Why the supported advance survives the rule above: order, not an ancestry allowance.
+
+        The pair is resolved first and the stage gate runs after it, in the same workspace, so the
+        base its receipt names is the base the resolver just read. The assertion is that ordering,
+        because it is the whole reason requiring exact equality does not refuse the ordinary case.
+        """
+        self.start_dispatcher()
+        self._sealed_over_an_earlier_base("resolved", "resolved")
+        self._green_verdict_in_validate("release-gate-after-the-resolution")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release")
+        self.host.calls.clear()
+
+        self.assertEqual(self.tick()["to"], "done")
+
+        gate = self.host.calls.index("gate_check")
+        self.assertEqual(
+            [call for call in self.host.calls[:gate] if call.startswith("read_")],
+            ["read_head_revision", "read_base_revision", "read_base_ancestry"],
+            "the pair is resolved, whole, before the gate that attests it is asked anything",
+        )
+        audit = next(
+            item["body"] for item in self.reader.show(CARD_REF)["comments"] if "release audit" in item["body"]
+        )
+        self.assertIn(f"base_sha: {self.host.base_commit}", audit)
+        self.assertNotIn(self._SEALED_BASE, audit, "the merge did not stand on the sealed base")
 
     def test_a_merge_published_before_the_crash_is_never_published_twice(self) -> None:
         """The one progress fact a verdict effect records. The merge is the only step a replay

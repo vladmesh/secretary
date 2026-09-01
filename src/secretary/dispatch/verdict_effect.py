@@ -26,8 +26,8 @@ The ordered chain is:
 4. refuse a candidate that drifted off the reviewed one, and a base whose history no longer
    contains the base this round was judged over;
 5. execute the gate this stage requires;
-6. accept and persist a fresh dispatcher-owned exact-SHA receipt, and refuse one that names a
-   different candidate or a base that predates the round's;
+6. accept and persist a fresh dispatcher-owned exact-SHA receipt, and refuse one that names
+   anything other than the pair step 3 resolved;
 7. and only then move the card to Assessment, or merge it, as the intent permits.
 
 Steps 1 to 4 are unconditional. Every effect, of every kind, on the first execution and on every
@@ -42,6 +42,17 @@ verdict about drift, and a card could be parked or merged over a pair nobody had
 first execution and on every replay alike. The resolver returns either an exact pair or a named
 failure, ``EffectPreconditions`` accepts only the former, and a failure is answered by blocking the
 card with the specific read that could not be made.
+
+Step 6 answers to step 3 and to nothing else. The receipt is the evidence for the effect that is
+about to happen, so it has to describe the pair that effect will act on: the resolved current
+candidate and the resolved current base, both exactly. A receipt naming the base this round was
+sealed over, after the base branch advanced normally to a newer one, describes a check that ran on
+a history the merge would no longer land on — and the executor used to accept it, because it
+compared the receipt with the sealed identity instead of with the pair it had just resolved. The
+supported normal advance is preserved by the order, not by an ancestry allowance: the gate runs
+after the resolution, over the same workspace, so its receipt names the resolved pair. When the
+base moves again in the window between them, the receipt describes a third pair and the effect
+fails closed through the same blocked outcome as any other receipt that is not about this round.
 
 Steps 5 and 6 are the mechanical half, and which stage requires them is the one place stage policy
 lives (``required_gate_stage``). A merge always requires them, at the release stage. The Assessment
@@ -491,7 +502,7 @@ def _establish_preconditions(
     if blocked is not None:
         return blocked
     receipt = GateReceipt.accept(record.gate_attestation, current_sha=current.candidate_sha)
-    mismatch = _receipt_mismatch(runtime, record, identity, receipt, current)
+    mismatch = _receipt_mismatch(identity, receipt, current)
     if mismatch:
         return runtime._block_merge_path(
             task,
@@ -580,22 +591,28 @@ def _block_unresolved(
 
 
 def _receipt_mismatch(
-    runtime: Any,
-    record: DispatcherRecord,
     identity: ValidatedReviewIdentity,
     receipt: GateReceipt | None,
     current: ResolvedCurrentPair,
 ) -> str:
-    """Why this stage's fresh receipt is not about this round's candidate and base, or "".
+    """Why this stage's fresh receipt is not about the pair this effect will act on, or "".
 
     An explicitly non-attesting gate produces no receipt and that is its documented answer, already
     settled by the accepting policy above; there is nothing here to compare. A receipt that does
-    exist has to name the candidate this chain just resolved and validated, and a base the round's
-    own base is still an ancestor of — a receipt executed over an older base is evidence about a
-    history this verdict was never given.
+    exist has to name the resolved current pair, both halves, exactly: the candidate this chain
+    resolved and validated against the sealed identity, and the base this chain resolved as the one
+    the effect would land on.
 
-    The base half fails closed. An ancestry that cannot be decided is not a receipt that covers
-    this round: the release would otherwise merge on evidence whose history nobody could place.
+    The base half is the repair. It used to be measured against the sealed identity — the receipt's
+    base had to be the round's base or a descendant of it — and after the ordinary, supported
+    advance of the base branch that let a receipt for the sealed base attest a release onto a newer
+    one. The check ran over a history the merge would not land on, and the merge went ahead. The
+    resolved pair is the authority now, and an ancestral stale base is not equivalent to it.
+
+    Nothing about the supported advance is refused by that. The gate is executed after the pair is
+    resolved and over the same workspace, so its receipt names the resolved base in the ordinary
+    case; a base that moves again inside that window leaves a receipt about a third pair, and the
+    caller answers it with the same blocked outcome every other foreign receipt gets.
     """
     if receipt is None:
         return ""
@@ -604,12 +621,10 @@ def _receipt_mismatch(
             f"names candidate `{receipt.validated_sha[:12]}`, not the reviewed "
             f"`{identity.candidate_sha[:12]}`"
         )
-    if receipt.base_sha != identity.base_sha and not (
-        runtime.host.read_base_ancestry(record, identity.base_sha, receipt.base_sha).contains
-    ):
+    if receipt.base_sha != current.base_sha:
         return (
-            f"names base `{receipt.base_sha[:12]}`, which does not descend from the reviewed base "
-            f"`{identity.base_sha[:12]}`"
+            f"names base `{receipt.base_sha[:12]}`, not the base `{current.base_sha[:12]}` this "
+            f"effect resolved and would land on"
         )
     return ""
 
