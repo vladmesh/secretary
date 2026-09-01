@@ -33,6 +33,7 @@ from secretary.dispatcher import (
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_launch import launch_intent_liveness
+from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import (
     TuiDeliveryError,
@@ -4218,7 +4219,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             for event in self.runtime.audit.events(REF)
             if event.get("transition", {}).get("target") == "blocked"
         ][-1]
-        self.assertEqual(blocked["data"]["terminal_taxonomy"]["blocked_reason"], "infrastructure")
+        self.assertEqual(blocked["data"]["terminal_taxonomy"]["blocked_reason"], "other")
+        self.assertEqual(_budget_event_type(blocked), "blocked")
         self.assertIsInstance(blocked["data"].get("attempt_outcome_owed"), dict)
 
     def test_a_mismatch_over_a_head_that_will_not_stop_keeps_the_record(self) -> None:

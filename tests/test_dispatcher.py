@@ -3462,6 +3462,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         reason = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
         self.assertIn("action-download-http-5xx", reason)
         self.assertIn("2 Actions rerun(s)", reason)
+        terminal = next(
+            event for event in self.audit_events() if "infrastructure-reruns-exhausted" in event["request_id"]
+        )
+        self.assertEqual(terminal["data"]["terminal_taxonomy"]["blocked_reason"], "gate")
+        self.assertEqual(_budget_event_type(terminal), "blocked")
 
     def test_unrunnable_infrastructure_gate_blocks_instead_of_rereading_the_same_red(self) -> None:
         self.start_dispatcher()
@@ -3489,6 +3494,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             "Blocked rather than rereading the same terminal result",
             self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
         )
+        terminal = next(
+            event for event in self.audit_events() if "infrastructure-rerun-blocked" in event["request_id"]
+        )
+        self.assertEqual(terminal["data"]["terminal_taxonomy"]["blocked_reason"], "gate")
+        self.assertEqual(_budget_event_type(terminal), "blocked")
 
     def test_infrastructure_rerun_transport_retries_with_the_gate_transport_ceiling(self) -> None:
         self.start_dispatcher()
@@ -5570,6 +5580,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("non-fast-forward", task["comments"][-1]["body"])
         self.assertEqual(self.host.torn_down, [], "a failed merge must not remove the workspace")
         self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+        terminal = next(event for event in self.audit_events() if "merge-blocked" in event["request_id"])
+        self.assertEqual(terminal["data"]["terminal_taxonomy"]["blocked_reason"], "implementation")
+        self.assertEqual(_budget_event_type(terminal), "blocked")
 
     def test_rework_bringup_failure_after_red_review_blocks_the_card(self) -> None:
         """The rework workspace can be gone by the time a red verdict lands. The card has already
@@ -5882,6 +5895,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
         self.assertEqual(self.host.prepared, ["secretary-510-pilot"], "nothing new may be launched")
         self.assertEqual(self.host.reviews, [])
+        terminal = next(event for event in self.audit_events() if "adopt-head-blocked" in event["request_id"])
+        self.assertEqual(terminal["data"]["terminal_taxonomy"]["blocked_reason"], "other")
+        self.assertEqual(_budget_event_type(terminal), "blocked")
         history = self.routing_history()
         self.assertEqual(
             [[run.head for run in attempt.worker_runs] for attempt in history],
@@ -7478,6 +7494,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(task["state"], "blocked")
         self.assertIn("uncommitted changes", task["comments"][-1]["body"])
         self.assertEqual(self.host.reviews, [])
+        terminal = next(
+            event for event in self.audit_events() if "worker-result-blocked" in event["request_id"]
+        )
+        self.assertEqual(terminal["data"]["terminal_taxonomy"]["blocked_reason"], "implementation")
+        self.assertEqual(_budget_event_type(terminal), "blocked")
 
     def test_not_durable_worker_result_retries_an_unconfirmed_stop_before_blocking(self) -> None:
         self.start_dispatcher()

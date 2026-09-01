@@ -1882,16 +1882,14 @@ has been read, let alone judged. So a failure of the host leaves the card carryi
 the one family that is a verdict is the card's own contract, which no healthy host survives and no
 later tick repairs.
 
-The class is durable in the action token of the transition the block writes. An infrastructure
-outcome puts `-infrastructure-` in front of `-blocked` — `bringup-infrastructure-blocked`,
-`worker-respawn-infrastructure-blocked`, `rework-infrastructure-blocked`,
-`review-infrastructure-blocked`, `contract-preflight-infrastructure-blocked` — and a task outcome
-keeps byte-for-byte the action token it always had. Reading the class is reading that token back: a
-request id containing `-infrastructure-blocked` is an infrastructure outcome and every other block
-is not. That is a reading which survives the tick, the pane and the log, and it is the only one:
-nothing infers the class from a message, a role or a caller. Deliberately it is not card metadata
-either, for the same reason the block classification of a report is not — a second write that can
-fail on its own would leave a card field silently disagreeing with the audit.
+For a new transition, the immutable taxonomy record is the durable budget classification. A
+classified head bring-up writes `infrastructure_blocked`; every other normalized blocked terminal,
+including a worker-result failure, gate exhaustion, merge failure, unavailable adopted head and
+durable-record mismatch, writes `blocked`. The action token remains durable lifecycle evidence but
+is not used to recast a forward terminal cause. A historical transition without taxonomy alone
+keeps its released action-token accounting, while its taxonomy read stays explicit
+`legacy`/`other` evidence. Deliberately this is not card metadata: a second write that can fail on
+its own would leave a card field silently disagreeing with the audit.
 
 The card's Blocked reason and the tick's outcome are built from one object, so they say the same
 thing in the same words. The reason ends in a clause naming the class, the cause, the stage
@@ -1922,11 +1920,12 @@ An infrastructure outcome charges the sprint nothing. It is still recorded, beca
 to see how often the host failed to bring a card up, and it is recorded apart: as the uncharged
 event type `infrastructure_blocked`, visible as `budget.uncharged` in `sprint show` and `sprint
 status`, entering neither `total` nor the `signal` and `hard` thresholds. Every other block — a
-worker's own report, the gate, a merge, a release — charges `blocked` exactly as it always did. Both
-families go through the same budget write and are told apart only by the token above. A sprint
-stored before the field existed reads as zero; there is no migration. New transitions use the shared
-terminal taxonomy for this distinction; historical transitions missing it remain legacy/other evidence
-and are not retrospectively inferred from their request-id action tokens.
+worker's own report, the gate, a merge or a release failure — charges `blocked` exactly as it always
+did. Both families go through the same budget write and are distinguished by the forward taxonomy
+record. A sprint stored before the field existed reads as zero; there is no migration. New
+transitions use the shared terminal taxonomy for this distinction; historical transitions missing it
+remain legacy/other evidence and retain their durable action-token accounting without a rewrite or
+inference from request ids, prose, timestamps or live state.
 
 ## Pause
 
