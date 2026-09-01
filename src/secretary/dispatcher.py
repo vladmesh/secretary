@@ -100,6 +100,8 @@ from secretary.dispatch.review_context import (
     ReviewRoundContext,
     bind_review_context,
     open_review_round,
+    require_review_context,
+    require_verdict_review_context,
 )
 from secretary.dispatcher_gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
@@ -2118,14 +2120,17 @@ class DispatcherRuntime:
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
         if _last_marker(task, record.review_baseline, {"review:green", "review:red"}):
             # A verdict is standing on this round, so its identity has to be readable before
-            # anything acts on it. Missing or conflicting context is a fail-closed lifecycle
-            # outcome here, not a tick that quietly waits for a verdict already on the board.
+            # anything acts on it. Missing, damaged or conflicting context is a fail-closed
+            # lifecycle outcome here, not a tick that quietly waits for a verdict already on the
+            # board, and not a pair rebuilt to fit an answer that is already written.
             try:
-                # A surviving context answers immediately; a record rebuilt while the reviewer was
-                # answering recovers the same pair from the launch this dispatcher recorded for
-                # the round. Nothing else may establish identity here: resolving a base now would
-                # be inventing one to fit a verdict that is already written.
-                context = bind_review_context(self.host, task, record, recorded_launch=True)
+                # Read, never established. Once a verdict exists, the round's identity is a fact
+                # that was fixed before it — recovering a pair now, from a reviewer document or
+                # from any later receipt, would be inventing an identity to fit a verdict that is
+                # already written. So this asks the boundary for the bound context and takes its
+                # refusal, whether the context is absent, damaged, from another round, or
+                # contradicted by the launch this dispatcher recorded for the round.
+                context = require_verdict_review_context(self.host, task, record)
             except ReviewContextError as exc:
                 return self.block_review_context(
                     task,
@@ -2140,7 +2145,7 @@ class DispatcherRuntime:
         else:
             marker = None
         if marker == "review:green":
-            return self._park_green_verdict(task, record, records, payload, attempt_id)
+            return self._park_green_verdict(task, record, records, payload, attempt_id, context)
         if marker == "review:red":
             # Only the reviewer's lifecycle ends here: a full `stop` would take the worktree's
             # terminals down, and this checkout is about to be parked and is never re-created from
@@ -5145,16 +5150,22 @@ class DispatcherRuntime:
         return str(observer.get("kind") or "") == "head" and bool(observer.get("profile"))
 
     def _merge_readiness(
-        self, task: dict[str, Any], record: DispatcherRecord
+        self, task: dict[str, Any], record: DispatcherRecord, context: ReviewRoundContext
     ) -> tuple[str, GateResult | None, str]:
-        """Everything that must hold before this checkout may be merged, read once.
+        """Everything mechanical that must hold before this checkout may be merged, read once.
 
         Returns one of "drift", "transport", "failed", "pending", "red" or "green". Both sides of the
         seam ask it: Validate before parking a green verdict, and the release again immediately before
         the merge. "transport" is deliberately not "failed" — a backend that could not be reached says
         nothing about the checkout, so the caller retries rather than deciding the card on silence.
+
+        The round's identity is not one of the answers, because it is a precondition of asking: every
+        answer here is about a candidate, and only the bound context says which candidate that is. So
+        each caller reaches the identity boundary itself and hands the result in — Validate through
+        the verdict it is reading, the release through the context the park left behind — and a round
+        that cannot produce one never gets as far as a gate.
         """
-        drift = self._review_drift(task, record)
+        drift = self._review_drift(task, record, context)
         if drift:
             return "drift", None, drift
         try:
@@ -5176,13 +5187,19 @@ class DispatcherRuntime:
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
         attempt_id: str,
+        context: ReviewRoundContext,
     ) -> dict[str, Any]:
-        """A green review verdict parks the card; it does not merge it."""
+        """A green review verdict parks the card; it does not merge it.
+
+        Except on a card with nobody to park it for, where this is also the merge path — so the
+        context is the one the caller already required to read the verdict at all, carried here
+        rather than looked up again from a record the same tick has not changed.
+        """
         ref = task["ref"]
         # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
         self._record_verdict_routing(ref, record, "green")
         self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
-        kind, result, detail = self._merge_readiness(task, record)
+        kind, result, detail = self._merge_readiness(task, record, context)
         if kind == "transport":
             retry = self._gate_transport_retry(
                 task,
@@ -5607,7 +5624,25 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """Perform a release decision: re-check the mechanical state, then merge."""
         ref = task["ref"]
-        kind, result, detail = self._merge_readiness(task, record)
+        try:
+            # A release decides that one reviewed pair may land, and the park is exactly the window
+            # in which nothing else on the record still names it: the reviewer's pane is gone and
+            # the release gate below attests today's checkout, whatever the verdict judged. So the
+            # bound context is required here, before the gate is asked, and a round that lost it —
+            # absent, damaged or belonging to another round — stops on the board with the reason
+            # instead of merging on mechanical evidence that was never about it.
+            context = require_review_context(record)
+        except ReviewContextError as exc:
+            return self.block_review_context(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="assessment",
+                reason=scrub_host_output(str(exc)),
+            )
+        kind, result, detail = self._merge_readiness(task, record, context)
         if kind == "transport":
             # A release that could not ask the gate is not a release that was refused.
             retry = self._gate_transport_retry(
@@ -5743,18 +5778,17 @@ class DispatcherRuntime:
         self.save_records(payload, records)
         return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
 
-    def _review_drift(self, task: dict[str, Any], record: DispatcherRecord) -> str:
+    def _review_drift(
+        self, task: dict[str, Any], record: DispatcherRecord, context: ReviewRoundContext
+    ) -> str:
         """Has the checkout moved off the candidate the reviewer was pointed at? A verdict describes one
         code state; merging a different one lands work nobody reviewed. Returns the operator message for
-        the bounce, or "" when the states match, or when neither can be read — an unreadable workspace is
-        the gate's failure to report, not a silent bounce.
+        the bounce, or "" when the states match, or when the checkout cannot be read — an unreadable
+        workspace is the gate's failure to report, not a silent bounce.
 
-        The candidate comes from the round's bound context, which is the one place that still knows
-        what this reviewer was asked about after its pane is gone.
+        The candidate is the round's bound context, handed in by the readiness check that already
+        required it: this compares two code states and never decides whether a round has an identity.
         """
-        context = record.review_context
-        if context is None:
-            return ""
         current = self.host.head_commit(record)
         if not current or current == context.candidate_sha:
             return ""

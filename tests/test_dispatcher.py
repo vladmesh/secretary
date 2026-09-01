@@ -14,7 +14,7 @@ import tomllib
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
@@ -81,8 +81,10 @@ from secretary.dispatcher_review import (
     start_review as start_reviewer,
 )
 from secretary.dispatch.review_context import (
+    DamagedReviewContext,
     ReviewContextError,
     ReviewRoundContext,
+    require_review_context,
 )
 from secretary.dispatcher_state import (
     DispatcherRecord,
@@ -267,7 +269,15 @@ class LegacyDispatcherRecordTests(unittest.TestCase):
 
         self.assertTrue(record.worker_continuation.retained)
 
-    def test_a_review_round_context_round_trips_and_a_damaged_one_reads_as_no_round(self) -> None:
+    def test_a_review_round_context_round_trips_and_a_damaged_one_survives_as_damage(self) -> None:
+        """Absence and damage are different persisted facts, and the record keeps them apart.
+
+        This is the contract the branch's first cut got wrong: it read a half-written context back
+        as ``None``, which is the same value a round that was never opened has, and the recovery
+        precedence then happily bound a pair for a round a reviewer may already have answered.
+        Damage is preserved instead, with its reason and its original payload, so it is still
+        damage after a save and every consumer of the boundary refuses it.
+        """
         context = ReviewRoundContext(
             candidate_sha="c" * 40,
             base_sha="b" * 40,
@@ -284,18 +294,34 @@ class LegacyDispatcherRecordTests(unittest.TestCase):
         self.assertEqual(record.review_context, context)
         self.assertEqual(DispatcherRecord.from_json(record.to_json()).review_context, context)
 
+        # A record written before the round context existed: the bare pin is not an identity, and
+        # absence is the one state the recovery precedence is still allowed to fill.
+        self.assertIsNone(DispatcherRecord.from_json({"state": "reviewing"}).review_context)
+        self.assertIsNone(
+            DispatcherRecord.from_json({"state": "reviewing", "review_context": None}).review_context
+        )
+
         for damage in (
             {"candidate_sha": "c" * 40},
             dict(context.to_json(), base_sha=""),
             dict(context.to_json(), source="guessed"),
             dict(context.to_json(), candidate_sha="C" * 40),
+            dict(context.to_json(), review_baseline="round four"),
             "not-an-object",
-            # A record written before the round context existed: the bare pin is not an identity.
-            None,
         ):
             with self.subTest(damage=damage):
                 loaded = DispatcherRecord.from_json({"state": "reviewing", "review_context": damage})
-                self.assertIsNone(loaded.review_context)
+
+                self.assertIsInstance(loaded.review_context, DamagedReviewContext)
+                self.assertTrue(loaded.review_context.reason)
+                self.assertEqual(loaded.to_json()["review_context"], damage, "damage is persisted as read")
+                self.assertIsInstance(
+                    DispatcherRecord.from_json(loaded.to_json()).review_context,
+                    DamagedReviewContext,
+                    "a save does not launder damage into absence",
+                )
+                with self.assertRaises(ReviewContextError):
+                    require_review_context(loaded)
 
     def test_a_legacy_review_commit_record_still_loads_with_no_bound_round(self) -> None:
         loaded = DispatcherRecord.from_json({"state": "reviewing", "review_commit": "c" * 40})
@@ -7815,6 +7841,175 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 blocked = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
                 self.assertIn("review round context is unavailable", blocked)
 
+    # a damaged persisted context, across the crash boundary (secretary-1527) ------------
+
+    # The three ways the round's identity can be gone from disk. "null" is absence: a record
+    # written before the field, or a save that dropped it. The other two are damage, which is the
+    # stronger fact — a pair was bound and is now unreadable — and which the first cut of this
+    # branch read back as absence, so the recovery precedence rebound over rounds a reviewer had
+    # already answered.
+    _CONTEXT_DAMAGE: ClassVar[dict[str, Any]] = {
+        "null": None,
+        "partial": {
+            "candidate_sha": "1" * 40,
+            "base_sha": "",
+            "attempt_id": "attempt",
+            "review_baseline": 0,
+            "source": "initial-receipt",
+        },
+        "malformed": "not-an-object",
+    }
+
+    def _persist_context(self, value: Any) -> None:
+        """Write the round's persisted context by hand, the way a crashed save would leave it."""
+        payload = self.runtime.production_state.load()
+        payload["records"]["secretary-510-pilot"]["review_context"] = value
+        self.runtime.production_state.save(payload)
+
+    def _assert_blocked_on_context(self, result: dict, damage: str) -> None:
+        """The card is Blocked, and the durable evidence names which of the two states it is in.
+
+        Absence and damage read differently on the board on purpose: "no bound context" is a round
+        that was never opened, and an unreadable one is a round whose identity was lost, which is
+        the case an operator has to go and reconstruct by hand.
+        """
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "review context unavailable")
+        card = self.reader.show("secretary-510-pilot")
+        self.assertEqual(card["state"], "blocked")
+        blocked = card["comments"][-1]["body"]
+        self.assertIn("review round context is unavailable", blocked)
+        if damage == "null":
+            self.assertIn("no bound candidate/base context", blocked)
+        else:
+            self.assertIn("the persisted context of this review round is unreadable", blocked)
+        self.assertEqual(self.host.completed, [], "nothing was merged")
+
+    def _green_verdict_in_validate(self, request_id: str) -> dict:
+        """Drive one round to an accepted structured green verdict standing in Validate."""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        original = dict(self._review_context())
+        self._write_verdict(kind="green", body="the work is sound", request_id=request_id)
+        return original
+
+    def test_a_green_verdict_over_a_damaged_persisted_context_blocks_before_the_park(self) -> None:
+        """The reviewer document survives the crash, and it still may not answer for the round.
+
+        A verdict is already on the board, so the pair it judged is a fact fixed before it: the
+        launch this dispatcher recorded can contradict that pair but never supply it. Absence and
+        damage both stop here, and the undamaged control parks the same verdict normally.
+        """
+        for damage, value in ((None, None), *self._CONTEXT_DAMAGE.items()):
+            with self.subTest(damage=damage or "intact"):
+                self.setUp()
+                original = self._green_verdict_in_validate(f"structured-green-{damage}")
+                if damage is None:
+                    self.assertEqual(self.tick()["to"], "assessment")
+                    continue
+                baseline = int(self._record_json()["review_baseline"])
+                self._persist_context(value)
+                self.assertEqual(
+                    self.host.review_contexts[("secretary-510-pilot", baseline)],
+                    (original["candidate_sha"], original["base_sha"]),
+                    "the round's own recorded reviewer document is intact",
+                )
+
+                self._assert_blocked_on_context(self.tick(), damage)
+
+                self.assertEqual(
+                    self.reader.show("secretary-510-pilot")["state"],
+                    "blocked",
+                    "the recorded document did not rebind a round that already has a verdict",
+                )
+
+    def test_an_observer_release_over_a_damaged_persisted_context_blocks_before_the_merge(self) -> None:
+        """The parked card is the window the finding walked through: the reviewer's pane is gone,
+        the release gate attests today's checkout, and only the bound context still names what was
+        judged. A damaged one has to stop the release; an intact one still merges."""
+        for damage, value in ((None, None), *self._CONTEXT_DAMAGE.items()):
+            with self.subTest(damage=damage or "intact"):
+                self.setUp()
+                self._green_verdict_in_validate(f"release-green-{damage}")
+                self.assertEqual(self.tick()["to"], "assessment")
+                if damage is not None:
+                    self._persist_context(value)
+                self._decide("release")
+
+                released = self.tick()
+
+                if damage is None:
+                    self.assertEqual(released["to"], "done")
+                    self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+                    continue
+                self._assert_blocked_on_context(released, damage)
+
+    def test_a_no_observer_route_over_a_damaged_persisted_context_blocks_before_the_merge(self) -> None:
+        """The route with nobody to park it: the same verdict tick is the merge. It reaches the
+        same boundary, so a lost identity blocks there instead of merging on a fresh gate."""
+        for damage, value in ((None, None), *self._CONTEXT_DAMAGE.items()):
+            with self.subTest(damage=damage or "intact"):
+                self.setUp()
+                self.start_dispatcher()
+                self.unobserved_card()
+                self._run_worker_to_validate()
+                self.assertEqual(self.tick()["action"], "review-started")
+                self._write_verdict(
+                    kind="green", body="green, and nobody parks it", request_id=f"solo-green-{damage}"
+                )
+                if damage is not None:
+                    self._persist_context(value)
+
+                merged = self.tick()
+
+                if damage is None:
+                    self.assertEqual(merged["to"], "done")
+                    self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+                    continue
+                self._assert_blocked_on_context(merged, damage)
+
+    def test_an_observer_release_over_a_context_from_another_round_blocks(self) -> None:
+        """The third state a persisted context can be wrong in: complete, readable, and about a
+        round this record has left. It is a missing reset, not evidence, so the release refuses it
+        the same way — and the board says which round it actually names."""
+        self.setUp()
+        self._green_verdict_in_validate("foreign-round-green")
+        self.assertEqual(self.tick()["to"], "assessment")
+        foreign = dict(
+            self._review_context(), review_baseline=int(self._record_json()["review_baseline"]) + 7
+        )
+        self._persist_context(foreign)
+        self._decide("release")
+
+        released = self.tick()
+
+        self.assertEqual(released["status"], "blocked", released)
+        self.assertEqual(released["reason"], "review context unavailable")
+        blocked = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn(f"belongs to review round {foreign['review_baseline']}", blocked)
+        self.assertEqual(self.host.completed, [], "nothing was merged")
+
+    def test_a_damaged_context_stops_a_respawn_instead_of_rebinding_the_round(self) -> None:
+        """Before any verdict, damage is still not absence. A respawn re-confirms the round it is
+        asking again about, and the recorded document would answer — but the pair this record lost
+        is the pair the previous reviewer was given, so re-deriving one here would quietly ask a
+        second reviewer a different question. A round that never bound a pair is the case the
+        recorded-launch adoption test below covers, and it still recovers."""
+        for damage, value in self._CONTEXT_DAMAGE.items():
+            if damage == "null":
+                continue
+            with self.subTest(damage=damage):
+                self.setUp()
+                self.start_dispatcher()
+                self._run_worker_to_validate()
+                self.assertEqual(self.tick()["action"], "review-started")
+                self.assertEqual(self.tick()["action"], "waiting-review-verdict")
+                self._persist_context(value)
+                self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+
+                self._assert_blocked_on_context(self.tick(), damage)
+
     def test_a_lost_record_recovers_the_round_from_the_launch_it_recorded(self) -> None:
         self.start_dispatcher()
         self._run_worker_to_validate()
@@ -12596,6 +12791,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 records,
                 {"version": 1, "mode": "production", "phase": "production"},
                 "attempt-1",
+                require_review_context(record),
             )
 
             self.assertEqual(result["to"], "done")

@@ -1142,6 +1142,21 @@ generation, reviewer launch, launch-intent adoption, respawn, verdict selection,
 no-observer release. No path compares an accepted verdict against a gate receipt to rediscover what that
 verdict was about.
 
+The persisted field has three states, and they are kept apart. Absence is a round nobody has opened yet, and
+it is the only state the recovery precedence below may fill. A persisted value that cannot be read back as a
+complete context — a missing half, an unknown source, a payload that is not an object — is *damage*, not
+absence: the round it names may already have been answered, so it is preserved as it was read, survives
+being saved again, and is refused by every consumer until the round ends. Reading damage back as absence
+would let a later tick bind a different pair for a round a reviewer had already judged.
+
+The precedence is used only while a round is being established. Once a verdict stands on the round, the
+context is required and never re-derived: neither the reviewer document nor any later gate receipt may
+supply an identity for an answer that already exists, though a surviving document is still read as a
+contradiction check and can disqualify a bound context it disagrees with. Every verdict-driven merge path
+reaches that requirement before it reaches a gate — the verdict selection that reads the marker, and the
+release that acts on an observer decision after the park. A fresh mechanical receipt governs mechanical
+readiness and never substitutes for a missing verdict identity.
+
 It is bound once per round, and the precedence is fixed:
 
 1. the context already bound for this round, which no later evidence replaces;
@@ -1171,10 +1186,12 @@ after this round was opened. Neither the round context nor the verdict header is
 valid executed dispatcher-owned exact-SHA broad-gate receipt: an explicit `none`/`noop` gate, or a missing
 receipt, attests nothing however exactly the round is identified.
 
-Two consequences are deliberate. A verdict standing on a round whose context cannot be established blocks
-the card instead of being merged — the dispatcher can neither name the code that verdict judged nor prove
-the checkout still holds it. And a review round recovered without its durable document in an attesting
-project blocks as well, rather than opening a round over a base no receipt covers.
+Two consequences are deliberate. A verdict standing on a round whose context is missing, damaged or from
+another round blocks the card instead of being merged — the dispatcher can neither name the code that
+verdict judged nor prove the checkout still holds it — and so does an observer release or a no-observer
+merge over the same states, on the Blocked evidence that says which of them it is. And a review round
+recovered without its durable document in an attesting project blocks as well, rather than opening a round
+over a base no receipt covers.
 
 The `reported` events are the authoritative copy and keep the classification of every block, so counting how
 often one head blocks is a question for the audit. The retired `triggered_agents pipeline` CLI is no longer a

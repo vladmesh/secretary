@@ -14,6 +14,16 @@ is: mechanical evidence for its own stage. ``ReviewRoundContext`` also carries t
 bound for, because a context that outlived its round is not a fact about the current one - a
 missing reset has to be visible rather than silently reused.
 
+The persisted field has three states, not two, and this module is where they stay apart. Absence
+is a round nobody has opened, and only there may the recovery precedence below establish a pair.
+Damage - a half-written value, an unknown source, a payload that is not an object at all - is a
+round whose identity was *lost*, and it is preserved as ``DamagedReviewContext`` rather than read
+back as absence, because a reviewer may already have answered the round it names: rebinding over
+it would invent an identity for a verdict that already exists. Both ``bind_review_context`` and
+``require_review_context`` refuse it, so every path that reaches this boundary - reviewer bring-up,
+launch-intent adoption, verdict selection, merge readiness for the park, the observer release and
+the no-observer release alike - fails closed on the board with the reason instead of merging.
+
 Nothing in this module reads a verdict, decides whether the checkout has since drifted off the
 bound candidate, or attests a broad suite. Drift has two owners already — the reviewer bring-up,
 which refuses to hand a pane a candidate the checkout no longer holds, and the merge readiness
@@ -109,6 +119,39 @@ class ReviewRoundContext:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class DamagedReviewContext:
+    """A persisted review context that could not be read back as one.
+
+    Absence and damage are different facts and must not collapse into the same value. "No context"
+    is a round that has not been opened yet, and the documented recovery precedence may establish
+    one. A half-written or contradictory context is a round whose identity was lost, and a reviewer
+    may already be answering it: recovering a pair for it would invent an identity for a verdict
+    somebody else has already given. So the damage is kept, with the reason, and it is kept
+    *durably* - ``to_json`` hands back the exact payload that was read, so a save does not quietly
+    launder the damage into an absence the next tick would happily rebind over. Only a round
+    ending - which is what ``open_review_round`` is - clears it.
+    """
+
+    reason: str
+    payload: Any
+
+    def to_json(self) -> Any:
+        return self.payload
+
+
+def load_review_context(payload: Any) -> ReviewRoundContext | DamagedReviewContext | None:
+    """Read a persisted review context into one of its three states.
+
+    Absence stays absence, a complete value becomes the typed context, and anything else becomes
+    the damage itself rather than a traceback that would unload the whole record over one field.
+    """
+    try:
+        return ReviewRoundContext.from_json(payload)
+    except (TypeError, ValueError) as exc:
+        return DamagedReviewContext(reason=str(exc), payload=payload)
+
+
 def open_review_round(record: DispatcherRecord, review_baseline: int) -> None:
     """Move the record onto a new review round: its baseline and its identity, in one step.
 
@@ -148,6 +191,11 @@ def bind_review_context(
     Later gate receipts are deliberately not an input here. They belong to their own stage and may
     legitimately name a base this round never saw.
     """
+    damaged = _damage(record)
+    if damaged is not None:
+        # Not a round that can be opened: a round whose identity was lost. Nothing here may
+        # replace it, because the pair it lost is the pair a reviewer may already be answering.
+        raise damaged
     recovered = _recorded_pair(host, task, record) if recorded_launch else None
     existing = record.review_context
     if existing is not None:
@@ -185,17 +233,48 @@ def bind_review_context(
     return context
 
 
+def require_verdict_review_context(
+    host: Any, task: dict[str, Any], record: DispatcherRecord
+) -> ReviewRoundContext:
+    """The identity a standing verdict is read against: required, never established.
+
+    Once a reviewer has published a verdict, the pair that verdict judged is a fact fixed before
+    it, so this deliberately has no recovery precedence at all - a missing, damaged or foreign
+    context is a refusal, not an invitation to derive a pair that would fit the answer already on
+    the board. The round's own recorded launch is still read, but only as a contradiction check:
+    it can disqualify the bound context, never supply one.
+    """
+    context = require_review_context(record)
+    recovered = _recorded_pair(host, task, record)
+    if recovered is not None and not context.names_revisions(*recovered):
+        raise ReviewContextError(
+            "the recorded reviewer launch names a different candidate/base than the bound round"
+        )
+    return context
+
+
 def require_review_context(record: DispatcherRecord) -> ReviewRoundContext:
     """The bound context of the round the record is in, or a fail-closed refusal.
 
     Every read path goes through this rather than through the field, so "no context" and "a
     context from a round that has ended" are one answer with one message at every site.
     """
+    damaged = _damage(record)
+    if damaged is not None:
+        raise damaged
     context = record.review_context
     if context is None:
         raise ReviewContextError("this review round has no bound candidate/base context")
     _require_current_round(context, record)
     return context
+
+
+def _damage(record: DispatcherRecord) -> ReviewContextError | None:
+    """The refusal a damaged persisted context owes, or ``None`` when there is no damage."""
+    context = record.review_context
+    if not isinstance(context, DamagedReviewContext):
+        return None
+    return ReviewContextError("the persisted context of this review round is unreadable: " + context.reason)
 
 
 def _require_current_round(context: ReviewRoundContext, record: DispatcherRecord) -> None:
