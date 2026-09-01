@@ -2746,8 +2746,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_an_ambiguous_claude_observer_source_ends_at_the_unproven_ceiling(self) -> None:
         """A current Claude descriptor cannot fall back to a workspace-wide transcript scan."""
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
-            os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}),
         ):
             self.open_sprint()
             self.board.metadata[12]["sprint_ref"] = "sprint:1"
@@ -3360,7 +3361,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertIn("observer-stopped", [row.get("action") for row in self.actions(result)])
 
     def test_an_infrastructure_block_is_recorded_on_the_sprint_without_charging_it(self) -> None:
-        """End to end: the tick reads the class off the transition and counts it apart."""
+        """End to end: the tick reads the shared terminal taxonomy and counts it apart."""
         self.catalog.instance = {"sprint_budget": {"signal": 1, "hard": 2}}
         self.runtime.sprints = SprintReader(
             self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2}
@@ -3376,6 +3377,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             sprint_override=True,
             sprint_override_reason="the worker head never came up",
             request_id=infrastructure_action("dispatcher-attempt-1-bringup-blocked"),
+            terminal_taxonomy={
+                "version": 1,
+                "disposition": "blocked",
+                "blocked_reason": "infrastructure",
+                "source_evidence": "infrastructure",
+                "provenance": "forward",
+            },
         )
 
         self.runtime.production_tick()
@@ -3407,9 +3415,22 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertIsNone(_budget_event_type({"kind": "verdict", "payload": {"marker": "review:green"}}))
         self.assertIsNone(_budget_event_type({"kind": "moved", "payload": {"to": "done"}}))
 
-    def test_infrastructure_bring_up_block_is_counted_apart_from_a_task_block(self) -> None:
-        """The class is read off the transition's own action token, not decided a second time."""
-        blocked = {"kind": "moved", "payload": {"to": "blocked"}}
+    def test_infrastructure_block_is_counted_apart_from_a_task_block(self) -> None:
+        """The class is read from the transition taxonomy, never request-id spelling."""
+        blocked = {
+            "record_type": "board.protocol_event",
+            "kind": "card.blocked",
+            "transition": {"target": "blocked"},
+            "data": {
+                "terminal_taxonomy": {
+                    "version": 1,
+                    "disposition": "blocked",
+                    "blocked_reason": "infrastructure",
+                    "source_evidence": "infrastructure",
+                    "provenance": "forward",
+                }
+            },
+        }
         charged = (
             "dispatcher-attempt-1-bringup-blocked",
             "dispatcher-attempt-1-worker-respawn-blocked",
@@ -3419,35 +3440,77 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "dispatcher-attempt-1-worker-report-blocked",
             "",
         )
-        uncharged = tuple(
-            infrastructure_action(action)
-            for action in (
-                "dispatcher-attempt-1-bringup-blocked",
-                "dispatcher-attempt-1-worker-respawn-blocked",
-                "dispatcher-attempt-1-rework-blocked",
-                "dispatcher-attempt-1-review-blocked",
-            )
-        )
-
         self.assertEqual(
             [_budget_event_type({**blocked, "request_id": request_id}) for request_id in charged],
-            ["blocked"] * len(charged),
+            [BUDGET_UNCHARGED_INFRASTRUCTURE] * len(charged),
         )
+        legacy = {"kind": "moved", "payload": {"to": "blocked"}}
         self.assertEqual(
-            [_budget_event_type({**blocked, "request_id": request_id}) for request_id in uncharged],
-            [BUDGET_UNCHARGED_INFRASTRUCTURE] * len(uncharged),
+            _budget_event_type({**legacy, "request_id": infrastructure_action(charged[0])}),
+            BUDGET_UNCHARGED_INFRASTRUCTURE,
         )
+        self.assertEqual(_budget_event_type({**legacy, "request_id": "worker-report-blocked"}), "blocked")
         # The other budget-shaped events keep their type whatever the request id spells.
         self.assertEqual(
             _budget_event_type(
                 {
                     "kind": "moved",
                     "payload": {"from": "validate", "to": "ready"},
-                    "request_id": uncharged[0],
+                    "request_id": charged[0],
                 }
             ),
             "preempt",
         )
+
+    def test_forward_reslice_charges_and_malformed_history_does_not_stop_later_budget_events(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="blocked",
+            reason="reslice",
+            sprint_override=True,
+            sprint_override_reason="reslice",
+            request_id="forward-reslice",
+            terminal_taxonomy={
+                "version": 2,
+                "disposition": "reslice",
+                "blocked_reason": None,
+                "source_evidence": None,
+                "budget_class": "blocked",
+                "provenance": "forward",
+            },
+        )
+        self.audit.append(
+            "malformed-taxonomy",
+            {
+                "event_id": "evt_malformed_taxonomy",
+                "request_id": "malformed-taxonomy",
+                "ref": "secretary-510-pilot",
+                "record_type": "board.protocol_event",
+                "kind": "card.blocked",
+                "transition": {"target": "blocked"},
+                "data": {"terminal_taxonomy": {"version": 1}},
+            },
+        )
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="later budget event",
+            request_id="later-red-review",
+        )
+
+        actions = _reconcile_sprint_budget(self.runtime)
+
+        self.assertEqual(
+            [action.get("event_type") or action.get("action") for action in actions],
+            ["blocked", "terminal-taxonomy-invalid", "red_review"],
+        )
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 2)
 
     def test_full_green_card_cycle_does_not_charge_the_sprint_budget(self) -> None:
         self.open_sprint()
@@ -5033,8 +5096,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
 class ClaudeObserverProviderContractTests(unittest.TestCase):
     def test_current_launch_retains_its_pre_pane_baseline_and_records_progress(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
-            os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}),
         ):
             root = Path(tmp)
             catalog = FakeCatalog()
@@ -5065,11 +5129,7 @@ class ClaudeObserverProviderContractTests(unittest.TestCase):
             self.assertEqual(run.spec.adapter, "claude")
             self.assertEqual(run.fanout_policy["provider_progress_source"], before)
 
-            transcript = (
-                Path(before["root"])
-                / claude_project_dir_name(workspace)
-                / "observer-session.jsonl"
-            )
+            transcript = Path(before["root"]) / claude_project_dir_name(workspace) / "observer-session.jsonl"
             transcript.parent.mkdir(parents=True)
             transcript.write_text(
                 '{"type":"assistant","sessionId":"claude-observer-session"}\n', encoding="utf-8"
@@ -5087,8 +5147,7 @@ class ClaudeObserverProviderContractTests(unittest.TestCase):
             self.assertEqual(bound["state"], "bound")
             self.assertEqual(bound["path"], str(transcript.resolve()))
             transcript.write_text(
-                '{"type":"assistant","sessionId":"claude-observer-session"}\n'
-                '{"type":"assistant"}\n',
+                '{"type":"assistant","sessionId":"claude-observer-session"}\n{"type":"assistant"}\n',
                 encoding="utf-8",
             )
 

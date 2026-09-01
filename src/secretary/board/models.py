@@ -12,6 +12,12 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, ClassVar, TypeAlias
 
+from secretary.board.terminal_taxonomy import (
+    BLOCKED_REASONS,
+    TERMINAL_DISPOSITIONS,
+    read_terminal_taxonomy,
+)
+
 EntityRef: TypeAlias = str
 
 
@@ -96,24 +102,9 @@ ATTEMPT_USAGE_ROLES = ("worker", "reviewer")
 ATTEMPT_USAGE_PHASES = ("worker", "review")
 
 ATTEMPT_OUTCOME_VERDICTS = ("green", "red", "blocked", "missing", "legacy")
-ATTEMPT_OUTCOME_DISPOSITIONS = (
-    "release",
-    "rework",
-    "reslice",
-    "blocked",
-    "drop",
-    "operator_stop",
-)
-ATTEMPT_OUTCOME_BLOCKED_REASONS = (
-    "implementation",
-    "review",
-    "task_contract",
-    "gate",
-    "provider",
-    "infrastructure",
-    "operator",
-    "other",
-)
+# Compatibility exports; the terminal taxonomy owns these vocabularies.
+ATTEMPT_OUTCOME_DISPOSITIONS = TERMINAL_DISPOSITIONS
+ATTEMPT_OUTCOME_BLOCKED_REASONS = BLOCKED_REASONS
 ATTEMPT_OUTCOME_COMPLETENESS = ("collected", "degraded", "missing", "legacy")
 
 
@@ -316,6 +307,7 @@ class Event:
         _validate_control_marker_event(self.kind, self.entity_kind, self.reason, self.data)
         _validate_attempt_usage_event(self.kind, self.entity_kind, self.data)
         _validate_attempt_outcome_event(self.kind, self.entity_kind, self.data)
+        _validate_terminal_taxonomy_event(self.entity_kind, self.target_state, self.data)
         # The journal spelling is UTC.  Keep the value canonical too, so an
         # event read back from its own record compares equal to the value that
         # was written, even when its caller supplied another aware timezone.
@@ -641,6 +633,20 @@ def _validate_attempt_outcome_event(
             raise ValueError(f"attempt outcome {role} completeness requires its usage event ref")
         if state in {"missing", "legacy"} and usage_ref is not None:
             raise ValueError(f"attempt outcome {role} missingness carries no usage event ref")
+
+
+def _validate_terminal_taxonomy_event(
+    entity_kind: EntityKind, target_state: str | None, data: dict[str, Any]
+) -> None:
+    """Keep optional forward taxonomy data at the ordinary typed-event boundary."""
+    if "terminal_taxonomy" not in data:
+        return
+    if entity_kind is not EntityKind.CARD or target_state is None:
+        raise ValueError("terminal taxonomy requires a Card transition")
+    raw = data["terminal_taxonomy"]
+    if not isinstance(raw, dict):
+        raise ValueError("terminal taxonomy must be an object")
+    read_terminal_taxonomy({"terminal_taxonomy": raw}, disposition=str(raw.get("disposition") or ""))
 
 
 def _format_time(value: datetime) -> str:

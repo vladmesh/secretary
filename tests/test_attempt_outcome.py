@@ -122,7 +122,58 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(blocked["to"], "blocked")
         occurrence = self._outcomes()[0].event.data
         self.assertEqual((occurrence["verdict"], occurrence["disposition"]), ("blocked", "blocked"))
+        self.assertEqual(occurrence["blocked_reason"], "other")
         self.assertEqual(occurrence["usage_completeness"]["review"], "missing")
+
+    def test_worker_wrong_task_definition_maps_forward_to_task_contract(self) -> None:
+        self._start_worker_round()
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference=CARD_REF,
+            kind="blocked",
+            classification="wrong_task_definition",
+            body="the contract contradicts itself",
+            request_id=self._worker_report_request_id("blocked", "wrong_task_definition"),
+        )
+
+        self.tick()
+
+        occurrence = self._outcomes()[0].event.data
+        self.assertEqual(occurrence["blocked_reason"], "task_contract")
+        effect = next(
+            event
+            for event in self.writer.board_host.canon.events(ref=CARD_REF)
+            if event.kind.value == "card.blocked"
+        )
+        self.assertEqual(
+            effect.data["terminal_taxonomy"],
+            {
+                "version": 2,
+                "disposition": "blocked",
+                "blocked_reason": "task_contract",
+                "source_evidence": "wrong_task_definition",
+                "budget_class": "blocked",
+                "provenance": "forward",
+            },
+        )
+
+    def test_malformed_taxonomy_does_not_gate_the_lifecycle_effect(self) -> None:
+        _payload, record = self._start_worker_round()
+
+        self.runtime.terminal_effect(
+            self.reader.show(CARD_REF),
+            record,
+            target="blocked",
+            reason="a lifecycle effect with malformed analytics input",
+            request_id="malformed-taxonomy-effect",
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="not-a-taxonomy-reason",
+        )
+
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertEqual(self._outcomes(), ())
 
     def test_done_then_red_gate_seals_rework_before_opening_the_next_round(self) -> None:
         self.start_dispatcher()

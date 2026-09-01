@@ -595,6 +595,11 @@ def bring_up_blocked_action(action: str, failure: BringUpFailure) -> str:
     return infrastructure_action(action) if failure.infrastructure else action
 
 
+def bring_up_terminal_reason(failure: BringUpFailure) -> str:
+    """The forward taxonomy reason for a classified bring-up failure."""
+    return "infrastructure" if failure.infrastructure else "task_contract"
+
+
 def bring_up_failure_class(request_id: str) -> str:
     """Read a blocked bring-up's class back off the transition it wrote. The consumer's half."""
     return (

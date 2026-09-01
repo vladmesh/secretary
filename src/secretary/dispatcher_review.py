@@ -13,6 +13,7 @@ from secretary.dispatcher_launch import (
     BringUpFailure,
     bring_up_blocked_action,
     bring_up_blocked_reason,
+    bring_up_terminal_reason,
     busy_launch_delivery,
     classify_bring_up_failure,
     clear_launch_intent,
@@ -191,10 +192,9 @@ def review_infrastructure_failure(
         if held is not None:
             return dict(held, **failure.outcome_fields(held["reason"]))
     blocked_reason = review_infrastructure_blocked_reason(record, reason, failure)
-    runtime.writer.move(
-        role="dispatcher",
-        actor=runtime.owner,
-        reference=ref,
+    runtime.terminal_effect(
+        task,
+        record,
         target="blocked",
         reason=blocked_reason,
         request_id=_attempt_request_id(
@@ -203,6 +203,9 @@ def review_infrastructure_failure(
             ref,
             _wait_cycle_token(record),
         ),
+        terminal_state="blocked",
+        disposition="blocked",
+        blocked_reason=bring_up_terminal_reason(failure),
     )
     records[ref] = record
     runtime.save_records(payload, records)
@@ -909,15 +912,17 @@ def start_review(
     )
     if failure is not None:
         if failure.startswith("codex-fanout-policy:"):
-            runtime.writer.move(
-                role="dispatcher",
-                actor=runtime.owner,
-                reference=ref,
+            runtime.terminal_effect(
+                task,
+                record,
                 target="blocked",
                 reason=f"Codex provider fan-out policy refused reviewer preflight: {failure}",
                 request_id=_attempt_request_id(
                     record.attempt_id or attempt_id, "codex-fanout-review-blocked", ref
                 ),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="provider",
             )
             records.pop(ref, None)
             runtime.save_records(payload, records)
@@ -1022,10 +1027,9 @@ def start_review(
         blocked_reason = bring_up_blocked_reason(
             "review bring-up failed", exc, record, REVIEW_ROLE, failure=failure
         )
-        runtime.writer.move(
-            role="dispatcher",
-            actor=runtime.owner,
-            reference=ref,
+        runtime.terminal_effect(
+            task,
+            record,
             target="blocked",
             reason=blocked_reason,
             request_id=_attempt_request_id(
@@ -1034,6 +1038,9 @@ def start_review(
                 ref,
                 _wait_cycle_token(record),
             ),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason=bring_up_terminal_reason(failure),
         )
         records.pop(ref, None)
         return {

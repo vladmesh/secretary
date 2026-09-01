@@ -11,6 +11,11 @@ from typing import Any
 
 from secretary._fsutil import try_file_lock, write_json
 from secretary.board.models import Event, EventKind
+from secretary.board.terminal_taxonomy import (
+    TerminalTaxonomyValidationError,
+    budget_event_type,
+    read_terminal_taxonomy,
+)
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatcher_launch import (
     FAILURE_CLASS_INFRASTRUCTURE,
@@ -42,7 +47,7 @@ from secretary.dispatcher_state import (
     attempt_request_id as _attempt_request_id,
 )
 from secretary.dispatcher_types import STOPPED_BY_RECONCILIATION, HostError
-from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, SprintWriter, budget_thresholds
+from secretary.sprints import SprintWriter, budget_thresholds
 from secretary.tasks import ACTIVE_STATES, TaskError
 
 # Tick telemetry records terminal health for pipeline and steward readers.
@@ -1200,13 +1205,17 @@ def _production_active_mismatch(
             f"stopped: {stopped['reason']}"
         )
         return stopped
-    runtime.writer.move(
-        role="dispatcher",
-        actor=runtime.owner,
-        reference=task["ref"],
+    runtime.terminal_effect(
+        task,
+        record,
         target="blocked",
         reason="production recovery blocked: active task claim no longer matches production record",
         request_id=_attempt_request_id(record.attempt_id, "active-mismatch-blocked", task["ref"]),
+        terminal_state="blocked",
+        disposition="blocked",
+        # A durable claim/record disagreement is source evidence in its own
+        # right, not an uncharged head bring-up infrastructure failure.
+        blocked_reason="other",
     )
     divergence = record_divergence(
         payload,
@@ -1377,7 +1386,21 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
         reference = str(event.get("ref") or "")
         if not reference or reference.startswith("sprint:"):
             continue
-        event_type = _budget_event_type(event)
+        try:
+            event_type = _budget_event_type(event)
+        except TerminalTaxonomyValidationError as exc:
+            # A corrupt observation is not a lifecycle concern and must not
+            # prevent later durable events from reaching their budget seam.
+            outcomes.append(
+                {
+                    "status": "degraded",
+                    "step": "sprint-budget",
+                    "action": "terminal-taxonomy-invalid",
+                    "ref": reference,
+                    "reason": str(exc),
+                }
+            )
+            continue
         if event_type is None:
             continue
         identity = str(event.get("event_id") or event.get("request_id") or "")
@@ -1479,16 +1502,19 @@ def _budget_event_type(event: dict[str, Any]) -> str | None:
     if target:
         request_id = str(event.get("request_id") or "")
         if target == "blocked":
-            # A bring-up that never produced a head wrote its class into this transition's action
-            # token (`bring_up_blocked_action`), and this is the reading side of that token: an
-            # infrastructure outcome is counted, and charged to nobody.  Every other block — a
-            # worker's own report, the gate, a merge, a release — has no such token and charges
-            # exactly as it always did.
-            return (
-                BUDGET_UNCHARGED_INFRASTRUCTURE
-                if bring_up_failure_class(request_id) == FAILURE_CLASS_INFRASTRUCTURE
-                else "blocked"
-            )
+            if payload.get("terminal_taxonomy") is None:
+                # Taxonomy did not exist when this transition committed. Keep
+                # its durable action-token accounting rather than inventing a
+                # forward classification from prose or current state.
+                return (
+                    "infrastructure_blocked"
+                    if bring_up_failure_class(request_id) == FAILURE_CLASS_INFRASTRUCTURE
+                    else "blocked"
+                )
+            # A committed forward record owns its disposition. In particular,
+            # an assessment reslice can target Blocked without becoming a
+            # blocked taxonomy disposition during budget recovery.
+            return budget_event_type(read_terminal_taxonomy(payload, disposition=None))
         if target == "ready" and source in ACTIVE_STATES:
             return "preempt"
         if target == "in_progress" and "gate-red" in request_id:

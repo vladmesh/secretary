@@ -2472,6 +2472,7 @@ class TaskWriter:
         sprint_override_reason: str = "",
         request_id: str | None = None,
         outcome_owed: dict[str, Any] | None = None,
+        terminal_taxonomy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._role(role, _ROLES)
         reason = self._redact_for_board(reason)
@@ -2479,6 +2480,8 @@ class TaskWriter:
         request_id = request_id or str(uuid.uuid4())
         if outcome_owed is not None and not isinstance(outcome_owed, dict):
             raise TaskError("validation", "attempt outcome obligation must be an object", 2)
+        if terminal_taxonomy is not None and not isinstance(terminal_taxonomy, dict):
+            raise TaskError("validation", "terminal taxonomy must be an object", 2)
         task = self.reader.show(reference)
         if (
             role == "steward"
@@ -2520,6 +2523,9 @@ class TaskWriter:
                 # the next generation, so re-deriving it here would turn an
                 # exact effect retry into a conflicting payload.
                 outcome_owed = dict(stored_obligation) if isinstance(stored_obligation, dict) else None
+            if terminal_taxonomy is not None:
+                stored_taxonomy = existing.data.get("terminal_taxonomy")
+                terminal_taxonomy = dict(stored_taxonomy) if isinstance(stored_taxonomy, dict) else None
             try:
                 target_state = CardState(target)
             except ValueError:
@@ -2540,6 +2546,7 @@ class TaskWriter:
                 reason=_transition_reason(reason, target),
                 request_id=request_id,
                 outcome_owed=outcome_owed,
+                terminal_taxonomy=terminal_taxonomy,
                 finish=self._transition_cleanup(
                     task,
                     source=str(existing.source_state or ""),
@@ -2597,6 +2604,7 @@ class TaskWriter:
             reason=_transition_reason(reason, target),
             request_id=request_id,
             outcome_owed=outcome_owed,
+            terminal_taxonomy=terminal_taxonomy,
             finish=self._transition_cleanup(
                 task,
                 source=source,
@@ -2727,6 +2735,7 @@ class TaskWriter:
         reason: str,
         request_id: str,
         outcome_owed: dict[str, Any] | None = None,
+        terminal_taxonomy: dict[str, Any] | None = None,
         finish: Callable[[Any], None] | None = None,
     ) -> MutationResult:
         """Run one state edge through the typed adapter and its shared journal.
@@ -2744,7 +2753,14 @@ class TaskWriter:
                     reason,
                     RelatedRefs(()),
                     request_id,
-                    data={"attempt_outcome_owed": dict(outcome_owed)} if outcome_owed is not None else {},
+                    data={
+                        **({"attempt_outcome_owed": dict(outcome_owed)} if outcome_owed is not None else {}),
+                        **(
+                            {"terminal_taxonomy": dict(terminal_taxonomy)}
+                            if terminal_taxonomy is not None
+                            else {}
+                        ),
+                    },
                 ),
                 finish=finish,
             )
