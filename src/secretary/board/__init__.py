@@ -10,6 +10,8 @@ from secretary.board.card_transitions import (
     card_transition,
 )
 from secretary.board.events import (
+    AnalyticsOutcomeConflict,
+    AttemptOutcomeOccurrence,
     AttemptUsageOccurrence,
     BoardEventCanon,
     BoardEventPending,
@@ -62,6 +64,8 @@ __all__ = [
     "CARD_TRANSITIONS",
     "TRANSITIONS",
     "Actor",
+    "AnalyticsOutcomeConflict",
+    "AttemptOutcomeOccurrence",
     "AttemptUsageOccurrence",
     "BoardEntity",
     "BoardEventCanon",

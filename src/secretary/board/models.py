@@ -52,6 +52,9 @@ class EventKind(StrEnum):
     # records at the moment the phase ended.  It is a Card fact with no backend mutation: the
     # journal is the only place a finished phase's token counts are durable at all.
     ATTEMPT_USAGE = "attempt.usage"
+    # A completed attempt's final lifecycle disposition.  This is deliberately
+    # an observation, never an edge the lifecycle reader may consume.
+    ATTEMPT_OUTCOME = "attempt.outcome"
 
 
 class AttemptUsageOutcome(StrEnum):
@@ -91,6 +94,27 @@ ATTEMPT_USAGE_ACCOUNTS = ("tokens", "session_totals", "phase_baseline")
 
 ATTEMPT_USAGE_ROLES = ("worker", "reviewer")
 ATTEMPT_USAGE_PHASES = ("worker", "review")
+
+ATTEMPT_OUTCOME_VERDICTS = ("green", "red", "blocked", "missing", "legacy")
+ATTEMPT_OUTCOME_DISPOSITIONS = (
+    "release",
+    "rework",
+    "reslice",
+    "blocked",
+    "drop",
+    "operator_stop",
+)
+ATTEMPT_OUTCOME_BLOCKED_REASONS = (
+    "implementation",
+    "review",
+    "task_contract",
+    "gate",
+    "provider",
+    "infrastructure",
+    "operator",
+    "other",
+)
+ATTEMPT_OUTCOME_COMPLETENESS = ("collected", "degraded", "missing", "legacy")
 
 
 class ProductState(StrEnum):
@@ -291,6 +315,7 @@ class Event:
             raise ValueError("event data must be an object")
         _validate_control_marker_event(self.kind, self.entity_kind, self.reason, self.data)
         _validate_attempt_usage_event(self.kind, self.entity_kind, self.data)
+        _validate_attempt_outcome_event(self.kind, self.entity_kind, self.data)
         # The journal spelling is UTC.  Keep the value canonical too, so an
         # event read back from its own record compares equal to the value that
         # was written, even when its caller supplied another aware timezone.
@@ -533,6 +558,89 @@ def _validate_attempt_usage_event(
             expected = total - start
             if owned != expected:
                 raise ValueError(f"attempt usage dimension {name} does not match its session-total interval")
+
+
+def _validate_attempt_outcome_event(
+    kind: EventKind,
+    entity_kind: EntityKind,
+    data: dict[str, Any],
+) -> None:
+    """Validate the sealed v1 attempt outcome without interpreting lifecycle state.
+
+    Keeping this at the normal typed-event boundary means an unknown version or
+    enum cannot silently become analytics data, while generic and older typed
+    records retain their released readers.
+    """
+    if kind is not EventKind.ATTEMPT_OUTCOME:
+        return
+    if entity_kind is not EntityKind.CARD:
+        raise ValueError("attempt outcome events require a Card subject")
+    required = {
+        "version",
+        "attempt_id",
+        "attempt",
+        "report_generation",
+        "sprint_ref",
+        "specification_revision",
+        "terminal_state",
+        "verdict",
+        "disposition",
+        "blocked_reason",
+        "source_event_ids",
+        "usage_completeness",
+    }
+    if set(data) != required:
+        raise ValueError("attempt outcome v1 has an unsupported field set")
+    if data["version"] != 1:
+        raise ValueError("unsupported attempt outcome version")
+    for name in ("attempt_id",):
+        value = data[name]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"attempt outcome requires a non-empty {name}")
+    for name in ("attempt", "report_generation"):
+        value = data[name]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"attempt outcome requires a positive {name}")
+    for name in ("sprint_ref", "specification_revision"):
+        value = data[name]
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"attempt outcome {name} must be a non-empty string or null")
+    if data["terminal_state"] not in {"done", "blocked", "in_progress"}:
+        raise ValueError("attempt outcome terminal state must be done, blocked or in_progress")
+    if data["verdict"] not in ATTEMPT_OUTCOME_VERDICTS:
+        raise ValueError("attempt outcome verdict is unsupported")
+    if data["disposition"] not in ATTEMPT_OUTCOME_DISPOSITIONS:
+        raise ValueError("attempt outcome disposition is unsupported")
+    blocked_reason = data["blocked_reason"]
+    if blocked_reason is not None and blocked_reason not in ATTEMPT_OUTCOME_BLOCKED_REASONS:
+        raise ValueError("attempt outcome blocked reason is unsupported")
+    if (data["disposition"] == "blocked") != (blocked_reason is not None):
+        raise ValueError("attempt outcome blocked reason is present exactly for blocked disposition")
+    refs = data["source_event_ids"]
+    if not isinstance(refs, dict) or set(refs) != {
+        "report",
+        "verdict",
+        "decision",
+        "effect",
+        "worker_usage",
+        "review_usage",
+    }:
+        raise ValueError("attempt outcome source_event_ids are incomplete")
+    for name, value in refs.items():
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"attempt outcome source event {name} must be a non-empty string or null")
+    completeness = data["usage_completeness"]
+    if not isinstance(completeness, dict) or set(completeness) != {"worker", "review"}:
+        raise ValueError("attempt outcome usage completeness is incomplete")
+    for role in ("worker", "review"):
+        state = completeness[role]
+        if state not in ATTEMPT_OUTCOME_COMPLETENESS:
+            raise ValueError(f"attempt outcome {role} completeness is unsupported")
+        usage_ref = refs[f"{role}_usage"]
+        if state in {"collected", "degraded"} and usage_ref is None:
+            raise ValueError(f"attempt outcome {role} completeness requires its usage event ref")
+        if state in {"missing", "legacy"} and usage_ref is not None:
+            raise ValueError(f"attempt outcome {role} missingness carries no usage event ref")
 
 
 def _format_time(value: datetime) -> str:

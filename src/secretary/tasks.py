@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.events import BoardEventCanon, BoardEventPending
+from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.models import (
     Actor,
@@ -2248,6 +2248,101 @@ class TaskWriter:
                 canon.commit(occurrence.request_id, occurrence.event)
             except (OSError, TypeError, ValueError, TaskError):
                 # The obligation stays exactly where it is: still staged, still owed, still exact.
+                continue
+            finished += 1
+        return finished
+
+    def attempt_outcome(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        data: dict[str, Any],
+        reason: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Stage then append one immutable observational terminal occurrence.
+
+        This writer intentionally has no board effect.  Its caller is required
+        to call it only after the lifecycle owner has confirmed the terminal
+        move; a retry can only append the exact staged object.
+        """
+        self._role(role, {"dispatcher"})
+        if not request_id.strip():
+            raise TaskError("validation", "an attempt outcome needs the request id it owns", 2)
+        canon = self.board_host.canon
+        if canon is None:
+            raise TaskError("backend_unavailable", "board event canon is unavailable", 1)
+        try:
+            occurrences = canon.attempt_outcome_occurrences(ref=reference)
+            key = (reference, data.get("attempt_id"), data.get("report_generation"))
+            existing_occurrence = next(
+                (
+                    occurrence
+                    for occurrence in occurrences
+                    if (
+                        occurrence.event.ref,
+                        occurrence.event.data.get("attempt_id"),
+                        occurrence.event.data.get("report_generation"),
+                    )
+                    == key
+                ),
+                None,
+            )
+            if existing_occurrence is not None:
+                if existing_occurrence.event.data != data:
+                    raise AnalyticsOutcomeConflict(
+                        f"attempt outcome natural key {key!r} has conflicting payloads"
+                    )
+                return self._commit_attempt_outcome(
+                    canon, existing_occurrence.request_id, existing_occurrence.event, replayed=True
+                )
+            event = Event(
+                event_id="evt_" + uuid.uuid4().hex,
+                kind=EventKind.ATTEMPT_OUTCOME,
+                entity_kind=EntityKind.CARD,
+                ref=reference,
+                actor=Actor(role, actor),
+                reason=reason,
+                occurred_at=datetime.now(UTC),
+                data=dict(data),
+            )
+            canon.stage(request_id, event)
+        except AnalyticsOutcomeConflict as exc:
+            raise TaskError("analytics_outcome_conflict", str(exc), 3) from None
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except OSError:
+            raise TaskError("audit_unavailable", "attempt outcome could not be staged", 4) from None
+        return self._commit_attempt_outcome(canon, request_id, event, replayed=False)
+
+    def _commit_attempt_outcome(
+        self, canon: BoardEventCanon, request_id: str, event: Event, *, replayed: bool
+    ) -> dict[str, Any]:
+        try:
+            canon.commit(request_id, event)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except OSError:
+            raise TaskError(
+                "audit_pending", "attempt outcome is staged and awaits its journal append", 4
+            ) from None
+        return {"action": "attempt_outcome", "event_id": event.event_id, "replayed": replayed}
+
+    def finish_attempt_outcomes(self, *, role: str, reference: str = "") -> int:
+        """Append staged outcomes only; it never derives or changes lifecycle facts."""
+        self._role(role, {"dispatcher"})
+        canon = self.board_host.canon
+        if canon is None:
+            return 0
+        finished = 0
+        for occurrence in canon.attempt_outcome_occurrences(ref=reference):
+            if not occurrence.pending:
+                continue
+            try:
+                canon.commit(occurrence.request_id, occurrence.event)
+            except (OSError, TypeError, ValueError, TaskError):
                 continue
             finished += 1
         return finished

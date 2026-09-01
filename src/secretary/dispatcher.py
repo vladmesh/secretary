@@ -1719,13 +1719,22 @@ class DispatcherRuntime:
             unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
-            self.writer.move(
+            effect = self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
                 reference=ref,
                 target="blocked",
                 reason="worker report:blocked",
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-blocked", ref),
+            )
+            self.record_attempt_outcome(
+                task,
+                record,
+                terminal_state="blocked",
+                disposition="blocked",
+                effect_event_id=str(effect["event_id"]),
+                verdict="blocked",
+                blocked_reason="other",
             )
             records.pop(ref, None)
             return {
@@ -3973,7 +3982,7 @@ class DispatcherRuntime:
             # A transition performing a decision is the second half of a round whose verdict was
             # already recorded at the park; recording it again would overwrite that outcome.
             self._record_verdict_routing(ref, record, continuation.verdict_outcome)
-        self.writer.move(
+        effect = self.writer.move(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
@@ -3985,6 +3994,16 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id, f"{phase}-red", ref, str(baseline)
             ),
+        )
+        self.record_attempt_outcome(
+            task,
+            record,
+            terminal_state="in_progress",
+            disposition="rework",
+            effect_event_id=str(effect["event_id"]),
+            verdict=continuation.verdict_outcome
+            if continuation.verdict_outcome in {"green", "red"}
+            else "missing",
         )
         moved = self.reader.show(ref)
         # The previous round's report stays behind this baseline, so no tick reads it as this one's.
@@ -5323,7 +5342,7 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return unconfirmed
         self.host.stop(record)
-        self.writer.move(
+        effect = self.writer.move(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
@@ -5331,6 +5350,15 @@ class DispatcherRuntime:
             reason=f"Observer decision: reslice. {reason}".strip(),
             decision="reslice",
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "assessment-reslice", ref),
+        )
+        self.record_attempt_outcome(
+            task,
+            record,
+            terminal_state="blocked",
+            disposition="reslice",
+            effect_event_id=str(effect["event_id"]),
+            verdict="red",
+            blocked_reason=None,
         )
         resume_workspaces = payload.setdefault("resume_workspaces", {})
         if isinstance(resume_workspaces, dict):
@@ -5363,7 +5391,7 @@ class DispatcherRuntime:
         """A merge path that cannot finish leaves the card Blocked with its heads down."""
         ref = task["ref"]
         self.host.stop(record)
-        self.writer.move(
+        effect = self.writer.move(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
@@ -5371,6 +5399,14 @@ class DispatcherRuntime:
             reason=reason,
             decision=decision,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, action, ref),
+        )
+        self.record_attempt_outcome(
+            task,
+            record,
+            terminal_state="blocked",
+            disposition="blocked",
+            effect_event_id=str(effect["event_id"]),
+            blocked_reason="infrastructure",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -5546,7 +5582,7 @@ class DispatcherRuntime:
                 outcome="merge failed",
             )
         self.host.teardown(record)
-        self.writer.move(
+        effect = self.writer.move(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
@@ -5554,6 +5590,14 @@ class DispatcherRuntime:
             reason=move_reason,
             decision=decision,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
+        )
+        self.record_attempt_outcome(
+            task,
+            record,
+            terminal_state="done",
+            disposition="release",
+            effect_event_id=str(effect["event_id"]),
+            verdict="green",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -5708,6 +5752,85 @@ class DispatcherRuntime:
         return [
             occurrence.event.ref for occurrence in canon.attempt_usage_occurrences() if occurrence.pending
         ]
+
+    def record_attempt_outcome(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        *,
+        terminal_state: str,
+        disposition: str,
+        effect_event_id: str,
+        verdict: str = "missing",
+        blocked_reason: str | None = None,
+    ) -> None:
+        """Append the terminal ledger row after, and only after, a confirmed effect.
+
+        This is intentionally a pure journal finisher.  It reads only durable
+        typed occurrences already written for this round and does not inspect
+        a provider, move a card, launch a head, or make a lifecycle decision.
+        """
+        attempt_id = record.attempt_id
+        if not attempt_id:
+            # Operator/legacy terminal paths have no permission to invent a
+            # round identity merely to make analytics look complete.
+            return
+        canon = self.writer.board_host.canon
+        if canon is None:
+            return
+        attempt = max(record.attempt_round, 1)
+        generation = max(record.report_generation, 1)
+        usages = {
+            str(occurrence.event.data["role"]): occurrence.event
+            for occurrence in canon.attempt_usage_occurrences(ref=task["ref"])
+            if occurrence.event.data.get("attempt_id") == attempt_id
+            and occurrence.event.data.get("report_generation") == generation
+        }
+        source: dict[str, str | None] = {
+            "report": None,
+            "verdict": None,
+            "decision": None,
+            "effect": effect_event_id,
+            "worker_usage": None,
+            "review_usage": None,
+        }
+        completeness: dict[str, str] = {}
+        for role, ledger_role in (("worker", "worker"), ("review", "reviewer")):
+            usage = usages.get(ledger_role)
+            if usage is None:
+                completeness[role] = "missing"
+                continue
+            source[f"{role}_usage"] = usage.event_id
+            completeness[role] = "collected" if usage.data.get("outcome") == "collected" else "degraded"
+        # Marker references are deliberately optional in v1: current marker
+        # events do not bind a round identity, and guessing from chronology or
+        # prose would violate the sealed-ledger contract.
+        data = {
+            "version": 1,
+            "attempt_id": attempt_id,
+            "attempt": attempt,
+            "report_generation": generation,
+            "sprint_ref": task.get("sprint") or None,
+            "specification_revision": None,
+            "terminal_state": terminal_state,
+            "verdict": verdict,
+            "disposition": disposition,
+            "blocked_reason": blocked_reason,
+            "source_event_ids": source,
+            "usage_completeness": completeness,
+        }
+        self.writer.attempt_outcome(
+            role="dispatcher",
+            actor=self.owner,
+            reference=task["ref"],
+            data=data,
+            reason="confirmed terminal lifecycle effect",
+            request_id=_attempt_request_id(attempt_id, "attempt-outcome", task["ref"], str(generation)),
+        )
+
+    def publish_pending_attempt_outcomes(self) -> int:
+        """Finish exact staged outcomes; it is not a lifecycle recovery loop."""
+        return self.writer.finish_attempt_outcomes(role="dispatcher")
 
     def publish_pending_attempt_usage(self) -> list[dict[str, Any]]:
         """Publish every staged `attempt.usage` occurrence the installation still owes.

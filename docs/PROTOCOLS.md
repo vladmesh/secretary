@@ -1180,6 +1180,39 @@ new round enters the same workspace.
 
 ### What a finished phase cost
 
+### Attempt outcome ledger v1
+
+`attempt.outcome` version 1 is append-only observational telemetry. It is written by the dispatcher
+lifecycle owner only after its terminal effect has been confirmed. It is never a lifecycle input: no card
+move, merge, retry, admission, gate, observer decision or recovery decision reads it.
+
+Its natural key is exactly `(card_ref, attempt_id, report_generation)`. `attempt` is the observed ordinal
+and is not part of the key. The Card subject supplies `card_ref`; `data` carries `version: 1`, non-empty
+`attempt_id`, positive `attempt` and `report_generation`, nullable `sprint_ref` and
+`specification_revision`, `terminal_state` (`done`, `blocked` or `in_progress` for a rework effect),
+`verdict` (`green|red|blocked|missing|legacy`), `disposition`
+(`release|rework|reslice|blocked|drop|operator_stop`), and nullable `blocked_reason`
+(`implementation|review|task_contract|gate|provider|infrastructure|operator|other`). A blocked reason is
+present exactly when disposition is `blocked`.
+
+`source_event_ids` always contains nullable `report`, `verdict`, `decision`, `effect`, `worker_usage` and
+`review_usage` references. `usage_completeness` always contains `worker` and `review`, each one of
+`collected|degraded|missing|legacy`. Collected or degraded usage has its matching usage-event ref; missing
+and legacy usage has no such ref. The existing marker protocol does not bind marker records to an attempt,
+so an unknown report/verdict/decision reference remains null rather than being inferred from timestamp,
+request-id grammar, marker prose, live state or ordering.
+
+`null`, missing, degraded and legacy are distinct. A null field is not a token zero. `missing` says no
+forward occurrence was available, `degraded` says an occurrence exists but did not yield usable phase
+measurement, and `legacy` names evidence predating this contract. Historical events are neither rewritten
+nor backfilled.
+
+The exact replay returns the staged or committed immutable occurrence. A retry that proposes a different
+payload for the same natural key raises the named `AnalyticsOutcomeConflict` diagnostic. A crash after the
+stage reuses that exact pending event; recovery only appends it. A crash before stage remains owed from the
+confirmed lifecycle effect and may be staged by the lifecycle owner from durable facts, never by an
+analytics reader. Unknown versions, fields and enums are rejected by the ordinary typed board-event reader.
+
 Every completed worker phase and every completed review phase leaves one `attempt.usage` event on the
 card, so phase cost is answerable from the Secretary journal alone and nobody has to reopen a provider
 session file to get it. It is a typed board protocol event (`kind: "attempt.usage"`, a Card subject) with

@@ -28,6 +28,15 @@ class AttemptUsageOccurrence:
     pending: bool
 
 
+@dataclass(frozen=True, slots=True)
+class AttemptOutcomeOccurrence:
+    """One validated terminal outcome and whether its append remains owed."""
+
+    request_id: str
+    event: Event
+    pending: bool
+
+
 @contextlib.contextmanager
 def marker_comment_lock(data_dir: str | Path, ref: str) -> Iterator[None]:
     """Serialize one Card marker occurrence from its witness through commit.
@@ -81,6 +90,10 @@ def render_marker_comment(event: Event) -> str:
 
 class BoardEventPending(RuntimeError):
     """The backend effect succeeded, but its durable protocol event did not."""
+
+
+class AnalyticsOutcomeConflict(ValueError):
+    """One immutable attempt-outcome natural key was offered two payloads."""
 
 
 class BoardEventCanon:
@@ -213,6 +226,42 @@ class BoardEventCanon:
         return tuple(
             AttemptUsageOccurrence(request_id, by_request[request_id][0], by_request[request_id][1])
             for request_id in order
+        )
+
+    def attempt_outcome_occurrences(self, *, ref: str = "") -> Sequence[AttemptOutcomeOccurrence]:
+        """Return the one staged-or-committed outcome for each v1 natural key.
+
+        Unlike a request-id retry, the ledger identity is independent of the
+        writer request: `(card_ref, attempt_id, report_generation)`.  A second
+        owner is therefore an analytics diagnostic, even if it chose another
+        request id.  No lifecycle operation is performed here.
+        """
+        records = self.audit._occurrence_projection_records()
+        by_key: dict[tuple[str, str, int], tuple[str, Event, bool]] = {}
+        order: list[tuple[str, str, int]] = []
+        for record, pending in records:
+            if record.get("kind") != EventKind.ATTEMPT_OUTCOME.value:
+                continue
+            event = self._typed(record)
+            if ref and event.ref != ref:
+                continue
+            request_id = record.get("request_id")
+            if not isinstance(request_id, str) or not request_id:
+                raise AnalyticsOutcomeConflict("attempt outcome occurrence has no request id")
+            key = (event.ref, str(event.data["attempt_id"]), int(event.data["report_generation"]))
+            previous = by_key.get(key)
+            if previous is None:
+                by_key[key] = (request_id, event, pending)
+                order.append(key)
+                continue
+            previous_request, previous_event, previous_pending = previous
+            if previous_request != request_id or previous_event != event:
+                raise AnalyticsOutcomeConflict(
+                    f"attempt outcome natural key {key!r} has conflicting payloads"
+                )
+            by_key[key] = (request_id, previous_event, previous_pending and pending)
+        return tuple(
+            AttemptOutcomeOccurrence(by_key[key][0], by_key[key][1], by_key[key][2]) for key in order
         )
 
     def _claim(self, request_id: str, record: dict[str, Any]) -> dict[str, Any] | None:

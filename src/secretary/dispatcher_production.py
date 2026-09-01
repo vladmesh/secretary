@@ -353,6 +353,9 @@ def _production_tick_work(
     # those, and it runs before the fence, the cycle, reconciliation and any claim, because all of
     # them read a journal these records belong in.
     usage_outcomes = runtime.publish_pending_attempt_usage()
+    # Outcomes are the same journal-only recovery shape: this pass appends
+    # exact staged records and never derives, moves, admits or retries work.
+    runtime.publish_pending_attempt_outcomes()
 
     observer_errors: list[dict[str, str]] = []
     # Fence unhealthy sprint observers before advancing any reserved cards.
