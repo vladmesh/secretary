@@ -32,6 +32,7 @@ from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
 from secretary.dispatch import host as dispatcher_host_module
+from secretary.dispatch import verdict_effect
 from secretary import (
     dispatcher_launcher,
     dispatcher_observer,
@@ -90,6 +91,7 @@ _RUNTIME_MODULES = (
     dispatcher_production,
     dispatcher_review,
     dispatcher_observer,
+    verdict_effect,
 )
 
 # Attribute owners as they are spelled at the call sites: `self.host` inside DispatcherRuntime,

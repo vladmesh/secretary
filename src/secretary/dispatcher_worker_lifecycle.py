@@ -662,6 +662,16 @@ class WorkerReportNudge:
         )
 
 
+# What the durable verdict-effect intent is an intent to *do*. A card with an observer parks in
+# Assessment and waits; a card with nobody to release it, and a card an observer released, has the
+# merge as its effect. Both are one durable intent followed by one effect performed by the one
+# replayable executor, so recovery finishes the effect the intent opened rather than re-deciding
+# which one this round earned from a sprint that may read differently now.
+PARK_EFFECT_ASSESSMENT = "assessment"
+PARK_EFFECT_RELEASE = "release"
+PARK_EFFECTS = (PARK_EFFECT_ASSESSMENT, PARK_EFFECT_RELEASE)
+
+
 class WorkerContinuationStage(StrEnum):
     NONE = "none"
     VALIDATION_MOVE_PENDING = "validation_move_pending"
@@ -672,6 +682,11 @@ class WorkerContinuationStage(StrEnum):
     # be able to tell "the move may not have landed" from "the card is parked and waiting".
     ASSESSMENT_PENDING = "assessment_pending"
     ASSESSMENT_PARKED = "assessment_parked"
+    # A merge this card is owed: the no-observer release a green verdict earns on its own tick, and
+    # the release an observer decided on a parked card. Separate from the Assessment stages because
+    # the effect is different and recovery has to finish the one the intent opened, not the one the
+    # stage name happens to suggest.
+    RELEASE_PENDING = "release_pending"
     RED_TRANSITION_PENDING = "red_transition_pending"
     DELIVERY_PENDING = "delivery_pending"
     DELIVERY_CONFIRMED = "delivery_confirmed"
@@ -701,6 +716,27 @@ class WorkerContinuation:
     prevent.
     """
     verdict_outcome: str = ""
+    park_effect: str = ""
+    """Which effect this verdict-effect intent is owed: the Assessment move, or the merge.
+
+    Recorded with the intent rather than re-read at completion time, because the answer comes from
+    the sprint's observer and a sprint that closed, or a board that cannot be read, would give a
+    different one. A park opened to wait for a decision may not finish as a merge because nobody
+    could see the observer on the recovery tick, and a release opened as the merge may not finish by
+    stranding the card in a wait nothing will end. Empty is the Assessment move: a released record
+    written before the effect was named could only have opened that one, and keeps that behaviour.
+    """
+    merge_published: bool = False
+    """Whether this intent's merge has already been published. The one progress fact it records.
+
+    The merge is the only step in a verdict effect that a replay cannot simply repeat: the board
+    moves and the gate are idempotent or re-executed, and a published merge is neither. So the
+    executor writes this between the publication and the Done move, and a replay that finds it
+    finishes the bookkeeping of the effect it already performed instead of landing a second one.
+
+    It says nothing about identity, checkout, base, drift, gate or receipt: those are re-established
+    on every invocation and none of them may be inferred from an intent that survived a crash.
+    """
     decision: str = ""
     """The observer decision this transition is performing, empty when nobody decided anything.
 
@@ -744,11 +780,25 @@ class WorkerContinuation:
 
     @property
     def parked(self) -> bool:
-        """The card is held by a verdict nobody has acted on, move landed or not."""
+        """The card is held by a verdict nobody has finished acting on, effect landed or not."""
         return self.stage in {
             WorkerContinuationStage.ASSESSMENT_PENDING,
             WorkerContinuationStage.ASSESSMENT_PARKED,
+            WorkerContinuationStage.RELEASE_PENDING,
         }
+
+    @property
+    def effect_pending(self) -> bool:
+        """A verdict effect is open on this record: the executor owes it a move or a merge."""
+        return self.stage in {
+            WorkerContinuationStage.ASSESSMENT_PENDING,
+            WorkerContinuationStage.RELEASE_PENDING,
+        }
+
+    @property
+    def releases_on_park(self) -> bool:
+        """Whether this intent's effect is the merge rather than the Assessment move."""
+        return self.park_effect == PARK_EFFECT_RELEASE
 
     @property
     def red_transition_pending(self) -> bool:
@@ -776,25 +826,58 @@ class WorkerContinuation:
             raise ValueError(f"cannot confirm validation move from {self.stage}")
         self.stage = WorkerContinuationStage.RETAINED
 
-    def begin_park(self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str) -> None:
-        """Record the reviewer's verdict before the card is parked in Assessment.
+    def begin_park(
+        self,
+        phase: str,
+        report_baseline: int,
+        move_reason: str,
+        verdict_outcome: str,
+        effect: str = PARK_EFFECT_ASSESSMENT,
+        decision: str = "",
+    ) -> None:
+        """Open the durable verdict-effect intent: what this card is owed, and how to replay it.
 
-        The verdict is durable here, and nothing has yet merged, resumed a worker or moved the board. A
-        tick that dies between this write and the move is recovered by finishing the move, never by
-        re-deciding what the verdict meant. Re-entry from `ASSESSMENT_PENDING` is allowed.
+        The intent is durable here, and nothing has yet merged, resumed a worker or moved the board. A
+        tick that dies between this write and the effect is recovered by re-running the executor,
+        never by re-deciding what the verdict meant. Re-entry from the matching pending stage is
+        allowed, which is what makes the executor's own replay idempotent.
+
+        A release may also be opened from `ASSESSMENT_PARKED`: that is an observer decision on a
+        parked card, and it is the same one intent followed by the same one effect as the release a
+        card with no observer earns directly.
         """
-        if self.stage not in {
+        if effect not in PARK_EFFECTS:
+            raise ValueError(f"unknown park effect {effect}")
+        release = effect == PARK_EFFECT_RELEASE
+        allowed = {
             WorkerContinuationStage.NONE,
             WorkerContinuationStage.VALIDATION_MOVE_PENDING,
             WorkerContinuationStage.RETAINED,
-            WorkerContinuationStage.ASSESSMENT_PENDING,
-        }:
-            raise ValueError(f"cannot park from {self.stage}")
-        self.stage = WorkerContinuationStage.ASSESSMENT_PENDING
+            # Re-entry from the matching pending stage, and from a confirmed park: a release is the
+            # observer's decision on one, and an Assessment move re-opened over one is the executor
+            # replaying the same effect, which the board move's request id already makes a no-op.
+            WorkerContinuationStage.RELEASE_PENDING
+            if release
+            else WorkerContinuationStage.ASSESSMENT_PENDING,
+            WorkerContinuationStage.ASSESSMENT_PARKED,
+        }
+        if self.stage not in allowed:
+            raise ValueError(f"cannot open a {effect} verdict effect from {self.stage}")
+        self.stage = (
+            WorkerContinuationStage.RELEASE_PENDING if release else WorkerContinuationStage.ASSESSMENT_PENDING
+        )
         self.phase = phase
         self.report_baseline = int(report_baseline)
         self.move_reason = move_reason
         self.verdict_outcome = verdict_outcome
+        self.park_effect = effect
+        self.decision = decision
+
+    def note_merge_published(self) -> None:
+        """The merge this intent opened has landed. Recorded before the Done move that follows it."""
+        if self.stage != WorkerContinuationStage.RELEASE_PENDING:
+            raise ValueError(f"cannot publish a merge from {self.stage}")
+        self.merge_published = True
 
     def confirm_park(self) -> None:
         """The card is in Assessment. From here only a recorded decision moves it."""
@@ -829,6 +912,10 @@ class WorkerContinuation:
             WorkerContinuationStage.RETAINED,
             # A rework decision on a parked card opens the transition the park was holding back.
             WorkerContinuationStage.ASSESSMENT_PARKED,
+            # A park whose board move never happened, refused on replay by the preconditions the
+            # verdict executor re-establishes before it moves anything. The card is still where the
+            # worker left it, so the round it opens is the one that supersedes the abandoned park.
+            WorkerContinuationStage.ASSESSMENT_PENDING,
         }:
             raise ValueError(f"cannot open a red transition from {self.stage}")
         self.stage = WorkerContinuationStage.RED_TRANSITION_PENDING
@@ -902,6 +989,8 @@ class WorkerContinuation:
         self.reserved_generation = 0
         self.move_reason = ""
         self.verdict_outcome = ""
+        self.park_effect = ""
+        self.merge_published = False
         self.decision = ""
         self.decision_body = ""
         self.session_held = False
@@ -920,6 +1009,8 @@ class WorkerContinuation:
             "reserved_generation": self.reserved_generation,
             "move_reason": self.move_reason,
             "verdict_outcome": self.verdict_outcome,
+            "park_effect": self.park_effect,
+            "merge_published": self.merge_published,
             "decision": self.decision,
             "decision_body": self.decision_body,
             "session_held": self.session_held,
@@ -943,6 +1034,11 @@ class WorkerContinuation:
             reserved_generation=int(value.get("reserved_generation") or 0),
             move_reason=str(value.get("move_reason") or ""),
             verdict_outcome=str(value.get("verdict_outcome") or ""),
+            # A park written before the effect was named is the Assessment move, which was the
+            # only effect a park had then; empty reads as that everywhere the field is consulted.
+            park_effect=str(value.get("park_effect") or ""),
+            # A released record predates the merge, so it never published one under this intent.
+            merge_published=bool(value.get("merge_published") or False),
             decision=str(value.get("decision") or ""),
             # A transition written before the decision text was frozen carries none. Its round then
             # renders the way it did when it was written: reviewer findings only.

@@ -8,6 +8,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from secretary.dispatch.review_context import (
+    DamagedReviewContext,
+    ReviewRoundContext,
+    load_review_context,
+)
 from secretary.dispatcher_types import DispatcherError
 from secretary.dispatcher_worker_lifecycle import (
     WorkerContinuation,
@@ -111,10 +116,18 @@ class DispatcherRecord:
     rejected_failure_class: str = "substantive"
     rejected_failure_reason: str = ""
     rejected_done_reports: int = 0
-    # Reviewer leaf is stable across handle aliases; its commit fences verdicts to its checkout.
+    # Reviewer leaf is stable across handle aliases.
     review_handle: str = ""
     review_leaf: str = ""
-    review_commit: str = ""
+    # The identity of the review round this record is in: the exact candidate/base pair the
+    # reviewer was given, bound once and cleared with the lifecycle state that ends the round.
+    # Three states, kept apart on purpose. `None` is "no round is bound", which every consumer
+    # treats as fail-closed rather than as permission to rediscover the pair from whatever
+    # mechanical receipt is standing, and which only a fresh round may fill. A
+    # `DamagedReviewContext` is a persisted context that could not be read back, which is a
+    # stronger fact than absence: the round it belongs to may already have a verdict, so nothing
+    # rebinds over it and every consumer refuses until the round ends.
+    review_context: ReviewRoundContext | DamagedReviewContext | None = None
     # Re-review packet: the last rejected checkout and the reviewer's prior blocker text.  These
     # survive the red transition so the next independent reviewer can inspect the delta rather
     # than rediscovering the full historical diff.
@@ -280,7 +293,7 @@ class DispatcherRecord:
             "report_generation": self.report_generation,
             "report_decision": self.report_decision,
             "review_baseline": self.review_baseline,
-            "review_commit": self.review_commit,
+            "review_context": self.review_context.to_json() if self.review_context is not None else None,
             "previous_reviewed_sha": self.previous_reviewed_sha,
             "previous_blockers": self.previous_blockers,
             "review_handle": self.review_handle,
@@ -399,7 +412,7 @@ class DispatcherRecord:
             rejected_done_reports=int(payload.get("rejected_done_reports") or 0),
             review_handle=str(payload.get("review_handle") or ""),
             review_leaf=str(payload.get("review_leaf") or ""),
-            review_commit=str(payload.get("review_commit") or ""),
+            review_context=load_review_context(payload.get("review_context")),
             previous_reviewed_sha=str(payload.get("previous_reviewed_sha") or ""),
             previous_blockers=str(payload.get("previous_blockers") or ""),
             worker_leaf=str(payload.get("worker_leaf") or ""),

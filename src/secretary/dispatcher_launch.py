@@ -49,6 +49,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from secretary.dispatch.review_context import ReviewContextError, bind_review_context
 from secretary.dispatcher_heartbeat import intent_heartbeat_identity
 from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_state import DispatcherRecord
@@ -1003,10 +1004,26 @@ def _adopt_launch_intent(
         forget_role_head(record, WORKER_ROLE)
         record.state = "reviewing"
         record.review_started_at = record.review_progress_at = launched_at
-        if not record.review_commit:
+        try:
             # The worker is down and the reviewer writes no commits, so the checkout still sits
-            # where the launch pinned it. The merge gate needs that sha to accept the verdict.
-            record.review_commit = runtime.host.head_commit(record)
+            # where the launch pinned it — but which round that launch opened is a fact only the
+            # round's own durable document can supply, and a surviving context is re-confirmed
+            # against it rather than assumed.
+            bind_review_context(runtime.host, task, record, recorded_launch=True)
+        except ReviewContextError as exc:
+            # Never re-raised into the tick: an adopted reviewer whose round cannot be identified
+            # is a lifecycle answer this card has to carry on the board, not an exception that
+            # comes back identically on every tick after it.
+            _persist_quietly(runtime, payload, records)
+            return runtime.block_review_context(
+                task,
+                record,
+                records,
+                payload,
+                record.attempt_id,
+                step=step,
+                reason=scrub_host_output(str(exc)),
+            )
         deferred = _record_adopted_routing(runtime, task, records, payload, record, intent, role, step)
         if deferred is not None:
             return deferred

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.checkpoint import CheckpointResult
+from secretary.dispatch.current_pair import AncestryRead, RevisionRead
 from secretary.dispatcher import (
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_REVIEW_FREEZE,
@@ -768,7 +769,22 @@ class FakeHost:
         self.split_from: list[str] = []
         self.stopped_reviews: list[str] = []
         self.review_stop_initiators: list[str] = []
-        self.commit = "c0ffee1234567890"
+        self._commit = "c0ffee1234567890c0ffee1234567890c0ffee12"
+        # The exact base a receiptless round resolves; reassign it to model a base branch that
+        # moved between two rounds, or under a card waiting in Validate.
+        self.base_commit = "b" * 40
+        # What this host recorded into each round's reviewer document, keyed by (ref, baseline):
+        # the recovery evidence a lost record reads back.
+        self.review_contexts: dict[tuple[str, int], tuple[str, str]] = {}
+        # Bases the branch no longer descends from: add one to model a rewritten base branch.
+        self.rewritten_bases: set[str] = set()
+        self.base_ancestry_questions: list[tuple[str, str]] = []
+        # Typed overrides for what Git answers when the current pair is resolved. Left as None the
+        # fake answers from the revisions above; set one to model a workspace this host cannot
+        # address, a command that failed, or output that is empty, malformed or ambiguous.
+        self.head_read: RevisionRead | None = None
+        self.base_read: RevisionRead | None = None
+        self.ancestry_read: AncestryRead | None = None
         self.instance_publish_recoveries: set[tuple[str, str]] = set()
         # Observer heads (secretary-793): which sprints got one, which handles were stopped, and
         # the pid the fake heartbeat writes. os.getpid() is a live process, so the default launch
@@ -1183,6 +1199,11 @@ class FakeHost:
         if self.fail_review_error is not None:
             raise self.fail_review_error
         self.reviews.append(task["ref"])
+        # The real host writes the round's exact pair into the document it hands the reviewer.
+        self.review_contexts[(task["ref"], record.review_baseline)] = (
+            record.review_context.candidate_sha,
+            record.review_context.base_sha,
+        )
         # Mirror the real host: the reviewer gets its own pane and the worker head is shut down,
         # pinning the commit the reviewer judges.
         self.split_from.append(record.handle)
@@ -1617,9 +1638,53 @@ class FakeHost:
             self.stopped_reviews.append(record.review_handle)
         self._kill_head("review", record)
 
+    @property
+    def commit(self) -> str:
+        return self._commit
+
+    @commit.setter
+    def commit(self, value: str) -> None:
+        # Production Git only ever answers with an exact object id, and the review context refuses
+        # anything else. Named fixture revisions stay readable at the assignment sites while the
+        # fake keeps exposing the same exact-SHA contract to the runtime.
+        self._commit = (
+            value.lower()
+            if len(value) == 40 and all(character in "0123456789abcdef" for character in value.lower())
+            else hashlib.sha1(value.encode("utf-8")).hexdigest()
+        )
+
+    def read_head_revision(self, record) -> RevisionRead:
+        self.calls.append("read_head_revision")
+        if self.head_read is not None:
+            return self.head_read
+        return RevisionRead(available=True, ok=True, output=self.commit + "\n")
+
+    def read_base_revision(self, task: dict, record) -> RevisionRead:
+        self.calls.append("read_base_revision")
+        if self.base_read is not None:
+            return self.base_read
+        return RevisionRead(available=True, ok=True, output=self.base_commit + "\n")
+
+    def read_base_ancestry(self, record, ancestor: str, descendant: str) -> AncestryRead:
+        self.calls.append("read_base_ancestry")
+        self.base_ancestry_questions.append((ancestor, descendant))
+        if self.ancestry_read is not None:
+            return self.ancestry_read
+        return AncestryRead(available=True, contains=ancestor not in self.rewritten_bases)
+
     def head_commit(self, record) -> str:
         self.calls.append("head_commit")
-        return self.commit
+        read = self.read_head_revision(record)
+        return read.output.strip() if read.ok else ""
+
+    def review_base_commit(self, task: dict, record) -> str:
+        self.calls.append("review_base_commit")
+        read = self.read_base_revision(task, record)
+        return read.output.strip() if read.ok else ""
+
+    def recorded_review_context(self, task: dict, record) -> tuple[str, str] | None:
+        self.calls.append("recorded_review_context")
+        return self.review_contexts.get((task["ref"], record.review_baseline))
 
     def is_instance_publish_recovery(
         self, task: dict, record, reviewed_commit: str, current_commit: str

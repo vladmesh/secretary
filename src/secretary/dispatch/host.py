@@ -6,6 +6,8 @@ import contextlib
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -23,8 +25,16 @@ from secretary.codex_provider_events import (
     CodexProviderEventIngress,
 )
 from secretary.config import validate_instance
+from secretary.dispatch.current_pair import (
+    AncestryRead,
+    RevisionRead,
+)
 from secretary.dispatch.head_vitality_episode import (
     VitalityVerdict as VitalityVerdict,
+)
+from secretary.dispatch.review_context import (
+    ReviewContextError,
+    require_review_context,
 )
 from secretary.dispatcher_gate import (
     GateResult,
@@ -255,6 +265,19 @@ from triggered_agents.runtime.prompt_document import (
 from triggered_agents.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
+
+# The one heading the generated verdict commands live under. `recorded_review_context` recovers a
+# lost round's identity from the commands below it, so the two must stay one constant.
+_VERDICT_COMMAND_HEADING = "Post exactly one review verdict through the secretary task protocol:"
+_EXACT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+def _command_option(tokens: list[str], name: str) -> str:
+    """The value an option carries in one already-split command line, or "" when it carries none."""
+    try:
+        return tokens[tokens.index(name) + 1]
+    except (ValueError, IndexError):
+        return ""
+
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
@@ -1755,16 +1778,149 @@ class CommandHostRuntime:
             return
         self.stop_head(record, "review", initiator)
 
-    def head_commit(self, record: DispatcherRecord) -> str:
-        """Commit the workspace checkout currently sits on, or "" when it cannot be read. Pinned
-        at review start and re-read at merge time so a verdict can be tied to a code state."""
+    def read_head_revision(self, record: DispatcherRecord) -> RevisionRead:
+        """What `rev-parse HEAD` says the checkout is on, reported rather than interpreted.
+
+        The typed read the current-pair resolver classifies. Nothing is normalized, defaulted or
+        turned into a sentinel here: a host with no workspace to read is unavailable, a `git` that
+        failed carries its own message, and whatever the command printed is handed back as it was
+        printed — including nothing at all. The distinction between "this is the commit" and "there
+        is no answer" has to survive the return, because collapsing them into a string is exactly
+        how an unreadable workspace once passed a drift check.
+        """
         if self.mode == "noop" or not record.workspace:
-            return ""
+            return RevisionRead(available=False, ok=False, detail="this host has no workspace checkout")
         try:
             completed = self._run(["git", "-C", record.workspace, "rev-parse", "HEAD"], "review head sha")
-        except HostError:
-            return ""
-        return completed.stdout.strip()
+        except HostError as exc:
+            return RevisionRead(available=True, ok=False, detail=scrub_host_output(str(exc)))
+        return RevisionRead(available=True, ok=True, output=completed.stdout)
+
+    def read_base_revision(self, task: dict[str, Any], record: DispatcherRecord) -> RevisionRead:
+        """What the base branch is now, refreshed from the remote first, reported the same way.
+
+        The base a round is opened over and the base an effect would land on are both read here.
+        The remote is refreshed before the read, because the base in question is the base as it is
+        now rather than whatever this worktree last happened to fetch, and a fetch that fails is a
+        failed read rather than a stale answer passed off as a current one.
+        """
+        if self.mode == "noop" or not record.workspace:
+            return RevisionRead(available=False, ok=False, detail="this host has no workspace checkout")
+        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+        try:
+            self._run(["git", "-C", record.workspace, "fetch", "origin", base], "review base fetch")
+            completed = self._run(
+                ["git", "-C", record.workspace, "rev-parse", f"origin/{base}"],
+                "review base sha",
+            )
+        except HostError as exc:
+            return RevisionRead(available=True, ok=False, detail=scrub_host_output(str(exc)))
+        return RevisionRead(available=True, ok=True, output=completed.stdout)
+
+    def head_commit(self, record: DispatcherRecord) -> str:
+        """Commit the workspace checkout currently sits on, or "" when it cannot be read.
+
+        The pre-verdict spelling of the read above, and the only place the empty answer is still
+        allowed: it feeds the review context, whose constructor requires an exact 40-hex revision
+        and refuses "" by raising, so the emptiness is rejected at the point it is produced instead
+        of travelling on as a comparison that quietly holds. Nothing that acts on a verdict uses
+        this; the executor resolves a typed pair.
+        """
+        read = self.read_head_revision(record)
+        return read.output.strip() if read.ok else ""
+
+    def review_base_commit(self, task: dict[str, Any], record: DispatcherRecord) -> str:
+        """Resolve the exact base a receiptless review round is opened over, or "" when it cannot be.
+
+        Only the explicitly non-attesting binding path asks for this: every attested round takes
+        its base from the gate receipt that executed over it. Same contract as `head_commit` above
+        — the empty answer is refused by the context that consumes it.
+        """
+        read = self.read_base_revision(task, record)
+        return read.output.strip() if read.ok else ""
+
+    def recorded_review_context(
+        self, task: dict[str, Any], record: DispatcherRecord
+    ) -> tuple[str, str] | None:
+        """The exact pair this dispatcher wrote into the round's own reviewer document.
+
+        Recovery evidence, for a record lost while a reviewer was already answering. It reads only
+        the generated verdict-command section this host writes itself: a reviewer's quoted prose,
+        including the previous round's blockers echoed back into the document, is text about a
+        command rather than the command this dispatcher issued. A document that is absent is not
+        evidence and answers ``None``; a document that is present but says something other than one
+        exact pair is a contradiction and refuses.
+        """
+        document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
+        try:
+            body = document.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        _before, found, commands = body.rpartition(_VERDICT_COMMAND_HEADING)
+        if not found:
+            raise ReviewContextError("the recorded reviewer document has no generated verdict commands")
+        contexts: dict[str, tuple[str, str]] = {}
+        for line in commands.splitlines():
+            try:
+                tokens = shlex.split(line)
+            except ValueError:
+                raise ReviewContextError("a recorded reviewer verdict command is unreadable") from None
+            if "verdict" not in tokens:
+                continue
+            if _command_option(tokens, "--ref") != task["ref"] or (
+                _command_option(tokens, "--role") != "reviewer"
+            ):
+                continue
+            kind = _command_option(tokens, "--kind")
+            candidate = _command_option(tokens, "--candidate-sha")
+            base = _command_option(tokens, "--base-sha")
+            if (
+                kind not in {"green", "red"}
+                or not _EXACT_SHA_RE.fullmatch(candidate)
+                or not _EXACT_SHA_RE.fullmatch(base)
+            ):
+                raise ReviewContextError("a recorded reviewer verdict command has no exact context")
+            if kind in contexts:
+                raise ReviewContextError("the recorded reviewer verdict commands are ambiguous")
+            contexts[kind] = (candidate, base)
+        if set(contexts) != {"green", "red"} or contexts["green"] != contexts["red"]:
+            raise ReviewContextError("the recorded reviewer verdict commands name no single context")
+        return contexts["green"]
+
+    def read_base_ancestry(
+        self, record: DispatcherRecord, ancestor: str, descendant: str
+    ) -> AncestryRead:
+        """Whether one commit is still reachable from another, decided or explicitly undecided.
+
+        A base branch that simply advanced keeps the reviewed base as an ancestor, and that is the
+        ordinary case a release must not refuse: other cards land while this one waits. A base that
+        was rewritten, reset or replaced does not, and then the delta the reviewer read no longer
+        exists in the history a merge would land on.
+
+        `merge-base --is-ancestor` answers exactly that with its exit status: zero is yes, one is
+        no, and anything else — a commit this workspace does not have, a repository that cannot be
+        opened, a `git` that could not run — is not an answer at all. The third case is reported as
+        one rather than folded into either, because a card is parked or merged on the difference.
+        """
+        if self.mode == "noop" or not record.workspace:
+            return AncestryRead(available=False, detail="this host has no workspace checkout")
+        if not (_is_exact_sha(ancestor) and _is_exact_sha(descendant)):
+            return AncestryRead(available=True, detail="ancestry is asked only about exact commits")
+        try:
+            completed = self.run_capture(
+                ["git", "-C", record.workspace, "merge-base", "--is-ancestor", ancestor, descendant],
+                "merge ancestry check",
+            )
+        except HostError as exc:
+            return AncestryRead(available=True, detail=scrub_host_output(str(exc)))
+        if completed.returncode == 0:
+            return AncestryRead(available=True, contains=True)
+        if completed.returncode == 1:
+            return AncestryRead(available=True, contains=False)
+        return AncestryRead(
+            available=True,
+            detail=scrub_host_output(_tail((completed.stderr or completed.stdout or "").strip())),
+        )
 
     def is_instance_publish_recovery(
         self,
@@ -3679,15 +3835,23 @@ class CommandHostRuntime:
         attempt_id: str,
         review_round: int,
         *,
-        record: DispatcherRecord | None = None,
+        record: DispatcherRecord,
     ) -> str:
+        """Render this round's reviewer document, over the round's own bound context.
+
+        The record is required and so is its context: the verdict commands below carry the exact
+        pair being judged, and a document that guessed either of them would ask for a verdict
+        about a code state nobody chose.
+        """
         # The round belongs in the key like it does in the worker report id: a card that goes red
         # twice in one attempt reuses attempt_id, and a round-less id replays the first verdict.
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
         body_file = _body_file_path("verdict", task["ref"], review_round)
-        current_sha = self.head_commit(record) if record else ""
+        current_sha = self.head_commit(record)
         attestation = _gate_attestation_for_prompt(record, current_sha)
+        context = require_review_context(record)
+        candidate_sha, base_sha = context.candidate_sha, context.base_sha
         sections = [
             f"# Review {task['ref']}",
             "",
@@ -3701,6 +3865,17 @@ class CommandHostRuntime:
             "A red verdict must list every blocker you have found in this round. Prefix each with a",
             "stable `BLOCKER-<short-slug>` id so a re-review can close it without rediscovering it.",
             "Do not hold blockers back for a later round and do not widen the scope on the next one.",
+            "",
+            "Submit every red blocker as a repeatable `--blocker-finding BLOCKER-id:kind` argument,",
+            "in the order you want them read. The kinds are: `correctness` for wrong observable",
+            "behaviour; `architecture` for a violated structural or ownership boundary;",
+            "`verification` for evidence that is absent, invalid or does not cover the claim;",
+            "`security` for confidentiality, integrity, authorization or access-control risk;",
+            "`data_loss` for state that can be destroyed or lost irrecoverably; `compatibility` for",
+            "a broken supported interface or promise; `operability` for unsafe deployment, recovery",
+            "or routine operation; `authorship` for commit attribution against the policy below;",
+            "and `other` only when no more specific kind applies. GREEN carries no findings; RED",
+            "carries at least one, with the same ids used in the prose evidence below.",
             "",
             "For every RED blocker, state the concrete reachable scenario, the violated acceptance",
             "criterion or operational invariant, material assumptions, whether this branch introduced",
@@ -3720,10 +3895,13 @@ class CommandHostRuntime:
             "real behaviour you verified and how. If no end-to-end check against the real backend",
             "was possible, write plainly that it was not done and which assumption stays unverified.",
             "",
-            "Post exactly one review verdict through the secretary task protocol:",
+            f"The candidate under review is `{candidate_sha}`, over base `{base_sha}`. Both are",
+            "part of the verdict, so post it with exactly these revisions:",
+            "",
+            _VERDICT_COMMAND_HEADING,
             *_body_file_instructions(body_file),
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --request-id {green_request} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --request-id {red_request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --candidate-sha {candidate_sha} --base-sha {base_sha} --request-id {green_request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --candidate-sha {candidate_sha} --base-sha {base_sha} --blocker-finding BLOCKER-short-slug:correctness --request-id {red_request} --body-file {body_file}",
             "",
         ]
         if attestation:
@@ -3749,7 +3927,7 @@ class CommandHostRuntime:
                 "gates: run appropriate focused or broad validation when the review needs that evidence.",
                 "",
             ]
-        if record and record.preferred_head:
+        if record.preferred_head:
             sections[4:4] = [
                 "## Head failover",
                 "",
@@ -3761,7 +3939,7 @@ class CommandHostRuntime:
                 "entitled to have, not an invitation to grade the head.",
                 "",
             ]
-        if record and record.previous_reviewed_sha:
+        if record.previous_reviewed_sha:
             sections[4:4] = [
                 "## Re-review packet",
                 "",

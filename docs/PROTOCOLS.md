@@ -1015,7 +1015,8 @@ through the board host, which records each occurrence as a typed protocol event 
 `events.ndjson`: `record_type` is `board.protocol_event`, the lifecycle edge is the object
 `transition: {source, target}`, and the reason is carried as text rather than as a digest. Released
 generic `moved` and `claimed` rows stay readable exactly as they were written, and every other operation
-(`report`, `verdict`, `decide`, `routing`, comments, create/edit/archive) keeps its generic record. A
+(`routing`, comments, create/edit/archive) keeps its generic record. The control-marker operations
+`report`, `verdict` and `decide` use their typed Card occurrences as described below. A
 reader that cares about card transitions therefore has to handle both shapes explicitly; `record_type` is
 what tells them apart. A request id written before the migration also keeps the operation it named: a
 retry of a released generic `move` or `claim` id replays that record and finishes its released cleanup,
@@ -1089,6 +1090,158 @@ given one. An observer moving a card out of Blocked must give a non-empty reason
 steward carries moving one into it; the reason is a comment on the card and is carried by the card's
 transition event, so how a Blocked card was disposed of stays answerable.
 
+### Structured review verdicts
+
+Every newly accepted `task verdict` is one typed `card.verdict` occurrence. Its existing marker, free-form
+`body`, `body_sha256`, `description_sha256`, `specification_revision` and rendered `[review:green]` or
+`[review:red]` comment are unchanged. Four additive data fields form the machine-readable header:
+
+```json
+{
+  "verdict": "red",
+  "candidate_sha": "<exact lowercase 40-hex commit>",
+  "base_sha": "<exact lowercase 40-hex commit>",
+  "blocker_findings": [
+    {"finding_id": "BLOCKER-stable-slug", "kind": "correctness"}
+  ]
+}
+```
+
+Finding order is significant. Each `finding_id` is unique within the verdict and matches
+`BLOCKER-<lowercase-short-slug>`. A green verdict carries no findings; a red verdict carries at least one.
+The closed finding-kind vocabulary is:
+
+- `correctness`: observable behaviour is wrong.
+- `architecture`: a required structural or ownership boundary is violated.
+- `verification`: required evidence is absent, invalid or does not cover the claim.
+- `security`: confidentiality, integrity, authorization or access control is at risk.
+- `data_loss`: state can be destroyed or lost irrecoverably.
+- `compatibility`: a supported interface or compatibility promise is broken.
+- `operability`: deployment, recovery, monitoring or routine operation is unsafe.
+- `authorship`: commit attribution violates the authorship policy.
+- `other`: no more specific member applies.
+
+The dispatcher writes the exact candidate and base into the generated review document, and the reviewer's
+two generated verdict commands carry them. The reviewer repeats `--blocker-finding BLOCKER-id:kind` for red
+findings and still owes the prose evidence for each of them. Request replay compares the entire event,
+including the verdict, both revisions and the ordered findings, so a request id cannot change any of them.
+
+The canonical projection of a `card.verdict` is `structured` only when the whole header validates, is in its
+normalized lowercase spelling, and agrees with the marker and status the verdict was published as. An event
+with no header — including every historical verdict — or with a malformed one projects as `unstructured`.
+The projection retains the original event and body unchanged; it does not migrate, discard or repair
+history. Generic event consumers and released marker comments therefore stay readable, and normal
+board/audit export exposes all four fields without parsing prose.
+
+### The review round context
+
+The candidate/base identity of a review round is owned by one typed, immutable `ReviewRoundContext` on the
+dispatcher record. It holds the exact pair given to the current reviewer, plus the attempt and review
+baseline that name the round, and it is the single place that identity lives: reviewer prompt generation,
+reviewer launch, launch-intent adoption, respawn, verdict selection, Assessment parking, the observer
+release and the no-observer release all read it, and no path compares an accepted verdict against a gate
+receipt to rediscover what that verdict was about.
+
+#### The three persisted states
+
+The persisted field is decoded totally: every value the state repository's JSON writer can produce and its
+reader can hand back — `null`, booleans, integers, floats including the non-finite ones that encoder emits,
+strings, arrays and objects — lands in exactly one of three answers, and none of them escapes as an
+exception or is coerced into shape.
+
+- **Absence** (`null`, or a record written before the field existed) is a round nobody has opened yet. It is
+  the only state the recovery precedence below may fill.
+- **A valid context** requires the exact object: precisely the five fields `candidate_sha`, `base_sha`,
+  `attempt_id`, `review_baseline` and `source`, no others; both revisions exact lowercase 40-hex; a
+  non-empty attempt; a known source; and a review baseline that is a JSON integer — not a boolean, not a
+  real number, finite, and within the persisted range.
+- **Damage** is everything else, and it is a stronger fact than absence: a round whose identity was *lost*
+  may already have been answered by a reviewer, so a pair recovered for it now would be an identity invented
+  to fit an existing answer. Damage is preserved as `DamagedReviewContext` with the specific refusal reason
+  and the original payload, so saving the record writes the damaged bytes back rather than laundering them
+  into an absence the next tick would happily rebind over. Only the end of a round clears it.
+
+Nothing is read generously. A boolean is not the integer Python also says it is, `1.5` is not round one,
+`Infinity` is not a baseline, an oversized integer is not a comment count, an uppercase revision is not the
+normalized one the writer produces, and an unknown field is a record written by something this dispatcher
+does not understand. Each is refused by name, because a persisted record that means something other than
+what it says is how a round acquires an identity nobody chose.
+
+#### Before a verdict: recovery
+
+While a round is being established there is no answer yet for a recovered pair to be fitted to, so the pair
+may be recovered. It is bound once per round, and the precedence is fixed:
+
+1. the context already bound for this round, which no later evidence replaces;
+2. the durable launch this dispatcher recorded for this round — the generated verdict commands in the
+   round's own reviewer document — when the dispatcher has independently established that the launch was
+   recorded. Quoted prose, including a previous round's blockers echoed into the document, is not recovery
+   evidence;
+3. the applicable initial exact-SHA gate receipt, at the one boundary that owns it;
+4. the pinned checkout with a freshly resolved remote base, and only for an explicitly non-attesting gate
+   (`ci:none`, or a noop host);
+5. otherwise nothing is bound, and the card is moved to Blocked naming the contradiction. That includes
+   launch-intent adoption, which routes a context it cannot establish to the same visible outcome rather
+   than to a tick that repeats a generic failure.
+
+Damage is refused at every rung: nothing binds over it, including a respawn that would otherwise re-confirm
+the round from the same document.
+
+#### After a verdict: validation
+
+Once a verdict stands on the round, identity is validated and never established. One authority
+(`validate_post_verdict_identity`) is the only door between a standing verdict and everything that acts on
+one, and it reads all three durable pieces of evidence the round left behind:
+
+1. the **persisted context**, which is required, and required to name this attempt and this review round;
+2. the **accepted structured verdict**, whose header states the exact candidate and base it judged;
+3. the **reviewer document** this dispatcher recorded for the round, when it survives.
+
+Any source may disqualify the identity; none may supply one. The comparison is always the whole pair — a
+candidate that matches while the base does not is still a different question — and later mechanical receipts
+are not consulted at all, because an assessment or release receipt is evidence about its own stage over a
+base that may legitimately have moved since the round was opened. The authority either issues one
+`ValidatedReviewIdentity` or refuses with the specific contradiction; that value is the only thing the rest
+of the lifecycle accepts, so a weaker raw or optional context cannot reach a gate or a merge.
+
+Selecting *which* occurrence answers the round is a separate, identity-free step: the verdict occurrence
+whose rendered marker comment stands on the card after this round's baseline. A verdict whose header names
+another pair, or that carries no readable header, is still the verdict standing on this round — it is handed
+to the authority and refused by name, rather than filtered out into a card that waits forever on an answer
+it already has.
+
+Every verdict-driven path takes the validated identity as a required value: the green park, the red park,
+the Assessment recovery of a record lost while parked, the observer release, the no-observer release, the
+mechanical readiness and drift checks, and the merge itself. Missing, damaged, foreign or
+candidate/base-conflicting identity stops the card before the gate and before the merge, on Blocked evidence
+that says which of those it was, rather than as a generic dispatcher exception that repeats every tick.
+
+#### Round boundaries and mechanical evidence
+
+A round ends by clearing the context together with the baseline that says where its verdict is read from:
+the worker report that opens the next round, the red transition that hands the checkout back, the stale-done
+bounce and the infrastructure retry all move both in one step. A new round can therefore bind a different
+candidate and a different base without inheriting either half, and a context that names a round the record
+has left is a contradiction that fails closed rather than being reused. Ending the reviewer's pane — a
+verdict, a respawn, a park — forgets where that head was and nothing else: the context outlives it, which is
+what lets a parked verdict still be checked against the candidate it judged.
+
+Mechanical gate receipts are unchanged and remain dispatcher-owned exact-SHA evidence for their own stages.
+The initial receipt validates a newly bound context once; the assessment and release receipts govern
+mechanical progression only, may overwrite their predecessor and may legitimately name a base that advanced
+after this round was opened — advanced, and so still descending from the base the round was judged over,
+which is what the executor's own receipt check below requires of them. Neither the round context, nor the validated identity, nor the verdict header,
+nor a worker-local broad receipt is ever a substitute for a valid executed dispatcher-owned exact-SHA
+broad-gate receipt: an explicit `none`/`noop` gate, or a missing receipt, attests nothing however exactly
+the round is identified.
+
+Two consequences are deliberate. A verdict standing on a round whose identity is missing, damaged, from
+another round or contradicted by a durable source blocks the card instead of being merged — the dispatcher
+can neither name the code that verdict judged nor prove the checkout still holds it — and so does an
+observer release or a no-observer merge over the same states, on Blocked evidence that says which of them it
+is. And a review round recovered without its durable document in an attesting project blocks as well, rather
+than opening a round over a base no receipt covers.
+
 The `reported` events are the authoritative copy and keep the classification of every block, so counting how
 often one head blocks is a question for the audit. The retired `triggered_agents pipeline` CLI is no longer a
 write path; the vocabulary has one definition, in `secretary.tasks`. Its `--kind done` is unchanged.
@@ -1132,6 +1285,162 @@ The audit trail is always written to the installation's data directory: `--data-
 instance file, not the working directory, so a call from another project's workspace does not leave a data
 directory there. If the data directory cannot be resolved, the command fails with a usage error rather than
 writing next to the process.
+
+### The replayable verdict effect
+
+A substantive verdict earns the card exactly one durable effect: it is parked in Assessment for an observer
+to answer, or its branch is merged. Both are irreversible from the outside, and one executor
+(`secretary.dispatch.verdict_effect.run_verdict_effect`) is the only production owner of either. Every entry
+reaches an effect through it: the green park, the red park, the no-observer release a green verdict earns on
+its own tick, the release an observer decided on a parked card, the recovery of a crash before the board
+move, the recovery of a move whose checkpoint was lost, and the recovery of a record rebuilt while a card was
+parked. There is no direct route from any of them to the board move or to the merge; an architecture test
+holds the calls themselves to that one module, and the effects take a value only its precondition chain can
+issue.
+
+#### Intent versus evidence
+
+The executor's only input is a durable `VerdictEffectIntent`: which effect this card is owed, the round and
+baseline identity that make replaying it idempotent, the reason the move carries, the observer decision it is
+performing, and one progress fact. It records nothing else, and in particular it does not claim that the
+round's identity still holds, that the checkout is still on the reviewed candidate, that the base has not
+moved, that a gate was executed, that a receipt is valid or that the merge is still ready. A crash may sit
+between the intent and the effect, and none of those survive one — a `ValidatedReviewIdentity` lives in the
+memory of the tick that obtained it, and a receipt on the record is evidence about the tick that persisted
+it. Which effect the intent names is decided once, when it is opened, because that answer comes from a sprint
+that may since have closed or become unreadable; everything else is re-established.
+
+The one progress fact is `merge_published`, written between the merge publication and the Done move it still
+owes. The merge is the only step of a verdict effect a replay cannot simply repeat, so a replay that finds it
+finishes that bookkeeping and never publishes a second time. Board moves need no such flag: they are keyed on
+the baseline the intent was opened against, so the tick that already moved the card and the tick recovering
+from a crash before that move issue the same request and it moves once.
+
+#### The replay order
+
+On every invocation, immediately before the requested effect, the executor:
+
+1. selects the verdict standing on this round — a typed occurrence, not a marker read out of prose;
+2. obtains the sealed `ValidatedReviewIdentity` from the one post-verdict authority;
+3. resolves the current pair — the checkout as it is now and the base branch as it is now — through the one
+   typed resolver described below, which either answers with an exact pair or with a named failure;
+4. refuses a candidate that has drifted off the reviewed one, and a base branch whose history no longer
+   contains the base this round was judged over;
+5. executes the gate this stage requires;
+6. accepts and persists a fresh dispatcher-owned exact-SHA receipt, and refuses one that names a different
+   candidate or a base the reviewed base does not reach;
+7. and only then moves the card to Assessment, or merges it, as the intent permits.
+
+A prior receipt, an identity value or a worker-local broad receipt is never carried across the intent
+boundary as proof of any of these. Steps 3 to 6 run again on a replay exactly as they ran on the first
+execution: recovery finishes the effect the intent opened, never a smaller set of the preconditions.
+
+Steps 1 to 4 are unconditional, for every effect of every kind. Stage policy is consulted only after them,
+and it can excuse step 5 and step 6 alone: an effect whose stage requires no broad gate still resolves the
+current checkout and the current base and still refuses a drifted pair before it moves anything. A verdict
+that no longer describes the code in the workspace is not a verdict any effect may act on, whether that
+effect would mint a receipt or not.
+
+#### The current pair
+
+The pair a verdict was given over is fixed; the pair an effect would act on is not, and resolving the second
+one is a separate typed step with a single owner (`secretary.dispatch.current_pair.resolve_current_pair`). It
+runs on every executor invocation, after the identity is sealed and before stage policy is consulted, and its
+result is one of exactly two kinds of value.
+
+A **resolved current pair** is a success. It carries the exact normalized lowercase 40-hex candidate and base
+as they are now, plus the ancestry facts the drift and readiness checks need:
+
+- whether the resolved candidate is the reviewed candidate;
+- whether a differing checkout is the supported instance-publish recovery, in which case the candidate is
+  still this round's;
+- how the base branch now stands to the base this round was judged over: `identical`, `advanced` — the
+  reviewed base is still reachable from it, which is the ordinary case while other cards land — or
+  `rewritten`, which it is not.
+
+Only a resolved pair may construct or enter the executor's `EffectPreconditions`, and only the resolver can
+issue one. That is a type boundary rather than a convention: "the pair was read and it is exactly this" and
+"the pair could not be read" cannot be spelled as the same value, so no board move, stage gate or merge can
+be reached by a comparison that held by default.
+
+An **unresolved current pair** is every other outcome, and each is named rather than collapsed into a
+sentinel:
+
+- `unavailable`: this host cannot address the workspace the pair would be read in;
+- `failed`: the command that reads it failed;
+- `empty`: the command produced no output;
+- `malformed`: the output is not an exact commit id;
+- `ambiguous`: the output names more than one revision;
+- `ancestry`: the base branch moved and whether it still contains the reviewed base could not be decided.
+
+The three reads behind those outcomes are host operations that report rather than interpret: the checkout's
+own revision, the base branch after the remote is refreshed, and — only when the base actually moved — the
+ancestry question, answered by `merge-base --is-ancestor` where exit 0 is yes, exit 1 is no, and any other
+status is no answer at all. Empty, failed and undecidable reads are never turned into empty strings, and an
+undecided ancestry is never read as an intact one.
+
+Every unresolved outcome fails closed: the card is moved to Blocked with the specific outcome as its durable
+evidence, no board move is issued, no stage gate is executed, no receipt is persisted and nothing is merged.
+Blocked rather than a rework bounce, because a candidate nobody could read is not evidence that a worker did
+anything wrong; and blocked rather than a silent retry, because each of these is a condition somebody has to
+change. This holds identically on first execution and on every crash replay. The one deliberate exception is
+an intent whose merge is already published: that effect's irreversible half has happened, re-resolving could
+only refuse something that cannot be taken back, and what is left is idempotent bookkeeping that merges
+nothing.
+
+The comparison against the sealed verdict pair is made once, by the executor, on the resolved value: a
+candidate that is neither the reviewed one nor a publish recovery, and a base relation of `rewritten`, are
+refused before any board move, gate or merge. A base that merely advanced is the documented supported route
+and does not weaken the exact candidate check — the candidate must still be exactly the reviewed one.
+
+The pre-verdict binding path keeps its own string-shaped reads of the checkout and the base, and it is safe
+for the reason the executor's were not: the value goes straight into `ReviewRoundContext`, whose constructor
+requires an exact lowercase 40-hex revision, so an unreadable answer is refused where it is produced instead
+of travelling on as a comparison that quietly holds.
+
+#### Stage gate policy
+
+Which stage a given effect must execute is stated in one place (`required_gate_stage`) and is read from the
+durable intent and the validated verdict, so it answers the same thing on the first execution and on every
+replay:
+
+- a merge always executes the **release** stage, whichever entry decided it;
+- parking a **green** verdict executes the **assessment** stage, and its receipt is the fresh evidence the
+  observer reads beside the report and the verdict;
+- parking a **red** verdict requires **no broad gate**. It merges nothing and lands the card in front of a
+  person whose next move is rework, reslice, or a release that executes the release stage itself.
+
+"No broad gate" is a statement about the gate and its receipt, not about the preconditions. A red park —
+on its first execution, on a replay after a crash before the board move, and on a recovery whose checkpoint
+was lost — resolves the checkout and the base and refuses a moved candidate or a rewritten base exactly as a
+green park does; it then parks without executing a gate and mints no receipt. A red park whose candidate
+drifted hands the round back to the worker in In progress and never reaches Assessment.
+
+Where the project's gate mode is explicitly non-attesting — `ci:none`, or a noop host — the stage still runs
+its documented route and mints no receipt, and nothing calls that route attested. Where a gate mode promises
+execution, a green answer without a valid exact-SHA receipt cannot park and cannot merge: none, noop, missing
+and invalid all fail closed, and so does a receipt that names another candidate or a base the round never
+had.
+
+#### Crash recovery and failure outcomes
+
+An identity that is by then absent, null, damaged, foreign, or in conflict with the verdict header or the
+recorded reviewer document blocks the card with that specific reason and performs no Assessment move and no
+merge — green parks, red parks and both releases alike. So does every unresolved current pair, a gate that
+could not produce the receipt its stage requires, and a merge the host refuses. A checkout that moved and a
+rewritten base are resolved successfully and refused by the comparison, which is why they keep the
+worker-facing rework disposition described below rather than blocking from Validate.
+
+A non-green mechanical answer keeps the disposition its side of the seam already had. On a card still in
+Validate a red gate or a drifted checkout hands the round back to the worker in In progress; on a card
+standing in Assessment the same answers block it, naming the release they refused. A pending rollup waits and
+is escalated on the existing stall clock; an unreachable gate backend is retried on the existing transport
+budget and only blocks once that budget is spent, because a backend that could not be reached says nothing
+about the checkout. Infrastructure failures take their existing rerun path.
+
+Adopting a card an operator or a lost record left standing in Assessment is not a verdict effect: it records
+the board's own fact, moves nothing and merges nothing, and the release decision on such a card goes through
+the executor like any other.
 
 ### The no-observer ceiling
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from secretary.dispatch.review_context import ReviewContextError, bind_review_context
 from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
@@ -503,13 +504,16 @@ def _pane_work_state(host: Any, handle: str) -> str:
 
 
 def end_review_pane(host: Any, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:
-    """Close the reviewer's pane and forget it. Used wherever the reviewer's lifecycle ends on its own
-    — a red verdict, a respawn after a silent reviewer — so the next bring-up cannot mistake a stale
-    handle for a live pane, and so the worker's workspace survives untouched.
+    """Close the reviewer's pane and forget where it was. Used wherever the reviewer's lifecycle ends
+    on its own — a red verdict, a respawn after a silent reviewer — so the next bring-up cannot
+    mistake a stale handle for a live pane, and so the worker's workspace survives untouched.
 
-    `initiator` is who is ending it and every caller names one. The pane pointers are dropped
-    afterwards; the run itself stays on the record, because the initiator it carries is what makes
-    the stop readable after the head is gone.
+    Only the pane address is dropped. The round's candidate/base context is not this head's
+    property: a respawn answers the same question, and a park has to keep it after the pane it was
+    asked in is gone.
+
+    `initiator` is who is ending it and every caller names one. The run itself stays on the record,
+    because the initiator it carries is what makes the stop readable after the head is gone.
 
     A stop the host will not confirm raises, and the record keeps pointing at that reviewer: every
     caller opens something in the same checkout right after.
@@ -518,7 +522,6 @@ def end_review_pane(host: Any, record: DispatcherRecord, initiator: str = STOPPE
     record.review_handle = ""
     record.review_leaf = ""
     record.review_pid_file = ""
-    record.review_commit = ""
 
 
 def recover_review_launch(
@@ -556,6 +559,22 @@ def recover_review_launch(
             "reason": "review heartbeat names a live process with a mismatching launch identity",
         }
     if status.get("live"):
+        try:
+            # A live reviewer is answering one exact pair, and a record rebuilt underneath it has
+            # to recover which: the verdict it is about to write is only consumable against the
+            # round it was actually given. A surviving context is re-confirmed against the same
+            # document rather than trusted on its own.
+            bind_review_context(runtime.host, task, record, recorded_launch=True)
+        except ReviewContextError as exc:
+            return runtime.block_review_context(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="review",
+                reason=scrub_host_output(str(exc)),
+            )
         record.state = "reviewing"
         # A reviewer is on the checkout: whatever stuck launches came before belong to an episode
         # that is over, so the abort ceiling starts fresh for the next one (issue:aa9a8ae4), and so
@@ -850,6 +869,22 @@ def start_review(
 ) -> dict[str, Any]:
     ref = task["ref"]
     try:
+        # Nothing about a reviewer is worth starting before the round it answers is identified:
+        # the document it is handed names the exact pair, and so will its verdict. The gate
+        # normally bound it already; a respawn re-confirms that binding, and a bring-up whose
+        # record was rebuilt recovers it from the launch this dispatcher recorded for the round.
+        context = bind_review_context(
+            runtime.host,
+            task,
+            record,
+            recorded_launch=True,
+            unattested=runtime.unattested_gate(task),
+        )
+    except ReviewContextError as exc:
+        return runtime.block_review_context(
+            task, record, records, payload, attempt_id, step="review", reason=scrub_host_output(str(exc))
+        )
+    try:
         readiness = runtime.head_readiness(record.review_head)
     except HostError as exc:
         if record.gate_state != "green":
@@ -1043,6 +1078,29 @@ def start_review(
             "reason": "host review failed",
             **failure.outcome_fields(blocked_reason),
         }
+    if launch.commit and launch.commit != context.candidate_sha:
+        # The checkout moved between binding this round and freezing the worker for it. The pane is
+        # already open, so this goes back as the same ambiguity every post-pane failure does: the
+        # intent is kept, and the next tick either adopts that head against the bound context or
+        # settles it. What it must not do is silently review a candidate nobody chose.
+        return _reviewer_launch_aborted(
+            runtime,
+            task,
+            records,
+            ref,
+            record,
+            attempt_id,
+            HeadLaunchAborted(
+                "the review launch checkout moved off this round's bound candidate",
+                handle=launch.handle,
+                leaf=launch.leaf,
+                workspace=record.workspace,
+                pid_file=str(launch.head_run.get("pid_file") or ""),
+                evidence=dict(launch.delivery_evidence),
+                head_run=dict(launch.head_run),
+            ),
+            payload=payload,
+        )
     # Persist reviewer pane, launch snapshot, and HeadRun together before record adoption.
     confirm_launch_intent(
         runtime,
@@ -1057,7 +1115,6 @@ def start_review(
     )
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf
-    record.review_commit = launch.commit
     if launch.delivery_evidence:
         # Successful and refused reviewer launches use the same durable, metadata-only receipt.
         # A later recovery therefore sees the actual transport version and submit count instead
