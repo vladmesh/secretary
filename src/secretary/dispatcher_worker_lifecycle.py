@@ -914,6 +914,10 @@ class WorkerContinuation:
             WorkerContinuationStage.RETAINED,
             # A rework decision on a parked card opens the transition the park was holding back.
             WorkerContinuationStage.ASSESSMENT_PARKED,
+            # A park whose board move never happened, refused on replay by the preconditions the
+            # verdict executor re-establishes before it moves anything. The card is still where the
+            # worker left it, so the round it opens is the one that supersedes the abandoned park.
+            WorkerContinuationStage.ASSESSMENT_PENDING,
         }:
             raise ValueError(f"cannot open a red transition from {self.stage}")
         self.stage = WorkerContinuationStage.RED_TRANSITION_PENDING

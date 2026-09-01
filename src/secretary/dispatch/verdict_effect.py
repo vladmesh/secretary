@@ -29,13 +29,21 @@ The ordered chain is:
    different candidate or a base that predates the round's;
 7. and only then move the card to Assessment, or merge it, as the intent permits.
 
-Steps 3 to 6 are the mechanical half, and which stage requires them is the one place stage policy
+Steps 1 to 4 are unconditional. Every effect, of every kind, on the first execution and on every
+replay, selects its standing verdict, seals its identity, resolves the checkout and base as they
+are at that instant and refuses a drifted pair — because a verdict that no longer describes the
+code is not a verdict any effect may act on, whatever the effect is.
+
+Steps 5 and 6 are the mechanical half, and which stage requires them is the one place stage policy
 lives (``required_gate_stage``). A merge always requires them, at the release stage. The Assessment
 park of a green verdict requires them at the assessment stage, which is where the fresh receipt the
 observer reads comes from. The Assessment park of a red verdict requires no broad gate: it lands a
 card in front of a person, merges nothing, and inventing a gate for it would spend a CI run to
 decide a question nobody asked. That is a stage policy, evaluated identically on the first
 execution and on every replay — not a recovery arm that finishes less than the tick before it did.
+It is a policy about the gate and its receipt alone: a stage that requires no broad gate is still
+answered after the current checkout and base have been read and found undrifted, never instead of
+reading them.
 
 Nothing here decides what a verdict meant, what effect it earned or which round it belongs to.
 Those answers come from the durable intent and from ``review_context``'s single authority; this
@@ -158,6 +166,10 @@ def required_gate_stage(intent: VerdictEffectIntent, identity: ValidatedReviewId
     * Parking a red verdict requires no broad gate. It merges nothing and lands the card in front
       of a person whose next move is rework, reslice or a release that runs the release stage
       itself. Running a broad gate for it would spend a check to answer a question nobody asked.
+
+    An empty answer excuses the gate and the receipt, and nothing else. The caller asks this only
+    after the current checkout and base have been resolved and the reviewed pair has been found
+    undrifted, so no stage can be spelled that skips its way past those.
     """
     if intent.merges:
         return "release"
@@ -347,19 +359,6 @@ def _establish_preconditions(
     )
     if not isinstance(identity, ValidatedReviewIdentity):
         return identity
-    stage = required_gate_stage(intent, identity)
-    if not stage:
-        # This stage requires no broad gate and lands nothing on the base branch. The identity is
-        # the whole precondition, and it has just been established.
-        return EffectPreconditions(
-            intent=intent,
-            identity=identity,
-            checkout_sha="",
-            base_sha="",
-            gate_stage="",
-            receipt=None,
-            seal=_EFFECT_AUTHORITY,
-        )
     checkout_sha = str(runtime.host.head_commit(record) or "")
     base_sha = str(runtime.host.review_base_commit(task, record) or "")
     drift = _drift(runtime, task, record, identity, checkout_sha, base_sha)
@@ -376,6 +375,21 @@ def _establish_preconditions(
             kind="drift",
             detail=drift,
             result=None,
+        )
+    stage = required_gate_stage(intent, identity)
+    if not stage:
+        # This stage requires no broad gate and lands nothing on the base branch, so the chain ends
+        # here — after the current checkout and base were resolved and the pair was found undrifted,
+        # never before them. What the policy makes optional is the gate and the receipt it mints,
+        # not the question of whether this verdict still describes the code the effect would move.
+        return EffectPreconditions(
+            intent=intent,
+            identity=identity,
+            checkout_sha=checkout_sha,
+            base_sha=base_sha,
+            gate_stage="",
+            receipt=None,
+            seal=_EFFECT_AUTHORITY,
         )
     try:
         result = runtime.host.gate_check(task, record)

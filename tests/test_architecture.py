@@ -170,6 +170,54 @@ class SourceLayoutTests(unittest.TestCase):
             ValidatedReviewIdentity, verdict_effect.EffectPreconditions, "two distinct seals"
         )
 
+    def test_the_current_pair_is_resolved_before_stage_policy_is_consulted(self) -> None:
+        """The order inside the chain, held statically where a comment could not hold it.
+
+        secretary-1529 shipped a boundary that asked `required_gate_stage` first and returned the
+        sealed preconditions for a stage that needs no broad gate before it had read the checkout
+        at all, so a red park moved a card over a candidate that had drifted away. The policy is
+        about the gate and its receipt; it may not be reached, and no precondition value may be
+        issued, until the current checkout and base have been resolved and the pair checked.
+        """
+        source = (ROOT / "src" / "secretary" / "dispatch" / "verdict_effect.py").read_text(
+            encoding="utf-8"
+        )
+        chain = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef) and node.name == "_establish_preconditions"
+        )
+        lines: dict[str, list[int]] = {}
+        for node in ast.walk(chain):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            name = (
+                function.attr
+                if isinstance(function, ast.Attribute)
+                else function.id
+                if isinstance(function, ast.Name)
+                else ""
+            )
+            if name in {"head_commit", "review_base_commit", "_drift", "required_gate_stage", "EffectPreconditions"}:
+                lines.setdefault(name, []).append(node.lineno)
+        for name in ("head_commit", "review_base_commit", "_drift", "required_gate_stage", "EffectPreconditions"):
+            self.assertIn(name, lines, f"{name} is no longer part of the chain")
+        self.assertLess(max(lines["head_commit"]), min(lines["_drift"]), "the checkout is read first")
+        self.assertLess(
+            max(lines["review_base_commit"]), min(lines["_drift"]), "the base is read first"
+        )
+        self.assertLess(
+            max(lines["_drift"]),
+            min(lines["required_gate_stage"]),
+            "stage policy is consulted only after the pair is checked",
+        )
+        self.assertLess(
+            max(lines["_drift"]),
+            min(lines["EffectPreconditions"]),
+            "no sealed precondition value is issued before the drift check",
+        )
+
     def test_old_environment_import_is_the_same_implementation(self) -> None:
         self.assertIs(_env.positive_int, env.positive_int)
         with mock.patch.dict(os.environ, {"COUNT": "7"}):

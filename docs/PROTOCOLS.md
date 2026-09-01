@@ -1334,6 +1334,12 @@ A prior receipt, an identity value or a worker-local broad receipt is never carr
 boundary as proof of any of these. Steps 3 to 6 run again on a replay exactly as they ran on the first
 execution: recovery finishes the effect the intent opened, never a smaller set of the preconditions.
 
+Steps 1 to 4 are unconditional, for every effect of every kind. Stage policy is consulted only after them,
+and it can excuse step 5 and step 6 alone: an effect whose stage requires no broad gate still resolves the
+current checkout and the current base and still refuses a drifted pair before it moves anything. A verdict
+that no longer describes the code in the workspace is not a verdict any effect may act on, whether that
+effect would mint a receipt or not.
+
 #### Stage gate policy
 
 Which stage a given effect must execute is stated in one place (`required_gate_stage`) and is read from the
@@ -1345,6 +1351,12 @@ replay:
   observer reads beside the report and the verdict;
 - parking a **red** verdict requires **no broad gate**. It merges nothing and lands the card in front of a
   person whose next move is rework, reslice, or a release that executes the release stage itself.
+
+"No broad gate" is a statement about the gate and its receipt, not about the preconditions. A red park —
+on its first execution, on a replay after a crash before the board move, and on a recovery whose checkpoint
+was lost — resolves the checkout and the base and refuses a moved candidate or a rewritten base exactly as a
+green park does; it then parks without executing a gate and mints no receipt. A red park whose candidate
+drifted hands the round back to the worker in In progress and never reaches Assessment.
 
 Where the project's gate mode is explicitly non-attesting — `ci:none`, or a noop host — the stage still runs
 its documented route and mints no receipt, and nothing calls that route attested. Where a gate mode promises

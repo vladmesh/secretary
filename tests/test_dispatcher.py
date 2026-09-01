@@ -8625,6 +8625,152 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             "the red park minted no receipt of its own and invented no claim",
         )
 
+    def _red_verdict_in_validate(self, request_id: str) -> dict:
+        """Drive one round to an accepted structured red verdict standing in Validate.
+
+        On a gate mode that promises execution and mints a receipt, so "the red park executed no
+        broad gate" is a claim about this card that could have been false.
+        """
+        self.start_dispatcher()
+        self._attesting()
+        self.host.commit = "c" * 40
+        self.host.gate_results = [GateResult("green", "initial", attestation=self._receipt("a"))]
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        original = dict(self._review_context())
+        self._write_verdict(kind="red", body="one blocker", request_id=request_id)
+        return original
+
+    # What the workspace and the base branch can do between a verdict and the effect it earned:
+    # nothing, the ordinary advance of a base other cards land on, a checkout that moved to another
+    # commit, and a base branch whose history was replaced. The first two leave the reviewed pair
+    # intact and the effect is owed; the last two do not, and no effect is.
+    _PAIR_MUTATIONS: ClassVar[tuple[str, ...]] = (
+        "advanced-base",
+        "moved-candidate",
+        "rewritten-base",
+    )
+
+    def _mutate_pair(self, name: str, reviewed: dict) -> str:
+        """Put the checkout or the base into one of those states, and answer with what it owes."""
+        if name == "advanced-base":
+            self.host.base_commit = "9" * 40
+            return ""
+        if name == "moved-candidate":
+            self.host.commit = "f" * 40
+            return "describes a different state of the code"
+        if name == "rewritten-base":
+            self.host.rewritten_bases = {reviewed["base_sha"]}
+            self.host.base_commit = "9" * 40
+            return "no longer descends from"
+        raise AssertionError(f"unknown pair mutation {name}")
+
+    def _assert_red_park_landed(self, parked: dict, moves: list[str]) -> None:
+        """The receiptless red park, performed exactly once and attesting nothing."""
+        self.assertEqual(parked["to"], "assessment")
+        self.assertEqual(parked["verdict"], "red")
+        self.assertEqual(moves, ["assessment"], "the card moved once")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "assessment")
+        self.assertEqual(self.host.gate_calls, [CARD_REF], "only the pre-review gate ever ran")
+        self.assertEqual(
+            self._parked_record()["gate_attestation"]["command_or_check_set_digest"],
+            "a" * 64,
+            "the red park minted no receipt of its own",
+        )
+
+    def _assert_red_park_refused(self, bounced: dict, moves: list[str], evidence: str) -> None:
+        """The pair drifted, so the round goes back to the worker and Assessment is never reached."""
+        self.assertEqual(bounced["action"], "review-freeze-red-rework")
+        self.assertNotIn("assessment", moves, "the card never reached Assessment")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+        self.assertIn(evidence, self.reader.show(CARD_REF)["comments"][-2]["body"])
+        self.assertEqual(self.host.gate_calls, [CARD_REF], "drift is decided before any gate")
+        self.assertEqual(
+            self._record_json().get("gate_attestation") or {},
+            {},
+            "a refused park mints no receipt, and the bounce clears the one the round held",
+        )
+
+    def test_a_red_park_resolves_the_current_pair_before_it_moves_anything(self) -> None:
+        """secretary-1529: the red park's stage requires no broad gate, and that excuses the gate
+        and its receipt — not the question of whether this verdict still describes the code. On the
+        first execution as much as on any replay, the executor reads the checkout and the base as
+        they are now and refuses a candidate that moved or a base that was rewritten, before it
+        parks anything in front of an observer. A base that merely advanced, and an untouched pair,
+        still park exactly once and still execute no broad gate."""
+        for mutation in (None, *self._PAIR_MUTATIONS):
+            with self.subTest(mutation=mutation or "intact"):
+                self.setUp()
+                reviewed = self._red_verdict_in_validate(f"red-pair-{mutation}")
+                evidence = "" if mutation is None else self._mutate_pair(mutation, reviewed)
+
+                answered, moves = self._moves_of(self.tick)
+
+                if not evidence:
+                    self._assert_red_park_landed(answered, moves)
+                    continue
+                self._assert_red_park_refused(answered, moves, evidence)
+
+    def test_a_red_park_replayed_after_a_crash_resolves_the_pair_it_finds(self) -> None:
+        """The same boundary on the replay side. The intent that survived the crash records that a
+        red park is owed and nothing about the code it was owed over, so the recovering tick reads
+        the checkout and the base itself. A pair that drifted while the dispatcher was down is
+        refused; an intact one, and a base that only advanced, complete the park once."""
+        for mutation in (None, *self._PAIR_MUTATIONS):
+            with self.subTest(mutation=mutation or "intact"):
+                self.setUp()
+                reviewed = self._red_verdict_in_validate(f"red-replay-{mutation}")
+                self._crash_before_the_park_move()
+                evidence = "" if mutation is None else self._mutate_pair(mutation, reviewed)
+
+                recovered, moves = self._moves_of(self.tick)
+
+                if not evidence:
+                    self._assert_red_park_landed(recovered, moves)
+                    continue
+                self._assert_red_park_refused(recovered, moves, evidence)
+
+    def test_a_red_park_whose_checkpoint_was_lost_never_parks_a_drifted_pair_again(self) -> None:
+        """The other crash window: the board move landed and its checkpoint did not, so recovery
+        comes through Assessment. The pair is resolved there too — a checkout that moved in that
+        window blocks the card rather than confirming a park over code nobody reviewed — and an
+        intact round confirms the park it already made without moving the card a second time."""
+        for mutation in (None, "moved-candidate"):
+            with self.subTest(mutation=mutation or "intact"):
+                self.setUp()
+                reviewed = self._red_verdict_in_validate(f"red-lost-checkpoint-{mutation}")
+                self._crash_after_the_park_move()
+                if mutation is not None:
+                    self._mutate_pair(mutation, reviewed)
+
+                recovered, moves = self._moves_of(self.tick)
+
+                if mutation is None:
+                    self.assertEqual(recovered["to"], "assessment")
+                    self.assertEqual(moves, ["assessment"], "the replay re-issued its one request")
+                    self.assertEqual(
+                        [
+                            event["kind"]
+                            for event in self.runtime.audit.events(CARD_REF)
+                            if event["kind"] == "card.assessed"
+                        ],
+                        ["card.assessed"],
+                        "keyed on the intent's baseline, so the board moved the card once",
+                    )
+                    self.assertEqual(
+                        self._parked_record()["worker_continuation"]["stage"],
+                        WorkerContinuationStage.ASSESSMENT_PARKED.value,
+                    )
+                    self.assertEqual(self.host.gate_calls, [CARD_REF], "still no broad gate")
+                    continue
+                self.assertEqual(recovered["status"], "blocked")
+                self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+                self.assertIn(
+                    "describes a different state of the code",
+                    self.reader.show(CARD_REF)["comments"][-1]["body"],
+                )
+                self.assertEqual(self.host.gate_calls, [CARD_REF], "drift is decided before any gate")
+
     def test_a_park_replayed_after_its_receipt_was_persisted_regates_before_it_moves(self) -> None:
         """A crash between the stage receipt and the intent. The receipt on the record is evidence
         about the tick that died, never permission for the next one: recovery executes the stage
