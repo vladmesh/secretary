@@ -2746,8 +2746,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_an_ambiguous_claude_observer_source_ends_at_the_unproven_ceiling(self) -> None:
         """A current Claude descriptor cannot fall back to a workspace-wide transcript scan."""
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
-            os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}),
         ):
             self.open_sprint()
             self.board.metadata[12]["sprint_ref"] = "sprint:1"
@@ -3461,7 +3462,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "preempt",
         )
 
-    def test_forward_reslice_and_malformed_history_do_not_stop_later_budget_events(self) -> None:
+    def test_forward_reslice_charges_and_malformed_history_does_not_stop_later_budget_events(self) -> None:
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.writer.move(
@@ -3474,10 +3475,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             sprint_override_reason="reslice",
             request_id="forward-reslice",
             terminal_taxonomy={
-                "version": 1,
+                "version": 2,
                 "disposition": "reslice",
                 "blocked_reason": None,
                 "source_evidence": None,
+                "budget_class": "blocked",
                 "provenance": "forward",
             },
         )
@@ -3504,8 +3506,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         actions = _reconcile_sprint_budget(self.runtime)
 
-        self.assertEqual([action["event_type"] for action in actions], ["red_review"])
-        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
+        self.assertEqual(
+            [action.get("event_type") or action.get("action") for action in actions],
+            ["blocked", "terminal-taxonomy-invalid", "red_review"],
+        )
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 2)
 
     def test_full_green_card_cycle_does_not_charge_the_sprint_budget(self) -> None:
         self.open_sprint()
@@ -5091,8 +5096,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
 class ClaudeObserverProviderContractTests(unittest.TestCase):
     def test_current_launch_retains_its_pre_pane_baseline_and_records_progress(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
-            os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}),
         ):
             root = Path(tmp)
             catalog = FakeCatalog()
@@ -5123,11 +5129,7 @@ class ClaudeObserverProviderContractTests(unittest.TestCase):
             self.assertEqual(run.spec.adapter, "claude")
             self.assertEqual(run.fanout_policy["provider_progress_source"], before)
 
-            transcript = (
-                Path(before["root"])
-                / claude_project_dir_name(workspace)
-                / "observer-session.jsonl"
-            )
+            transcript = Path(before["root"]) / claude_project_dir_name(workspace) / "observer-session.jsonl"
             transcript.parent.mkdir(parents=True)
             transcript.write_text(
                 '{"type":"assistant","sessionId":"claude-observer-session"}\n', encoding="utf-8"
@@ -5145,8 +5147,7 @@ class ClaudeObserverProviderContractTests(unittest.TestCase):
             self.assertEqual(bound["state"], "bound")
             self.assertEqual(bound["path"], str(transcript.resolve()))
             transcript.write_text(
-                '{"type":"assistant","sessionId":"claude-observer-session"}\n'
-                '{"type":"assistant"}\n',
+                '{"type":"assistant","sessionId":"claude-observer-session"}\n{"type":"assistant"}\n',
                 encoding="utf-8",
             )
 

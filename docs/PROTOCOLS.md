@@ -1195,15 +1195,21 @@ cause. Invalid forward values are rejected by that typed boundary. Missing taxon
 reason tokens read as explicit `legacy`/`other` evidence, without a rewrite, backfill or inference from
 request ids, prose, timestamps or live state.
 
-The same normalized taxonomy supplies each new dispatcher Blocked transition, its `attempt.outcome`
-obligation and sprint-budget class. The committed record's own disposition is read during recovery, so
-an assessment `reslice` that targets Blocked remains `reslice` rather than being recast as a blocked
-taxonomy disposition. Infrastructure is recorded as uncharged `infrastructure_blocked`; every other
-normalized block is charged as `blocked`. An event that predates the taxonomy keeps its pre-existing
-durable action-token budget class, while its taxonomy read remains explicit `legacy`/`other` evidence.
-These consumers are observational: a malformed or unavailable taxonomy/outcome/budget observation
-cannot gate, reorder, retry or undo the lifecycle effect, and one malformed historical record does not
-stop reconciliation of later budget events.
+The same normalizer accepts the actual terminal cause once and persists a forward record with the
+exact disposition, normalized reason, source evidence and budget class. That immutable record travels
+with the lifecycle effect, supplies its post-effect `attempt.outcome` obligation, and is the only
+forward input to budget reconciliation. The committed record's own disposition is read during recovery,
+so an assessment `reslice` that targets Blocked remains `reslice` rather than being recast as a blocked
+taxonomy disposition, while its retained `blocked` budget class still charges the Blocked transition.
+Only a genuine classified head bring-up infrastructure outcome is recorded as uncharged
+`infrastructure_blocked`; worker-result, gate, merge, adoption and durable-state mismatch causes retain
+their own charged class. Every other normalized block is charged as `blocked`. A committed older forward
+record remains authoritative and derives its compatible class; only an event with no taxonomy predates
+the boundary and keeps its durable action-token budget class, while its taxonomy read remains explicit
+`legacy`/`other` evidence. These consumers are observational: a malformed or unavailable
+taxonomy/outcome/budget observation cannot gate, reorder, retry or undo the lifecycle effect. A malformed
+record yields the named non-gating `terminal-taxonomy-invalid` budget diagnostic and does not stop later
+budget events.
 
 Its natural key is exactly `(card_ref, attempt_id, report_generation)`. `attempt` is the observed ordinal
 and is not part of the key. The Card subject supplies `card_ref`; `data` carries `version: 1`, non-empty

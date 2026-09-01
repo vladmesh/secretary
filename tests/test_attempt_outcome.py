@@ -149,10 +149,11 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(
             effect.data["terminal_taxonomy"],
             {
-                "version": 1,
+                "version": 2,
                 "disposition": "blocked",
                 "blocked_reason": "task_contract",
                 "source_evidence": "wrong_task_definition",
+                "budget_class": "blocked",
                 "provenance": "forward",
             },
         )

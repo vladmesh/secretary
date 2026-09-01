@@ -68,7 +68,7 @@ class TerminalTaxonomyTests(unittest.TestCase):
                 disposition="blocked",
             )
 
-    def test_forward_reslice_reads_its_committed_disposition_not_blocked_target(self) -> None:
+    def test_forward_reslice_keeps_its_disposition_and_charges_blocked(self) -> None:
         taxonomy = read_terminal_taxonomy(
             {
                 "terminal_taxonomy": normalize_terminal_taxonomy(disposition="reslice").to_record(),
@@ -76,7 +76,19 @@ class TerminalTaxonomyTests(unittest.TestCase):
             disposition=None,
         )
         self.assertEqual(taxonomy.disposition, "reslice")
-        self.assertIsNone(budget_event_type(taxonomy))
+        self.assertEqual(budget_event_type(taxonomy), "blocked")
+
+    def test_forward_record_persists_the_normalized_budget_class(self) -> None:
+        taxonomy = normalize_terminal_taxonomy(disposition="blocked", blocked_reason="infrastructure")
+        record = taxonomy.to_record()
+        self.assertEqual(record["budget_class"], "infrastructure_blocked")
+        self.assertEqual(
+            read_terminal_taxonomy({"terminal_taxonomy": record}, disposition="blocked"), taxonomy
+        )
+
+        record["budget_class"] = "blocked"
+        with self.assertRaisesRegex(TerminalTaxonomyValidationError, "budget class"):
+            read_terminal_taxonomy({"terminal_taxonomy": record}, disposition="blocked")
 
     def test_typed_event_boundary_rejects_malformed_forward_taxonomy(self) -> None:
         with self.assertRaisesRegex(ValueError, "terminal taxonomy"):
@@ -100,3 +112,35 @@ class TerminalTaxonomyTests(unittest.TestCase):
         )
         self.assertEqual(budget_event_type(infrastructure), "infrastructure_blocked")
         self.assertEqual(budget_event_type(task_contract), "blocked")
+
+    def test_corrected_forward_terminal_causes_remain_charged(self) -> None:
+        """Only classified head bring-up failures are uncharged infrastructure."""
+        causes = {
+            "worker-result": "implementation",
+            "gate-exhaustion": "gate",
+            "gate-rerun-unavailable": "gate",
+            "adopt-head": "other",
+            "merge": "implementation",
+            "active-mismatch": "other",
+        }
+        for path, reason in causes.items():
+            with self.subTest(path=path):
+                taxonomy = normalize_terminal_taxonomy(disposition="blocked", blocked_reason=reason)
+                self.assertEqual((taxonomy.blocked_reason, taxonomy.budget_class), (reason, "blocked"))
+
+    def test_older_forward_record_still_wins_over_legacy_action_accounting(self) -> None:
+        taxonomy = read_terminal_taxonomy(
+            {
+                "terminal_taxonomy": {
+                    "version": 1,
+                    "disposition": "blocked",
+                    "blocked_reason": "infrastructure",
+                    "source_evidence": "infrastructure",
+                    "provenance": "forward",
+                }
+            },
+            disposition="blocked",
+        )
+        self.assertEqual(
+            (taxonomy.provenance, budget_event_type(taxonomy)), ("forward", "infrastructure_blocked")
+        )

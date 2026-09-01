@@ -1213,7 +1213,9 @@ def _production_active_mismatch(
         request_id=_attempt_request_id(record.attempt_id, "active-mismatch-blocked", task["ref"]),
         terminal_state="blocked",
         disposition="blocked",
-        blocked_reason="infrastructure",
+        # A durable claim/record disagreement is source evidence in its own
+        # right, not an uncharged head bring-up infrastructure failure.
+        blocked_reason="other",
     )
     divergence = record_divergence(
         payload,
@@ -1386,9 +1388,18 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
             continue
         try:
             event_type = _budget_event_type(event)
-        except TerminalTaxonomyValidationError:
+        except TerminalTaxonomyValidationError as exc:
             # A corrupt observation is not a lifecycle concern and must not
             # prevent later durable events from reaching their budget seam.
+            outcomes.append(
+                {
+                    "status": "degraded",
+                    "step": "sprint-budget",
+                    "action": "terminal-taxonomy-invalid",
+                    "ref": reference,
+                    "reason": str(exc),
+                }
+            )
             continue
         if event_type is None:
             continue

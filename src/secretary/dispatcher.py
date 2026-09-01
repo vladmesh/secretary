@@ -1664,7 +1664,7 @@ class DispatcherRuntime:
                     ),
                     terminal_state="blocked",
                     disposition="blocked",
-                    blocked_reason="infrastructure",
+                    blocked_reason="implementation",
                 )
                 records.pop(ref, None)
                 return {
@@ -3916,7 +3916,9 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
-            blocked_reason="infrastructure",
+            # The failed gate is the terminal cause.  Its original runner
+            # outage explains the bounded reruns, not this Blocked effect.
+            blocked_reason="gate",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -3959,7 +3961,9 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
-            blocked_reason="infrastructure",
+            # A rerun that cannot be requested leaves a gate obligation
+            # unresolved; it is not a head bring-up infrastructure outcome.
+            blocked_reason="gate",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -4693,7 +4697,7 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
                 terminal_state="blocked",
                 disposition="blocked",
-                blocked_reason="infrastructure",
+                blocked_reason="other",
             )
         else:
             # A lost record that cannot be adopted has no durable round context.
@@ -4717,7 +4721,7 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
                 terminal_state="blocked",
                 disposition="blocked",
-                blocked_reason="infrastructure",
+                blocked_reason="other",
             )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -5484,7 +5488,7 @@ class DispatcherRuntime:
             verdict=record.worker_continuation.verdict_outcome
             if record.worker_continuation.verdict_outcome in {"green", "red", "blocked"}
             else "missing",
-            blocked_reason="infrastructure",
+            blocked_reason=_merge_terminal_reason(action),
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -6315,6 +6319,20 @@ def _retained_worker_busy_deferred(
             f"HeadRun remains owned and the pending delivery retries in {wait}s"
         ),
     }
+
+
+def _merge_terminal_reason(action: str) -> str:
+    """Classify the terminal cause a merge path actually reached.
+
+    A failed release/merge and a gate that cannot supply a usable result still
+    charge as their own terminal work.  Only a classified head bring-up is the
+    distinct uncharged infrastructure family.
+    """
+    if action == "red-review-ceiling":
+        return "review"
+    if "gate" in action:
+        return "gate"
+    return "implementation"
 
 
 def _retained_worker_recovery_window(
