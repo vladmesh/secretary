@@ -51,9 +51,9 @@ SOURCE_KINDS = {
     CODEX_ADAPTER: CODEX_SOURCE_KIND,
     CLAUDE_ADAPTER: CLAUDE_SOURCE_KIND,
 }
-# The Codex snapshot's own spelling of the dimensions it reports. Its input and output totals include
-# their cache and reasoning subcounts, respectively; ``_canonical_codex_totals`` removes those
-# contained counts so every exported bucket is non-overlapping.
+# The Codex snapshot's own spelling of the dimensions it reports. Its input total contains its cache
+# subcounts, which ``_canonical_codex_totals`` removes. Its output total is retained unchanged;
+# reasoning is a contained subset used for analysis, not another additive cost bucket.
 CODEX_TOKEN_FIELDS = {
     "input": "input_tokens",
     "cache_input": "cache_write_input_tokens",
@@ -61,8 +61,8 @@ CODEX_TOKEN_FIELDS = {
     "output": "output_tokens",
     "reasoning": "reasoning_output_tokens",
 }
-# The Claude usage object's own spelling of the dimensions it reports. Reasoning tokens are absent
-# from it, and stay unavailable rather than being folded into output.
+# The Claude usage object's own spelling of the additive dimensions it reports. Thinking tokens live
+# under ``output_tokens_details`` and are handled separately as a contained subset of output.
 CLAUDE_TOKEN_FIELDS = {
     "input": "input_tokens",
     "cache_input": "cache_creation_input_tokens",
@@ -237,9 +237,7 @@ def apply_phase_boundary(
         return replace(
             collection,
             outcome=AttemptUsageOutcome.ARITHMETIC_CONTRADICTION,
-            detail=(
-                "the provider session total fell below the authoritative boundary of an earlier phase"
-            ),
+            detail=("the provider session total fell below the authoritative boundary of an earlier phase"),
             tokens=TokenTotals(),
             session_totals=TokenTotals(),
             baseline=TokenTotals(),
@@ -425,15 +423,35 @@ def claude_usage(records: Iterable[Any]) -> SessionUsage:
     if not order:
         return SessionUsage(invalid=invalid)
     sums: dict[str, int | None] = dict.fromkeys(CLAUDE_TOKEN_FIELDS, None)
+    reasoning = 0
+    reasoning_available = True
+    seen = 0
     for key in order:
         usage = latest[key]
+        thinking, malformed = _claude_thinking_tokens(usage)
+        if malformed:
+            invalid += 1
+            continue
         for name, provider_field in CLAUDE_TOKEN_FIELDS.items():
             value = _count(usage, provider_field)
             if value is None:
                 continue
             sums[name] = value if sums[name] is None else (sums[name] or 0) + value
-    # Claude's session records expose no separate reasoning-token dimension.
-    return SessionUsage(totals=TokenTotals(**sums, reasoning=None), records=len(order), invalid=invalid)
+        seen += 1
+        if thinking is None:
+            reasoning_available = False
+        else:
+            reasoning += thinking
+    if not seen:
+        return SessionUsage(invalid=invalid)
+    return SessionUsage(
+        totals=TokenTotals(
+            **sums,
+            reasoning=reasoning if reasoning_available else None,
+        ),
+        records=seen,
+        invalid=invalid,
+    )
 
 
 def attempt_usage_data(
@@ -505,25 +523,24 @@ def _codex_snapshot(record: Any) -> tuple[dict[str, Any] | None, bool]:
 
 
 def _canonical_codex_totals(snapshot: Mapping[str, Any]) -> TokenTotals | None:
-    """Convert one Codex endpoint to the five non-overlapping protocol buckets.
+    """Convert one Codex endpoint to the canonical protocol dimensions.
 
     Codex defines both cache counts inside ``input_tokens`` and reasoning inside ``output_tokens``.
-    All five raw fields must be present to make the canonical account self-sufficient. Impossible
-    containment is a malformed provider snapshot rather than a negative or silently clamped bucket.
+    Cache counts are split out of input, while output stays inclusive and reasoning remains its
+    contained subset. All five raw fields and valid containment are required for a usable snapshot.
     """
     raw = {name: _count(snapshot, field) for name, field in CODEX_TOKEN_FIELDS.items()}
     if any(value is None for value in raw.values()):
         return None
     values = {name: int(value) for name, value in raw.items()}
     uncached = values["input"] - values["cache_input"] - values["cache_read_input"]
-    non_reasoning = values["output"] - values["reasoning"]
-    if uncached < 0 or non_reasoning < 0:
+    if uncached < 0 or values["reasoning"] > values["output"]:
         return None
     return TokenTotals(
         input=uncached,
         cache_input=values["cache_input"],
         cache_read_input=values["cache_read_input"],
-        output=non_reasoning,
+        output=values["output"],
         reasoning=values["reasoning"],
     )
 
@@ -544,7 +561,9 @@ def _sum_token_totals(parts: Sequence[TokenTotals]) -> TokenTotals:
     for name in TOKEN_DIMENSIONS:
         values = [getattr(part, name) for part in parts]
         totals[name] = (
-            None if any(value is None for value in values) else sum(value for value in values if value is not None)
+            None
+            if any(value is None for value in values)
+            else sum(value for value in values if value is not None)
         )
     return TokenTotals(**totals)
 
@@ -562,6 +581,26 @@ def _claude_usage_object(record: Any) -> tuple[dict[str, Any] | None, bool]:
     if not any(_count(usage, field) is not None for field in CLAUDE_TOKEN_FIELDS.values()):
         return None, True
     return dict(usage), False
+
+
+def _claude_thinking_tokens(usage: Mapping[str, Any]) -> tuple[int | None, bool]:
+    """One deduplicated message's reasoning subset and whether its detail is malformed.
+
+    An omitted detail makes aggregate reasoning unavailable without losing the known total output.
+    A present detail must be a non-negative integer contained in that message's output total.
+    """
+    details = usage.get("output_tokens_details")
+    if details is None:
+        return None, False
+    if not isinstance(details, Mapping):
+        return None, True
+    if "thinking_tokens" not in details:
+        return None, False
+    thinking = _count(details, "thinking_tokens")
+    output = _count(usage, "output_tokens")
+    if thinking is None or output is None or thinking > output:
+        return None, True
+    return thinking, False
 
 
 def _claude_message_key(record: Mapping[str, Any], index: int) -> str:

@@ -78,7 +78,7 @@ def codex_token_count(
     }
 
 
-def claude_assistant(message_id: str, **usage: int) -> dict:
+def claude_assistant(message_id: str, **usage: object) -> dict:
     """One Claude assistant record carrying that message's usage object."""
     return {
         "type": "assistant",
@@ -127,7 +127,7 @@ def write_jsonl(path: Path, records: list, *, tail: str = "") -> Path:
 
 
 class CodexAggregationTests(unittest.TestCase):
-    """Codex snapshot segments produce one monotone, non-overlapping session account."""
+    """Codex snapshot segments produce one monotone canonical session account."""
 
     def test_the_last_cumulative_snapshot_is_the_whole_session(self) -> None:
         session = codex_usage(
@@ -139,7 +139,7 @@ class CodexAggregationTests(unittest.TestCase):
 
         self.assertEqual(session.records, 2)
         self.assertEqual(session.totals.input, 450)
-        self.assertEqual(session.totals.output, 36)
+        self.assertEqual(session.totals.output, 61)
         self.assertEqual(session.totals.reasoning, 25)
 
     def test_a_repeated_snapshot_names_the_same_total_rather_than_adding_to_it(self) -> None:
@@ -169,11 +169,13 @@ class CodexAggregationTests(unittest.TestCase):
         self.assertEqual(session.totals.cache_input, 41772)
         self.assertEqual(session.totals.cache_read_input, 546048)
         self.assertEqual(session.totals.input, 6348)
-        self.assertEqual(session.totals.output, 4030)
+        self.assertEqual(session.totals.output, 6524)
         self.assertEqual(session.totals.reasoning, 2494)
 
     def test_a_cache_write_of_zero_is_the_provider_count_and_not_an_absence(self) -> None:
-        session = codex_usage([codex_token_count(input_tokens=900, cache_write_input_tokens=0, output_tokens=0)])
+        session = codex_usage(
+            [codex_token_count(input_tokens=900, cache_write_input_tokens=0, output_tokens=0)]
+        )
 
         self.assertEqual(session.totals.cache_input, 0)
 
@@ -195,7 +197,10 @@ class CodexAggregationTests(unittest.TestCase):
         self.assertTrue(session.totals.empty)
 
     def test_reset_segments_sum_to_a_monotone_canonical_session_total(self) -> None:
-        records = [json.loads(line) for line in (USAGE_FIXTURES / "codex-reset-session.jsonl").read_text().splitlines()]
+        records = [
+            json.loads(line)
+            for line in (USAGE_FIXTURES / "codex-reset-session.jsonl").read_text().splitlines()
+        ]
 
         session = codex_usage(records)
 
@@ -206,7 +211,7 @@ class CodexAggregationTests(unittest.TestCase):
                 input=789388,
                 cache_input=100000,
                 cache_read_input=8900000,
-                output=24873,
+                output=37873,
                 reasoning=13000,
             ),
         )
@@ -251,6 +256,7 @@ class ClaudeAggregationTests(unittest.TestCase):
                     cache_creation_input_tokens=1200,
                     cache_read_input_tokens=0,
                     output_tokens=90,
+                    output_tokens_details={"thinking_tokens": 30},
                 ),
                 claude_assistant(
                     "msg_2",
@@ -258,6 +264,7 @@ class ClaudeAggregationTests(unittest.TestCase):
                     cache_creation_input_tokens=300,
                     cache_read_input_tokens=1200,
                     output_tokens=45,
+                    output_tokens_details={"thinking_tokens": 0},
                 ),
             ]
         )
@@ -267,17 +274,70 @@ class ClaudeAggregationTests(unittest.TestCase):
         self.assertEqual(session.totals.cache_input, 1500)
         self.assertEqual(session.totals.cache_read_input, 1200)
         self.assertEqual(session.totals.output, 135)
-        self.assertIsNone(session.totals.reasoning, "Claude publishes no separate reasoning dimension")
+        self.assertEqual(session.totals.reasoning, 30)
 
-    def test_realistic_fixture_keeps_claude_input_exclusive_of_both_cache_buckets(self) -> None:
-        records = [json.loads(line) for line in (USAGE_FIXTURES / "claude-cache-session.jsonl").read_text().splitlines()]
+    def test_realistic_fixture_keeps_input_exclusive_and_output_inclusive(self) -> None:
+        records = [
+            json.loads(line)
+            for line in (USAGE_FIXTURES / "claude-cache-session.jsonl").read_text().splitlines()
+        ]
 
-        session = claude_usage(records)
+        session = claude_usage(records[:3])
 
         self.assertEqual(session.totals.input, 10258)
         self.assertEqual(session.totals.cache_input, 12174)
         self.assertEqual(session.totals.cache_read_input, 44196)
-        self.assertEqual(session.totals.output, 1412)
+        self.assertEqual(session.totals.output, 691)
+        self.assertEqual(session.totals.reasoning, 9)
+
+    def test_missing_thinking_detail_makes_reasoning_unavailable_without_losing_output(self) -> None:
+        records = [
+            json.loads(line)
+            for line in (USAGE_FIXTURES / "claude-cache-session.jsonl").read_text().splitlines()
+        ]
+
+        session = claude_usage(records[:4])
+
+        self.assertEqual(session.records, 3, "the duplicate message id contributes only its final record")
+        self.assertEqual(session.totals.output, 901)
+        self.assertIsNone(session.totals.reasoning)
+
+    def test_thinking_greater_than_output_is_malformed(self) -> None:
+        records = [
+            json.loads(line)
+            for line in (USAGE_FIXTURES / "claude-cache-session.jsonl").read_text().splitlines()
+        ]
+
+        session = claude_usage(records[4:])
+
+        self.assertEqual(session.records, 0)
+        self.assertEqual(session.invalid, 1)
+        self.assertTrue(session.totals.empty)
+
+    def test_output_has_one_inclusive_meaning_across_adapters(self) -> None:
+        codex = codex_usage(
+            [codex_token_count(input_tokens=10, output_tokens=90, reasoning_output_tokens=30)]
+        )
+        claude = claude_usage(
+            [
+                claude_assistant(
+                    "msg_1",
+                    input_tokens=10,
+                    output_tokens=90,
+                    output_tokens_details={"thinking_tokens": 30},
+                )
+            ]
+        )
+
+        for session in (codex, claude):
+            self.assertEqual(session.totals.output, 90)
+            self.assertEqual(session.totals.reasoning, 30)
+            additive_total = sum(
+                value
+                for name in ("input", "cache_input", "cache_read_input", "output")
+                if (value := getattr(session.totals, name)) is not None
+            )
+            self.assertEqual(additive_total, 100, "reasoning is not added to the cost total")
 
     def test_one_message_counts_once_however_many_times_it_was_written(self) -> None:
         """A streamed message is written repeatedly and a resumed session repeats earlier ones."""
@@ -534,6 +594,25 @@ class SourceCollectionTests(unittest.TestCase):
                 self.assertEqual(result.skipped_records, 1)
                 self.assertTrue(result.tokens.empty)
 
+    def test_claude_thinking_outside_total_output_is_a_typed_malformed_outcome(self) -> None:
+        path = write_jsonl(
+            self.root / "broken-thinking.jsonl",
+            [
+                claude_assistant(
+                    "msg_1",
+                    input_tokens=5,
+                    output_tokens=20,
+                    output_tokens_details={"thinking_tokens": 21},
+                )
+            ],
+        )
+
+        result = collect_usage(adapter="claude", source=bound_claude_source(path))
+
+        self.assertIs(result.outcome, AttemptUsageOutcome.RECORDS_MALFORMED)
+        self.assertEqual(result.skipped_records, 1)
+        self.assertTrue(result.tokens.empty)
+
     def test_a_phase_after_a_durable_boundary_is_read_as_the_interval_since_it(self) -> None:
         path = write_jsonl(self.root / "grown.jsonl", [codex_token_count(input_tokens=450, output_tokens=61)])
 
@@ -558,9 +637,7 @@ class SourceCollectionTests(unittest.TestCase):
         )
 
     def test_a_session_total_below_the_boundary_is_a_typed_contradiction(self) -> None:
-        path = write_jsonl(
-            self.root / "reset.jsonl", [codex_token_count(input_tokens=5, output_tokens=0)]
-        )
+        path = write_jsonl(self.root / "reset.jsonl", [codex_token_count(input_tokens=5, output_tokens=0)])
 
         result = collect_usage(
             adapter="codex", source=bound_codex_source(path), baseline=TokenTotals(input=450)
@@ -1011,6 +1088,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
             cache_creation_input_tokens=1400,
             cache_read_input_tokens=22000,
             output_tokens=512,
+            output_tokens_details={"thinking_tokens": 128},
         )
         session_id = self.bind_source("worker", journal, adapter="claude")
         self._report_done()
@@ -1028,7 +1106,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
                 "cache_input": 1400,
                 "cache_read_input": 22000,
                 "output": 512,
-                "reasoning": None,
+                "reasoning": 128,
             },
         )
 
@@ -1333,7 +1411,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
             "input": 789388,
             "cache_input": 100000,
             "cache_read_input": 8900000,
-            "output": 24873,
+            "output": 37873,
             "reasoning": 13000,
         }
         for dimension, total in expected.items():
