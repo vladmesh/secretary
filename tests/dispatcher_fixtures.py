@@ -19,6 +19,7 @@ from typing import Any
 from unittest import mock
 
 from secretary._fsutil import file_lock
+from secretary.dispatch.review_context import ReviewRoundContext
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, HostError
 from secretary.dispatcher_heartbeat import heartbeat_identity
 from secretary.dispatcher_state import new_attempt_id, now_rfc3339, record_attempt
@@ -237,14 +238,71 @@ class DispatcherRuntimeFixture:
         )
 
     def _review_red(self, request_id: str = "review-red", body: str = "fix the hermetic test") -> None:
-        self.writer.verdict(
-            role="reviewer",
-            actor="reviewer",
-            reference="secretary-510-pilot",
-            kind="red",
+        self._write_verdict(kind="red", body=body, request_id=request_id)
+
+    def _write_verdict(
+        self,
+        *,
+        kind: str,
+        body: str,
+        request_id: str,
+        role: str = "reviewer",
+        actor: str = "reviewer",
+        reference: str = CARD_REF,
+        candidate_sha: str = "",
+        base_sha: str = "",
+        blocker_findings: list[dict[str, str]] | None = None,
+    ) -> dict:
+        """Post a verdict the way the reviewer holding this round's document would.
+
+        The header is the round's bound context, because that is literally what the generated
+        verdict command carries. A test that wants a header naming something else passes it
+        explicitly; a replayed request id keeps the header its first call wrote, or the replay
+        would be refused for a reason the test is not about.
+        """
+        context = self._review_context(reference)
+        existing = self.writer.audit.event(request_id)
+        data = existing.get("data") if isinstance(existing, dict) else None
+        if isinstance(data, dict) and "candidate_sha" in data:
+            candidate_sha = candidate_sha or str(data["candidate_sha"])
+            base_sha = base_sha or str(data["base_sha"])
+            if blocker_findings is None:
+                blocker_findings = list(data.get("blocker_findings") or [])
+        if blocker_findings is None:
+            blocker_findings = (
+                [] if kind == "green" else [{"finding_id": "BLOCKER-test-finding", "kind": "correctness"}]
+            )
+        return self.writer.verdict(
+            role=role,
+            actor=actor,
+            reference=reference,
+            kind=kind,
             body=body,
+            candidate_sha=candidate_sha or context.get("candidate_sha") or self.host.commit,
+            base_sha=base_sha or context.get("base_sha") or self.host.base_commit,
+            blocker_findings=blocker_findings,
             request_id=request_id,
         )
+
+    def _bind_review_round(self, record, *, candidate: str = "", base: str = "") -> None:
+        """Give a hand-built green-gate record the identity the real initial gate would bind.
+
+        Production reaches a reviewer bring-up only through a green gate, which binds the round
+        there; a fixture that fakes the gate state has to fake its round too, or it is testing a
+        state the dispatcher never produces.
+        """
+        record.review_context = ReviewRoundContext(
+            candidate_sha=candidate or self.host.commit,
+            base_sha=base or self.host.base_commit,
+            attempt_id=record.attempt_id,
+            review_baseline=record.review_baseline,
+            source="initial-receipt",
+        )
+
+    def _review_context(self, reference: str = CARD_REF) -> dict:
+        """The candidate/base identity bound to the reference's current review round."""
+        record = self.runtime.production_state.load().get("records", {}).get(reference) or {}
+        return record.get("review_context") or {}
 
     def _worker_report_request_id(self, kind: str = "done", classification: str = "") -> str:
         """The report request-id the worker in the checkout is actually holding, read out of its

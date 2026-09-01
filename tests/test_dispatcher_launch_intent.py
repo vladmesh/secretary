@@ -396,12 +396,23 @@ class LaunchIntentTests(unittest.TestCase):
         )
 
     def verdict(self, kind: str, body: str, request_id: str) -> None:
+        self._write_verdict(kind=kind, body=body, request_id=request_id)
+
+    def _write_verdict(self, *, kind: str, body: str, request_id: str) -> None:
+        """Post a verdict carrying the header the round's own reviewer document would name."""
+        record = self.runtime.production_state.load()["records"][REF]
+        context = record["review_context"] or {}
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
             reference=REF,
             kind=kind,
             body=body,
+            candidate_sha=context["candidate_sha"],
+            base_sha=context["base_sha"],
+            blocker_findings=(
+                [] if kind == "green" else [{"finding_id": "BLOCKER-test-finding", "kind": "correctness"}]
+            ),
             request_id=request_id,
         )
 
@@ -1603,13 +1614,41 @@ class LaunchIntentTests(unittest.TestCase):
         assert record is not None
         self.assertEqual(record.state, "reviewing")
         # The merge gate refuses a verdict it cannot tie to a checkout, so the adopted reviewer
-        # gets the commit its launch was pinned at.
-        self.assertEqual(record.review_commit, self.host.commit)
+        # keeps the round its recorded launch opened, candidate and base together.
+        assert record.review_context is not None
+        self.assertEqual(record.review_context.candidate_sha, self.host.commit)
+        self.assertEqual(record.review_context.base_sha, self.host.base_commit)
+        self.assertIn(
+            "recorded_review_context",
+            self.host.calls,
+            "the adoption re-confirms the surviving context against the launch it recorded",
+        )
 
         # The verdict of the adopted reviewer lands on the card it was launched for.
         self.verdict("green", "looks good", "verdict-green")
         self.assertEqual(self.release_after_green_verdict()["to"], "done")
         self.assertEqual(self.host.reviews, [REF])
+
+    def test_an_adopted_reviewer_whose_round_contradicts_its_launch_blocks_on_the_board(self) -> None:
+        """secretary-1527: adoption is a production call path, so it owes a lifecycle answer.
+
+        The launch this dispatcher recorded names one candidate/base pair and the record names
+        another. Raising here would come back identically on every tick after it — the generic
+        `unexpected_error` loop this contour exists to prevent — so the contradiction goes to the
+        board with its reason and the card stops instead.
+        """
+        self.run_to_validate()
+        with self.state_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
+        self.host.review_contexts = {key: ("9" * 40, "8" * 40) for key in self.host.review_contexts}
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "review context unavailable")
+        self.assertEqual(self.reader.show(REF)["state"], "blocked")
+        self.assertIsNone(self.record())
+        self.assertIn("review round context is unavailable", self.reader.show(REF)["comments"][-1]["body"])
 
     def test_a_review_intent_whose_head_died_starts_exactly_one_replacement(self) -> None:
         self.run_to_validate()
@@ -3978,12 +4017,16 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         """Lose the tick right after a red verdict's rework head came up, round 2 reserved."""
         self.leave_a_post_launch_review_intent()
         self.tick()  # the reviewer of the lost tick is adopted
+        record = self.runtime.production_state.load()["records"][REF]
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
             reference=REF,
             kind="red",
             body="needs work",
+            candidate_sha=record["review_context"]["candidate_sha"],
+            base_sha=record["review_context"]["base_sha"],
+            blocker_findings=[{"finding_id": "BLOCKER-test-finding", "kind": "correctness"}],
             request_id="verdict-red",
         )
         self.tick()  # the verdict parks the card

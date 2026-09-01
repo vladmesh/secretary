@@ -6,6 +6,8 @@ import contextlib
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -25,6 +27,10 @@ from secretary.codex_provider_events import (
 from secretary.config import validate_instance
 from secretary.dispatch.head_vitality_episode import (
     VitalityVerdict as VitalityVerdict,
+)
+from secretary.dispatch.review_context import (
+    ReviewContextError,
+    require_review_context,
 )
 from secretary.dispatcher_gate import (
     GateResult,
@@ -255,6 +261,19 @@ from triggered_agents.runtime.prompt_document import (
 from triggered_agents.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
+
+# The one heading the generated verdict commands live under. `recorded_review_context` recovers a
+# lost round's identity from the commands below it, so the two must stay one constant.
+_VERDICT_COMMAND_HEADING = "Post exactly one review verdict through the secretary task protocol:"
+_EXACT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+def _command_option(tokens: list[str], name: str) -> str:
+    """The value an option carries in one already-split command line, or "" when it carries none."""
+    try:
+        return tokens[tokens.index(name) + 1]
+    except (ValueError, IndexError):
+        return ""
+
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
@@ -1765,6 +1784,75 @@ class CommandHostRuntime:
         except HostError:
             return ""
         return completed.stdout.strip()
+
+    def review_base_commit(self, task: dict[str, Any], record: DispatcherRecord) -> str:
+        """Resolve the exact base a receiptless review round is opened over, or "" when it cannot be.
+
+        Only the explicitly non-attesting path asks for this: every attested round takes its base
+        from the gate receipt that executed over it. The remote is refreshed first, because the
+        base a reviewer is told about has to be the base as it is now, not whatever this worktree
+        last happened to fetch.
+        """
+        if self.mode == "noop" or not record.workspace:
+            return ""
+        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+        try:
+            self._run(["git", "-C", record.workspace, "fetch", "origin", base], "review base fetch")
+            completed = self._run(
+                ["git", "-C", record.workspace, "rev-parse", f"origin/{base}"],
+                "review base sha",
+            )
+        except HostError:
+            return ""
+        return completed.stdout.strip()
+
+    def recorded_review_context(
+        self, task: dict[str, Any], record: DispatcherRecord
+    ) -> tuple[str, str] | None:
+        """The exact pair this dispatcher wrote into the round's own reviewer document.
+
+        Recovery evidence, for a record lost while a reviewer was already answering. It reads only
+        the generated verdict-command section this host writes itself: a reviewer's quoted prose,
+        including the previous round's blockers echoed back into the document, is text about a
+        command rather than the command this dispatcher issued. A document that is absent is not
+        evidence and answers ``None``; a document that is present but says something other than one
+        exact pair is a contradiction and refuses.
+        """
+        document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
+        try:
+            body = document.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        _before, found, commands = body.rpartition(_VERDICT_COMMAND_HEADING)
+        if not found:
+            raise ReviewContextError("the recorded reviewer document has no generated verdict commands")
+        contexts: dict[str, tuple[str, str]] = {}
+        for line in commands.splitlines():
+            try:
+                tokens = shlex.split(line)
+            except ValueError:
+                raise ReviewContextError("a recorded reviewer verdict command is unreadable") from None
+            if "verdict" not in tokens:
+                continue
+            if _command_option(tokens, "--ref") != task["ref"] or (
+                _command_option(tokens, "--role") != "reviewer"
+            ):
+                continue
+            kind = _command_option(tokens, "--kind")
+            candidate = _command_option(tokens, "--candidate-sha")
+            base = _command_option(tokens, "--base-sha")
+            if (
+                kind not in {"green", "red"}
+                or not _EXACT_SHA_RE.fullmatch(candidate)
+                or not _EXACT_SHA_RE.fullmatch(base)
+            ):
+                raise ReviewContextError("a recorded reviewer verdict command has no exact context")
+            if kind in contexts:
+                raise ReviewContextError("the recorded reviewer verdict commands are ambiguous")
+            contexts[kind] = (candidate, base)
+        if set(contexts) != {"green", "red"} or contexts["green"] != contexts["red"]:
+            raise ReviewContextError("the recorded reviewer verdict commands name no single context")
+        return contexts["green"]
 
     def is_instance_publish_recovery(
         self,
@@ -3679,15 +3767,23 @@ class CommandHostRuntime:
         attempt_id: str,
         review_round: int,
         *,
-        record: DispatcherRecord | None = None,
+        record: DispatcherRecord,
     ) -> str:
+        """Render this round's reviewer document, over the round's own bound context.
+
+        The record is required and so is its context: the verdict commands below carry the exact
+        pair being judged, and a document that guessed either of them would ask for a verdict
+        about a code state nobody chose.
+        """
         # The round belongs in the key like it does in the worker report id: a card that goes red
         # twice in one attempt reuses attempt_id, and a round-less id replays the first verdict.
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
         body_file = _body_file_path("verdict", task["ref"], review_round)
-        current_sha = self.head_commit(record) if record else ""
+        current_sha = self.head_commit(record)
         attestation = _gate_attestation_for_prompt(record, current_sha)
+        context = require_review_context(record)
+        candidate_sha, base_sha = context.candidate_sha, context.base_sha
         sections = [
             f"# Review {task['ref']}",
             "",
@@ -3701,6 +3797,17 @@ class CommandHostRuntime:
             "A red verdict must list every blocker you have found in this round. Prefix each with a",
             "stable `BLOCKER-<short-slug>` id so a re-review can close it without rediscovering it.",
             "Do not hold blockers back for a later round and do not widen the scope on the next one.",
+            "",
+            "Submit every red blocker as a repeatable `--blocker-finding BLOCKER-id:kind` argument,",
+            "in the order you want them read. The kinds are: `correctness` for wrong observable",
+            "behaviour; `architecture` for a violated structural or ownership boundary;",
+            "`verification` for evidence that is absent, invalid or does not cover the claim;",
+            "`security` for confidentiality, integrity, authorization or access-control risk;",
+            "`data_loss` for state that can be destroyed or lost irrecoverably; `compatibility` for",
+            "a broken supported interface or promise; `operability` for unsafe deployment, recovery",
+            "or routine operation; `authorship` for commit attribution against the policy below;",
+            "and `other` only when no more specific kind applies. GREEN carries no findings; RED",
+            "carries at least one, with the same ids used in the prose evidence below.",
             "",
             "For every RED blocker, state the concrete reachable scenario, the violated acceptance",
             "criterion or operational invariant, material assumptions, whether this branch introduced",
@@ -3720,10 +3827,13 @@ class CommandHostRuntime:
             "real behaviour you verified and how. If no end-to-end check against the real backend",
             "was possible, write plainly that it was not done and which assumption stays unverified.",
             "",
-            "Post exactly one review verdict through the secretary task protocol:",
+            f"The candidate under review is `{candidate_sha}`, over base `{base_sha}`. Both are",
+            "part of the verdict, so post it with exactly these revisions:",
+            "",
+            _VERDICT_COMMAND_HEADING,
             *_body_file_instructions(body_file),
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --request-id {green_request} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --request-id {red_request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --candidate-sha {candidate_sha} --base-sha {base_sha} --request-id {green_request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --candidate-sha {candidate_sha} --base-sha {base_sha} --blocker-finding BLOCKER-short-slug:correctness --request-id {red_request} --body-file {body_file}",
             "",
         ]
         if attestation:
@@ -3749,7 +3859,7 @@ class CommandHostRuntime:
                 "gates: run appropriate focused or broad validation when the review needs that evidence.",
                 "",
             ]
-        if record and record.preferred_head:
+        if record.preferred_head:
             sections[4:4] = [
                 "## Head failover",
                 "",
@@ -3761,7 +3871,7 @@ class CommandHostRuntime:
                 "entitled to have, not an invitation to grade the head.",
                 "",
             ]
-        if record and record.previous_reviewed_sha:
+        if record.previous_reviewed_sha:
             sections[4:4] = [
                 "## Re-review packet",
                 "",

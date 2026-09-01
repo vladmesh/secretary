@@ -90,5 +90,62 @@ class ResolveDataDirTest(unittest.TestCase):
         self.assertEqual(resolve_data_dir(args), "/env/data")
 
 
+class VerdictOptionTests(unittest.TestCase):
+    """The reviewer's side of the structured header: what the command line accepts."""
+
+    def parse(self, *arguments: str) -> argparse.Namespace:
+        from secretary.cli import build_parser
+
+        return build_parser().parse_args(
+            ["task", "verdict", "--ref", "x-1", "--role", "reviewer", *arguments]
+        )
+
+    def test_repeated_blocker_findings_keep_their_order(self) -> None:
+        from secretary.task_commands import _blocker_findings
+
+        args = self.parse(
+            "--kind",
+            "red",
+            "--candidate-sha",
+            "c" * 40,
+            "--base-sha",
+            "b" * 40,
+            "--blocker-finding",
+            "BLOCKER-first:correctness",
+            "--blocker-finding",
+            "BLOCKER-second:data_loss",
+        )
+
+        self.assertEqual(
+            _blocker_findings(args.blocker_finding),
+            [
+                {"finding_id": "BLOCKER-first", "kind": "correctness"},
+                {"finding_id": "BLOCKER-second", "kind": "data_loss"},
+            ],
+        )
+
+    def test_a_green_verdict_carries_no_findings_and_still_names_both_revisions(self) -> None:
+        from secretary.task_commands import _blocker_findings
+
+        args = self.parse("--kind", "green", "--candidate-sha", "c" * 40, "--base-sha", "b" * 40)
+
+        self.assertEqual(_blocker_findings(args.blocker_finding), [])
+        self.assertEqual(args.candidate_sha, "c" * 40)
+        self.assertEqual(args.base_sha, "b" * 40)
+
+    def test_a_finding_without_a_kind_is_a_usage_error(self) -> None:
+        from secretary.task_commands import _blocker_findings
+
+        for value in ("BLOCKER-first", ":correctness", "BLOCKER-first:"):
+            with self.subTest(value=value), self.assertRaisesRegex(TaskError, "BLOCKER-"):
+                _blocker_findings([value])
+
+    def test_both_revisions_are_required_by_the_command_line(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.parse("--kind", "green", "--base-sha", "b" * 40)
+        with self.assertRaises(SystemExit):
+            self.parse("--kind", "green", "--candidate-sha", "c" * 40)
+
+
 if __name__ == "__main__":
     unittest.main()

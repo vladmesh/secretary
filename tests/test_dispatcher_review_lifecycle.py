@@ -26,6 +26,7 @@ from secretary.dispatcher import (
     HostError,
 )
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
+from secretary.dispatch.review_context import ReviewRoundContext, open_review_round
 from secretary.dispatcher_review import (
     recover_review_launch,
 )
@@ -68,6 +69,21 @@ from tests.fakes.dispatcher import (
     FakePusher,
 )
 from tests.fanout_fixtures import accepted_transport_run
+
+
+def _bound_round(
+    candidate: str = "c" * 40, base: str = "b" * 40, review_baseline: int = 0
+) -> ReviewRoundContext:
+    """The round identity a reviewer bring-up always has in production, for a hand-built record."""
+    return ReviewRoundContext(
+        candidate_sha=candidate,
+        base_sha=base,
+        attempt_id="attempt-1",
+        review_baseline=review_baseline,
+        source="initial-receipt",
+    )
+
+
 from tests.integration_setup import require_disposable_board_fixture
 from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
@@ -392,6 +408,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             review_baseline=0,
             state="review_starting",
             claimed_at=0.0,
+            review_context=_bound_round(),
         )
 
     def _bounded_delivery(self):
@@ -497,7 +514,10 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
     def test_a_second_round_gets_its_own_document(self) -> None:
         host = NudgingReviewHost(self.root)
         record = self._record()
-        record.review_baseline = 1
+        # A second round is a second round on the record too: the baseline and the identity of
+        # the round it names move together, which is what `open_review_round` is for.
+        open_review_round(record, 1)
+        record.review_context = _bound_round(review_baseline=1)
 
         with self._bounded_delivery():
             host.start_review(self.task, record)
@@ -985,6 +1005,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
             review_baseline=0,
             state="reviewing",
             claimed_at=0.0,
+            review_context=_bound_round(),
         )
         for name, value in fields.items():
             setattr(record, name, value)
@@ -1384,6 +1405,7 @@ class ReviewLivenessTests(unittest.TestCase):
             review_baseline=0,
             state="reviewing",
             claimed_at=0.0,
+            review_context=_bound_round(),
         )
         for name, value in fields.items():
             setattr(record, name, value)
@@ -2618,6 +2640,7 @@ class ReviewPaneTests(unittest.TestCase):
             review_baseline=0,
             state="review_starting",
             claimed_at=0.0,
+            review_context=_bound_round(),
         )
 
     def test_reviewer_is_split_off_the_worker_pane_and_gets_its_leaf_from_inventory(self) -> None:

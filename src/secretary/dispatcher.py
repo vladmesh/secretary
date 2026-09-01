@@ -10,6 +10,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from secretary.board.events import VerdictProjection, project_verdict, render_marker_comment
+from secretary.board.models import Event
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
@@ -93,6 +95,13 @@ from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     _same_repo,
     _watchdog_kind,
 )
+from secretary.dispatch.review_context import (
+    ReviewContextError,
+    ValidatedReviewIdentity,
+    bind_review_context,
+    open_review_round,
+    validate_post_verdict_identity,
+)
 from secretary.dispatcher_gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,
@@ -107,6 +116,7 @@ from secretary.dispatcher_gate import (
 )
 from secretary.dispatcher_gate_receipt import (
     AcceptedGreenGate,
+    GateReceipt,
 )
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
@@ -1668,7 +1678,10 @@ class DispatcherRuntime:
             # The report is accepted from here on. Account the worker phase it closes while the
             # head that wrote it is still on the record with its bound provider session.
             self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
-            record.review_baseline = len(task.get("comments") or [])
+            # The fresh worker-to-Validate round boundary. Whatever the previous round was judged
+            # over ends here: the round this report opens binds its own candidate and base, and
+            # inherits neither half.
+            open_review_round(record, len(task.get("comments") or []))
             # Freeze before moving the board. A later tick may finish the idempotent move, but it
             # never leaves a completed worker writing while CI or a reviewer owns this checkout.
             try:
@@ -1686,6 +1699,22 @@ class DispatcherRuntime:
                 record.gate_transport_failures = 0
                 record.gate_transport_error = ""
                 self._reset_infrastructure_reruns(record)
+            else:
+                # No gate will run for this round, so this is where its context is bound instead.
+                # The receipt still standing is the initial one this unchanged candidate passed —
+                # a report-only correction reaches here only after a red review, which runs no
+                # gate of its own and therefore replaces nothing.
+                blocked = self._bind_review_context(
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    step="advance",
+                    receipt=GateReceipt.accept(record.gate_attestation, current_sha=current_sha),
+                )
+                if blocked is not None:
+                    return blocked
             _reset_wait(record, "worker")
             _reset_wait(record, "review")
             records[ref] = record
@@ -1876,7 +1905,7 @@ class DispatcherRuntime:
             ),
         )
         record.comment_baseline = len(self.reader.show(ref).get("comments") or [])
-        record.review_baseline = record.comment_baseline
+        open_review_round(record, record.comment_baseline)
         records[ref] = record
         self.save_records(payload, records)
         self.writer.move(
@@ -2014,7 +2043,7 @@ class DispatcherRuntime:
             ),
         )
         record.comment_baseline = len(self.reader.show(ref).get("comments") or [])
-        record.review_baseline = record.comment_baseline
+        open_review_round(record, record.comment_baseline)
         # The bounce restarts this attempt with a new TASK.md, so it is a new report round: without a
         # new generation the next done report would be deduped against the stale one just rejected.
         # The routing round does not move here, so this generation cannot be `attempt_round`.
@@ -2088,15 +2117,27 @@ class DispatcherRuntime:
             # before any review marker and before a reviewer starts: a rollup that has turned green
             # since cannot retract a red round this card is already owed.
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
-        marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
-        if marker == "review:green":
-            return self._park_green_verdict(task, record, records, payload, attempt_id)
-        if marker == "review:red":
+        standing = self._standing_verdict(task, record)
+        if standing is not None:
+            # A verdict is standing on this round, so its identity has to be established before
+            # anything acts on it. Missing, damaged, foreign or conflicting identity is a
+            # fail-closed lifecycle outcome here, not a tick that quietly waits for a verdict
+            # already on the board, and not a pair rebuilt to fit an answer that is written.
+            identity = self._post_verdict_identity(
+                task, record, records, payload, attempt_id, standing, step="review"
+            )
+            if not isinstance(identity, ValidatedReviewIdentity):
+                return identity
+        else:
+            identity = None
+        if identity is not None and identity.verdict == "green":
+            return self._park_green_verdict(task, record, records, payload, attempt_id, identity)
+        if identity is not None:
             # Only the reviewer's lifecycle ends here: a full `stop` would take the worktree's
             # terminals down, and this checkout is about to be parked and is never re-created from
-            # base. An unconfirmed stop ends the tick before the card moves. The commit is read
-            # first: ending the reviewer forgets the commit it judged and the park has to keep it.
-            reviewed = record.review_commit or self.host.head_commit(record)
+            # base. An unconfirmed stop ends the tick before the card moves. The round's bound
+            # candidate is what was judged; ending the reviewer's pane does not forget it.
+            reviewed = identity.candidate_sha
             unconfirmed = self._end_review_pane_confirmed(
                 record,
                 records,
@@ -2148,7 +2189,6 @@ class DispatcherRuntime:
                 payload,
                 attempt_id,
                 verdict_outcome="red",
-                reviewed_commit=reviewed,
                 move_reason=(
                     "review:red. The card is parked in Assessment: the reviewer is stopped and "
                     "the worker of this round is held, waiting for a release, rework or reslice "
@@ -2198,6 +2238,67 @@ class DispatcherRuntime:
             "attempt_id": attempt_id,
             "action": "waiting-review-verdict",
         }
+
+    def _standing_verdict(
+        self, task: dict[str, Any], record: DispatcherRecord
+    ) -> VerdictProjection | None:
+        """The verdict occurrence standing on this review round, or ``None`` when there is none.
+
+        Selection only: which occurrence this round is being answered by, read from the durable
+        record rather than from the comment prose. An occurrence counts when the marker comment
+        that published it is on the card after this round's baseline and its body is exactly what
+        the event renders — a staged event whose comment never landed is not a published verdict,
+        and a comment nothing committed is not one either.
+
+        Deliberately no identity is consulted here. A verdict whose header names another pair, or
+        that carries no readable header at all, is still the verdict standing on this round: it is
+        handed to the post-verdict authority, which refuses it by name and lands the card on the
+        board. Filtering it out here instead would make a contradicted verdict indistinguishable
+        from a round nobody has answered yet, and the card would wait forever on an answer it
+        already has.
+        """
+        comments = (task.get("comments") or [])[record.review_baseline :]
+        for raw in reversed(self.audit.events(task["ref"])):
+            if raw.get("kind") != "card.verdict":
+                continue
+            try:
+                event = Event.from_record(raw)
+                projection = project_verdict(event)
+                rendered = render_marker_comment(event)
+            except (TypeError, ValueError):
+                continue
+            marker = event.data.get("marker")
+            if any(
+                comment.get("marker") == marker and comment.get("body") == rendered
+                for comment in comments
+            ):
+                return projection
+        return None
+
+    def _post_verdict_identity(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        verdict: VerdictProjection,
+        *,
+        step: str,
+    ) -> ValidatedReviewIdentity | dict[str, Any]:
+        """This round's validated identity, or the tick's fail-closed outcome for not having one.
+
+        The one door between a standing verdict and everything that acts on one. Every caller —
+        the green park, the red park, the observer release, the no-observer release — reaches the
+        authority through here and either receives the typed identity or returns the Blocked
+        outcome unchanged, so no path can be written that carries on with a weaker value.
+        """
+        try:
+            return validate_post_verdict_identity(self.host, task, record, verdict)
+        except ReviewContextError as exc:
+            return self.block_review_context(
+                task, record, records, payload, attempt_id, step=step, reason=scrub_host_output(str(exc))
+            )
 
     def _wait_watchdog(
         self,
@@ -3560,6 +3661,23 @@ class DispatcherRuntime:
         record.gate_pending_since = 0.0
         self._reset_infrastructure_reruns(record)
         record.gate_attestation = accepted.persisted_payload()
+        if stage == "initial":
+            # The one place an initial receipt validates a review round's identity. Every later
+            # stage writes its receipt above and stops there: an assessment or release gate is
+            # evidence about its own stage, and the base it names may legitimately have moved
+            # since this round was opened.
+            blocked = self._bind_review_context(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="review",
+                receipt=accepted.receipt,
+                unattested=self.unattested_gate(task),
+            )
+            if blocked is not None:
+                return blocked
         records[ref] = record
         self.save_records(payload, records)
         if accepted.receipt is not None and stage in {"assessment", "release"}:
@@ -3590,6 +3708,83 @@ class DispatcherRuntime:
                 ),
             )
         return None
+
+    def unattested_gate(self, task: dict[str, Any]) -> bool:
+        """Whether this card's mechanical gate explicitly attests nothing.
+
+        `ci:none` promises no execution, and a noop host executes nothing at all. Only these two
+        may open a review round on a freshly resolved base rather than on a receipt: everywhere
+        else, a round with no exact-SHA evidence for its base has no identity to give a reviewer.
+        """
+        return _validation_ci(self.host, task) == "none" or getattr(self.host, "mode", "real") == "noop"
+
+    def _bind_review_context(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        step: str,
+        receipt: GateReceipt | None = None,
+        unattested: bool = False,
+        recorded_launch: bool = False,
+    ) -> dict[str, Any] | None:
+        """Bind this round's review context, or answer with the tick's fail-closed outcome."""
+        try:
+            bind_review_context(
+                self.host,
+                task,
+                record,
+                receipt=receipt,
+                unattested=unattested,
+                recorded_launch=recorded_launch,
+            )
+        except ReviewContextError as exc:
+            return self.block_review_context(
+                task, record, records, payload, attempt_id, step=step, reason=scrub_host_output(str(exc))
+            )
+        return None
+
+    def block_review_context(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        step: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """The one visible outcome for a review round whose identity cannot be established.
+
+        Reached from binding, from reviewer bring-up, from launch-intent adoption and from a
+        verdict standing over a round with no context. All of them mean the same thing — nobody
+        can say which candidate over which base this round is about — and none of them may be
+        answered by guessing, by merging, or by a tick that repeats the same failure forever. The
+        card goes to Blocked naming the contradiction, which is a question an operator can answer.
+        """
+        ref = task["ref"]
+        self.host.stop(record)
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=f"review round context is unavailable: {reason}",
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-context-blocked", ref),
+        )
+        records.pop(ref, None)
+        self.save_records(payload, records)
+        return {
+            "status": "blocked",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "reason": "review context unavailable",
+        }
 
     def _block_missing_gate_receipt(
         self,
@@ -3989,8 +4184,9 @@ class DispatcherRuntime:
         moved = self.reader.show(ref)
         # The previous round's report stays behind this baseline, so no tick reads it as this one's.
         record.comment_baseline = max(len(moved.get("comments") or []), baseline)
-        # Where the next verdict is scanned from, so the one just acted on is not read again.
-        record.review_baseline = record.comment_baseline
+        # Where the next verdict is scanned from, so the one just acted on is not read again. The
+        # judged round's identity ends with it: the rework binds its own candidate and base.
+        open_review_round(record, record.comment_baseline)
         # The rework's generation is the one this transition reserved before the move: assigned,
         # never advanced. A legacy transition without a reservation falls back to the advance it
         # was written with.
@@ -4010,8 +4206,6 @@ class DispatcherRuntime:
             record.gate_transport_failures = 0
             record.gate_transport_error = ""
             self._reset_infrastructure_reruns(record)
-        # The judged round ends here: a stale review pin would refuse the rework's merge.
-        record.review_commit = ""
         _reset_wait(record, "review")
         _reset_wait(record, "worker")
         records[ref] = record
@@ -4960,16 +5154,22 @@ class DispatcherRuntime:
         return str(observer.get("kind") or "") == "head" and bool(observer.get("profile"))
 
     def _merge_readiness(
-        self, task: dict[str, Any], record: DispatcherRecord
+        self, task: dict[str, Any], record: DispatcherRecord, identity: ValidatedReviewIdentity
     ) -> tuple[str, GateResult | None, str]:
-        """Everything that must hold before this checkout may be merged, read once.
+        """Everything mechanical that must hold before this checkout may be merged, read once.
 
         Returns one of "drift", "transport", "failed", "pending", "red" or "green". Both sides of the
         seam ask it: Validate before parking a green verdict, and the release again immediately before
         the merge. "transport" is deliberately not "failed" — a backend that could not be reached says
         nothing about the checkout, so the caller retries rather than deciding the card on silence.
+
+        The round's identity is not one of the answers, because it is a precondition of asking: every
+        answer here is about a candidate, and only a validated identity says which candidate that is.
+        So the parameter is the validated value and nothing weaker — a raw persisted context or an
+        optional one cannot be passed here, which is what keeps a round whose identity was never
+        checked from reaching a gate at all.
         """
-        drift = self._review_drift(task, record)
+        drift = self._review_drift(task, record, identity)
         if drift:
             return "drift", None, drift
         try:
@@ -4991,13 +5191,19 @@ class DispatcherRuntime:
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
         attempt_id: str,
+        identity: ValidatedReviewIdentity,
     ) -> dict[str, Any]:
-        """A green review verdict parks the card; it does not merge it."""
+        """A green review verdict parks the card; it does not merge it.
+
+        Except on a card with nobody to park it for, where this is also the merge path — so the
+        identity is the validated one the caller already had to obtain to read the verdict at all,
+        carried here rather than looked up again from a record the same tick has not changed.
+        """
         ref = task["ref"]
         # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
         self._record_verdict_routing(ref, record, "green")
         self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
-        kind, result, detail = self._merge_readiness(task, record)
+        kind, result, detail = self._merge_readiness(task, record, identity)
         if kind == "transport":
             retry = self._gate_transport_retry(
                 task,
@@ -5101,19 +5307,21 @@ class DispatcherRuntime:
         if blocked is not None:
             return blocked
         if not parks:
-            # No observer to release it, so the green verdict merges on its own tick.
+            # No observer to release it, so the green verdict merges on its own tick — over the
+            # same validated identity the park would have carried, because this is the merge.
             return self._release_effect(
                 task,
                 record,
                 records,
                 payload,
                 attempt_id,
+                identity,
                 step="review",
                 move_reason="review:green",
             )
-        # The checkout must be quiet while the card waits, so the reviewer's pane goes here — but
-        # its commit is read first, because ending the reviewer forgets the commit it judged.
-        reviewed = record.review_commit or self.host.head_commit(record)
+        # The checkout must be quiet while the card waits, so the reviewer's pane goes here. Its
+        # pane address is all that is forgotten: the round's context outlives it, and is what the
+        # release decision will still be checked against.
         unconfirmed = self._end_review_pane_confirmed(
             record,
             records,
@@ -5132,7 +5340,6 @@ class DispatcherRuntime:
             payload,
             attempt_id,
             verdict_outcome="green",
-            reviewed_commit=reviewed,
             move_reason=(
                 "review:green. The card is parked in Assessment: the mechanical gate is green "
                 "and the merge waits for a release, rework or reslice decision."
@@ -5149,17 +5356,17 @@ class DispatcherRuntime:
         *,
         verdict_outcome: str,
         move_reason: str,
-        reviewed_commit: str = "",
     ) -> dict[str, Any]:
         """The only way a substantive verdict leaves Validate.
 
         The red transition's order, for the same reason: the intent is on disk, with the reason the
         card is moving, before anything observable moves. Nothing comes after the move — the card waits.
+
+        Nothing is re-pinned here. The park is exactly the window in which the reviewer's pane is
+        gone while the merge gate must still refuse a checkout that moved off the reviewed
+        candidate, and the round's bound context is what carries that candidate across it.
         """
         ref = task["ref"]
-        # Re-pinned after the reviewer's pane was forgotten: the merge gate refuses a release for
-        # a checkout that moved off the reviewed commit, and the park is exactly that window.
-        record.review_commit = reviewed_commit or record.review_commit
         record.worker_continuation.begin_park(
             "review", len(task.get("comments") or []), move_reason, verdict_outcome
         )
@@ -5421,9 +5628,37 @@ class DispatcherRuntime:
         *,
         reason: str,
     ) -> dict[str, Any]:
-        """Perform a release decision: re-check the mechanical state, then merge."""
+        """Perform a release decision: re-check the mechanical state, then merge.
+
+        The park is exactly the window in which nothing mechanical on the record still names the
+        pair a release is about: the reviewer's pane is gone and the release gate below attests
+        today's checkout, whatever the verdict judged. So this side of the seam goes through the
+        same post-verdict authority the park did, over the same three durable sources, and a round
+        that cannot produce a validated identity — because it was never bound, was read back
+        damaged, belongs to another round, or is contradicted by the reviewer document or by the
+        verdict's own header — stops on the board with the reason instead of merging on mechanical
+        evidence that was never about it. This is also the path a record lost while parked lands
+        on: an adopted record has no bound context, and nothing here may invent one for a verdict
+        that is already written.
+        """
         ref = task["ref"]
-        kind, result, detail = self._merge_readiness(task, record)
+        standing = self._standing_verdict(task, record)
+        if standing is None:
+            return self.block_review_context(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="assessment",
+                reason="no accepted reviewer verdict stands on this parked review round",
+            )
+        identity = self._post_verdict_identity(
+            task, record, records, payload, attempt_id, standing, step="assessment"
+        )
+        if not isinstance(identity, ValidatedReviewIdentity):
+            return identity
+        kind, result, detail = self._merge_readiness(task, record, identity)
         if kind == "transport":
             # A release that could not ask the gate is not a release that was refused.
             retry = self._gate_transport_retry(
@@ -5510,6 +5745,7 @@ class DispatcherRuntime:
             records,
             payload,
             attempt_id,
+            identity,
             step="assessment",
             move_reason=f"Observer decision: release. {reason}".strip(),
             decision="release",
@@ -5522,12 +5758,19 @@ class DispatcherRuntime:
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
         attempt_id: str,
+        identity: ValidatedReviewIdentity,
         *,
         step: str,
         move_reason: str,
         decision: str = "",
     ) -> dict[str, Any]:
-        """Merge the reviewed branch, tear the round down and move the card to Done."""
+        """Merge the reviewed branch, tear the round down and move the card to Done.
+
+        The validated identity is a required argument rather than something read here, and it is
+        what makes this function unreachable without one: both merge routes — the no-observer green
+        verdict and the observer release — obtain it from the single post-verdict authority, and
+        there is no spelling of this call that lands a candidate whose round nobody could identify.
+        """
         ref = task["ref"]
         try:
             self.host.complete_green(task, record)
@@ -5541,7 +5784,10 @@ class DispatcherRuntime:
                 payload,
                 attempt_id,
                 action="merge-blocked",
-                reason=f"merge failed: {scrub_host_output(str(exc))}",
+                reason=(
+                    f"merge of reviewed candidate `{identity.candidate_sha[:12]}` failed: "
+                    f"{scrub_host_output(str(exc))}"
+                ),
                 step=step,
                 outcome="merge failed",
             )
@@ -5559,21 +5805,25 @@ class DispatcherRuntime:
         self.save_records(payload, records)
         return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
 
-    def _review_drift(self, task: dict[str, Any], record: DispatcherRecord) -> str:
-        """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes one code
-        state; merging a different one lands work nobody reviewed. Returns the operator message for the
-        bounce, or "" when the states match, or when neither can be read — an unreadable workspace is
-        the gate's failure to report, not a silent bounce.
+    def _review_drift(
+        self, task: dict[str, Any], record: DispatcherRecord, identity: ValidatedReviewIdentity
+    ) -> str:
+        """Has the checkout moved off the candidate the reviewer was pointed at? A verdict describes one
+        code state; merging a different one lands work nobody reviewed. Returns the operator message for
+        the bounce, or "" when the states match, or when the checkout cannot be read — an unreadable
+        workspace is the gate's failure to report, not a silent bounce.
+
+        The candidate is the round's validated identity, handed in by the readiness check that
+        already required it: this compares two code states and never decides whether a round has an
+        identity.
         """
-        if not record.review_commit:
-            return ""
         current = self.host.head_commit(record)
-        if not current or current == record.review_commit:
+        if not current or current == identity.candidate_sha:
             return ""
-        if self.host.is_instance_publish_recovery(task, record, record.review_commit, current):
+        if self.host.is_instance_publish_recovery(task, record, identity.candidate_sha, current):
             return ""
         return (
-            f"The review was given for commit `{record.review_commit[:12]}` while the working copy "
+            f"The review was given for commit `{identity.candidate_sha[:12]}` while the working copy "
             f"is now on `{current[:12]}`: the verdict describes a different state of the code. The "
             f"card is back in In progress; rework it and report again."
         )
