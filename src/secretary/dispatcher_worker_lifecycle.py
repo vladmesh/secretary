@@ -662,6 +662,15 @@ class WorkerReportNudge:
         )
 
 
+# What the durable park intent is an intent to *do*. A card with an observer parks in Assessment
+# and waits; a card with nobody to release it has the merge as its park effect. Both are one
+# durable intent followed by one effect, so recovery finishes the effect the intent opened rather
+# than re-deciding which one this round earned from a sprint that may read differently now.
+PARK_EFFECT_ASSESSMENT = "assessment"
+PARK_EFFECT_RELEASE = "release"
+PARK_EFFECTS = (PARK_EFFECT_ASSESSMENT, PARK_EFFECT_RELEASE)
+
+
 class WorkerContinuationStage(StrEnum):
     NONE = "none"
     VALIDATION_MOVE_PENDING = "validation_move_pending"
@@ -701,6 +710,16 @@ class WorkerContinuation:
     prevent.
     """
     verdict_outcome: str = ""
+    park_effect: str = ""
+    """Which effect this park intent is owed: the Assessment move, or the no-observer merge.
+
+    Recorded with the intent rather than re-read at completion time, because the answer comes from
+    the sprint's observer and a sprint that closed, or a board that cannot be read, would give a
+    different one. A park opened to wait for a decision may not finish as a merge because nobody
+    could see the observer on the recovery tick, and a park opened as the merge may not finish by
+    stranding the card in a wait nothing will end. Empty is the Assessment move: a record written
+    before the effect was named could only have opened that one.
+    """
     decision: str = ""
     """The observer decision this transition is performing, empty when nobody decided anything.
 
@@ -751,6 +770,11 @@ class WorkerContinuation:
         }
 
     @property
+    def releases_on_park(self) -> bool:
+        """Whether this park's effect is the no-observer merge rather than the Assessment move."""
+        return self.park_effect == PARK_EFFECT_RELEASE
+
+    @property
     def red_transition_pending(self) -> bool:
         return self.stage == WorkerContinuationStage.RED_TRANSITION_PENDING
 
@@ -776,7 +800,14 @@ class WorkerContinuation:
             raise ValueError(f"cannot confirm validation move from {self.stage}")
         self.stage = WorkerContinuationStage.RETAINED
 
-    def begin_park(self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str) -> None:
+    def begin_park(
+        self,
+        phase: str,
+        report_baseline: int,
+        move_reason: str,
+        verdict_outcome: str,
+        effect: str = PARK_EFFECT_ASSESSMENT,
+    ) -> None:
         """Record the reviewer's verdict before the card is parked in Assessment.
 
         The verdict is durable here, and nothing has yet merged, resumed a worker or moved the board. A
@@ -790,11 +821,14 @@ class WorkerContinuation:
             WorkerContinuationStage.ASSESSMENT_PENDING,
         }:
             raise ValueError(f"cannot park from {self.stage}")
+        if effect not in PARK_EFFECTS:
+            raise ValueError(f"unknown park effect {effect}")
         self.stage = WorkerContinuationStage.ASSESSMENT_PENDING
         self.phase = phase
         self.report_baseline = int(report_baseline)
         self.move_reason = move_reason
         self.verdict_outcome = verdict_outcome
+        self.park_effect = effect
 
     def confirm_park(self) -> None:
         """The card is in Assessment. From here only a recorded decision moves it."""
@@ -902,6 +936,7 @@ class WorkerContinuation:
         self.reserved_generation = 0
         self.move_reason = ""
         self.verdict_outcome = ""
+        self.park_effect = ""
         self.decision = ""
         self.decision_body = ""
         self.session_held = False
@@ -920,6 +955,7 @@ class WorkerContinuation:
             "reserved_generation": self.reserved_generation,
             "move_reason": self.move_reason,
             "verdict_outcome": self.verdict_outcome,
+            "park_effect": self.park_effect,
             "decision": self.decision,
             "decision_body": self.decision_body,
             "session_held": self.session_held,
@@ -943,6 +979,9 @@ class WorkerContinuation:
             reserved_generation=int(value.get("reserved_generation") or 0),
             move_reason=str(value.get("move_reason") or ""),
             verdict_outcome=str(value.get("verdict_outcome") or ""),
+            # A park written before the effect was named is the Assessment move, which was the
+            # only effect a park had then; empty reads as that everywhere the field is consulted.
+            park_effect=str(value.get("park_effect") or ""),
             decision=str(value.get("decision") or ""),
             # A transition written before the decision text was frozen carries none. Its round then
             # renders the way it did when it was written: reviewer findings only.

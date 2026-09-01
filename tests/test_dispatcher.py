@@ -20,6 +20,7 @@ from unittest import mock
 from secretary import dispatcher as dispatcher_module
 from secretary import role_env
 from secretary._fsutil import try_file_lock
+from secretary.board.events import project_verdict
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
@@ -38,6 +39,7 @@ from secretary.dispatch.review_context import (
     ValidatedReviewIdentity,
     load_review_context,
     require_review_context,
+    validate_post_verdict_identity,
 )
 from secretary.dispatcher import (
     STOPPED_BY_REVIEW_VERDICT,
@@ -8363,6 +8365,170 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(parked["to"], "assessment")
         self.assertEqual(self._record_json()["rejected_sha"], context["candidate_sha"])
 
+    # the park's own crash boundary (secretary-1528) -----------------------------------
+
+    def _crash_before_the_park_move(self) -> None:
+        """Run the tick that opens the park and die exactly between its intent and its board move.
+
+        The window production actually has: the intent is durable, the card has not moved, and the
+        identity the dead tick validated is gone with its memory.
+        """
+        real_move = self.writer.move
+
+        def die_before_the_move(**kwargs):
+            if kwargs.get("target") == "assessment":
+                raise OSError("dispatcher died between the park intent and the board move")
+            return real_move(**kwargs)
+
+        with mock.patch.object(self.writer, "move", die_before_the_move), self.assertRaises(OSError):
+            self.tick()
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PENDING.value,
+        )
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+    def _crash_after_the_park_move(self) -> None:
+        """The other half of the window: the board move landed and its checkpoint did not."""
+        real_save = self.runtime.production_state.save
+
+        def die_after_the_move(payload: dict) -> None:
+            record = payload.get("records", {}).get("secretary-510-pilot", {})
+            if record.get("state") == "assessment":
+                raise OSError("dispatcher died after the park's board move")
+            real_save(payload)
+
+        with mock.patch.object(
+            self.runtime.production_state, "save", die_after_the_move
+        ), self.assertRaises(OSError):
+            self.tick()
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PENDING.value,
+        )
+
+    def _moves_of(self, run) -> tuple[dict, list[str]]:
+        """Whatever the tick did, with every board move it made, in order."""
+        moves: list[str] = []
+        real_move = self.writer.move
+
+        def record_move(**kwargs):
+            moves.append(str(kwargs.get("target")))
+            return real_move(**kwargs)
+
+        with mock.patch.object(self.writer, "move", record_move):
+            result = run()
+        return result, moves
+
+    def test_an_interrupted_green_park_revalidates_before_the_assessment_move(self) -> None:
+        """The park intent is evidence that an effect is pending, never that the identity behind it
+        still holds. A crash after that intent, and a context that is absent, damaged, foreign or
+        contradicted by the time recovery runs, has to block on the way to Assessment rather than
+        finish a move over a round nobody can identify. The undamaged control still parks once."""
+        for state in (None, *self._INVALID_ROUND_STATES):
+            with self.subTest(state=state or "intact"):
+                self.setUp()
+                self._green_verdict_in_validate(f"interrupted-green-{state}")
+                self._crash_before_the_park_move()
+                evidence = "" if state is None else self._break_round(state)
+
+                recovered, moves = self._moves_of(self.tick)
+
+                if state is None:
+                    self.assertEqual(recovered["to"], "assessment")
+                    self.assertEqual(moves, ["assessment"])
+                    self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+                    self.assertEqual(
+                        self._parked_record()["worker_continuation"]["stage"],
+                        WorkerContinuationStage.ASSESSMENT_PARKED.value,
+                    )
+                    continue
+                self._assert_round_blocked(recovered, evidence)
+                self.assertEqual(moves, ["blocked"], "the card never reached Assessment")
+
+    def test_an_interrupted_red_park_revalidates_before_the_assessment_move(self) -> None:
+        """The red side of the same crash. A red park moves the card for an observer to answer, so
+        an unidentifiable round may not land there either — and a valid one still parks."""
+        for state in (None, *self._INVALID_ROUND_STATES):
+            with self.subTest(state=state or "intact"):
+                self.setUp()
+                self.start_dispatcher()
+                self._run_worker_to_validate()
+                self.assertEqual(self.tick()["action"], "review-started")
+                self._write_verdict(
+                    kind="red", body="one blocker", request_id=f"interrupted-red-{state}"
+                )
+                self._crash_before_the_park_move()
+                evidence = "" if state is None else self._break_round(state)
+
+                recovered, moves = self._moves_of(self.tick)
+
+                if state is None:
+                    self.assertEqual(recovered["to"], "assessment")
+                    self.assertEqual(recovered["verdict"], "red")
+                    self.assertEqual(moves, ["assessment"])
+                    continue
+                self._assert_round_blocked(recovered, evidence)
+                self.assertEqual(moves, ["blocked"], "the card never reached Assessment")
+
+    def test_a_park_whose_checkpoint_was_lost_revalidates_before_it_confirms(self) -> None:
+        """The other half of the same boundary: the move landed and the checkpoint did not, so
+        recovery comes through Assessment instead of Validate. It is the same call, so it asks the
+        same question — a context lost in that window blocks rather than confirming a park whose
+        identity nothing can state."""
+        for state in (None, "null", "partial", "foreign-round", "candidate-conflict", "base-conflict"):
+            with self.subTest(state=state or "intact"):
+                self.setUp()
+                self._green_verdict_in_validate(f"lost-checkpoint-{state}")
+                self._crash_after_the_park_move()
+                evidence = "" if state is None else self._break_round(state)
+
+                recovered = self.tick()
+
+                if state is None:
+                    self.assertEqual(recovered["to"], "assessment")
+                    self.assertEqual(
+                        self._parked_record()["worker_continuation"]["stage"],
+                        WorkerContinuationStage.ASSESSMENT_PARKED.value,
+                    )
+                    continue
+                self._assert_round_blocked(recovered, evidence)
+
+    def test_an_interrupted_no_observer_release_revalidates_before_the_merge(self) -> None:
+        """A card nobody parks it for has the merge as its park effect, and that effect crosses the
+        same crash boundary: the intent is durable, the merge is not done, and the identity has to
+        be established again from disk before anything is landed. An intact round still merges."""
+        for state in (None, *self._INVALID_ROUND_STATES):
+            with self.subTest(state=state or "intact"):
+                self.setUp()
+                self.start_dispatcher()
+                self.unobserved_card()
+                self._run_worker_to_validate()
+                self.assertEqual(self.tick()["action"], "review-started")
+                self._write_verdict(
+                    kind="green", body="green, and nobody parks it", request_id=f"interrupted-solo-{state}"
+                )
+                with mock.patch.object(
+                    self.host, "complete_green", side_effect=OSError("dispatcher died before the merge")
+                ), self.assertRaises(OSError):
+                    self.tick()
+                self.assertEqual(self.host.completed, [], "the merge did not happen")
+                self.assertEqual(
+                    self._parked_record()["worker_continuation"]["stage"],
+                    WorkerContinuationStage.ASSESSMENT_PENDING.value,
+                    "the release intent is durable before the merge",
+                )
+                evidence = "" if state is None else self._break_round(state)
+
+                recovered = self.tick()
+
+                if state is None:
+                    self.assertEqual(recovered["to"], "done")
+                    self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+                    continue
+                self._assert_round_blocked(recovered, evidence)
+
     def test_a_damaged_context_stops_a_respawn_instead_of_rebinding_the_round(self) -> None:
         """Before any verdict, damage is still not absence. A respawn re-confirms the round it is
         asking again about, and the recorded document would answer — but the pair this record lost
@@ -13156,15 +13322,38 @@ class DispatcherLauncherTests(unittest.TestCase):
             )
             records = {"secretary-510-pilot": record}
 
+            # The verdict this round is answered by, published the way the reviewer holding the
+            # round's document publishes it. The no-observer merge now runs from the park
+            # boundary, which re-reads the standing verdict from the card and revalidates this
+            # round's identity before it merges, so a merge test has to stand on a real one.
+            writer.verdict(
+                role="reviewer",
+                actor="reviewer",
+                reference="secretary-510-pilot",
+                kind="green",
+                body="the reviewed candidate merges",
+                candidate_sha=feature,
+                base_sha=checkpoint,
+                blocker_findings=[],
+                request_id="checkpoint-merge-green",
+            )
+            task = TaskReader(board).show("secretary-510-pilot")  # type: ignore[arg-type]
+            identity = validate_post_verdict_identity(
+                runtime.host,
+                task,
+                record,
+                project_verdict(Event.from_record(TaskAudit(data_dir).events("secretary-510-pilot")[-1])),
+            )
+
             # The card carries no sprint, so the green verdict merges on its own tick: the
             # entry point moved with the seam, what it does on this path did not.
             result = runtime._park_green_verdict(
-                TaskReader(board).show("secretary-510-pilot"),  # type: ignore[arg-type]
+                task,
                 record,
                 records,
                 {"version": 1, "mode": "production", "phase": "production"},
                 "attempt-1",
-                require_review_context(record),
+                identity,
             )
 
             self.assertEqual(result["to"], "done")

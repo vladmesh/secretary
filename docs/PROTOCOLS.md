@@ -1216,6 +1216,31 @@ mechanical readiness and drift checks, and the merge itself. Missing, damaged, f
 candidate/base-conflicting identity stops the card before the gate and before the merge, on Blocked evidence
 that says which of those it was, rather than as a generic dispatcher exception that repeats every tick.
 
+#### The park effect boundary
+
+A substantive verdict leaves Validate through one durable intent followed by one effect, and the effect is
+recorded with the intent: a card whose sprint declares an observer parks in Assessment and waits, and a card
+with nobody to release it has the merge itself as its park effect. Which one it is may not be re-decided at
+completion time, because that answer comes from a sprint that may since have closed or become unreadable.
+
+One function performs that effect (`_complete_park`), and it is the only thing that moves a verdict to
+Assessment or finishes a no-observer release. Every invocation — the first tick, the recovery of a crash
+before the board move, and the recovery of a move whose checkpoint was lost — re-reads the standing
+structured verdict and the round's durable sources and calls the one authority again, before the board move,
+before the merge and before any further state save. The saved intent is evidence that an effect is pending
+and never evidence that its identity was validated: a `ValidatedReviewIdentity` lives in the memory of the
+tick that obtained it and cannot cross a crash boundary, so recovery establishes its own or does nothing.
+
+A park whose context is by then absent, null, damaged, foreign, or in conflict with the verdict header or
+the recorded reviewer document therefore blocks with that specific reason and performs no Assessment move
+and no merge — green and red parks alike. A valid identity keeps the behaviour a park has always had: the
+move is keyed on the baseline the intent was opened against, so the tick that already moved the card and the
+tick recovering from a crash before that move run the same call and it moves once.
+
+Adopting a card an operator or a lost record left standing in Assessment is not that effect: it records the
+board's own fact, moves nothing and merges nothing, and the release decision on such a card goes through the
+authority like any other.
+
 #### Round boundaries and mechanical evidence
 
 A round ends by clearing the context together with the baseline that says where its verdict is read from:
