@@ -1013,6 +1013,9 @@ class TaskWriterTests(unittest.TestCase):
             reference="secretary-468",
             kind="red",
             body=ordinary,
+            candidate_sha="c" * 40,
+            base_sha="b" * 40,
+            blocker_findings=[{"finding_id": "BLOCKER-test-finding", "kind": "other"}],
             request_id="ordinary-long-verdict",
         )
 
@@ -2523,12 +2526,63 @@ class TaskWriterTests(unittest.TestCase):
             reference="secretary-468",
             kind="green",
             body="ok",
+            candidate_sha="c" * 40,
+            base_sha="b" * 40,
+            blocker_findings=[],
             request_id="green",
         )
 
         self.assertEqual(result["action"], "verdict")
         comment = [call for call in self.client.calls if call[0] == "createComment"][-1]
         self.assertEqual(comment[1]["content"], "[review:green]\nok")
+
+    def test_reviewer_verdict_persists_the_complete_structured_header(self) -> None:
+        findings = [
+            {"finding_id": "BLOCKER-first", "kind": "correctness"},
+            {"finding_id": "BLOCKER-second", "kind": "operability"},
+        ]
+        self.writer.verdict(
+            role="reviewer",
+            actor="r",
+            reference="secretary-468",
+            kind="red",
+            body="evidence for both blocker ids",
+            candidate_sha="c" * 40,
+            base_sha="b" * 40,
+            blocker_findings=findings,
+            request_id="structured-red",
+        )
+
+        data = self.writer.audit.committed_event("structured-red")["data"]  # type: ignore[index]
+        self.assertEqual(data["verdict"], "red")
+        self.assertEqual(data["candidate_sha"], "c" * 40)
+        self.assertEqual(data["base_sha"], "b" * 40)
+        self.assertEqual(data["blocker_findings"], findings)
+        comment = [call for call in self.client.calls if call[0] == "createComment"][-1]
+        self.assertEqual(comment[1]["content"], "[review:red]\nevidence for both blocker ids")
+
+    def test_verdict_rejects_changed_header_on_request_replay(self) -> None:
+        arguments = {
+            "role": "reviewer",
+            "actor": "r",
+            "reference": "secretary-468",
+            "kind": "green",
+            "body": "ok",
+            "candidate_sha": "c" * 40,
+            "base_sha": "b" * 40,
+            "blocker_findings": [],
+            "request_id": "same-verdict",
+        }
+        self.writer.verdict(**arguments)
+
+        for field, value in (("candidate_sha", "d" * 40), ("base_sha", "a" * 40), ("kind", "red")):
+            with self.subTest(field=field), self.assertRaisesRegex(TaskError, "payload"):
+                changed = dict(arguments, **{field: value})
+                if field == "kind":
+                    changed["blocker_findings"] = [
+                        {"finding_id": "BLOCKER-new", "kind": "correctness"}
+                    ]
+                self.writer.verdict(**changed)
 
     def test_validate_to_in_progress_rework_is_dispatcher_only(self) -> None:
         self.client.tasks[0]["column_id"] = 4
@@ -4694,6 +4748,9 @@ class RequestIdOwnershipTests(unittest.TestCase):
             reference="secretary-468",
             kind="green",
             body="ok",
+            candidate_sha="c" * 40,
+            base_sha="b" * 40,
+            blocker_findings=[],
             request_id="round-1",
         )
 
@@ -4704,6 +4761,9 @@ class RequestIdOwnershipTests(unittest.TestCase):
                 reference="secretary-468",
                 kind="red",
                 body="the gate is red",
+                candidate_sha="d" * 40,
+                base_sha="b" * 40,
+                blocker_findings=[{"finding_id": "BLOCKER-test-finding", "kind": "correctness"}],
                 request_id="round-1",
             )
 
@@ -4772,6 +4832,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 reference="secretary-468",
                 kind="green",
                 body=body,
+                candidate_sha="c" * 40,
+                base_sha="b" * 40,
+                blocker_findings=[],
                 request_id=request_id,
             )
         self.client.tasks[0]["column_id"] = 7  # Assessment for observer decisions.

@@ -10,6 +10,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from secretary.board.events import project_verdict, render_marker_comment
+from secretary.board.models import Event
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
@@ -111,7 +113,6 @@ from secretary.dispatcher_gate_receipt import (
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
     _gate_red_repeat_count,
-    _last_marker,
     _last_marker_body,
     _last_review_red_body,
     _report_adoption_baseline,
@@ -2088,7 +2089,7 @@ class DispatcherRuntime:
             # before any review marker and before a reviewer starts: a rollup that has turned green
             # since cannot retract a red round this card is already owed.
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
-        marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
+        marker = self._accepted_review_marker(task, record)
         if marker == "review:green":
             return self._park_green_verdict(task, record, records, payload, attempt_id)
         if marker == "review:red":
@@ -2198,6 +2199,47 @@ class DispatcherRuntime:
             "attempt_id": attempt_id,
             "action": "waiting-review-verdict",
         }
+
+    def _accepted_review_marker(
+        self, task: dict[str, Any], record: DispatcherRecord
+    ) -> str | None:
+        """Select only this round's structured verdict with the review and gate revisions."""
+        candidate = record.review_commit
+        receipt = record.gate_attestation if isinstance(record.gate_attestation, dict) else {}
+        base = record.review_base_sha
+        attested_candidate = str(receipt.get("validated_sha") or "")
+        attested_base = str(receipt.get("base_sha") or "")
+        if not candidate or not base:
+            return None
+        if (attested_candidate or attested_base) and (
+            attested_candidate != candidate or attested_base != base
+        ):
+            return None
+        comments = (task.get("comments") or [])[record.review_baseline :]
+        for raw in reversed(self.audit.events(task["ref"])):
+            if raw.get("kind") != "card.verdict":
+                continue
+            try:
+                event = Event.from_record(raw)
+                projection = project_verdict(event)
+            except (TypeError, ValueError):
+                continue
+            header = projection.header
+            if (
+                projection.structure != "structured"
+                or header is None
+                or header.candidate_sha != candidate
+                or header.base_sha != base
+            ):
+                continue
+            verdict = header.verdict
+            rendered = render_marker_comment(event)
+            if any(
+                comment.get("marker") == f"review:{verdict}" and comment.get("body") == rendered
+                for comment in comments
+            ):
+                return f"review:{verdict}"
+        return None
 
     def _wait_watchdog(
         self,
@@ -3560,6 +3602,9 @@ class DispatcherRuntime:
         record.gate_pending_since = 0.0
         self._reset_infrastructure_reruns(record)
         record.gate_attestation = accepted.persisted_payload()
+        if stage == "initial":
+            receipt_base = str(record.gate_attestation.get("base_sha") or "")
+            record.review_base_sha = receipt_base or self.host.review_base_commit(task, record)
         records[ref] = record
         self.save_records(payload, records)
         if accepted.receipt is not None and stage in {"assessment", "release"}:

@@ -5,12 +5,13 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from secretary.board.models import Event, EventKind
+from secretary.board.models import VERDICT_BLOCKER_KINDS, Event, EventKind
 
 if TYPE_CHECKING:
     from secretary.tasks import TaskAudit
@@ -26,6 +27,102 @@ class AttemptUsageOccurrence:
     request_id: str
     event: Event
     pending: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BlockerFinding:
+    finding_id: str
+    kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictHeader:
+    verdict: str
+    candidate_sha: str
+    base_sha: str
+    blocker_findings: tuple[BlockerFinding, ...]
+
+    def to_data(self) -> dict[str, Any]:
+        return {
+            "verdict": self.verdict,
+            "candidate_sha": self.candidate_sha,
+            "base_sha": self.base_sha,
+            "blocker_findings": [
+                {"finding_id": finding.finding_id, "kind": finding.kind}
+                for finding in self.blocker_findings
+            ],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictProjection:
+    """A verdict occurrence plus its optional validated structured header."""
+
+    event: Event
+    structure: str
+    header: VerdictHeader | None = None
+
+
+_EXACT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_FINDING_ID_RE = re.compile(r"^BLOCKER-[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def normalize_verdict_header(
+    verdict: object,
+    candidate_sha: object,
+    base_sha: object,
+    blocker_findings: object,
+) -> VerdictHeader:
+    """Validate and normalize the one structured header written by new reviewers."""
+    if verdict not in {"green", "red"}:
+        raise ValueError("verdict header verdict must be green or red")
+    if not isinstance(candidate_sha, str) or not _EXACT_SHA_RE.fullmatch(candidate_sha):
+        raise ValueError("verdict header candidate_sha must be an exact 40-hex SHA")
+    if not isinstance(base_sha, str) or not _EXACT_SHA_RE.fullmatch(base_sha):
+        raise ValueError("verdict header base_sha must be an exact 40-hex SHA")
+    if not isinstance(blocker_findings, (list, tuple)):
+        raise TypeError("verdict header blocker_findings must be a list")
+    findings: list[BlockerFinding] = []
+    seen: set[str] = set()
+    for raw in blocker_findings:
+        if isinstance(raw, BlockerFinding):
+            finding_id, kind = raw.finding_id, raw.kind
+        elif isinstance(raw, dict):
+            finding_id, kind = raw.get("finding_id"), raw.get("kind")
+            if set(raw) != {"finding_id", "kind"}:
+                raise ValueError("each blocker finding must contain exactly finding_id and kind")
+        else:
+            raise TypeError("each blocker finding must be an object")
+        if not isinstance(finding_id, str) or not _FINDING_ID_RE.fullmatch(finding_id):
+            raise ValueError("blocker finding ids must match BLOCKER-<lowercase-short-slug>")
+        if finding_id in seen:
+            raise ValueError(f"duplicate blocker finding id {finding_id!r}")
+        if kind not in VERDICT_BLOCKER_KINDS:
+            raise ValueError("blocker finding kind must be one of " + ", ".join(VERDICT_BLOCKER_KINDS))
+        seen.add(finding_id)
+        findings.append(BlockerFinding(finding_id, str(kind)))
+    if verdict == "green" and findings:
+        raise ValueError("green verdicts require an empty blocker_findings list")
+    if verdict == "red" and not findings:
+        raise ValueError("red verdicts require at least one blocker finding")
+    return VerdictHeader(str(verdict), candidate_sha.lower(), base_sha.lower(), tuple(findings))
+
+
+def project_verdict(event: Event) -> VerdictProjection:
+    """Return a validated header or preserve missing/malformed additive data unchanged."""
+    if event.kind is not EventKind.CARD_VERDICTED:
+        raise ValueError("event is not a Card verdict")
+    data = event.data
+    required = ("verdict", "candidate_sha", "base_sha", "blocker_findings")
+    if not all(name in data for name in required):
+        return VerdictProjection(event, "unstructured")
+    try:
+        header = normalize_verdict_header(*(data[name] for name in required))
+    except (TypeError, ValueError):
+        return VerdictProjection(event, "unstructured")
+    if data.get("status") != header.verdict or data.get("marker") != f"review:{header.verdict}":
+        return VerdictProjection(event, "unstructured")
+    return VerdictProjection(event, "structured", header)
 
 
 @contextlib.contextmanager

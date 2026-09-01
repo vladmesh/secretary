@@ -106,6 +106,22 @@ from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRe
 
 
 class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
+    def _write_verdict(self, **kwargs) -> dict:
+        kind = kwargs["kind"]
+        record = self.runtime.production_state.load().get("records", {}).get(
+            kwargs.get("reference", "secretary-510-pilot"), {}
+        )
+        return self.writer.verdict(
+            **kwargs,
+            candidate_sha=record.get("review_commit") or "c" * 40,
+            base_sha=record.get("review_base_sha") or "b" * 40,
+            blocker_findings=(
+                []
+                if kind == "green"
+                else [{"finding_id": "BLOCKER-test-finding", "kind": "correctness"}]
+            ),
+        )
+
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
@@ -3323,7 +3339,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )  # type: ignore[arg-type]
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -3468,7 +3484,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             reason="worker completed",
             request_id="green-validate",
         )
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4643,7 +4659,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_card_event_charges_the_sprint_it_is_linked_to_and_no_other(self) -> None:
         self.with_thresholds(1, 3)
         self.settled_pair()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4696,7 +4712,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 if action["step"] == "review"
             ],
         )
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-neighbor",
@@ -4726,7 +4742,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_a_hard_stop_stops_one_sprint_while_the_other_keeps_claiming(self) -> None:
         self.with_thresholds(1, 2)
         self.settled_pair()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",

@@ -768,7 +768,8 @@ class FakeHost:
         self.split_from: list[str] = []
         self.stopped_reviews: list[str] = []
         self.review_stop_initiators: list[str] = []
-        self.commit = "c0ffee1234567890"
+        self._commit = "c0ffee1234567890c0ffee1234567890c0ffee12"
+        self.base_commit = "b" * 40
         self.instance_publish_recoveries: set[tuple[str, str]] = set()
         # Observer heads (secretary-793): which sprints got one, which handles were stopped, and
         # the pid the fake heartbeat writes. os.getpid() is a live process, so the default launch
@@ -1617,9 +1618,27 @@ class FakeHost:
             self.stopped_reviews.append(record.review_handle)
         self._kill_head("review", record)
 
+    @property
+    def commit(self) -> str:
+        return self._commit
+
+    @commit.setter
+    def commit(self, value: str) -> None:
+        # Production Git always returns an exact object id. Named fixture revisions stay readable
+        # at assignment sites while the fake exposes the same exact-SHA contract to the runtime.
+        self._commit = (
+            value
+            if len(value) == 40 and all(character in "0123456789abcdef" for character in value)
+            else hashlib.sha1(value.encode("utf-8")).hexdigest()
+        )
+
     def head_commit(self, record) -> str:
         self.calls.append("head_commit")
         return self.commit
+
+    def review_base_commit(self, task: dict, record) -> str:
+        self.calls.append("review_base_commit")
+        return self.base_commit
 
     def is_instance_publish_recovery(
         self, task: dict, record, reviewed_commit: str, current_commit: str

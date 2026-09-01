@@ -37,12 +37,15 @@ from secretary.board import (
     SprintState,
     SprintSupplement,
     TransitionRequest,
+    normalize_verdict_header,
+    project_verdict,
 )
 from secretary.board.card_transitions import (
     CARD_TRANSITIONS,
     CardTransitionForbidden,
     card_transition,
 )
+from secretary.board.models import VERDICT_BLOCKER_KINDS
 from secretary.tasks import TaskAudit, TaskError
 
 
@@ -522,6 +525,83 @@ class BoardHostContractTests(unittest.TestCase):
                 [event.event_id for event in recorded],
                 [first.event.event_id, second.event.event_id],
             )
+
+
+class VerdictProjectionTests(unittest.TestCase):
+    def event(self, **changes) -> Event:
+        data = {
+            "marker": "review:red",
+            "status": "red",
+            "verdict": "red",
+            "candidate_sha": "c" * 40,
+            "base_sha": "b" * 40,
+            "blocker_findings": [
+                {"finding_id": "BLOCKER-first", "kind": "correctness"},
+                {"finding_id": "BLOCKER-second", "kind": "verification"},
+            ],
+            "body": "BLOCKER-first and BLOCKER-second have evidence",
+        }
+        data.update(changes)
+        return Event(
+            "event-verdict",
+            EventKind.CARD_VERDICTED,
+            EntityKind.CARD,
+            "secretary-1526",
+            Actor("reviewer", "reviewer"),
+            data["body"],
+            datetime(2026, 9, 1, tzinfo=UTC),
+            data=data,
+        )
+
+    def test_red_header_projects_in_order_and_every_kind_is_documented(self) -> None:
+        projection = project_verdict(self.event())
+
+        self.assertEqual(projection.structure, "structured")
+        self.assertEqual(
+            [finding.finding_id for finding in projection.header.blocker_findings],  # type: ignore[union-attr]
+            ["BLOCKER-first", "BLOCKER-second"],
+        )
+        for kind in VERDICT_BLOCKER_KINDS:
+            with self.subTest(kind=kind):
+                header = normalize_verdict_header(
+                    "red",
+                    "c" * 40,
+                    "b" * 40,
+                    [{"finding_id": f"BLOCKER-kind-{kind.replace('_', '-')}", "kind": kind}],
+                )
+                self.assertEqual(header.blocker_findings[0].kind, kind)
+
+    def test_missing_or_malformed_headers_preserve_the_unstructured_event(self) -> None:
+        for event in (
+            self.event(candidate_sha=None),
+            self.event(blocker_findings=[]),
+            self.event(blocker_findings=[{"finding_id": "BLOCKER-first", "kind": "unknown"}]),
+            self.event(blocker_findings=[
+                {"finding_id": "BLOCKER-first", "kind": "correctness"},
+                {"finding_id": "BLOCKER-first", "kind": "security"},
+            ]),
+        ):
+            with self.subTest(data=event.data):
+                projection = project_verdict(event)
+                self.assertEqual(projection.structure, "unstructured")
+                self.assertIs(projection.event, event)
+                self.assertIsNone(projection.header)
+                self.assertIn("evidence", projection.event.reason)
+
+        legacy = self.event()
+        for name in ("verdict", "candidate_sha", "base_sha", "blocker_findings"):
+            legacy.data.pop(name)
+        self.assertEqual(project_verdict(legacy).structure, "unstructured")
+
+    def test_verdict_disagreement_and_cardinality_are_unstructured(self) -> None:
+        self.assertEqual(project_verdict(self.event(verdict="green")).structure, "unstructured")
+        green = self.event(
+            marker="review:green",
+            status="green",
+            verdict="green",
+            blocker_findings=[],
+        )
+        self.assertEqual(project_verdict(green).structure, "structured")
 
 
 class BoardMutationTransactionTests(unittest.TestCase):

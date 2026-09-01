@@ -92,6 +92,22 @@ ATTEMPT_USAGE_ACCOUNTS = ("tokens", "session_totals", "phase_baseline")
 ATTEMPT_USAGE_ROLES = ("worker", "reviewer")
 ATTEMPT_USAGE_PHASES = ("worker", "review")
 
+class VerdictBlockerKind(StrEnum):
+    """The invariant class violated by one structured review finding."""
+
+    CORRECTNESS = "correctness"
+    ARCHITECTURE = "architecture"
+    VERIFICATION = "verification"
+    SECURITY = "security"
+    DATA_LOSS = "data_loss"
+    COMPATIBILITY = "compatibility"
+    OPERABILITY = "operability"
+    AUTHORSHIP = "authorship"
+    OTHER = "other"
+
+
+VERDICT_BLOCKER_KINDS = tuple(kind.value for kind in VerdictBlockerKind)
+
 
 class ProductState(StrEnum):
     ACTIVE = "active"

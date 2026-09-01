@@ -396,12 +396,20 @@ class LaunchIntentTests(unittest.TestCase):
         )
 
     def verdict(self, kind: str, body: str, request_id: str) -> None:
+        record = self.runtime.production_state.load()["records"][REF]
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
             reference=REF,
             kind=kind,
             body=body,
+            candidate_sha=record["review_commit"],
+            base_sha=record["review_base_sha"],
+            blocker_findings=(
+                []
+                if kind == "green"
+                else [{"finding_id": "BLOCKER-test-finding", "kind": "correctness"}]
+            ),
             request_id=request_id,
         )
 
@@ -3978,12 +3986,16 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         """Lose the tick right after a red verdict's rework head came up, round 2 reserved."""
         self.leave_a_post_launch_review_intent()
         self.tick()  # the reviewer of the lost tick is adopted
+        record = self.runtime.production_state.load()["records"][REF]
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
             reference=REF,
             kind="red",
             body="needs work",
+            candidate_sha=record["review_commit"],
+            base_sha=record["review_base_sha"],
+            blocker_findings=[{"finding_id": "BLOCKER-test-finding", "kind": "correctness"}],
             request_id="verdict-red",
         )
         self.tick()  # the verdict parks the card

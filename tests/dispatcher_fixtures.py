@@ -237,12 +237,50 @@ class DispatcherRuntimeFixture:
         )
 
     def _review_red(self, request_id: str = "review-red", body: str = "fix the hermetic test") -> None:
+        self._write_verdict(
+            kind="red", body=body, request_id=request_id
+        )
+
+    def _write_verdict(
+        self,
+        *,
+        kind: str,
+        body: str,
+        request_id: str,
+        role: str = "reviewer",
+        actor: str = "reviewer",
+        reference: str = "secretary-510-pilot",
+    ) -> None:
+        record = self.runtime.production_state.load().get("records", {}).get(
+            "secretary-510-pilot",
+            {"review_commit": self.host.commit, "review_base_sha": self.host.base_commit},
+        )
+        findings = [] if kind == "green" else [
+            {"finding_id": "BLOCKER-test-finding", "kind": "correctness"}
+        ]
+        existing = self.writer.audit.event(request_id)
+        existing_data = existing.get("data") if isinstance(existing, dict) else None
+        candidate_sha = (
+            existing_data.get("candidate_sha")
+            if isinstance(existing_data, dict)
+            else record.get("review_commit") or self.host.commit
+        )
+        base_sha = (
+            existing_data.get("base_sha")
+            if isinstance(existing_data, dict)
+            else record.get("review_base_sha") or self.host.base_commit
+        )
+        if isinstance(existing_data, dict):
+            findings = existing_data.get("blocker_findings", findings)
         self.writer.verdict(
-            role="reviewer",
-            actor="reviewer",
-            reference="secretary-510-pilot",
-            kind="red",
+            role=role,
+            actor=actor,
+            reference=reference,
+            kind=kind,
             body=body,
+            candidate_sha=candidate_sha,
+            base_sha=base_sha,
+            blocker_findings=findings,
             request_id=request_id,
         )
 

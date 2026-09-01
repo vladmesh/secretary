@@ -115,6 +115,9 @@ class DispatcherRecord:
     review_handle: str = ""
     review_leaf: str = ""
     review_commit: str = ""
+    # Exact base paired with review_commit when the reviewer document is issued. This is still
+    # recorded for none/noop gates, but it is revision identity, never mechanical attestation.
+    review_base_sha: str = ""
     # Re-review packet: the last rejected checkout and the reviewer's prior blocker text.  These
     # survive the red transition so the next independent reviewer can inspect the delta rather
     # than rediscovering the full historical diff.
@@ -281,6 +284,7 @@ class DispatcherRecord:
             "report_decision": self.report_decision,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
+            "review_base_sha": self.review_base_sha,
             "previous_reviewed_sha": self.previous_reviewed_sha,
             "previous_blockers": self.previous_blockers,
             "review_handle": self.review_handle,
@@ -400,6 +404,7 @@ class DispatcherRecord:
             review_handle=str(payload.get("review_handle") or ""),
             review_leaf=str(payload.get("review_leaf") or ""),
             review_commit=str(payload.get("review_commit") or ""),
+            review_base_sha=str(payload.get("review_base_sha") or ""),
             previous_reviewed_sha=str(payload.get("previous_reviewed_sha") or ""),
             previous_blockers=str(payload.get("previous_blockers") or ""),
             worker_leaf=str(payload.get("worker_leaf") or ""),

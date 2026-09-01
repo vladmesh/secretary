@@ -1015,7 +1015,8 @@ through the board host, which records each occurrence as a typed protocol event 
 `events.ndjson`: `record_type` is `board.protocol_event`, the lifecycle edge is the object
 `transition: {source, target}`, and the reason is carried as text rather than as a digest. Released
 generic `moved` and `claimed` rows stay readable exactly as they were written, and every other operation
-(`report`, `verdict`, `decide`, `routing`, comments, create/edit/archive) keeps its generic record. A
+(`routing`, comments, create/edit/archive) keeps its generic record. The control-marker operations
+`report`, `verdict` and `decide` use their typed Card occurrences as described below. A
 reader that cares about card transitions therefore has to handle both shapes explicitly; `record_type` is
 what tells them apart. A request id written before the migration also keeps the operation it named: a
 retry of a released generic `move` or `claim` id replays that record and finishes its released cleanup,
@@ -1088,6 +1089,59 @@ a card field that silently disagrees with the audit. `--kind done` takes no clas
 given one. An observer moving a card out of Blocked must give a non-empty reason, the same requirement the
 steward carries moving one into it; the reason is a comment on the card and is carried by the card's
 transition event, so how a Blocked card was disposed of stays answerable.
+
+### Structured review verdicts
+
+Every newly accepted `task verdict` is one typed `card.verdict` occurrence. Its existing marker,
+free-form `body`, `body_sha256`, `description_sha256`, `specification_revision` and rendered
+`[review:green]` or `[review:red]` comment remain unchanged. Four additive data fields form the
+machine-readable header:
+
+```json
+{
+  "verdict": "red",
+  "candidate_sha": "<exact lowercase 40-hex commit>",
+  "base_sha": "<exact lowercase 40-hex commit>",
+  "blocker_findings": [
+    {"finding_id": "BLOCKER-stable-slug", "kind": "correctness"}
+  ]
+}
+```
+
+Finding order is significant. Each `finding_id` is unique in the verdict and matches
+`BLOCKER-<lowercase-short-slug>`. A green verdict has no findings; a red verdict has at least one.
+The closed finding-kind vocabulary is:
+
+- `correctness`: observable behaviour is wrong.
+- `architecture`: a required structural or ownership boundary is violated.
+- `verification`: required evidence is absent, invalid or does not cover the claim.
+- `security`: confidentiality, integrity, authorization or access control is at risk.
+- `data_loss`: state can be destructively or irrecoverably lost.
+- `compatibility`: a supported interface or compatibility promise is broken.
+- `operability`: deployment, recovery, monitoring or routine operation is unsafe.
+- `authorship`: commit attribution violates the authorship policy.
+- `other`: no more specific member applies.
+
+The dispatcher writes the exact candidate and base into the generated review document. The
+candidate is the checkout pinned when the reviewer starts. The base comes from the applicable gate
+receipt, or from the exact review context for an explicitly non-attesting `none`/`noop` gate. The
+reviewer repeats `--blocker-finding BLOCKER-id:kind` for red findings. Request replay compares the
+entire event, including verdict, both SHAs and the ordered findings, so a request id cannot change
+any of them.
+
+The canonical projection of a `card.verdict` is `structured` only when this entire header validates
+and agrees with the marker/status. An event with no header, including every historical verdict, or
+with a malformed header projects as `unstructured`. The projection retains the original event and
+body unchanged; it does not migrate, discard or repair history. Generic event consumers and released
+marker comments therefore remain readable, while normal board/audit export exposes all four fields
+without parsing prose.
+
+Dispatcher lifecycle consumption additionally requires the structured candidate/base pair to equal
+the checkout and base it actually sent to that review. Missing, stale or mismatched evidence cannot
+drive Assessment, rework or release. These revision fields are identity, not mechanical validation:
+they never replace the dispatcher-owned exact-SHA broad-gate receipt. An explicit `none`/`noop` gate,
+or a missing broad-gate receipt, remains non-attesting even when the verdict's revision binding is
+valid.
 
 The `reported` events are the authoritative copy and keep the classification of every block, so counting how
 often one head blocks is a question for the audit. The retired `triggered_agents pipeline` CLI is no longer a

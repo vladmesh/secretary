@@ -41,6 +41,24 @@ CARD_REF = "secretary-510-pilot"
 class LegacyPathTests(unittest.TestCase):
     """Shared fixture: one card driven through ``_tick_task`` like the runtime tests do."""
 
+    def write_verdict(self, kind: str, body: str, request_id: str) -> None:
+        record = self.runtime.production_state.load()["records"][CARD_REF]
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference=CARD_REF,
+            kind=kind,
+            body=body,
+            candidate_sha=record["review_commit"],
+            base_sha=record["review_base_sha"],
+            blocker_findings=(
+                []
+                if kind == "green"
+                else [{"finding_id": "BLOCKER-test-finding", "kind": "correctness"}]
+            ),
+            request_id=request_id,
+        )
+
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
@@ -163,14 +181,7 @@ class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
         self.report_done()
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
-        self.writer.verdict(
-            role="reviewer",
-            actor="reviewer",
-            reference=CARD_REF,
-            kind="red",
-            body="fix it",
-            request_id="review-red",
-        )
+        self.write_verdict("red", "fix it", "review-red")
         parked = self.tick()
         self.assertEqual(parked["to"], "assessment")
         self.writer.decide(

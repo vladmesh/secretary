@@ -1766,6 +1766,20 @@ class CommandHostRuntime:
             return ""
         return completed.stdout.strip()
 
+    def review_base_commit(self, task: dict[str, Any], record: DispatcherRecord) -> str:
+        """Resolve the exact base paired with a review before its document is issued."""
+        if self.mode == "noop" or not record.workspace:
+            return ""
+        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+        try:
+            completed = self._run(
+                ["git", "-C", record.workspace, "rev-parse", f"origin/{base}"],
+                "review base sha",
+            )
+        except HostError:
+            return ""
+        return completed.stdout.strip()
+
     def is_instance_publish_recovery(
         self,
         task: dict[str, Any],
@@ -3688,6 +3702,8 @@ class CommandHostRuntime:
         body_file = _body_file_path("verdict", task["ref"], review_round)
         current_sha = self.head_commit(record) if record else ""
         attestation = _gate_attestation_for_prompt(record, current_sha)
+        candidate_sha = str(attestation.get("validated_sha") or current_sha)
+        base_sha = str(attestation.get("base_sha") or (record.review_base_sha if record else ""))
         sections = [
             f"# Review {task['ref']}",
             "",
@@ -3701,6 +3717,15 @@ class CommandHostRuntime:
             "A red verdict must list every blocker you have found in this round. Prefix each with a",
             "stable `BLOCKER-<short-slug>` id so a re-review can close it without rediscovering it.",
             "Do not hold blockers back for a later round and do not widen the scope on the next one.",
+            "",
+            "Submit every red blocker as a repeatable `--blocker-finding BLOCKER-id:kind` argument.",
+            "Kinds are: `correctness` for wrong behaviour; `architecture` for a structural boundary;",
+            "`verification` for missing or invalid evidence; `security` for confidentiality, integrity",
+            "or access-control risk; `data_loss` for destructive or unrecoverable state; `compatibility`",
+            "for a broken supported interface; `operability` for deployment, recovery or observability;",
+            "`authorship` for forbidden attribution; and `other` only when none of those applies.",
+            "GREEN carries no blocker findings. RED requires at least one, with the same stable ids used",
+            "in the prose evidence below.",
             "",
             "For every RED blocker, state the concrete reachable scenario, the violated acceptance",
             "criterion or operational invariant, material assumptions, whether this branch introduced",
@@ -3722,8 +3747,8 @@ class CommandHostRuntime:
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --request-id {green_request} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --request-id {red_request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --candidate-sha {candidate_sha or '0' * 40} --base-sha {base_sha or '0' * 40} --request-id {green_request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --candidate-sha {candidate_sha or '0' * 40} --base-sha {base_sha or '0' * 40} --blocker-finding BLOCKER-short-slug:correctness --request-id {red_request} --body-file {body_file}",
             "",
         ]
         if attestation:

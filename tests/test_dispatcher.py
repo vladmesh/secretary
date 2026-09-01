@@ -1465,7 +1465,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertEqual(self.runtime.production_tick()["actions"][0]["to"], "validate")
         self.assertEqual(self.runtime.production_tick()["actions"][0]["action"], "review-started")
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -1574,7 +1574,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["to"], "validate")
         self.host.gate_results = [GateResult("green", "pre-review green"), GateResult("red", "merge red")]
         self.assertEqual(self.tick()["action"], "review-started")
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -2416,7 +2416,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(review_started["action"], "review-started")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -3102,7 +3102,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._rewind_wait("review", seconds=stall_seconds("review") + 60)
         self.assertEqual(self.tick()["action"], "review-respawned")
 
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -3145,7 +3145,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "review-started")
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -3277,7 +3277,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ]
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "review-started")
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -3335,7 +3335,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "review-started")
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4143,7 +4143,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.fail_complete_reason = "merge push failed: ! [rejected] non-fast-forward"
         self._run_worker_to_validate()
         self.tick()  # gate green -> review started
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4233,7 +4233,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.gate_results = [GateResult("green", "green"), GateResult("red", "CI went red")]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4252,7 +4252,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.gate_results = [GateResult("green", "green"), GateResult("pending", "CI running")]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4275,7 +4275,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4305,7 +4305,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4382,7 +4382,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4414,7 +4414,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._run_worker_to_validate()
         self.tick()
         reviewed = self.host.commit
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -4553,7 +4553,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5303,7 +5303,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5330,7 +5330,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5361,7 +5361,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5390,7 +5390,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ] + [GateTransportError(self.TRANSPORT_ERROR) for _ in range(GATE_TRANSPORT_MAX_ATTEMPTS)]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5422,7 +5422,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5452,7 +5452,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ]
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5477,7 +5477,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.gate_results = [GateResult("green", "green"), GateResult("red", "CI red", "boom")]
         self._run_worker_to_validate()
         self.tick()  # gate green -> review started
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5497,7 +5497,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.gate_results = [GateResult("green", "green"), GateResult("green", "green")]
         self._run_worker_to_validate()
         self.tick()  # gate green -> review started
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5517,7 +5517,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()  # gate green -> review started
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5539,7 +5539,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
     def _drive_to_green_verdict(self) -> None:
         self._run_worker_to_validate()
         self.tick()  # gate green -> review started
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5578,7 +5578,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._run_worker_to_validate()
         self.tick()
         self.host.fail_restart_reason = "rework workspace is missing"
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5717,7 +5717,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -5741,7 +5741,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -6286,7 +6286,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.tick()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -6393,7 +6393,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -6417,7 +6417,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -6437,7 +6437,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._run_worker_to_validate()
         self.tick()
         self.host.commit = "0000000000000000"
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -6456,6 +6456,32 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertTrue(any("a different state of the code" in comment["body"] for comment in comments))
         self.assertIn("continuation: replacement", comments[-1]["body"])
 
+    def test_structured_verdict_with_mismatched_header_cannot_drive_lifecycle(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        record = self._pilot_record()
+
+        for request_id, candidate, base in (
+            ("wrong-candidate", "d" * 40, record["review_base_sha"]),
+            ("wrong-base", record["review_commit"], "a" * 40),
+        ):
+            self.writer.verdict(
+                role="reviewer",
+                actor="reviewer",
+                reference="secretary-510-pilot",
+                kind="green",
+                body=request_id,
+                candidate_sha=candidate,
+                base_sha=base,
+                blocker_findings=[],
+                request_id=request_id,
+            )
+            result = self.tick()
+            self.assertEqual(result["action"], "waiting-review-verdict")
+            self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+            self.assertEqual(self.host.completed, [])
+
     def test_green_verdict_for_a_descendant_checkout_is_not_merged_by_default(self) -> None:
         """A descendant can contain new commits after review; only the instance publish recovery
         path is allowed to finish from a moved checkout."""
@@ -6464,7 +6490,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.tick()
         reviewed = self.host.commit
         self.host.commit = "1111111111111111"
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -6479,7 +6505,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         self.assertEqual(self.host.completed, [])
         self.assertIn(("is_instance_publish_recovery"), self.host.calls)
-        self.assertEqual(reviewed, "c0ffee1234567890")
+        self.assertEqual(reviewed, "c0ffee1234567890c0ffee1234567890c0ffee12")
 
     def test_green_verdict_for_instance_publish_recovery_can_finish_from_published_descendant(self) -> None:
         self.start_dispatcher()
@@ -6488,7 +6514,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         reviewed = self.host.commit
         self.host.commit = "2222222222222222"
         self.host.instance_publish_recoveries.add((reviewed, self.host.commit))
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -6507,7 +6533,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -7394,7 +7420,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["action"], "review-started")
 
         round_one = self._reviewer_red_request_id()
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -7423,7 +7449,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertNotEqual(round_two, round_one, "round 2 must not reuse round 1's request-id")
 
         before = len(self.reader.show("secretary-510-pilot")["comments"])
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -7516,7 +7542,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(result["action"], "review-started")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
-    def test_validate_adoption_processes_existing_review_verdict(self) -> None:
+    def test_validate_adoption_does_not_process_a_verdict_without_review_context(self) -> None:
         self.start_dispatcher()
         self.writer.report(
             role="worker",
@@ -7528,7 +7554,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.board.tasks[0]["column_id"] = 4
         self.board.metadata[12]["claim"] = "secretary-510-pilot-pilot"
-        self.writer.verdict(
+        self._write_verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
@@ -7537,11 +7563,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="existing-verdict",
         )
 
-        result = self._park_and_decide("release")
+        result = self.tick()
 
-        self.assertEqual(result["to"], "done")
-        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "done")
-        self.assertEqual(self.host.reviews, [])
+        self.assertEqual(result["action"], "review-started")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
     def test_host_error_comment_is_scrubbed(self) -> None:
         self.start_dispatcher()
@@ -11606,8 +11632,8 @@ class DispatcherLauncherTests(unittest.TestCase):
             later = host._review_prompt(task, "attempt-1", 7)
 
         def rid(text: str, kind: str) -> str:
-            start = text.index(f"--kind {kind} --request-id ") + len(f"--kind {kind} --request-id ")
-            return text[start:].split()[0]
+            line = next(line for line in text.splitlines() if f"--kind {kind} " in line)
+            return line.split("--request-id ", 1)[1].split()[0]
 
         # Same attempt, different review round: the verdict request-id must differ, or a second
         # round's verdict is idempotently deduped against the first and never registers, leaving

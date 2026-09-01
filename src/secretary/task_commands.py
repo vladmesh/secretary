@@ -148,6 +148,15 @@ def add_task_subcommands(subparsers) -> None:
             command.add_argument("--classification", default="", choices=("", *_BLOCK_CLASSIFICATIONS))
         if name == "verdict":
             command.add_argument("--kind", required=True, choices=("green", "red"))
+            command.add_argument("--candidate-sha", required=True)
+            command.add_argument("--base-sha", required=True)
+            command.add_argument(
+                "--blocker-finding",
+                action="append",
+                default=[],
+                metavar="BLOCKER-ID:KIND",
+                help="repeat once per red blocker; green carries none",
+            )
         if name == "decide":
             command.add_argument("--kind", required=True, choices=("release", "rework", "reslice"))
             command.add_argument("--reason-file")
@@ -347,9 +356,26 @@ def run_task_verdict(args: argparse.Namespace) -> int:
             reference=args.ref,
             kind=args.kind,
             body=body,
+            candidate_sha=args.candidate_sha,
+            base_sha=args.base_sha,
+            blocker_findings=_blocker_findings(args.blocker_finding),
             request_id=args.request_id,
         ),
     )
+
+
+def _blocker_findings(values: list[str]) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    for value in values:
+        finding_id, separator, kind = value.partition(":")
+        if not separator or not finding_id or not kind:
+            raise TaskError(
+                "validation",
+                "--blocker-finding must be BLOCKER-<short-slug>:<kind>",
+                2,
+            )
+        findings.append({"finding_id": finding_id, "kind": kind})
+    return findings
 
 
 def run_task_decide(args: argparse.Namespace) -> int:

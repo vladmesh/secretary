@@ -1211,12 +1211,16 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
 
     def _review_green(self, request_id: str = "review-green") -> None:
+        record = self._pilot_record()
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
             reference=CARD_REF,
             kind="green",
             body="the change is right",
+            candidate_sha=record.get("review_commit") or self.host.commit,
+            base_sha=record.get("review_base_sha") or self.host.base_commit,
+            blocker_findings=[],
             request_id=request_id,
         )
 

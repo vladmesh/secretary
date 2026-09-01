@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.events import BoardEventCanon, BoardEventPending
+from secretary.board.events import BoardEventCanon, BoardEventPending, normalize_verdict_header
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.models import (
     Actor,
@@ -1958,12 +1958,26 @@ class TaskWriter:
         )
 
     def verdict(
-        self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        kind: str,
+        body: str,
+        candidate_sha: str,
+        base_sha: str,
+        blocker_findings: list[dict[str, str]],
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"reviewer"})
         body = self._redact_for_board(body)
         if kind not in {"green", "red"} or not body.strip():
             raise TaskError("validation", "verdicts require a non-empty body", 2)
+        try:
+            header = normalize_verdict_header(kind, candidate_sha, base_sha, blocker_findings)
+        except (TypeError, ValueError) as exc:
+            raise TaskError("validation", str(exc), 2) from None
         current = self.reader.show(reference)
         revision = specification_revision(self.audit.events(reference), current["description"])
         return self._marker_write(
@@ -1977,6 +1991,7 @@ class TaskWriter:
             data={
                 "marker": f"review:{kind}",
                 "status": kind,
+                **header.to_data(),
                 "body": body,
                 "body_sha256": _digest(body),
                 "description_sha256": _digest(current["description"]),
