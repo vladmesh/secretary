@@ -26,6 +26,21 @@ class TerminalTaxonomyTests(unittest.TestCase):
         self.assertEqual(taxonomy.blocked_reason, "task_contract")
         self.assertEqual(taxonomy.source_evidence, "wrong_task_definition")
 
+    def test_all_forward_blocked_reasons_are_typed(self) -> None:
+        for reason in (
+            "implementation",
+            "review",
+            "task_contract",
+            "gate",
+            "provider",
+            "infrastructure",
+            "operator",
+            "other",
+        ):
+            with self.subTest(reason=reason):
+                taxonomy = normalize_terminal_taxonomy(disposition="blocked", blocked_reason=reason)
+                self.assertEqual((taxonomy.blocked_reason, taxonomy.source_evidence), (reason, reason))
+
     def test_external_fact_remains_evidence_without_invented_precision(self) -> None:
         taxonomy = normalize_terminal_taxonomy(disposition="blocked", blocked_reason="external_fact")
         self.assertEqual(taxonomy.blocked_reason, "other")
@@ -52,6 +67,16 @@ class TerminalTaxonomyTests(unittest.TestCase):
                 {"terminal_taxonomy": {"version": 1, "disposition": "blocked"}},
                 disposition="blocked",
             )
+
+    def test_forward_reslice_reads_its_committed_disposition_not_blocked_target(self) -> None:
+        taxonomy = read_terminal_taxonomy(
+            {
+                "terminal_taxonomy": normalize_terminal_taxonomy(disposition="reslice").to_record(),
+            },
+            disposition=None,
+        )
+        self.assertEqual(taxonomy.disposition, "reslice")
+        self.assertIsNone(budget_event_type(taxonomy))
 
     def test_typed_event_boundary_rejects_malformed_forward_taxonomy(self) -> None:
         with self.assertRaisesRegex(ValueError, "terminal taxonomy"):

@@ -151,6 +151,9 @@ from secretary.dispatcher_launch import (
     bring_up_blocked_reason as _bring_up_blocked_reason,
 )
 from secretary.dispatcher_launch import (
+    bring_up_terminal_reason as _bring_up_terminal_reason,
+)
+from secretary.dispatcher_launch import (
     classify_bring_up_failure as _classify_bring_up_failure,
 )
 from secretary.dispatcher_launch import (
@@ -894,7 +897,7 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
-            blocked_reason="infrastructure",
+            blocked_reason=_bring_up_terminal_reason(failure),
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -1202,7 +1205,7 @@ class DispatcherRuntime:
                 ),
                 terminal_state="blocked",
                 disposition="blocked",
-                blocked_reason="infrastructure",
+                blocked_reason=_bring_up_terminal_reason(failure),
             )
             records.pop(ref, None)
             self.save_records(payload, records)
@@ -4759,7 +4762,7 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
-            blocked_reason="infrastructure",
+            blocked_reason=_bring_up_terminal_reason(failure),
         )
         resume_workspaces = payload.setdefault("resume_workspaces", {})
         if isinstance(resume_workspaces, dict):

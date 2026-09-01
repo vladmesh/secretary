@@ -88,7 +88,7 @@ def normalize_terminal_taxonomy(*, disposition: str, blocked_reason: str | None 
     return TerminalTaxonomy(disposition, normalized, source_evidence, "forward")
 
 
-def read_terminal_taxonomy(data: Any, *, disposition: str) -> TerminalTaxonomy:
+def read_terminal_taxonomy(data: Any, *, disposition: str | None) -> TerminalTaxonomy:
     """Read forward taxonomy data, or explicitly identify a legacy absence.
 
     This reader is for observational consumers.  It never upgrades a legacy
@@ -97,6 +97,8 @@ def read_terminal_taxonomy(data: Any, *, disposition: str) -> TerminalTaxonomy:
     payload = data if isinstance(data, dict) else {}
     raw = payload.get("terminal_taxonomy")
     if raw is None:
+        if disposition is None:
+            raise TerminalTaxonomyValidationError("a legacy terminal taxonomy needs its transition disposition")
         if disposition not in TERMINAL_DISPOSITIONS:
             raise TerminalTaxonomyValidationError(f"unsupported terminal disposition {disposition!r}")
         return TerminalTaxonomy(
@@ -118,13 +120,13 @@ def read_terminal_taxonomy(data: Any, *, disposition: str) -> TerminalTaxonomy:
     taxonomy = normalize_terminal_taxonomy(
         disposition=raw["disposition"], blocked_reason=raw["source_evidence"]
     )
-    if taxonomy.disposition != disposition or taxonomy.blocked_reason != raw["blocked_reason"]:
+    if (disposition is not None and taxonomy.disposition != disposition) or taxonomy.blocked_reason != raw["blocked_reason"]:
         raise TerminalTaxonomyValidationError("terminal taxonomy does not match its transition")
     return taxonomy
 
 
-def budget_event_type(taxonomy: TerminalTaxonomy) -> str:
-    """Classify a blocked terminal observation without deciding any lifecycle work."""
+def budget_event_type(taxonomy: TerminalTaxonomy) -> str | None:
+    """Classify a terminal observation without deciding any lifecycle work."""
     if taxonomy.disposition != "blocked":
-        raise TerminalTaxonomyValidationError("only blocked terminal taxonomy has a sprint block class")
+        return None
     return "infrastructure_blocked" if taxonomy.blocked_reason == "infrastructure" else "blocked"

@@ -4213,6 +4213,13 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.assertFalse(self.head_alive("worker"), "the head of the unresolved launch is gone")
         self.assertNotIn(REF, self.records())
         self.assertEqual(self.reader.show(REF)["state"], "blocked")
+        blocked = [
+            event
+            for event in self.runtime.audit.events(REF)
+            if event.get("transition", {}).get("target") == "blocked"
+        ][-1]
+        self.assertEqual(blocked["data"]["terminal_taxonomy"]["blocked_reason"], "infrastructure")
+        self.assertIsInstance(blocked["data"].get("attempt_outcome_owed"), dict)
 
     def test_a_mismatch_over_a_head_that_will_not_stop_keeps_the_record(self) -> None:
         self.leave_a_post_launch_intent()

@@ -1196,10 +1196,14 @@ reason tokens read as explicit `legacy`/`other` evidence, without a rewrite, bac
 request ids, prose, timestamps or live state.
 
 The same normalized taxonomy supplies each new dispatcher Blocked transition, its `attempt.outcome`
-obligation and sprint-budget class. Infrastructure is recorded as uncharged
-`infrastructure_blocked`; every other normalized block is charged as `blocked`. These consumers are
-observational: a malformed or unavailable taxonomy/outcome/budget observation cannot gate, reorder,
-retry or undo the lifecycle effect.
+obligation and sprint-budget class. The committed record's own disposition is read during recovery, so
+an assessment `reslice` that targets Blocked remains `reslice` rather than being recast as a blocked
+taxonomy disposition. Infrastructure is recorded as uncharged `infrastructure_blocked`; every other
+normalized block is charged as `blocked`. An event that predates the taxonomy keeps its pre-existing
+durable action-token budget class, while its taxonomy read remains explicit `legacy`/`other` evidence.
+These consumers are observational: a malformed or unavailable taxonomy/outcome/budget observation
+cannot gate, reorder, retry or undo the lifecycle effect, and one malformed historical record does not
+stop reconciliation of later budget events.
 
 Its natural key is exactly `(card_ref, attempt_id, report_generation)`. `attempt` is the observed ordinal
 and is not part of the key. The Card subject supplies `card_ref`; `data` carries `version: 1`, non-empty

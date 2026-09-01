@@ -11,11 +11,17 @@ from typing import Any
 
 from secretary._fsutil import try_file_lock, write_json
 from secretary.board.models import Event, EventKind
-from secretary.board.terminal_taxonomy import budget_event_type, read_terminal_taxonomy
+from secretary.board.terminal_taxonomy import (
+    TerminalTaxonomyValidationError,
+    budget_event_type,
+    read_terminal_taxonomy,
+)
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatcher_launch import (
+    FAILURE_CLASS_INFRASTRUCTURE,
     REVIEW_ROLE,
     WORKER_ROLE,
+    bring_up_failure_class,
     forget_role_head,
     launch_intent,
     stop_launch_intent,
@@ -1199,13 +1205,15 @@ def _production_active_mismatch(
             f"stopped: {stopped['reason']}"
         )
         return stopped
-    runtime.writer.move(
-        role="dispatcher",
-        actor=runtime.owner,
-        reference=task["ref"],
+    runtime.terminal_effect(
+        task,
+        record,
         target="blocked",
         reason="production recovery blocked: active task claim no longer matches production record",
         request_id=_attempt_request_id(record.attempt_id, "active-mismatch-blocked", task["ref"]),
+        terminal_state="blocked",
+        disposition="blocked",
+        blocked_reason="infrastructure",
     )
     divergence = record_divergence(
         payload,
@@ -1376,7 +1384,12 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
         reference = str(event.get("ref") or "")
         if not reference or reference.startswith("sprint:"):
             continue
-        event_type = _budget_event_type(event)
+        try:
+            event_type = _budget_event_type(event)
+        except TerminalTaxonomyValidationError:
+            # A corrupt observation is not a lifecycle concern and must not
+            # prevent later durable events from reaching their budget seam.
+            continue
         if event_type is None:
             continue
         identity = str(event.get("event_id") or event.get("request_id") or "")
@@ -1478,10 +1491,19 @@ def _budget_event_type(event: dict[str, Any]) -> str | None:
     if target:
         request_id = str(event.get("request_id") or "")
         if target == "blocked":
-            # New dispatcher effects carry their typed taxonomy. A historical
-            # token or missing field reads as explicit legacy/other evidence;
-            # it is never reverse-classified from request-id spelling.
-            return budget_event_type(read_terminal_taxonomy(payload, disposition="blocked"))
+            if payload.get("terminal_taxonomy") is None:
+                # Taxonomy did not exist when this transition committed. Keep
+                # its durable action-token accounting rather than inventing a
+                # forward classification from prose or current state.
+                return (
+                    "infrastructure_blocked"
+                    if bring_up_failure_class(request_id) == FAILURE_CLASS_INFRASTRUCTURE
+                    else "blocked"
+                )
+            # A committed forward record owns its disposition. In particular,
+            # an assessment reslice can target Blocked without becoming a
+            # blocked taxonomy disposition during budget recovery.
+            return budget_event_type(read_terminal_taxonomy(payload, disposition=None))
         if target == "ready" and source in ACTIVE_STATES:
             return "preempt"
         if target == "in_progress" and "gate-red" in request_id:

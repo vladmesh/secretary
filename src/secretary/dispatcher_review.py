@@ -13,6 +13,7 @@ from secretary.dispatcher_launch import (
     BringUpFailure,
     bring_up_blocked_action,
     bring_up_blocked_reason,
+    bring_up_terminal_reason,
     busy_launch_delivery,
     classify_bring_up_failure,
     clear_launch_intent,
@@ -204,7 +205,7 @@ def review_infrastructure_failure(
         ),
         terminal_state="blocked",
         disposition="blocked",
-        blocked_reason="infrastructure",
+        blocked_reason=bring_up_terminal_reason(failure),
     )
     records[ref] = record
     runtime.save_records(payload, records)
@@ -1039,7 +1040,7 @@ def start_review(
             ),
             terminal_state="blocked",
             disposition="blocked",
-            blocked_reason="infrastructure",
+            blocked_reason=bring_up_terminal_reason(failure),
         )
         records.pop(ref, None)
         return {

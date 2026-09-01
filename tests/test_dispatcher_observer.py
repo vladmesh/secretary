@@ -3445,9 +3445,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         legacy = {"kind": "moved", "payload": {"to": "blocked"}}
         self.assertEqual(
-            [_budget_event_type({**legacy, "request_id": request_id}) for request_id in charged],
-            ["blocked"] * len(charged),
+            _budget_event_type({**legacy, "request_id": infrastructure_action(charged[0])}),
+            BUDGET_UNCHARGED_INFRASTRUCTURE,
         )
+        self.assertEqual(_budget_event_type({**legacy, "request_id": "worker-report-blocked"}), "blocked")
         # The other budget-shaped events keep their type whatever the request id spells.
         self.assertEqual(
             _budget_event_type(
@@ -3459,6 +3460,52 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             ),
             "preempt",
         )
+
+    def test_forward_reslice_and_malformed_history_do_not_stop_later_budget_events(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="blocked",
+            reason="reslice",
+            sprint_override=True,
+            sprint_override_reason="reslice",
+            request_id="forward-reslice",
+            terminal_taxonomy={
+                "version": 1,
+                "disposition": "reslice",
+                "blocked_reason": None,
+                "source_evidence": None,
+                "provenance": "forward",
+            },
+        )
+        self.audit.append(
+            "malformed-taxonomy",
+            {
+                "event_id": "evt_malformed_taxonomy",
+                "request_id": "malformed-taxonomy",
+                "ref": "secretary-510-pilot",
+                "record_type": "board.protocol_event",
+                "kind": "card.blocked",
+                "transition": {"target": "blocked"},
+                "data": {"terminal_taxonomy": {"version": 1}},
+            },
+        )
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="later budget event",
+            request_id="later-red-review",
+        )
+
+        actions = _reconcile_sprint_budget(self.runtime)
+
+        self.assertEqual([action["event_type"] for action in actions], ["red_review"])
+        self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
 
     def test_full_green_card_cycle_does_not_charge_the_sprint_budget(self) -> None:
         self.open_sprint()

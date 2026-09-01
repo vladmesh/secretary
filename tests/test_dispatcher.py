@@ -7249,6 +7249,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(bring_up_failure_class(transition["request_id"]), FAILURE_CLASS_TASK)
         self.assertIn("bringup-blocked", transition["request_id"])
         self.assertNotIn("infrastructure", transition["request_id"])
+        self.assertEqual(transition["data"]["terminal_taxonomy"]["blocked_reason"], "task_contract")
 
     def test_a_worker_pane_that_never_frees_up_ends_as_an_infrastructure_outcome(self) -> None:
         """The bounded deferral is unchanged, and what it ends in is a statement about the pane."""
@@ -7332,6 +7333,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(bring_up_failure_class(transition["request_id"]), FAILURE_CLASS_TASK)
         self.assertNotIn("infrastructure", transition["request_id"])
         self.assertEqual(self.host.calls.count("start_review"), 1)
+        self.assertEqual(transition["data"]["terminal_taxonomy"]["blocked_reason"], "task_contract")
 
     def test_a_rework_bringup_defers_on_a_pane_that_is_not_ready(self) -> None:
         """A rework is a bring-up like any other: a red gate that lands while the head's pane is
