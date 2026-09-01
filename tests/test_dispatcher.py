@@ -6676,6 +6676,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         before = self._record_of()
         before.gate_state = "green"
         before.gate_attestation = receipt
+        before.review_commit = str(receipt["validated_sha"])
+        before.review_base_sha = str(receipt["base_sha"])
         before.state = "review_starting"
         payload = self.runtime.production_state.load()
         self.runtime.production_state.put_records(payload, {"secretary-510-pilot": before})
@@ -6690,6 +6692,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         isolated_bodies.mkdir()
         with (
             mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(isolated_bodies)}),
+            mock.patch.object(real_host, "head_commit", return_value=str(receipt["validated_sha"])),
             mock.patch.object(
                 real_host, "_signal_head", side_effect=AssertionError("unexpected head signal")
             ),
@@ -7568,6 +7571,43 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(result["action"], "review-started")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_validate_adoption_recovers_the_recorded_review_context_and_verdict(self) -> None:
+        """A lost dispatcher record must not strand the reviewer its durable launch identifies."""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        original = self._pilot_record()
+        expected = (original["review_commit"], original["review_base_sha"])
+        self.assertEqual(original["gate_attestation"], {}, "ci:none remains non-attesting")
+        self.assertLess(
+            self.host.calls.index("review_base_commit"),
+            self.host.calls.index("start_review"),
+            "the receiptless base is authoritative before the reviewer launches",
+        )
+
+        payload = self.runtime.production_state.load()
+        payload["records"].pop("secretary-510-pilot")
+        self.runtime.production_state.save(payload)
+
+        adopted = self.tick()
+        recovered = self._pilot_record()
+        self.assertEqual(adopted["action"], "waiting-review-verdict")
+        self.assertEqual((recovered["review_commit"], recovered["review_base_sha"]), expected)
+        self.assertIn("recorded_review_context", self.host.calls)
+
+        self._write_verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="the recovered review is green",
+            request_id="recovered-review-green",
+        )
+        advanced = self.tick()
+
+        self.assertEqual(advanced["to"], "assessment")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
 
     def test_host_error_comment_is_scrubbed(self) -> None:
         self.start_dispatcher()
@@ -9626,6 +9666,22 @@ class HeadPromptTests(unittest.TestCase):
     def _command_lines(self, doc: str) -> list[str]:
         return [line for line in doc.splitlines() if "python3 -P -m secretary task" in line]
 
+    def _review_record(self, *, candidate: str = "c" * 40, base: str = "b" * 40) -> DispatcherRecord:
+        return DispatcherRecord(
+            worker="secretary-510-pilot-pilot",
+            workspace="",
+            handle="",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=3,
+            state="review_starting",
+            claimed_at=1.0,
+            review_commit=candidate,
+            review_base_sha=base,
+        )
+
     def _assert_receipt_name_at_site(
         self,
         prompt: str,
@@ -9683,6 +9739,80 @@ class HeadPromptTests(unittest.TestCase):
             self.assertIn("--body-file /tmp/secretary-verdict-secretary-510-pilot-3.md", command)
             self.assertNotIn("<file>", command)
 
+    def test_review_prompt_commands_carry_exact_context_and_typed_findings(self) -> None:
+        candidate = "1" * 40
+        base = "2" * 40
+        doc = self.host._review_prompt(
+            self.task,
+            "attempt-1",
+            3,
+            record=self._review_record(candidate=candidate, base=base),
+        )
+        commands = self._command_lines(doc)
+
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.assertIn(f"--candidate-sha {candidate}", command)
+            self.assertIn(f"--base-sha {base}", command)
+        red = next(command for command in commands if "--kind red" in command)
+        self.assertIn("--blocker-finding BLOCKER-short-slug:correctness", red)
+        for kind in (
+            "correctness",
+            "architecture",
+            "verification",
+            "security",
+            "data_loss",
+            "compatibility",
+            "operability",
+            "authorship",
+            "other",
+        ):
+            self.assertIn(f"`{kind}`", doc)
+
+    def test_review_document_refuses_a_missing_candidate_before_launch(self) -> None:
+        record = self._review_record(candidate="")
+        record.workspace = self.tmpdir.name
+        with (
+            mock.patch.object(self.host, "_launch") as launch,
+            self.assertRaisesRegex(HostError, "candidate SHA is unavailable"),
+        ):
+            self.host.start_review(self.task, record)
+        launch.assert_not_called()
+
+    def test_review_document_refuses_a_missing_base_before_launch(self) -> None:
+        record = self._review_record(base="")
+        record.workspace = self.tmpdir.name
+        with (
+            mock.patch.object(self.host, "_launch") as launch,
+            self.assertRaisesRegex(HostError, "base SHA is unavailable"),
+        ):
+            self.host.start_review(self.task, record)
+        launch.assert_not_called()
+
+    def test_receiptless_review_base_refreshes_the_remote_before_resolution(self) -> None:
+        record = self._review_record()
+        record.workspace = "/workspace"
+        self.host.mode = "real"
+        completed = [
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="b" * 40 + "\n", stderr=""),
+        ]
+        with mock.patch.object(self.host, "_run", side_effect=completed) as run:
+            base = self.host.review_base_commit(self.task, record)
+
+        self.assertEqual(base, "b" * 40)
+        self.assertEqual(run.call_args_list[0].args[1], "review base fetch")
+        self.assertEqual(run.call_args_list[0].args[0][-3:], ["fetch", "origin", "main"])
+        self.assertEqual(run.call_args_list[1].args[1], "review base sha")
+
+    def test_recorded_review_document_recovers_one_exact_context(self) -> None:
+        expected = ("1" * 40, "2" * 40)
+        record = self._review_record(candidate=expected[0], base=expected[1])
+        self.host._review_document(self.task, record)
+        lost = self._review_record(candidate="", base="")
+
+        self.assertEqual(self.host.recorded_review_context(self.task, lost), expected)
+
     def test_review_prompt_names_a_worker_head_chosen_by_failover(self) -> None:
         """secretary-1165: the reviewer is told which head wrote the branch when it is not the one
         the card asks for. A record with no substitution says nothing at all — a section that
@@ -9699,6 +9829,8 @@ class HeadPromptTests(unittest.TestCase):
             state="review_starting",
             claimed_at=1.0,
             preferred_head="codex",
+            review_commit="c" * 40,
+            review_base_sha="b" * 40,
         )
 
         substituted = self.host._review_prompt(self.task, "attempt-1", 1, record=record)
@@ -9726,6 +9858,8 @@ class HeadPromptTests(unittest.TestCase):
                 review_baseline=0,
                 state="review_starting",
                 claimed_at=1.0,
+                review_commit="c" * 40,
+                review_base_sha="b" * 40,
             )
             doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
             review = self.host._review_prompt(self.task, "attempt-1", 1, record=record)
@@ -10263,6 +10397,8 @@ class HeadPromptTests(unittest.TestCase):
             review_baseline=review_baseline,
             state="reviewing",
             claimed_at=0.0,
+            review_commit="c" * 40,
+            review_base_sha="b" * 40,
         )
 
     def test_launching_a_head_drops_a_stale_body_file(self) -> None:

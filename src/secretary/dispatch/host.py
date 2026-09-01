@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -255,6 +256,56 @@ from triggered_agents.runtime.prompt_document import (
 from triggered_agents.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
+
+_REVIEW_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def establish_review_context(
+    host: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    *,
+    recover_recorded_launch: bool = False,
+) -> tuple[str, str]:
+    """Bind a review round once to the candidate and base its document names.
+
+    A surviving record is authoritative. A lost record may recover the pair from the durable
+    launch document, but only when the dispatcher has independently proved that launch was
+    recorded. Otherwise an accepted exact-SHA gate supplies the pair, and receiptless none/noop
+    gates resolve the pinned checkout and a freshly fetched base through the host.
+    """
+    candidate = str(record.review_commit or "")
+    base = str(record.review_base_sha or "")
+    recorded_candidate = recorded_base = ""
+    if recover_recorded_launch and (not candidate or not base):
+        recover = getattr(host, "recorded_review_context", None)
+        if callable(recover):
+            recovered = recover(task, record)
+            if recovered:
+                recorded_candidate, recorded_base = recovered
+    attestation = record.gate_attestation if isinstance(record.gate_attestation, dict) else {}
+    attested_candidate = str(attestation.get("validated_sha") or "")
+    attested_base = str(attestation.get("base_sha") or "")
+    candidate = candidate or recorded_candidate or attested_candidate or str(host.head_commit(record) or "")
+    base = base or recorded_base
+    if not base and attested_candidate == candidate:
+        base = attested_base
+    if not base:
+        base = str(host.review_base_commit(task, record) or "")
+    if not _REVIEW_SHA_RE.fullmatch(candidate):
+        raise HostError("review candidate SHA is unavailable or is not an exact 40-hex revision")
+    if not _REVIEW_SHA_RE.fullmatch(base):
+        raise HostError("review base SHA is unavailable or is not an exact 40-hex revision")
+    current = str(host.head_commit(record) or "")
+    if _REVIEW_SHA_RE.fullmatch(current) and current != candidate:
+        raise HostError("recorded review candidate does not match the pinned checkout")
+    if record.review_commit and record.review_commit != candidate:
+        raise HostError("review candidate context is immutable")
+    if record.review_base_sha and record.review_base_sha != base:
+        raise HostError("review base context is immutable")
+    record.review_commit = candidate
+    record.review_base_sha = base
+    return candidate, base
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
@@ -1767,11 +1818,12 @@ class CommandHostRuntime:
         return completed.stdout.strip()
 
     def review_base_commit(self, task: dict[str, Any], record: DispatcherRecord) -> str:
-        """Resolve the exact base paired with a review before its document is issued."""
+        """Resolve the refreshed exact base paired with a receiptless review."""
         if self.mode == "noop" or not record.workspace:
             return ""
         base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
         try:
+            self._run(["git", "-C", record.workspace, "fetch", "origin", base], "review base fetch")
             completed = self._run(
                 ["git", "-C", record.workspace, "rev-parse", f"origin/{base}"],
                 "review base sha",
@@ -1779,6 +1831,24 @@ class CommandHostRuntime:
         except HostError:
             return ""
         return completed.stdout.strip()
+
+    def recorded_review_context(
+        self, task: dict[str, Any], record: DispatcherRecord
+    ) -> tuple[str, str] | None:
+        """Read the exact pair from the durable document of a recorded review launch."""
+        document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
+        try:
+            body = document.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        pairs = {
+            (candidate, base)
+            for candidate, base in re.findall(
+                r"--candidate-sha\s+([0-9a-fA-F]{40})\s+--base-sha\s+([0-9a-fA-F]{40})(?:\s|$)",
+                body,
+            )
+        }
+        return next(iter(pairs)) if len(pairs) == 1 else None
 
     def is_instance_publish_recovery(
         self,
@@ -3354,6 +3424,7 @@ class CommandHostRuntime:
         same document at the same path, and a document that cannot be written stops the bring-up before
         a pane is opened. Nothing here writes to or removes anything from the candidate checkout.
         """
+        establish_review_context(self, task, record)
         document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
         prompt = self._review_prompt(task, record.attempt_id, record.review_baseline, record=record)
         try:
@@ -3702,8 +3773,12 @@ class CommandHostRuntime:
         body_file = _body_file_path("verdict", task["ref"], review_round)
         current_sha = self.head_commit(record) if record else ""
         attestation = _gate_attestation_for_prompt(record, current_sha)
-        candidate_sha = str(attestation.get("validated_sha") or current_sha)
-        base_sha = str(attestation.get("base_sha") or (record.review_base_sha if record else ""))
+        if record:
+            candidate_sha, base_sha = establish_review_context(self, task, record)
+        else:
+            # Preview-only callers do not launch a reviewer. Production document generation always
+            # supplies a record and fails closed above when either exact revision is unavailable.
+            candidate_sha, base_sha = "CANDIDATE_SHA_REQUIRED", "BASE_SHA_REQUIRED"
         sections = [
             f"# Review {task['ref']}",
             "",
@@ -3747,8 +3822,8 @@ class CommandHostRuntime:
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --candidate-sha {candidate_sha or '0' * 40} --base-sha {base_sha or '0' * 40} --request-id {green_request} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --candidate-sha {candidate_sha or '0' * 40} --base-sha {base_sha or '0' * 40} --blocker-finding BLOCKER-short-slug:correctness --request-id {red_request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --candidate-sha {candidate_sha} --base-sha {base_sha} --request-id {green_request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --candidate-sha {candidate_sha} --base-sha {base_sha} --blocker-finding BLOCKER-short-slug:correctness --request-id {red_request} --body-file {body_file}",
             "",
         ]
         if attestation:

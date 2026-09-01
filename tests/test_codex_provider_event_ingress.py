@@ -1427,6 +1427,8 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             review_baseline=0,
             state="claimed",
             claimed_at=0.0,
+            review_commit="c" * 40,
+            review_base_sha="b" * 40,
         )
 
     def _assert_bound(self, run: dict, *, role: str) -> None:

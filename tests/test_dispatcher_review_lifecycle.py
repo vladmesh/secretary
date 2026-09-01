@@ -392,6 +392,8 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             review_baseline=0,
             state="review_starting",
             claimed_at=0.0,
+            review_commit="c" * 40,
+            review_base_sha="b" * 40,
         )
 
     def _bounded_delivery(self):
@@ -985,6 +987,8 @@ class ReviewerLifecycleTests(unittest.TestCase):
             review_baseline=0,
             state="reviewing",
             claimed_at=0.0,
+            review_commit="c" * 40,
+            review_base_sha="b" * 40,
         )
         for name, value in fields.items():
             setattr(record, name, value)
@@ -2618,6 +2622,8 @@ class ReviewPaneTests(unittest.TestCase):
             review_baseline=0,
             state="review_starting",
             claimed_at=0.0,
+            review_commit="c" * 40,
+            review_base_sha="b" * 40,
         )
 
     def test_reviewer_is_split_off_the_worker_pane_and_gets_its_leaf_from_inventory(self) -> None:

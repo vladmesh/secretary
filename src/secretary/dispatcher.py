@@ -94,6 +94,7 @@ from secretary.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     _report_nudge_prompt,
     _same_repo,
     _watchdog_kind,
+    establish_review_context,
 )
 from secretary.dispatcher_gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
@@ -3603,8 +3604,12 @@ class DispatcherRuntime:
         self._reset_infrastructure_reruns(record)
         record.gate_attestation = accepted.persisted_payload()
         if stage == "initial":
-            receipt_base = str(record.gate_attestation.get("base_sha") or "")
-            record.review_base_sha = receipt_base or self.host.review_base_commit(task, record)
+            try:
+                establish_review_context(self.host, task, record)
+            except HostError as exc:
+                return self._block_review_context(
+                    task, record, records, payload, attempt_id, scrub_host_output(str(exc))
+                )
         records[ref] = record
         self.save_records(payload, records)
         if accepted.receipt is not None and stage in {"assessment", "release"}:
@@ -3635,6 +3640,35 @@ class DispatcherRuntime:
                 ),
             )
         return None
+
+    def _block_review_context(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Fail closed before launch when the review's immutable revision pair is unknown."""
+        ref = task["ref"]
+        self.host.stop(record)
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=f"review context unavailable before reviewer launch: {reason}",
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-context-blocked", ref),
+        )
+        records.pop(ref, None)
+        self.save_records(payload, records)
+        return {
+            "status": "blocked",
+            "step": "gate",
+            "pilot_ref": ref,
+            "reason": "review context unavailable",
+        }
 
     def _block_missing_gate_receipt(
         self,
@@ -5982,6 +6016,8 @@ class DispatcherRuntime:
             worker_run=round_record.worker.to_json() if round_record and round_record.worker else {},
             review_run=round_record.reviewer.to_json() if round_record and round_record.reviewer else {},
         )
+        if launched:
+            establish_review_context(self.host, task, record, recover_recorded_launch=True)
         # A lost record may be recovered from the worker's own heartbeat, but only after its
         # self-described run, role and card binding are promoted into a HeadRun and checked again.
         # A legacy pid or another card's process stays unbound and is never signalled.

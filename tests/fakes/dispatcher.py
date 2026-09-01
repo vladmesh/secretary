@@ -723,6 +723,7 @@ class FakeHost:
         # records the hand-off without inventing a provider journal event.
         self.codex_provider_ingresses: list[str] = []
         self.reviews: list[str] = []
+        self.review_contexts: dict[tuple[str, int], tuple[str, str]] = {}
         self.stopped: list[str] = []
         self.torn_down: list[str] = []
         self.completed: list[str] = []
@@ -1184,6 +1185,10 @@ class FakeHost:
         if self.fail_review_error is not None:
             raise self.fail_review_error
         self.reviews.append(task["ref"])
+        self.review_contexts[(task["ref"], record.review_baseline)] = (
+            record.review_commit,
+            record.review_base_sha,
+        )
         # Mirror the real host: the reviewer gets its own pane and the worker head is shut down,
         # pinning the commit the reviewer judges.
         self.split_from.append(record.handle)
@@ -1639,6 +1644,10 @@ class FakeHost:
     def review_base_commit(self, task: dict, record) -> str:
         self.calls.append("review_base_commit")
         return self.base_commit
+
+    def recorded_review_context(self, task: dict, record) -> tuple[str, str] | None:
+        self.calls.append("recorded_review_context")
+        return self.review_contexts.get((task["ref"], record.review_baseline))
 
     def is_instance_publish_recovery(
         self, task: dict, record, reviewed_commit: str, current_commit: str
