@@ -1102,7 +1102,7 @@ class DispatcherRuntime:
                 # No terminal was created. This is policy evidence, not a transient failure worth
                 # retrying: a later tick with the same schema is the same prohibited launch.
                 self.terminal_effect(
-                    task,
+                    claimed,
                     record,
                     target="blocked",
                     reason=f"Codex provider fan-out policy refused worker preflight: {failure}",
@@ -1171,7 +1171,7 @@ class DispatcherRuntime:
                 "dispatcher bring-up failed", exc, record, WORKER_ROLE, failure=failure
             )
             self.terminal_effect(
-                {"ref": ref},
+                claimed,
                 record,
                 target="blocked",
                 reason=reason,
@@ -1727,7 +1727,7 @@ class DispatcherRuntime:
             unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
-            effect = self.terminal_effect(
+            self.terminal_effect(
                 task,
                 record,
                 target="blocked",
@@ -3998,7 +3998,7 @@ class DispatcherRuntime:
             # A transition performing a decision is the second half of a round whose verdict was
             # already recorded at the park; recording it again would overwrite that outcome.
             self._record_verdict_routing(ref, record, continuation.verdict_outcome)
-        effect = self.terminal_effect(
+        self.terminal_effect(
             task,
             record,
             target="in_progress",
@@ -4011,9 +4011,13 @@ class DispatcherRuntime:
             ),
             terminal_state="in_progress",
             disposition="rework",
-            verdict=continuation.verdict_outcome
-            if continuation.verdict_outcome in {"green", "red"}
-            else "missing",
+            verdict=(
+                "red"
+                if continuation.verdict_outcome.endswith("_red")
+                else continuation.verdict_outcome
+                if continuation.verdict_outcome in {"green", "red"}
+                else "missing"
+            ),
         )
         moved = self.reader.show(ref)
         # The previous round's report stays behind this baseline, so no tick reads it as this one's.
@@ -4642,14 +4646,29 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """A claimed card the dispatcher cannot pick back up on the head it was claimed with."""
         ref = task["ref"]
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            target="blocked",
-            reason=f"claimed head is unavailable: {scrub_host_output(str(error))}",
-            request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
-        )
+        record = records.get(ref)
+        if record is not None and record.attempt_id == attempt_id:
+            self.terminal_effect(
+                task,
+                record,
+                target="blocked",
+                reason=f"claimed head is unavailable: {scrub_host_output(str(error))}",
+                request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="infrastructure",
+            )
+        else:
+            # A lost record that cannot be adopted has no durable round context.
+            # The lifecycle effect still wins, but v1 cannot manufacture its key.
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                target="blocked",
+                reason=f"claimed head is unavailable: {scrub_host_output(str(error))}",
+                request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
+            )
         records.pop(ref, None)
         self.save_records(payload, records)
         return {
@@ -5358,7 +5377,7 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return unconfirmed
         self.host.stop(record)
-        effect = self.terminal_effect(
+        self.terminal_effect(
             task,
             record,
             target="blocked",
@@ -5403,7 +5422,7 @@ class DispatcherRuntime:
         """A merge path that cannot finish leaves the card Blocked with its heads down."""
         ref = task["ref"]
         self.host.stop(record)
-        effect = self.terminal_effect(
+        self.terminal_effect(
             task,
             record,
             target="blocked",
@@ -5591,7 +5610,7 @@ class DispatcherRuntime:
                 outcome="merge failed",
             )
         self.host.teardown(record)
-        effect = self.terminal_effect(
+        self.terminal_effect(
             task,
             record,
             target="done",
@@ -5886,6 +5905,7 @@ class DispatcherRuntime:
         elif obligation is not None:
             self._finish_attempt_outcome(obligation, str(effect["event_id"]))
         return effect
+
     def publish_pending_attempt_outcomes(self) -> list[dict[str, Any]]:
         """Recover committed terminal-effect obligations, then exact staged rows.
 

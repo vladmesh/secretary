@@ -1215,10 +1215,12 @@ conflicting, staging or append failure is reported as a degraded analytics diagn
 lifecycle effect and teardown unchanged. Unknown versions, fields and enums are rejected by the ordinary
 typed board-event reader.
 
-Only a dispatcher-owned transition that closes a started round carries an outcome obligation. Waiting,
-reviewer-launch and pre-claim refusal/retry paths are not terminal rounds. Operator stop/drop produces an
-outcome only where the stopping lifecycle record already carries a durable attempt id and positive round
-and generation; it never invents one for analytics.
+Only a dispatcher-owned transition that closes a started round with durable round context carries an
+outcome obligation. Waiting, reviewer-launch and pre-claim refusal/retry paths are not terminal rounds.
+A lost claimed record that cannot be adopted is a no-identity boundary: its Blocked lifecycle effect still
+commits, but it cannot construct a v1 key from request-id grammar, time, prose or live state. Operator
+stop/drop likewise produces an outcome only where the stopping lifecycle record already carries a durable
+attempt id and positive round and generation; it never invents one for analytics.
 
 ### What a finished phase cost
 

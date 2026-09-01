@@ -272,15 +272,37 @@ class BoardEventCanon:
         generic event reader, so unrelated observer work is not made to poll
         the audit merely because outcome recovery exists.
         """
+        records = self.audit._occurrence_projection_records()
+        committed_keys: set[tuple[str, str, int]] = set()
+        for record, pending in records:
+            if pending or record.get("kind") != EventKind.ATTEMPT_OUTCOME.value:
+                continue
+            event = self._typed(record)
+            committed_keys.add(
+                (event.ref, str(event.data["attempt_id"]), int(event.data["report_generation"]))
+            )
+
         effects: list[Event] = []
         seen: set[str] = set()
-        for record, pending in self.audit._occurrence_projection_records():
+        for record, pending in records:
             if pending:
                 continue
             data = record.get("data")
             if not isinstance(data, dict) or not isinstance(data.get("attempt_outcome_owed"), dict):
                 continue
             event = self._typed(record)
+            obligation = data["attempt_outcome_owed"]
+            try:
+                key = (
+                    str(obligation["card_ref"]),
+                    str(obligation["attempt_id"]),
+                    int(obligation["report_generation"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                # Preserve malformed telemetry as an owed, fail-open diagnostic.
+                key = None
+            if key is not None and key in committed_keys:
+                continue
             if event.event_id in seen:
                 continue
             seen.add(event.event_id)
