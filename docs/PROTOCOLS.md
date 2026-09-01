@@ -1184,6 +1184,23 @@ new round enters the same workspace.
 lifecycle owner only after its terminal effect has been confirmed. It is never a lifecycle input: no card
 move, merge, retry, admission, gate, observer decision or recovery decision reads it.
 
+New dispatcher terminal effects cross one forward-only typed taxonomy before their observational fields
+are written. Its independent disposition axis is
+`release|rework|reslice|blocked|drop|operator_stop`; its blocked-reason axis is
+`implementation|review|task_contract|gate|provider|infrastructure|operator|other`. The transition keeps
+the taxonomy's `source_evidence` beside its normalized reason. Thus a new worker
+`wrong_task_definition` report maps to `task_contract` while retaining that source token, and an
+`external_fact` report remains source evidence under `other` rather than being recast as a more precise
+cause. Invalid forward values are rejected by that typed boundary. Missing taxonomy data and historical
+reason tokens read as explicit `legacy`/`other` evidence, without a rewrite, backfill or inference from
+request ids, prose, timestamps or live state.
+
+The same normalized taxonomy supplies each new dispatcher Blocked transition, its `attempt.outcome`
+obligation and sprint-budget class. Infrastructure is recorded as uncharged
+`infrastructure_blocked`; every other normalized block is charged as `blocked`. These consumers are
+observational: a malformed or unavailable taxonomy/outcome/budget observation cannot gate, reorder,
+retry or undo the lifecycle effect.
+
 Its natural key is exactly `(card_ref, attempt_id, report_generation)`. `attempt` is the observed ordinal
 and is not part of the key. The Card subject supplies `card_ref`; `data` carries `version: 1`, non-empty
 `attempt_id`, positive `attempt` and `report_generation`, nullable `sprint_ref` and
@@ -1897,7 +1914,9 @@ event type `infrastructure_blocked`, visible as `budget.uncharged` in `sprint sh
 status`, entering neither `total` nor the `signal` and `hard` thresholds. Every other block — a
 worker's own report, the gate, a merge, a release — charges `blocked` exactly as it always did. Both
 families go through the same budget write and are told apart only by the token above. A sprint
-stored before the field existed reads as zero; there is no migration.
+stored before the field existed reads as zero; there is no migration. New transitions use the shared
+terminal taxonomy for this distinction; historical transitions missing it remain legacy/other evidence
+and are not retrospectively inferred from their request-id action tokens.
 
 ## Pause
 

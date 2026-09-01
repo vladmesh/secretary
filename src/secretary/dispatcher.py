@@ -10,6 +10,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from secretary.board.terminal_taxonomy import (
+    TerminalTaxonomy,
+    TerminalTaxonomyValidationError,
+    normalize_terminal_taxonomy,
+)
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
@@ -116,6 +121,7 @@ from secretary.dispatcher_helpers import (
     _last_review_red_body,
     _report_adoption_baseline,
     _review_adoption_baseline,
+    _round_blocked_report_classification,
     _round_report_ids,
     _round_report_marker,
     _spent_report_generations,
@@ -849,6 +855,7 @@ class DispatcherRuntime:
 
     def _contract_preflight_blocked(
         self,
+        task: dict[str, Any],
         ref: str,
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
@@ -863,10 +870,21 @@ class DispatcherRuntime:
         Nothing is computed here and nothing is read: the transition is the first statement made
         about the claimed card, and the dispatcher's own bookkeeping only follows it.
         """
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
+        self.terminal_effect(
+            task,
+            DispatcherRecord(
+                worker=_worker_id(task),
+                workspace="",
+                handle="",
+                head="",
+                review_head="",
+                attempt_id=attempt_id,
+                attempt_round=self._journal_round(ref) + 1,
+                comment_baseline=0,
+                review_baseline=0,
+                state="",
+                claimed_at=0.0,
+            ),
             target="blocked",
             reason=reason,
             request_id=_attempt_request_id(
@@ -874,6 +892,9 @@ class DispatcherRuntime:
                 _bring_up_blocked_action("contract-preflight-blocked", failure),
                 ref,
             ),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="infrastructure",
         )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -1000,6 +1021,7 @@ class DispatcherRuntime:
         if contract_outcome is not None:
             failure, blocked_reason, refusal = contract_outcome
             return self._contract_preflight_blocked(
+                task,
                 ref,
                 records,
                 payload,
@@ -1736,7 +1758,19 @@ class DispatcherRuntime:
                 terminal_state="blocked",
                 disposition="blocked",
                 verdict="blocked",
-                blocked_reason="other",
+                blocked_reason=(
+                    _round_blocked_report_classification(
+                        self.audit,
+                        ref,
+                        _round_report_ids(
+                            record.workspace,
+                            record.attempt_id or attempt_id,
+                            ref,
+                            record.report_generation,
+                        ),
+                    )
+                    or "other"
+                ),
             )
             records.pop(ref, None)
             return {
@@ -4661,13 +4695,26 @@ class DispatcherRuntime:
         else:
             # A lost record that cannot be adopted has no durable round context.
             # The lifecycle effect still wins, but v1 cannot manufacture its key.
-            self.writer.move(
-                role="dispatcher",
-                actor=self.owner,
-                reference=ref,
+            self.terminal_effect(
+                task,
+                DispatcherRecord(
+                    worker="",
+                    workspace="",
+                    handle="",
+                    head="",
+                    review_head="",
+                    attempt_id="",
+                    comment_baseline=0,
+                    review_baseline=0,
+                    state="",
+                    claimed_at=0.0,
+                ),
                 target="blocked",
                 reason=f"claimed head is unavailable: {scrub_host_output(str(error))}",
                 request_id=_attempt_request_id(attempt_id, "adopt-head-blocked", ref),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="infrastructure",
             )
         records.pop(ref, None)
         self.save_records(payload, records)
@@ -5783,7 +5830,7 @@ class DispatcherRuntime:
         terminal_state: str,
         disposition: str,
         verdict: str = "missing",
-        blocked_reason: str | None = None,
+        taxonomy: TerminalTaxonomy,
     ) -> dict[str, Any] | None:
         """The durable, pre-effect facts a terminal transition owes.
 
@@ -5804,8 +5851,8 @@ class DispatcherRuntime:
             "specification_revision": None,
             "terminal_state": terminal_state,
             "verdict": verdict,
-            "disposition": disposition,
-            "blocked_reason": blocked_reason,
+            "disposition": taxonomy.disposition,
+            "blocked_reason": taxonomy.blocked_reason,
         }
 
     def _finish_attempt_outcome(self, obligation: dict[str, Any], effect_event_id: str) -> dict[str, Any]:
@@ -5879,13 +5926,24 @@ class DispatcherRuntime:
         decision: str = "",
     ) -> dict[str, Any]:
         """The lifecycle-owned terminal effect and its non-blocking finisher."""
-        obligation = self._attempt_outcome_obligation(
-            task,
-            record,
-            terminal_state=terminal_state,
-            disposition=disposition,
-            verdict=verdict,
-            blocked_reason=blocked_reason,
+        taxonomy: TerminalTaxonomy | None = None
+        try:
+            taxonomy = normalize_terminal_taxonomy(disposition=disposition, blocked_reason=blocked_reason)
+        except TerminalTaxonomyValidationError:
+            # The effect is authoritative. A malformed observational value is
+            # rejected at its typed boundary but cannot delay or retract it.
+            pass
+        obligation = (
+            self._attempt_outcome_obligation(
+                task,
+                record,
+                terminal_state=terminal_state,
+                disposition=disposition,
+                verdict=verdict,
+                taxonomy=taxonomy,
+            )
+            if taxonomy is not None
+            else None
         )
         if obligation is not None:
             obligation = {"card_ref": task["ref"], **obligation}
@@ -5898,6 +5956,7 @@ class DispatcherRuntime:
             decision=decision,
             request_id=request_id,
             outcome_owed=obligation,
+            terminal_taxonomy=taxonomy.to_record() if taxonomy is not None else None,
         )
         effect_obligation = effect.get("outcome_owed") if isinstance(effect, dict) else None
         if isinstance(effect_obligation, dict):

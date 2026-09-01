@@ -3360,7 +3360,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertIn("observer-stopped", [row.get("action") for row in self.actions(result)])
 
     def test_an_infrastructure_block_is_recorded_on_the_sprint_without_charging_it(self) -> None:
-        """End to end: the tick reads the class off the transition and counts it apart."""
+        """End to end: the tick reads the shared terminal taxonomy and counts it apart."""
         self.catalog.instance = {"sprint_budget": {"signal": 1, "hard": 2}}
         self.runtime.sprints = SprintReader(
             self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2}
@@ -3376,6 +3376,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             sprint_override=True,
             sprint_override_reason="the worker head never came up",
             request_id=infrastructure_action("dispatcher-attempt-1-bringup-blocked"),
+            terminal_taxonomy={
+                "version": 1,
+                "disposition": "blocked",
+                "blocked_reason": "infrastructure",
+                "source_evidence": "infrastructure",
+                "provenance": "forward",
+            },
         )
 
         self.runtime.production_tick()
@@ -3407,9 +3414,22 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertIsNone(_budget_event_type({"kind": "verdict", "payload": {"marker": "review:green"}}))
         self.assertIsNone(_budget_event_type({"kind": "moved", "payload": {"to": "done"}}))
 
-    def test_infrastructure_bring_up_block_is_counted_apart_from_a_task_block(self) -> None:
-        """The class is read off the transition's own action token, not decided a second time."""
-        blocked = {"kind": "moved", "payload": {"to": "blocked"}}
+    def test_infrastructure_block_is_counted_apart_from_a_task_block(self) -> None:
+        """The class is read from the transition taxonomy, never request-id spelling."""
+        blocked = {
+            "record_type": "board.protocol_event",
+            "kind": "card.blocked",
+            "transition": {"target": "blocked"},
+            "data": {
+                "terminal_taxonomy": {
+                    "version": 1,
+                    "disposition": "blocked",
+                    "blocked_reason": "infrastructure",
+                    "source_evidence": "infrastructure",
+                    "provenance": "forward",
+                }
+            },
+        }
         charged = (
             "dispatcher-attempt-1-bringup-blocked",
             "dispatcher-attempt-1-worker-respawn-blocked",
@@ -3419,23 +3439,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "dispatcher-attempt-1-worker-report-blocked",
             "",
         )
-        uncharged = tuple(
-            infrastructure_action(action)
-            for action in (
-                "dispatcher-attempt-1-bringup-blocked",
-                "dispatcher-attempt-1-worker-respawn-blocked",
-                "dispatcher-attempt-1-rework-blocked",
-                "dispatcher-attempt-1-review-blocked",
-            )
-        )
-
         self.assertEqual(
             [_budget_event_type({**blocked, "request_id": request_id}) for request_id in charged],
-            ["blocked"] * len(charged),
+            [BUDGET_UNCHARGED_INFRASTRUCTURE] * len(charged),
         )
+        legacy = {"kind": "moved", "payload": {"to": "blocked"}}
         self.assertEqual(
-            [_budget_event_type({**blocked, "request_id": request_id}) for request_id in uncharged],
-            [BUDGET_UNCHARGED_INFRASTRUCTURE] * len(uncharged),
+            [_budget_event_type({**legacy, "request_id": request_id}) for request_id in charged],
+            ["blocked"] * len(charged),
         )
         # The other budget-shaped events keep their type whatever the request id spells.
         self.assertEqual(
@@ -3443,7 +3454,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 {
                     "kind": "moved",
                     "payload": {"from": "validate", "to": "ready"},
-                    "request_id": uncharged[0],
+                    "request_id": charged[0],
                 }
             ),
             "preempt",
