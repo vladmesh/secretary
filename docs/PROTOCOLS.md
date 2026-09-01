@@ -1216,31 +1216,6 @@ mechanical readiness and drift checks, and the merge itself. Missing, damaged, f
 candidate/base-conflicting identity stops the card before the gate and before the merge, on Blocked evidence
 that says which of those it was, rather than as a generic dispatcher exception that repeats every tick.
 
-#### The park effect boundary
-
-A substantive verdict leaves Validate through one durable intent followed by one effect, and the effect is
-recorded with the intent: a card whose sprint declares an observer parks in Assessment and waits, and a card
-with nobody to release it has the merge itself as its park effect. Which one it is may not be re-decided at
-completion time, because that answer comes from a sprint that may since have closed or become unreadable.
-
-One function performs that effect (`_complete_park`), and it is the only thing that moves a verdict to
-Assessment or finishes a no-observer release. Every invocation — the first tick, the recovery of a crash
-before the board move, and the recovery of a move whose checkpoint was lost — re-reads the standing
-structured verdict and the round's durable sources and calls the one authority again, before the board move,
-before the merge and before any further state save. The saved intent is evidence that an effect is pending
-and never evidence that its identity was validated: a `ValidatedReviewIdentity` lives in the memory of the
-tick that obtained it and cannot cross a crash boundary, so recovery establishes its own or does nothing.
-
-A park whose context is by then absent, null, damaged, foreign, or in conflict with the verdict header or
-the recorded reviewer document therefore blocks with that specific reason and performs no Assessment move
-and no merge — green and red parks alike. A valid identity keeps the behaviour a park has always had: the
-move is keyed on the baseline the intent was opened against, so the tick that already moved the card and the
-tick recovering from a crash before that move run the same call and it moves once.
-
-Adopting a card an operator or a lost record left standing in Assessment is not that effect: it records the
-board's own fact, moves nothing and merges nothing, and the release decision on such a card goes through the
-authority like any other.
-
 #### Round boundaries and mechanical evidence
 
 A round ends by clearing the context together with the baseline that says where its verdict is read from:
@@ -1253,8 +1228,9 @@ what lets a parked verdict still be checked against the candidate it judged.
 
 Mechanical gate receipts are unchanged and remain dispatcher-owned exact-SHA evidence for their own stages.
 The initial receipt validates a newly bound context once; the assessment and release receipts govern
-mechanical progression only, may overwrite their predecessor and may legitimately name a base that moved
-after this round was opened. Neither the round context, nor the validated identity, nor the verdict header,
+mechanical progression only, may overwrite their predecessor and may legitimately name a base that advanced
+after this round was opened — advanced, and so still descending from the base the round was judged over,
+which is what the executor's own receipt check below requires of them. Neither the round context, nor the validated identity, nor the verdict header,
 nor a worker-local broad receipt is ever a substitute for a valid executed dispatcher-owned exact-SHA
 broad-gate receipt: an explicit `none`/`noop` gate, or a missing receipt, attests nothing however exactly
 the round is identified.
@@ -1309,6 +1285,90 @@ The audit trail is always written to the installation's data directory: `--data-
 instance file, not the working directory, so a call from another project's workspace does not leave a data
 directory there. If the data directory cannot be resolved, the command fails with a usage error rather than
 writing next to the process.
+
+### The replayable verdict effect
+
+A substantive verdict earns the card exactly one durable effect: it is parked in Assessment for an observer
+to answer, or its branch is merged. Both are irreversible from the outside, and one executor
+(`secretary.dispatch.verdict_effect.run_verdict_effect`) is the only production owner of either. Every entry
+reaches an effect through it: the green park, the red park, the no-observer release a green verdict earns on
+its own tick, the release an observer decided on a parked card, the recovery of a crash before the board
+move, the recovery of a move whose checkpoint was lost, and the recovery of a record rebuilt while a card was
+parked. There is no direct route from any of them to the board move or to the merge; an architecture test
+holds the calls themselves to that one module, and the effects take a value only its precondition chain can
+issue.
+
+#### Intent versus evidence
+
+The executor's only input is a durable `VerdictEffectIntent`: which effect this card is owed, the round and
+baseline identity that make replaying it idempotent, the reason the move carries, the observer decision it is
+performing, and one progress fact. It records nothing else, and in particular it does not claim that the
+round's identity still holds, that the checkout is still on the reviewed candidate, that the base has not
+moved, that a gate was executed, that a receipt is valid or that the merge is still ready. A crash may sit
+between the intent and the effect, and none of those survive one — a `ValidatedReviewIdentity` lives in the
+memory of the tick that obtained it, and a receipt on the record is evidence about the tick that persisted
+it. Which effect the intent names is decided once, when it is opened, because that answer comes from a sprint
+that may since have closed or become unreadable; everything else is re-established.
+
+The one progress fact is `merge_published`, written between the merge publication and the Done move it still
+owes. The merge is the only step of a verdict effect a replay cannot simply repeat, so a replay that finds it
+finishes that bookkeeping and never publishes a second time. Board moves need no such flag: they are keyed on
+the baseline the intent was opened against, so the tick that already moved the card and the tick recovering
+from a crash before that move issue the same request and it moves once.
+
+#### The replay order
+
+On every invocation, immediately before the requested effect, the executor:
+
+1. selects the verdict standing on this round — a typed occurrence, not a marker read out of prose;
+2. obtains the sealed `ValidatedReviewIdentity` from the one post-verdict authority;
+3. resolves the checkout as it is now and the base branch as it is now;
+4. refuses a candidate that has drifted off the reviewed one, and a base branch whose history no longer
+   contains the base this round was judged over;
+5. executes the gate this stage requires;
+6. accepts and persists a fresh dispatcher-owned exact-SHA receipt, and refuses one that names a different
+   candidate or a base the reviewed base does not reach;
+7. and only then moves the card to Assessment, or merges it, as the intent permits.
+
+A prior receipt, an identity value or a worker-local broad receipt is never carried across the intent
+boundary as proof of any of these. Steps 3 to 6 run again on a replay exactly as they ran on the first
+execution: recovery finishes the effect the intent opened, never a smaller set of the preconditions.
+
+#### Stage gate policy
+
+Which stage a given effect must execute is stated in one place (`required_gate_stage`) and is read from the
+durable intent and the validated verdict, so it answers the same thing on the first execution and on every
+replay:
+
+- a merge always executes the **release** stage, whichever entry decided it;
+- parking a **green** verdict executes the **assessment** stage, and its receipt is the fresh evidence the
+  observer reads beside the report and the verdict;
+- parking a **red** verdict requires **no broad gate**. It merges nothing and lands the card in front of a
+  person whose next move is rework, reslice, or a release that executes the release stage itself.
+
+Where the project's gate mode is explicitly non-attesting — `ci:none`, or a noop host — the stage still runs
+its documented route and mints no receipt, and nothing calls that route attested. Where a gate mode promises
+execution, a green answer without a valid exact-SHA receipt cannot park and cannot merge: none, noop, missing
+and invalid all fail closed, and so does a receipt that names another candidate or a base the round never
+had.
+
+#### Crash recovery and failure outcomes
+
+An identity that is by then absent, null, damaged, foreign, or in conflict with the verdict header or the
+recorded reviewer document blocks the card with that specific reason and performs no Assessment move and no
+merge — green parks, red parks and both releases alike. So does a checkout that moved, a rewritten base, a
+gate that could not produce the receipt its stage requires, and a merge the host refuses.
+
+A non-green mechanical answer keeps the disposition its side of the seam already had. On a card still in
+Validate a red gate or a drifted checkout hands the round back to the worker in In progress; on a card
+standing in Assessment the same answers block it, naming the release they refused. A pending rollup waits and
+is escalated on the existing stall clock; an unreachable gate backend is retried on the existing transport
+budget and only blocks once that budget is spent, because a backend that could not be reached says nothing
+about the checkout. Infrastructure failures take their existing rerun path.
+
+Adopting a card an operator or a lost record left standing in Assessment is not a verdict effect: it records
+the board's own fact, moves nothing and merges nothing, and the release decision on such a card goes through
+the executor like any other.
 
 ### The no-observer ceiling
 

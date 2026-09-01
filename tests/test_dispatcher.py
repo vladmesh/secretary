@@ -4697,11 +4697,10 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.completed, [])
         self.assertEqual(self.host.torn_down, [])
 
-    def test_a_crash_inside_the_release_resumes_the_parked_card(self) -> None:
-        """A tick that dies inside the merge itself. There is no half-release state to recover:
-        the card resumes parked with the decision still standing, and the next tick runs the
-        release from the top. Telling a publish that landed from one that did not, so the retry
-        can be skipped, is the deferred recovery card."""
+    def test_a_crash_inside_the_release_resumes_the_release_intent(self) -> None:
+        """A tick that dies inside the merge itself. The release intent this decision opened is
+        durable and the merge is not, so the card resumes owing that same effect and the next tick
+        runs the whole precondition chain again before publishing anything, once."""
         self.start_dispatcher()
         self._drive_to_green_verdict()
         self.assertEqual(self.tick()["to"], "assessment")
@@ -4717,8 +4716,12 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
         self.assertEqual(
             self._parked_record()["worker_continuation"]["stage"],
-            WorkerContinuationStage.ASSESSMENT_PARKED.value,
-            "the card resumes parked, with the decision still the only thing standing",
+            WorkerContinuationStage.RELEASE_PENDING.value,
+            "the card resumes owing the merge this decision opened",
+        )
+        self.assertFalse(
+            self._parked_record()["worker_continuation"]["merge_published"],
+            "nothing was published, so no progress was recorded",
         )
         self.assertEqual(self.host.completed, [])
 
@@ -8516,7 +8519,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 self.assertEqual(self.host.completed, [], "the merge did not happen")
                 self.assertEqual(
                     self._parked_record()["worker_continuation"]["stage"],
-                    WorkerContinuationStage.ASSESSMENT_PENDING.value,
+                    WorkerContinuationStage.RELEASE_PENDING.value,
                     "the release intent is durable before the merge",
                 )
                 evidence = "" if state is None else self._break_round(state)
@@ -8528,6 +8531,351 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                     self.assertEqual(self.host.completed, ["secretary-510-pilot"])
                     continue
                 self._assert_round_blocked(recovered, evidence)
+
+    # the replayable verdict-effect executor (secretary-1529) ---------------------------
+
+    def _attesting(self, mode: str = "github") -> None:
+        """Put this card on a gate mode that promises execution and owes a receipt for it."""
+        self.catalog._adapter = {"validation": {"ci": mode}}
+
+    def _receipt(self, marker: str, *, candidate: str = "", base: str = "", mode: str = "github") -> dict:
+        """One exact-SHA receipt, spelled the way an executed gate hands it back."""
+        return {
+            "validated_sha": candidate or self.host.commit,
+            "base_sha": base or self.host.base_commit,
+            "gate_mode": mode,
+            "required_checks": [{"name": marker, "conclusion": "SUCCESS", "url": ""}],
+            "completed_at": "2026-09-01T00:00:00+00:00",
+            "command_or_check_set_digest": marker * 64,
+        }
+
+    def _crash_after_receipt(self, digest: str) -> None:
+        """Die on the save that persists one stage's receipt, before any effect is opened."""
+        real_save = self.runtime.production_state.save
+
+        def die_after_the_receipt(payload: dict) -> None:
+            record = payload.get("records", {}).get(CARD_REF, {})
+            attestation = record.get("gate_attestation") or {}
+            if attestation.get("command_or_check_set_digest") == digest:
+                real_save(payload)
+                raise OSError("dispatcher died after the stage receipt was persisted")
+            real_save(payload)
+
+        with mock.patch.object(
+            self.runtime.production_state, "save", die_after_the_receipt
+        ), self.assertRaises(OSError):
+            self.tick()
+
+    def test_each_verdict_effect_executes_its_own_stage_gate_over_the_reviewed_pair(self) -> None:
+        """The stage policy, end to end: a green park executes the assessment stage and the release
+        executes the release stage, each immediately before its own effect, each minting a fresh
+        exact-SHA receipt for the candidate this round was judged on. The initial receipt is never
+        the one either of them stands on."""
+        self.start_dispatcher()
+        self._attesting()
+        self.host.commit = "c" * 40
+        self.host.gate_results = [
+            GateResult("green", "initial", attestation=self._receipt("a")),
+            GateResult("green", "assessment", attestation=self._receipt("b")),
+            GateResult("green", "release", attestation=self._receipt("d")),
+        ]
+        self._green_verdict_in_validate("stage-gates-green")
+
+        self.assertEqual(self.tick()["to"], "assessment")
+
+        context = self._review_context()
+        parked = self._parked_record()["gate_attestation"]
+        self.assertEqual(parked["command_or_check_set_digest"], "b" * 64, "the park's own receipt")
+        self.assertEqual(parked["validated_sha"], context["candidate_sha"])
+        self.assertEqual(parked["base_sha"], context["base_sha"])
+        self.assertIn("Assessment delivery", self.reader.show(CARD_REF)["comments"][-2]["body"])
+        self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
+
+        self._decide("release")
+
+        self.assertEqual(self.tick()["to"], "done")
+        self.assertEqual(self.host.gate_calls, [CARD_REF] * 3, "the release executed its own gate")
+        audit = next(
+            item["body"] for item in self.reader.show(CARD_REF)["comments"] if "release audit" in item["body"]
+        )
+        self.assertIn("validated_sha: " + context["candidate_sha"], audit)
+        self.assertIn("  - d: SUCCESS", audit)
+        self.assertEqual(self.host.completed, [CARD_REF])
+
+    def test_a_red_park_executes_no_broad_gate_and_claims_no_attestation(self) -> None:
+        """The other half of the stage policy. A red park merges nothing and hands the card to a
+        person, so its stage requires no broad gate: running one would spend a check to answer a
+        question nobody asked. It parks all the same, and it attests nothing while doing it."""
+        self.start_dispatcher()
+        self._attesting()
+        self.host.commit = "c" * 40
+        self.host.gate_results = [GateResult("green", "initial", attestation=self._receipt("a"))]
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._write_verdict(kind="red", body="one blocker", request_id="red-park-no-gate")
+
+        parked = self.tick()
+
+        self.assertEqual(parked["to"], "assessment")
+        self.assertEqual(parked["verdict"], "red")
+        self.assertEqual(self.host.gate_calls, [CARD_REF], "only the pre-review gate ever ran")
+        self.assertEqual(
+            self._parked_record()["gate_attestation"]["command_or_check_set_digest"],
+            "a" * 64,
+            "the red park minted no receipt of its own and invented no claim",
+        )
+
+    def test_a_park_replayed_after_its_receipt_was_persisted_regates_before_it_moves(self) -> None:
+        """A crash between the stage receipt and the intent. The receipt on the record is evidence
+        about the tick that died, never permission for the next one: recovery executes the stage
+        gate again, over the checkout as it is then, and moves the card exactly once."""
+        self.start_dispatcher()
+        self._attesting()
+        self.host.commit = "c" * 40
+        self.host.gate_results = [
+            GateResult("green", "initial", attestation=self._receipt("a")),
+            GateResult("green", "assessment", attestation=self._receipt("b")),
+            GateResult("green", "assessment again", attestation=self._receipt("e")),
+        ]
+        self._green_verdict_in_validate("regate-after-receipt")
+
+        self._crash_after_receipt("b" * 64)
+
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "validate", "nothing moved")
+        self.assertEqual(
+            self._record_json()["worker_continuation"]["stage"],
+            WorkerContinuationStage.RETAINED.value,
+            "no verdict effect was opened: the receipt is not one",
+        )
+
+        recovered, moves = self._moves_of(self.tick)
+
+        self.assertEqual(recovered["to"], "assessment")
+        self.assertEqual(moves, ["assessment"], "the card moved once")
+        self.assertEqual(self.host.gate_calls, [CARD_REF] * 3, "the replay executed a fresh gate")
+        self.assertEqual(
+            self._parked_record()["gate_attestation"]["command_or_check_set_digest"],
+            "e" * 64,
+            "the effect stands on the receipt of the invocation that performed it",
+        )
+
+    def test_a_release_replayed_over_a_moved_checkout_never_merges(self) -> None:
+        """The finding, on the release side: the intent survives the crash and the checkout does
+        not stand still. A candidate that moved between the attempts is caught by the drift check
+        the replay runs itself, before the gate and before the merge."""
+        self.start_dispatcher()
+        self._green_verdict_in_validate("release-moved-checkout")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release")
+        with mock.patch.object(
+            self.host, "complete_green", side_effect=OSError("died on the way into the merge")
+        ), self.assertRaises(OSError):
+            self.tick()
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.RELEASE_PENDING.value,
+        )
+        self.host.commit = "f" * 40
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["status"], "blocked")
+        self.assertEqual(self.host.completed, [], "nothing was merged over a checkout that moved")
+        self.assertIn(
+            "describes a different state of the code",
+            self.reader.show(CARD_REF)["comments"][-1]["body"],
+        )
+
+    def test_a_release_over_a_rewritten_base_never_merges(self) -> None:
+        """The base branch is the other half of the reviewed pair. One that simply advanced still
+        contains the base the round was judged over; one that was rewritten does not, and then the
+        delta the reviewer read no longer exists in the history this merge would land on."""
+        self.start_dispatcher()
+        self._green_verdict_in_validate("release-rewritten-base")
+        self.assertEqual(self.tick()["to"], "assessment")
+        reviewed_base = self._review_context()["base_sha"]
+        self.host.rewritten_bases = {reviewed_base}
+        self.host.base_commit = "9" * 40
+        self._decide("release")
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(self.host.completed, [], "nothing was merged onto a replaced history")
+        self.assertIn("no longer descends from", self.reader.show(CARD_REF)["comments"][-1]["body"])
+        self.assertEqual(
+            self.host.gate_calls,
+            [CARD_REF, CARD_REF],
+            "the pre-review and park gates, and no release gate: drift is decided before it",
+        )
+
+    def test_a_release_over_a_base_that_only_advanced_still_merges_once(self) -> None:
+        """The control for the check above: other cards land while this one waits for a decision,
+        and a release that refused that would refuse every release the pipeline ever makes."""
+        self.start_dispatcher()
+        self._green_verdict_in_validate("release-advanced-base")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self.host.base_commit = "9" * 40
+        self._decide("release")
+
+        released = self.tick()
+
+        self.assertEqual(released["to"], "done")
+        self.assertEqual(self.host.completed, [CARD_REF])
+
+    def test_a_release_whose_gate_turned_red_blocks_instead_of_merging(self) -> None:
+        """The gate result mutated between the decision and the effect. The release executes the
+        stage gate itself, so it reads the red and stops, naming the decision it refused."""
+        self.start_dispatcher()
+        self._green_verdict_in_validate("release-red-gate")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self.host.gate_results = [GateResult("red", "the suite broke on the base merge")]
+        self._decide("release")
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(self.host.completed, [])
+        self.assertIn("Observer decision: release.", self.reader.show(CARD_REF)["comments"][-1]["body"])
+
+    def test_a_release_gate_that_is_green_without_a_receipt_cannot_merge(self) -> None:
+        """Where the stage requires a gate, a green with nothing exact behind it attests nothing.
+        The card blocks rather than merging on a claim no receipt supports."""
+        self.start_dispatcher()
+        self._attesting("local")
+        self.host.commit = "c" * 40
+        self.host.gate_results = [
+            GateResult("green", "initial", attestation=self._receipt("a", mode="local")),
+            GateResult("green", "assessment", attestation=self._receipt("b", mode="local")),
+            GateResult("green", "release with no evidence"),
+        ]
+        self._green_verdict_in_validate("release-receiptless")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release")
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["reason"], "release gate receipt unavailable")
+        self.assertEqual(self.host.completed, [])
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+
+    def test_a_release_receipt_for_another_candidate_cannot_merge(self) -> None:
+        """A receipt is only evidence about the pair it names. One executed over another candidate
+        is a check that happened, about code this verdict was never given."""
+        self.start_dispatcher()
+        self._attesting("local")
+        self.host.commit = "c" * 40
+        self.host.gate_results = [
+            GateResult("green", "initial", attestation=self._receipt("a", mode="local")),
+            GateResult("green", "assessment", attestation=self._receipt("b", mode="local")),
+            GateResult(
+                "green",
+                "release elsewhere",
+                attestation=self._receipt("d", candidate="7" * 40, mode="local"),
+            ),
+        ]
+        self._green_verdict_in_validate("release-foreign-receipt")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release")
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["reason"], "release gate receipt unavailable")
+        self.assertEqual(self.host.completed, [])
+
+    def test_a_release_receipt_over_a_base_the_round_never_had_cannot_merge(self) -> None:
+        """The base half of the same rule, and the half the dispersed version of this check missed:
+        a receipt whose base the reviewed base does not reach is evidence about another history."""
+        self.start_dispatcher()
+        self._attesting("local")
+        self.host.commit = "c" * 40
+        self.host.gate_results = [
+            GateResult("green", "initial", attestation=self._receipt("a", mode="local")),
+            GateResult("green", "assessment", attestation=self._receipt("b", mode="local")),
+            GateResult(
+                "green", "release", attestation=self._receipt("d", base="7" * 40, mode="local")
+            ),
+        ]
+        self._green_verdict_in_validate("release-foreign-base-receipt")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self.host.rewritten_bases = {self._review_context()["base_sha"]}
+        self._decide("release")
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["reason"], "release gate receipt does not name this round")
+        self.assertEqual(self.host.completed, [])
+
+    def test_a_merge_published_before_the_crash_is_never_published_twice(self) -> None:
+        """The one progress fact a verdict effect records. The merge is the only step a replay
+        cannot simply repeat, so it is written down between the publication and the Done move: the
+        recovery finishes that bookkeeping and never calls the merge again."""
+        self.start_dispatcher()
+        self._green_verdict_in_validate("merge-published-once")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release")
+        real_teardown = self.host.teardown
+
+        def die_after_publishing(record) -> None:
+            raise OSError("dispatcher died after the merge was published")
+
+        with mock.patch.object(self.host, "teardown", die_after_publishing), self.assertRaises(OSError):
+            self.tick()
+
+        self.assertEqual(self.host.completed, [CARD_REF], "the merge landed")
+        continuation = self._parked_record()["worker_continuation"]
+        self.assertEqual(continuation["stage"], WorkerContinuationStage.RELEASE_PENDING.value)
+        self.assertTrue(continuation["merge_published"], "the publication is durable")
+        self.host.teardown = real_teardown
+        self.host.commit = "f" * 40  # the checkout is irrelevant now: the merge cannot be taken back
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["to"], "done")
+        self.assertEqual(self.host.completed, [CARD_REF], "the merge was published once")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "done")
+
+    def test_a_pending_release_gate_waits_and_an_unreachable_one_retries(self) -> None:
+        """The existing dispositions of a non-green mechanical answer, unchanged by the executor:
+        a pending rollup waits and an unreachable backend is retried rather than decided on."""
+        self.start_dispatcher()
+        self._green_verdict_in_validate("release-pending-then-transport")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release")
+        self.host.gate_results = [GateResult("pending", "the rollup has not finished")]
+
+        waiting = self.tick()
+
+        self.assertEqual(waiting["action"], "merge-gate-pending")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "assessment")
+        self.assertEqual(self.host.completed, [])
+
+        self.host.gate_results = [GateTransportError("the backend refused the connection")]
+
+        retried = self.tick()
+
+        self.assertEqual(retried["status"], "degraded", "an unanswered gate is retried, not decided")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "assessment")
+        self.assertEqual(self.host.completed, [])
+
+        released = self.tick()
+
+        self.assertEqual(released["to"], "done")
+        self.assertEqual(self.host.completed, [CARD_REF])
+
+    def test_an_unattesting_release_gate_follows_its_documented_route(self) -> None:
+        """`ci:none` promises no execution, and that answer is explicit rather than a claim: the
+        release runs the supported receiptless route and the record keeps no attestation."""
+        self.start_dispatcher()
+        self._green_verdict_in_validate("release-unattested")
+        self.assertEqual(self.tick()["to"], "assessment")
+        self.assertEqual(self._parked_record()["gate_attestation"], {}, "ci:none attests nothing")
+        self._decide("release")
+
+        released = self.tick()
+
+        self.assertEqual(released["to"], "done")
+        self.assertEqual(self.host.completed, [CARD_REF])
 
     def test_a_damaged_context_stops_a_respawn_instead_of_rebinding_the_round(self) -> None:
         """Before any verdict, damage is still not absence. A respawn re-confirms the round it is
@@ -13338,22 +13686,16 @@ class DispatcherLauncherTests(unittest.TestCase):
                 request_id="checkpoint-merge-green",
             )
             task = TaskReader(board).show("secretary-510-pilot")  # type: ignore[arg-type]
-            identity = validate_post_verdict_identity(
-                runtime.host,
-                task,
-                record,
-                project_verdict(Event.from_record(TaskAudit(data_dir).events("secretary-510-pilot")[-1])),
-            )
 
             # The card carries no sprint, so the green verdict merges on its own tick: the
-            # entry point moved with the seam, what it does on this path did not.
+            # entry point names the release effect, and the executor re-establishes this round's
+            # identity, checkout, base, gate and receipt from disk before it publishes anything.
             result = runtime._park_green_verdict(
                 task,
                 record,
                 records,
                 {"version": 1, "mode": "production", "phase": "production"},
                 "attempt-1",
-                identity,
             )
 
             self.assertEqual(result["to"], "done")

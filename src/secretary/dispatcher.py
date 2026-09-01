@@ -10,8 +10,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from secretary.board.events import VerdictProjection, project_verdict, render_marker_comment
-from secretary.board.models import Event
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
@@ -100,7 +98,16 @@ from secretary.dispatch.review_context import (
     ValidatedReviewIdentity,
     bind_review_context,
     open_review_round,
-    validate_post_verdict_identity,
+)
+from secretary.dispatch.verdict_effect import (
+    VerdictEffectIntent,
+    run_verdict_effect,
+)
+from secretary.dispatch.verdict_effect import (
+    post_verdict_identity as _post_verdict_identity,
+)
+from secretary.dispatch.verdict_effect import (
+    standing_verdict as _standing_verdict,
 )
 from secretary.dispatcher_gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
@@ -121,7 +128,6 @@ from secretary.dispatcher_gate_receipt import (
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
     _gate_red_repeat_count,
-    _last_marker,
     _last_marker_body,
     _last_review_red_body,
     _report_adoption_baseline,
@@ -2111,30 +2117,40 @@ class DispatcherRuntime:
                 return self._block_unresumable(task, records, payload, attempt_id, "review", exc)
             records[ref] = record
         if record.worker_continuation.parked:
-            # The park's effect did not commit: the card is still in Validate with the verdict
-            # recorded. Finish that effect before the gate or any review marker is read — through
-            # the one boundary, which re-establishes this round's identity from disk first.
-            return self._complete_park(task, record, records, payload, attempt_id, ref=ref)
+            # The verdict effect this record opened did not finish: the card is still in Validate
+            # with the verdict recorded. It goes back to the one executor, which re-establishes
+            # every precondition from disk before it moves or merges anything.
+            return run_verdict_effect(
+                self,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                VerdictEffectIntent.from_continuation(record.worker_continuation),
+            )
         if record.worker_continuation.red_transition_pending:
             # A red transition whose move did not commit is finished before the gate is read again,
             # before any review marker and before a reviewer starts: a rollup that has turned green
             # since cannot retract a red round this card is already owed.
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
-        standing = self._standing_verdict(task, record)
+        standing = _standing_verdict(self, task, record)
         if standing is not None:
             # A verdict is standing on this round, so its identity has to be established before
             # anything acts on it. Missing, damaged, foreign or conflicting identity is a
             # fail-closed lifecycle outcome here, not a tick that quietly waits for a verdict
             # already on the board, and not a pair rebuilt to fit an answer that is written.
-            identity = self._post_verdict_identity(
-                task, record, records, payload, attempt_id, standing, step="review"
+            # The executor asks the same authority again on the far side of the intent; this
+            # reading answers which of the three red outcomes, or the park, this round takes.
+            identity = _post_verdict_identity(
+                self, task, record, records, payload, attempt_id, standing, step="review"
             )
             if not isinstance(identity, ValidatedReviewIdentity):
                 return identity
         else:
             identity = None
         if identity is not None and identity.verdict == "green":
-            return self._park_green_verdict(task, record, records, payload, attempt_id, identity)
+            return self._park_green_verdict(task, record, records, payload, attempt_id)
         if identity is not None:
             # Only the reviewer's lifecycle ends here: a full `stop` would take the worktree's
             # terminals down, and this checkout is about to be parked and is never re-created from
@@ -2185,17 +2201,22 @@ class DispatcherRuntime:
             # The worker of this round stays suspended through the park: the observer may send the
             # findings back to it, and that conversation is only worth keeping if nothing else writes.
             self._record_verdict_routing(ref, record, "red")
-            return self._begin_park(
+            return run_verdict_effect(
+                self,
                 task,
                 record,
                 records,
                 payload,
                 attempt_id,
-                verdict_outcome="red",
-                move_reason=(
-                    "review:red. The card is parked in Assessment: the reviewer is stopped and "
-                    "the worker of this round is held, waiting for a release, rework or reslice "
-                    "decision."
+                VerdictEffectIntent(
+                    effect=PARK_EFFECT_ASSESSMENT,
+                    report_baseline=len(task.get("comments") or []),
+                    verdict_outcome="red",
+                    move_reason=(
+                        "review:red. The card is parked in Assessment: the reviewer is stopped and "
+                        "the worker of this round is held, waiting for a release, rework or reslice "
+                        "decision."
+                    ),
                 ),
             )
         # Mechanical gate: a fresh report clears the cheap CI/local gate before the expensive
@@ -2241,67 +2262,6 @@ class DispatcherRuntime:
             "attempt_id": attempt_id,
             "action": "waiting-review-verdict",
         }
-
-    def _standing_verdict(
-        self, task: dict[str, Any], record: DispatcherRecord
-    ) -> VerdictProjection | None:
-        """The verdict occurrence standing on this review round, or ``None`` when there is none.
-
-        Selection only: which occurrence this round is being answered by, read from the durable
-        record rather than from the comment prose. An occurrence counts when the marker comment
-        that published it is on the card after this round's baseline and its body is exactly what
-        the event renders — a staged event whose comment never landed is not a published verdict,
-        and a comment nothing committed is not one either.
-
-        Deliberately no identity is consulted here. A verdict whose header names another pair, or
-        that carries no readable header at all, is still the verdict standing on this round: it is
-        handed to the post-verdict authority, which refuses it by name and lands the card on the
-        board. Filtering it out here instead would make a contradicted verdict indistinguishable
-        from a round nobody has answered yet, and the card would wait forever on an answer it
-        already has.
-        """
-        comments = (task.get("comments") or [])[record.review_baseline :]
-        for raw in reversed(self.audit.events(task["ref"])):
-            if raw.get("kind") != "card.verdict":
-                continue
-            try:
-                event = Event.from_record(raw)
-                projection = project_verdict(event)
-                rendered = render_marker_comment(event)
-            except (TypeError, ValueError):
-                continue
-            marker = event.data.get("marker")
-            if any(
-                comment.get("marker") == marker and comment.get("body") == rendered
-                for comment in comments
-            ):
-                return projection
-        return None
-
-    def _post_verdict_identity(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        verdict: VerdictProjection,
-        *,
-        step: str,
-    ) -> ValidatedReviewIdentity | dict[str, Any]:
-        """This round's validated identity, or the tick's fail-closed outcome for not having one.
-
-        The one door between a standing verdict and everything that acts on one. Every caller —
-        the green park, the red park, the observer release, the no-observer release — reaches the
-        authority through here and either receives the typed identity or returns the Blocked
-        outcome unchanged, so no path can be written that carries on with a weaker value.
-        """
-        try:
-            return validate_post_verdict_identity(self.host, task, record, verdict)
-        except ReviewContextError as exc:
-            return self.block_review_context(
-                task, record, records, payload, attempt_id, step=step, reason=scrub_host_output(str(exc))
-            )
 
     def _wait_watchdog(
         self,
@@ -5156,37 +5116,6 @@ class DispatcherRuntime:
             return False
         return str(observer.get("kind") or "") == "head" and bool(observer.get("profile"))
 
-    def _merge_readiness(
-        self, task: dict[str, Any], record: DispatcherRecord, identity: ValidatedReviewIdentity
-    ) -> tuple[str, GateResult | None, str]:
-        """Everything mechanical that must hold before this checkout may be merged, read once.
-
-        Returns one of "drift", "transport", "failed", "pending", "red" or "green". Both sides of the
-        seam ask it: Validate before parking a green verdict, and the release again immediately before
-        the merge. "transport" is deliberately not "failed" — a backend that could not be reached says
-        nothing about the checkout, so the caller retries rather than deciding the card on silence.
-
-        The round's identity is not one of the answers, because it is a precondition of asking: every
-        answer here is about a candidate, and only a validated identity says which candidate that is.
-        So the parameter is the validated value and nothing weaker — a raw persisted context or an
-        optional one cannot be passed here, which is what keeps a round whose identity was never
-        checked from reaching a gate at all.
-        """
-        drift = self._review_drift(task, record, identity)
-        if drift:
-            return "drift", None, drift
-        try:
-            result = self.host.gate_check(task, record)
-        except GateTransportError as exc:
-            return "transport", None, str(exc)
-        except HostError as exc:
-            return "failed", None, scrub_host_output(str(exc))
-        if result.status == "green":
-            return "green", result, ""
-        if result.status == "pending":
-            return "pending", result, ""
-        return "red", result, ""
-
     def _park_green_verdict(
         self,
         task: dict[str, Any],
@@ -5194,280 +5123,43 @@ class DispatcherRuntime:
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
         attempt_id: str,
-        identity: ValidatedReviewIdentity,
     ) -> dict[str, Any]:
-        """A green review verdict parks the card; it does not merge it.
+        """A green review verdict is owed one effect. This names it and hands it to the executor.
 
-        Everything mechanical happens here — the readiness re-check and the exact-SHA green receipt
-        — over the validated identity the caller already had to obtain to read the verdict at all,
-        carried here rather than looked up again from a record the same tick has not changed. The
-        durable effect is not: both endings open a park intent and are performed by the one
-        boundary below, which re-establishes the identity from disk before it moves or merges.
+        Which effect that is comes from the sprint, and it is decided here, once, with the intent:
+        a card whose sprint declares an observer parks in Assessment and waits for a decision, and a
+        card with nobody to release it has the merge as its effect. Recording the answer with the
+        intent is what keeps a sprint that closed, or a board that cannot be read on a later tick,
+        from turning a park into a merge or a merge into a wait nothing will end.
+
+        Nothing mechanical happens here. The readiness re-check, the stage gate and its exact-SHA
+        receipt belong to the executor, immediately before the effect and on every invocation of it,
+        because that is the only place they can be true of the state the effect actually lands on.
         """
         ref = task["ref"]
         # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
         self._record_verdict_routing(ref, record, "green")
         self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
-        kind, result, detail = self._merge_readiness(task, record, identity)
-        if kind == "transport":
-            retry = self._gate_transport_retry(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                GateTransportError(detail),
-                step="review",
-            )
-            if retry is not None:
-                return retry
-            return self._block_gate_transport(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                step="review",
-                action="merge-gate-transport-blocked",
-            )
-        if kind == "drift":
-            # The gate was never asked here; the bounce clears the record's gate state itself.
-            return self._gate_red_to_worker(
-                task, record, records, payload, attempt_id, GateResult("red", detail), phase="review-freeze"
-            )
-        self._gate_answered(ref, record, records, payload)
-        if kind == "failed":
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action="merge-gate-blocked",
-                reason=f"merge gate failed: {detail}",
-                step="review",
-                outcome="merge gate failed",
-            )
-        if kind == "pending":
-            if result is None:
-                return self._block_merge_path(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    action="merge-gate-result-blocked",
-                    reason="merge gate returned pending without a result payload",
-                    step="review",
-                    outcome="merge gate result unavailable",
-                )
-            return self._gate_pending(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                result,
-                step="review",
-                action="merge-gate-pending",
-            )
-        if kind != "green":
-            if result is None:
-                return self._block_merge_path(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    action="merge-gate-result-blocked",
-                    reason="merge gate returned a non-green state without a result payload",
-                    step="review",
-                    outcome="merge gate result unavailable",
-                )
-            return self._gate_red_to_worker(
-                task, record, records, payload, attempt_id, result, phase="merge-gate"
-            )
-        if result is None:
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action="merge-gate-result-blocked",
-                reason="merge gate returned green without a result payload",
-                step="review",
-                outcome="merge gate result unavailable",
-            )
         parks = self._parks_for_decision(task)
-        blocked = self._accept_green_gate(
+        return run_verdict_effect(
+            self,
             task,
             record,
             records,
             payload,
             attempt_id,
-            result,
-            stage="assessment" if parks else "release",
-        )
-        if blocked is not None:
-            return blocked
-        if not parks:
-            # No observer to release it, so the green verdict merges on its own tick. It still goes
-            # through the park boundary: the merge is this park's effect, the intent for it is on
-            # disk before anything irreversible happens, and the identity the merge runs on is the
-            # one that boundary re-establishes rather than the one this tick happens to hold.
-            return self._begin_park(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
+            VerdictEffectIntent(
+                effect=PARK_EFFECT_ASSESSMENT if parks else PARK_EFFECT_RELEASE,
+                report_baseline=len(task.get("comments") or []),
                 verdict_outcome="green",
-                move_reason="review:green",
-                effect=PARK_EFFECT_RELEASE,
-            )
-        # The checkout must be quiet while the card waits, so the reviewer's pane goes here. Its
-        # pane address is all that is forgotten: the round's context outlives it, and is what the
-        # release decision will still be checked against.
-        unconfirmed = self._end_review_pane_confirmed(
-            record,
-            records,
-            payload,
-            ref,
-            step="review",
-            attempt_id=attempt_id,
-            initiator=STOPPED_BY_REVIEW_VERDICT,
-        )
-        if unconfirmed is not None:
-            return unconfirmed
-        return self._begin_park(
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            verdict_outcome="green",
-            move_reason=(
-                "review:green. The card is parked in Assessment: the mechanical gate is green "
-                "and the merge waits for a release, rework or reslice decision."
+                move_reason=(
+                    "review:green. The card is parked in Assessment: the mechanical gate is green "
+                    "and the merge waits for a release, rework or reslice decision."
+                )
+                if parks
+                else "review:green",
             ),
         )
-
-    def _begin_park(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        verdict_outcome: str,
-        move_reason: str,
-        effect: str = PARK_EFFECT_ASSESSMENT,
-    ) -> dict[str, Any]:
-        """The only way a substantive verdict leaves Validate.
-
-        The red transition's order, for the same reason: the intent is on disk, with the reason the
-        card is moving and the effect it is owed, before anything observable happens. Nothing comes
-        after the effect — the card waits, or it is merged and gone.
-
-        Nothing is re-pinned here, and nothing validated is carried across the save. The park is
-        exactly the window in which the reviewer's pane is gone while the merge gate must still
-        refuse a checkout that moved off the reviewed candidate, and the round's bound context is
-        what carries that candidate across it — read back below, on the far side of the intent.
-        """
-        ref = task["ref"]
-        record.worker_continuation.begin_park(
-            "review", len(task.get("comments") or []), move_reason, verdict_outcome, effect
-        )
-        records[ref] = record
-        self.save_records(payload, records)
-        return self._complete_park(task, record, records, payload, attempt_id, ref=ref)
-
-    def _complete_park(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        *,
-        ref: str,
-    ) -> dict[str, Any]:
-        """The one boundary that performs a park's durable effect: the Assessment move, or the
-        no-observer merge. Nothing else moves a verdict to Assessment or finishes that release.
-
-        Every invocation re-establishes the round's identity before it acts, the first tick and the
-        recovery of a crash after the intent alike. The saved intent says an effect is pending; it
-        never says the identity behind it was validated, because the value that says so is in
-        memory and cannot cross a crash boundary. So the standing verdict and the round's durable
-        sources are read again here and handed to the one post-verdict authority: a context that is
-        absent, damaged, foreign or in conflict with the verdict or the recorded reviewer document
-        lands the card on Blocked with that reason, before the board move, before the merge and
-        before this record is saved any further.
-
-        A validated round keeps the behaviour a park has always had: the move is keyed on the
-        baseline the intent was opened against, so the tick that already moved the card and the tick
-        recovering from a crash before that move run the same call and it moves once.
-        """
-        continuation = record.worker_continuation
-        standing = self._standing_verdict(task, record)
-        if standing is None:
-            # The park was opened on a verdict, so this is not a round waiting for an answer: the
-            # occurrence it was opened over is no longer readable on the card.
-            return self.block_review_context(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                step="review",
-                reason="no accepted reviewer verdict stands on the review round this park was opened for",
-            )
-        identity = self._post_verdict_identity(
-            task, record, records, payload, attempt_id, standing, step="review"
-        )
-        if not isinstance(identity, ValidatedReviewIdentity):
-            return identity
-        if continuation.releases_on_park:
-            # A card nobody parks it for: the effect this intent opened is the merge itself, run
-            # over the identity just re-established rather than one the opening tick held.
-            return self._release_effect(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                identity,
-                step="review",
-                move_reason=continuation.move_reason,
-            )
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            target="assessment",
-            reason=continuation.move_reason,
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                "review-assessment",
-                ref,
-                str(continuation.report_baseline),
-            ),
-        )
-        continuation.confirm_park()
-        record.state = "assessment"
-        _reset_wait(record, "review")
-        records[ref] = record
-        self.save_records(payload, records)
-        return {
-            "status": "ok",
-            "step": "review",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "to": "assessment",
-            "verdict": continuation.verdict_outcome,
-        }
 
     def _advance_assessment(
         self,
@@ -5489,11 +5181,20 @@ class DispatcherRuntime:
         if continuation.red_transition_pending:
             # A rework decision whose move did not commit: finish it before any decision is read.
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
-        if continuation.assessment_pending:
-            # The move may not have landed, or landed with its checkpoint lost; re-issuing it is a
-            # no-op by request id. The same boundary runs it, so this recovery validates the
-            # round's identity exactly as the first attempt did.
-            return self._complete_park(task, record, records, payload, attempt_id, ref=ref)
+        if continuation.effect_pending:
+            # A verdict effect is still open on this card: the Assessment move may not have landed
+            # or landed with its checkpoint lost, or a release decided here has not finished. The
+            # same executor runs it, so this recovery re-establishes every precondition the first
+            # attempt did — and the merge it may owe is performed once.
+            return run_verdict_effect(
+                self,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                VerdictEffectIntent.from_continuation(continuation),
+            )
         if not continuation.parked:
             # A record lost while parked, or a card an operator parked by hand: the board is the
             # fact. A session this record cannot prove is held is not held, so it owns no worker.
@@ -5683,204 +5384,30 @@ class DispatcherRuntime:
         *,
         reason: str,
     ) -> dict[str, Any]:
-        """Perform a release decision: re-check the mechanical state, then merge.
+        """Perform a release decision by opening the merge intent and handing it to the executor.
 
         The park is exactly the window in which nothing mechanical on the record still names the
-        pair a release is about: the reviewer's pane is gone and the release gate below attests
-        today's checkout, whatever the verdict judged. So this side of the seam goes through the
-        same post-verdict authority the park did, over the same three durable sources, and a round
-        that cannot produce a validated identity — because it was never bound, was read back
-        damaged, belongs to another round, or is contradicted by the reviewer document or by the
-        verdict's own header — stops on the board with the reason instead of merging on mechanical
-        evidence that was never about it. This is also the path a record lost while parked lands
-        on: an adopted record has no bound context, and nothing here may invent one for a verdict
-        that is already written.
+        pair a release is about: the reviewer's pane is gone, and the release gate below attests
+        today's checkout whatever the verdict judged. So this side of the seam performs no effect of
+        its own. It names what the observer decided, and the one executor re-establishes the
+        standing verdict, the round's validated identity, the checkout, the base, the release gate
+        and its fresh exact-SHA receipt before anything is landed — the same chain, in the same
+        order, as the tick that parked the card and as the tick that recovers this one from a crash.
         """
-        ref = task["ref"]
-        standing = self._standing_verdict(task, record)
-        if standing is None:
-            return self.block_review_context(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                step="assessment",
-                reason="no accepted reviewer verdict stands on this parked review round",
-            )
-        identity = self._post_verdict_identity(
-            task, record, records, payload, attempt_id, standing, step="assessment"
-        )
-        if not isinstance(identity, ValidatedReviewIdentity):
-            return identity
-        kind, result, detail = self._merge_readiness(task, record, identity)
-        if kind == "transport":
-            # A release that could not ask the gate is not a release that was refused.
-            retry = self._gate_transport_retry(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                GateTransportError(detail),
-                step="assessment",
-            )
-            if retry is not None:
-                return retry
-            return self._block_gate_transport(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                step="assessment",
-                action="release-gate-transport-blocked",
-                prefix="Observer decision: release. ",
-            )
-        if kind != "drift":
-            # `drift` is decided before the gate is asked; only an answer clears the budget.
-            self._gate_answered(ref, record, records, payload)
-        if kind == "pending":
-            if result is None:
-                return self._block_merge_path(
-                    task,
-                    record,
-                    records,
-                    payload,
-                    attempt_id,
-                    action="release-gate-result-blocked",
-                    reason="merge gate returned pending without a result payload",
-                    step="assessment",
-                    outcome="merge gate result unavailable",
-                )
-            return self._gate_pending(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                result,
-                step="assessment",
-                action="merge-gate-pending",
-            )
-        if kind != "green":
-            summary = {
-                "drift": f"the release cannot land: {detail}",
-                "failed": f"the merge gate could not be read: {detail}",
-            }.get(kind, "the mechanical gate is no longer green for the checkout this release was decided on")
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action=f"release-{kind}-blocked",
-                reason=f"Observer decision: release. {summary}",
-                step="assessment",
-                outcome=f"release {kind}",
-            )
-        if result is None:
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action="release-gate-result-blocked",
-                reason="merge gate returned green without a result payload",
-                step="assessment",
-                outcome="merge gate result unavailable",
-            )
-        blocked = self._accept_green_gate(task, record, records, payload, attempt_id, result, stage="release")
-        if blocked is not None:
-            return blocked
-        return self._release_effect(
+        return run_verdict_effect(
+            self,
             task,
             record,
             records,
             payload,
             attempt_id,
-            identity,
-            step="assessment",
-            move_reason=f"Observer decision: release. {reason}".strip(),
-            decision="release",
-        )
-
-    def _release_effect(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
-        identity: ValidatedReviewIdentity,
-        *,
-        step: str,
-        move_reason: str,
-        decision: str = "",
-    ) -> dict[str, Any]:
-        """Merge the reviewed branch, tear the round down and move the card to Done.
-
-        The validated identity is a required argument rather than something read here, and it is
-        what makes this function unreachable without one: both merge routes — the no-observer green
-        verdict and the observer release — obtain it from the single post-verdict authority, and
-        there is no spelling of this call that lands a candidate whose round nobody could identify.
-        """
-        ref = task["ref"]
-        try:
-            self.host.complete_green(task, record)
-        except HostError as exc:
-            # A rejected merge must land the card in Blocked rather than escape the tick: an
-            # escaping error leaves the verdict standing and every later tick retries the merge.
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action="merge-blocked",
-                reason=(
-                    f"merge of reviewed candidate `{identity.candidate_sha[:12]}` failed: "
-                    f"{scrub_host_output(str(exc))}"
-                ),
-                step=step,
-                outcome="merge failed",
-            )
-        self.host.teardown(record)
-        self.writer.move(
-            role="dispatcher",
-            actor=self.owner,
-            reference=ref,
-            target="done",
-            reason=move_reason,
-            decision=decision,
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
-        )
-        records.pop(ref, None)
-        self.save_records(payload, records)
-        return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
-
-    def _review_drift(
-        self, task: dict[str, Any], record: DispatcherRecord, identity: ValidatedReviewIdentity
-    ) -> str:
-        """Has the checkout moved off the candidate the reviewer was pointed at? A verdict describes one
-        code state; merging a different one lands work nobody reviewed. Returns the operator message for
-        the bounce, or "" when the states match, or when the checkout cannot be read — an unreadable
-        workspace is the gate's failure to report, not a silent bounce.
-
-        The candidate is the round's validated identity, handed in by the readiness check that
-        already required it: this compares two code states and never decides whether a round has an
-        identity.
-        """
-        current = self.host.head_commit(record)
-        if not current or current == identity.candidate_sha:
-            return ""
-        if self.host.is_instance_publish_recovery(task, record, identity.candidate_sha, current):
-            return ""
-        return (
-            f"The review was given for commit `{identity.candidate_sha[:12]}` while the working copy "
-            f"is now on `{current[:12]}`: the verdict describes a different state of the code. The "
-            f"card is back in In progress; rework it and report again."
+            VerdictEffectIntent(
+                effect=PARK_EFFECT_RELEASE,
+                report_baseline=len(task.get("comments") or []),
+                verdict_outcome=record.worker_continuation.verdict_outcome,
+                move_reason=f"Observer decision: release. {reason}".strip(),
+                decision="release",
+            ),
         )
 
     def head_run_snapshot(

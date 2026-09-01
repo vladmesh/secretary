@@ -1854,6 +1854,29 @@ class CommandHostRuntime:
             raise ReviewContextError("the recorded reviewer verdict commands name no single context")
         return contexts["green"]
 
+    def base_ancestry_intact(
+        self, record: DispatcherRecord, reviewed_base: str, current_base: str
+    ) -> bool:
+        """Whether the base a round was judged over is still reachable from the base as it is now.
+
+        A base branch that simply advanced keeps the reviewed base as an ancestor, and that is the
+        ordinary case a release must not refuse: other cards land while this one waits. A base that
+        was rewritten, reset or replaced does not, and then the delta the reviewer read no longer
+        exists in the history the merge would land on.
+
+        An unreadable answer is `True`, for the same reason an unreadable checkout is not drift: a
+        workspace this host cannot interrogate is its own failure to report, not evidence about the
+        branch. The gate receipt is what says a check was executed; this only refuses a history that
+        can be shown to have moved out from under the round.
+        """
+        if self.mode == "noop" or not record.workspace:
+            return True
+        if not (_is_exact_sha(reviewed_base) and _is_exact_sha(current_base)):
+            return True
+        if reviewed_base == current_base:
+            return True
+        return self._commit_is_ancestor(record.workspace, reviewed_base, current_base)
+
     def is_instance_publish_recovery(
         self,
         task: dict[str, Any],

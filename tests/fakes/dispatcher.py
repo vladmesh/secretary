@@ -775,6 +775,9 @@ class FakeHost:
         # What this host recorded into each round's reviewer document, keyed by (ref, baseline):
         # the recovery evidence a lost record reads back.
         self.review_contexts: dict[tuple[str, int], tuple[str, str]] = {}
+        # Bases the branch no longer descends from: add one to model a rewritten base branch.
+        self.rewritten_bases: set[str] = set()
+        self.base_ancestry_questions: list[tuple[str, str]] = []
         self.instance_publish_recoveries: set[tuple[str, str]] = set()
         # Observer heads (secretary-793): which sprints got one, which handles were stopped, and
         # the pid the fake heartbeat writes. os.getpid() is a live process, so the default launch
@@ -1654,6 +1657,11 @@ class FakeHost:
     def recorded_review_context(self, task: dict, record) -> tuple[str, str] | None:
         self.calls.append("recorded_review_context")
         return self.review_contexts.get((task["ref"], record.review_baseline))
+
+    def base_ancestry_intact(self, record, reviewed_base: str, current_base: str) -> bool:
+        self.calls.append("base_ancestry_intact")
+        self.base_ancestry_questions.append((reviewed_base, current_base))
+        return not self.rewritten_bases or reviewed_base not in self.rewritten_bases
 
     def is_instance_publish_recovery(
         self, task: dict, record, reviewed_commit: str, current_commit: str
