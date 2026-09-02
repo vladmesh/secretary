@@ -1249,6 +1249,41 @@ commits, but it cannot construct a v1 key from request-id grammar, time, prose o
 stop/drop likewise produces an outcome only where the stopping lifecycle record already carries a durable
 attempt id and positive round and generation; it never invents one for analytics.
 
+### Offline analytics projection v1
+
+`secretary.board.analytics.project_analytics_checkpoint(directory)` is the canonical offline reader for one
+copied `state/board` checkpoint. Its first operation is `verify_analytics_checkpoint(directory)`. Only
+after that manifest-verifier boundary succeeds does it parse `cards.ndjson`, `sprints.ndjson` and
+`events.ndjson` below that verified directory. `export.json` is verifier-checked only as a count summary;
+it is not evidence for an analytics row or an alternative proof of the cut. The reader has no live board,
+dispatcher, provider session, comment, transcript or lifecycle dependency and never mutates a checkpoint.
+
+The versioned result has `checkpoint_id`, `rows`, `incomplete` and `incomplete_reasons`; `ndjson()` emits
+one deterministic object per row. Every row is keyed exactly by `card_ref`, `attempt_id` and
+`report_generation` and carries the outcome's round fields, terminal taxonomy, `source_event_ids`,
+`usage_completeness`, and nullable `worker_usage` and `review_usage` objects. A usage object preserves the
+usage event id, typed phase identity, collection outcome and all three nullable token accounts. It is never
+manufactured from a token total or replaced with a zero.
+
+The only usage join is the matching non-null `source_event_ids.worker_usage` or
+`source_event_ids.review_usage`. The referred event must be a typed `attempt.usage` on the same Card with
+the same attempt id, numeric attempt and report generation; worker requires role/phase `worker`/`worker`,
+and review requires `reviewer`/`review`. A `collected` completeness requires a collected usage occurrence;
+`degraded` requires a typed non-collected occurrence. `missing` and `legacy` carry no usage-event reference
+and remain visibly distinct from each other and from a null token dimension. No order, timestamp, request
+id, prose, marker, provider state or live Card field participates in a join.
+
+The projection fails closed with named `AnalyticsProjectionError` diagnostics: `analytics_malformed_row`,
+`analytics_invalid_typed_event`, `analytics_conflicting_event_identity`,
+`analytics_conflicting_request_ownership`, `analytics_conflicting_reference`,
+`analytics_conflicting_outcome_natural_key`, `analytics_dangling_card_ref`,
+`analytics_dangling_sprint_ref`, `analytics_dangling_source_event_ref`,
+`analytics_incompatible_source_event_ref`, and `analytics_incompatible_usage_join`. Each names its sealed
+file and record number. Exact replay of the same typed event and request is one occurrence; another event,
+request owner or payload is not. A sealed cut with no v1 outcome reports no rows and
+`no_attempt_outcome_v1`; legacy outcome or usage evidence sets explicit incompleteness rather than a
+historical backfill.
+
 ### What a finished phase cost
 
 Every completed worker phase and every completed review phase leaves one `attempt.usage` event on the
