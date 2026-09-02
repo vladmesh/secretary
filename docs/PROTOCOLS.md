@@ -1675,6 +1675,20 @@ heartbeat; a session it cannot confirm gets a confirmed stop, and the round lose
 Nothing here stops every terminal in the worktree, so the worker's own pane stays the reviewer's
 split anchor.
 
+While that retention is on the record, no vitality path may wake the session it holds. The head
+watchdog reads a stopped process as a head to revive, and the retention is a stopped process the
+dispatcher parked on purpose: read as an ordinary suspension it was SIGCONT'd out from under the
+pending gate within a tick, and the red verdict that followed then found the session no longer
+confirmably suspended and replaced it instead of reusing it. The vitality reduction is therefore
+told whose stop signal it is: a confirmed retention reduces to its own `Retained` verdict, which
+earns no recovery rung anywhere — not from the gate-pending tick, not from the report wait, and not
+from the destructive guard, which refuses every destructive step over it. A head stopped without an
+active retention keeps the ordinary suspension ladder (SIGCONT, response window, operator
+escalation). None of this hides a failed retention: a retained session that is provably gone still
+reduces to `Dead`, and one whose process is running again is still caught by the heartbeat
+confirmation immediately before the delivery boundary, which stops and replaces it exactly once.
+See [Head vitality](HEAD_VITALITY.md).
+
 Substantive red verdicts return the card to In progress through one transition, and both hand the
 round back to the session that wrote the code. An enumerated infrastructure red from the mechanical
 gate instead holds the card in Validate while the gate reruns the failed Actions run for the same

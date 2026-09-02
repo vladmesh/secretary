@@ -66,7 +66,9 @@ def episode(
         verdict=verdict,
         started_at=NOW - 10_000.0,
         updated_at=NOW - 1.0,
-        stall_frozen_since=stall_frozen_since if verdict is VitalityVerdict.SUSPENDED else 0.0,
+        stall_frozen_since=(
+            stall_frozen_since if verdict in (VitalityVerdict.SUSPENDED, VitalityVerdict.RETAINED) else 0.0
+        ),
         reason=reason,
         **overrides,  # type: ignore[arg-type]
     )
@@ -226,6 +228,45 @@ class SuspendedLadderTests(unittest.TestCase):
         final = persisted(recovered, cleared)
         self.assertEqual(final.recovery_rung, 0)
         self.assertEqual(final.recovery_span_started_at, 0.0)
+
+
+class RetainedVerdictTests(unittest.TestCase):
+    """secretary-1539: a process this dispatcher is holding earns no rung at all."""
+
+    def test_a_retained_head_observes_and_climbs_nothing(self) -> None:
+        decision = decide_recovery(episode(VitalityVerdict.RETAINED), None, NOW, THRESHOLDS)
+
+        self.assertIs(decision.intent, RecoveryIntent.OBSERVE)
+        self.assertEqual(decision.rung, RUNG_NONE)
+        self.assertTrue(decision.detail.get("retained"))
+
+    def test_a_spent_ladder_is_cleared_by_a_retention(self) -> None:
+        """A past suspension span does not carry its rung into the retention that followed it."""
+        spent = episode(
+            VitalityVerdict.RETAINED,
+            recovery_rung=RUNG_RESPONSE_WINDOW,
+            recovery_span_started_at=NOW - 30.0,
+        )
+
+        decision = decide_recovery(spent, spent, NOW, THRESHOLDS)
+
+        self.assertIs(decision.intent, RecoveryIntent.OBSERVE)
+        self.assertEqual(persisted(spent, decision).recovery_rung, RUNG_NONE)
+
+    def test_no_reason_string_promotes_a_retention_into_a_rung(self) -> None:
+        """Even the authoritative fast path may not act on a process the dispatcher parked.
+
+        The deterministic allowlist exists to reach a human fast when retrying cannot help. A
+        retained worker is not retrying anything: it is stopped on purpose, and the thing that
+        ends the retention is the gate's own verdict, not an escalation.
+        """
+        for reason in ("terminal_split_source_not_found", "process suspended on a stop signal"):
+            with self.subTest(reason=reason):
+                decision = decide_recovery(
+                    episode(VitalityVerdict.RETAINED, reason=reason), None, NOW, THRESHOLDS
+                )
+                self.assertIs(decision.intent, RecoveryIntent.OBSERVE)
+                self.assertEqual(decision.rung, RUNG_NONE)
 
 
 class SuspectedStallRungTests(unittest.TestCase):

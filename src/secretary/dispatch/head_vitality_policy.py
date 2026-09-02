@@ -17,6 +17,7 @@ The ladder this card implements (plan sections "Recovery policy" and "Sprint 1";
 beyond these rungs is Sprint 2+ scope and exists only as vocabulary)::
 
     SuspectedStall   -> observe / at most ONE idempotent nudge        (rung 1)
+    Retained         -> observe, and NOTHING else: no rung at all
     Suspended        -> identity-fenced SIGCONT once per span         (rung 2)
                        -> response window                             (rung 3)
                        -> operator escalation if still suspended      (rung 4)
@@ -263,6 +264,7 @@ def decide_recovery(
 
     Verdict -> intent, per the ladder in the module docstring:
 
+    * ``Retained`` -> ``observe``, rung state cleared, before anything else is consulted.
     * ``HealthyActive`` / ``HealthyQuiet`` / ``Unverifiable`` / ``Dead`` -> ``observe`` with
       rung state reset to zero. Health needs no intent; death and unobservability belong to
       the S1-4 paths (the watchdog's reclaim, the operator escalation), which run before this
@@ -272,6 +274,9 @@ def decide_recovery(
       earns is spent by the S1-4 wait-tick arm (``_prompt_worker_report``); routing the
       verdict through the policy keeps that behaviour byte-identical while making the rung
       table complete.
+    * ``Retained`` -> ``observe`` at rung zero, unconditionally. A process the dispatcher is
+      deliberately holding suspended is not a head awaiting recovery, so no rung -- SIGCONT
+      least of all -- may be earned over it.
     * ``Suspended`` -> the SIGCONT rungs, keyed on the freeze span (see
       :func:`_decide_suspended`): one identity-fenced SIGCONT per span, a response window
       after it, operator escalation -- never kill -- when the window expires.
@@ -287,6 +292,24 @@ def decide_recovery(
     if not isinstance(thresholds, RecoveryThresholds):
         return _previous_or_observe(previous_rung_state, "the policy was handed thresholds it cannot read")
     now = float(now)
+
+    if episode.verdict is VitalityVerdict.RETAINED:
+        # The dispatcher itself is holding this process on a stop signal, and it is the caller
+        # who told the reducer so. There is no rung to climb: not SIGCONT (which would wake a
+        # session the gate is deliberately holding still -- secretary-1539), not the nudge, and
+        # not the operator escalation either, since nothing here is unexpected. The ladder is
+        # reset to zero exactly as health resets it, so the retention's own end -- a resume, or a
+        # stop signal nobody intended -- starts a fresh span.
+        #
+        # Deliberately BEFORE the deterministic-refusal arm: this arm is about who owns the stop
+        # signal, and no reason string may promote a retention into a rung.
+        return RecoveryDecision(
+            intent=RecoveryIntent.OBSERVE,
+            rung=RUNG_NONE,
+            refusals=0,
+            reason="",
+            detail={"verdict": episode.verdict.value, "retained": True},
+        )
 
     cls = deterministic_reason_class(episode.reason)
     if cls is not None:

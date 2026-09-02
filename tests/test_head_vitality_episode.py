@@ -186,6 +186,65 @@ class ProcessAxisTests(unittest.TestCase):
         self.assertEqual(reduced.verdict, VitalityVerdict.SUSPENDED)
         self.assertNotEqual(reduced.verdict, VitalityVerdict.SUSPECTED_STALL)
 
+    def test_a_declared_retention_makes_the_same_stop_signal_its_own_verdict(self) -> None:
+        """secretary-1539: the kernel's `T` is one fact with two possible owners.
+
+        `retain_worker` parks a finished worker on purpose while the gate waits for CI. Read as
+        `Suspended` that parking is a head to revive, and the watchdog's SIGCONT then wakes the
+        session the gate is holding still. The caller -- the only party that knows whose stop
+        signal it is -- declares it, and the verdict says so.
+        """
+        batch = [heartbeat(1000.0, process=ProcessState.SUSPENDED), provider(1000.0)]
+
+        held = reduce_vitality(None, batch, now=1000.0, thresholds=THRESHOLDS, retained=True)
+        loose = reduce_vitality(None, batch, now=1000.0, thresholds=THRESHOLDS)
+
+        self.assertEqual(held.verdict, VitalityVerdict.RETAINED)
+        self.assertEqual(loose.verdict, VitalityVerdict.SUSPENDED)
+        self.assertIn("retained@pid_heartbeat", held.basis)
+        self.assertIn("suspended@pid_heartbeat", loose.basis)
+        # Both are the same parked process, so both freeze the stall clocks identically; only
+        # the recorded reason distinguishes them for an operator reading head-status.
+        self.assertEqual(held.stall_frozen_since, loose.stall_frozen_since)
+        self.assertIn("retention", held.reason)
+        self.assertNotIn("retention", loose.reason)
+
+    def test_a_retention_never_launders_death_or_a_running_process(self) -> None:
+        """The suppression is of the wake, not of the truth.
+
+        Death still outranks the retention -- a retained head that is provably gone is `Dead`,
+        which is what the confirm-or-replace path needs to hear. And a retention whose process
+        is running again is not `Retained` either: it reduces on the ordinary ladder, so the
+        caller's own "no longer confirmably suspended" failure is still reached.
+        """
+        dead = reduce_vitality(
+            None,
+            [heartbeat(1000.0, process=ProcessState.DEAD), provider(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
+            retained=True,
+        )
+        self.assertEqual(dead.verdict, VitalityVerdict.DEAD)
+
+        running = reduce_vitality(
+            None,
+            [heartbeat(1000.0), provider(1000.0, progress=ProgressState.ADVANCING)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
+            retained=True,
+        )
+        self.assertEqual(running.verdict, VitalityVerdict.HEALTHY_ACTIVE)
+
+    def test_the_retention_declaration_is_a_boolean_or_it_is_refused(self) -> None:
+        with self.assertRaises(HeadVitalityError):
+            reduce_vitality(
+                None,
+                [heartbeat(1000.0, process=ProcessState.SUSPENDED)],
+                now=1000.0,
+                thresholds=THRESHOLDS,
+                retained="yes",  # type: ignore[arg-type]
+            )
+
     def test_suspension_freezes_the_stall_clocks(self) -> None:
         """The secretary-1061 shape: a worker parked in T for 27 minutes must not be read as
         six hours of quiet. The freeze is stamped, and resumed time is shifted past it."""

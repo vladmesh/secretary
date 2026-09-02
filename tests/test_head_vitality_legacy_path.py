@@ -129,6 +129,38 @@ class LegacyPathTests(unittest.TestCase):
             request_id=request_id,
         )
 
+    def forget_retention(self) -> None:
+        """Drop the card's retention from the record, leaving its worker head identity intact.
+
+        A worker parked by ``retain_worker`` on ``report:done`` is stopped BY this dispatcher, and
+        since secretary-1539 the vitality reduction is told so. A head that is stopped without an
+        active retention on file -- an adopted or crash-recovered record, an operator's own
+        SIGSTOP, a session whose retention was dropped while the head survived -- is the shape the
+        fe04011b SIGCONT ladder exists for, and this is how the fixture reaches it.
+        """
+        payload = self.runtime.production_state.load()
+        payload["records"][CARD_REF]["worker_continuation"] = {}
+        self.runtime.production_state.save(payload)
+        self.assertFalse(self.record_of().worker_continuation.retained)
+
+    def stopped_worker_status(self) -> dict:
+        """What the host reports for a worker process the kernel has parked in `T`."""
+        return {
+            "known": True,
+            "live": True,
+            "reason": "live",
+            "last_activity": time.time(),
+            "pid_confirmed": True,
+            "idle": False,
+            "pid_status": {
+                "known": True,
+                "alive": True,
+                "match": True,
+                "state": "live-match",
+                "stopped": True,
+            },
+        }
+
     def run_worker_to_validate_and_review(self) -> None:
         """Claim, report done, pass the default green gate, start the reviewer."""
         self.tick()
@@ -305,6 +337,12 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         The fixture ordering matters (S1-3 review MAJOR 2): the pending gate answers must be
         queued BEFORE the report tick, so the second validate-side tick reaches
         ``_gate_pending`` -- the machinery the incident is about.
+
+        Since secretary-1539 the ladder is scoped to a stop signal this dispatcher does NOT own:
+        the card's retention is cleared here (``forget_retention``) so the stopped process is a
+        head nobody parked on purpose. That is the whole of the fe04011b protection and it is
+        unchanged; the retained case is pinned separately in
+        ``Issue02fe04d7RetainedWorkerTests``.
         """
         from secretary.dispatcher_gate import GateResult
 
@@ -340,6 +378,8 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
             },
         }
         self.host.worker_status_result = dict(stopped_status)
+        # ...and nothing this dispatcher did put it there.
+        self.forget_retention()
 
         # Age the pending window just past one minute: far below the six-hour ceiling.
         payload = self.runtime.production_state.load()
@@ -367,7 +407,12 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         self.assertIn("identity-fenced SIGCONT", comments[0])
 
     def test_an_expired_response_window_mid_gate_escalates_without_stopping(self) -> None:
-        """The second rung works inside the gate wait too: operator, never a stop."""
+        """The second rung works inside the gate wait too: operator, never a stop.
+
+        Same scoping as the rung above (secretary-1539): the ladder is climbed over a head this
+        dispatcher is not holding, so the card's retention is cleared before the suspension is
+        observed.
+        """
         from secretary.dispatcher_gate import GateResult
         from secretary.dispatcher_watchdog import suspension_response_window_seconds
 
@@ -399,6 +444,7 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
             },
         }
         self.host.worker_status_result = dict(stopped_status)
+        self.forget_retention()
 
         sent = self.tick()
         self.assertEqual(sent["action"], "worker-sigcont-sent")
@@ -467,3 +513,128 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         record = self.record_of()
         self.assertEqual(record.worker_respawns, 0)
         self.assertNotIn("restart_worker", self.host.calls)
+
+
+class Issue02fe04d7RetainedWorkerTests(LegacyPathTests):
+    """issue:02fe04d7cde3f31e8e56: the watchdog woke the worker the gate had just parked.
+
+    On codegen-orchestrator-1248 (2026-09-02) the card retained its worker at 15:14:53, the
+    vitality watchdog SIGCONT'd it at 15:17:32, CI came back red at 15:18:37, and at 15:18:51 the
+    red continuation read ``retained worker session is no longer confirmably suspended`` and took
+    ``replacement`` instead of ``reuse`` -- losing the provider conversation that wrote the code.
+    Retention lasts two to three minutes and CI takes three to four, so the SIGCONT always won
+    that race: not a flake, a fact with two owners.
+
+    ``retain_worker``'s SIGSTOP and the watchdog's SIGCONT were reading the same ``/proc`` state
+    ``T`` with opposite intentions. The reduction is now TOLD whose stop signal it is, so the
+    parked process reduces to ``Retained`` and no rung is ever climbed over it.
+    """
+
+    def run_to_gate_pending(self, pending_ticks: int = 3) -> None:
+        """Claim, report done (which retains the worker), and stamp a pending gate."""
+        from secretary.dispatcher_gate import GateResult
+
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.host.gate_results = [GateResult("pending", "CI still running") for _ in range(pending_ticks)]
+        self.tick()
+        self.report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.assertTrue(
+            self.record_of().worker_continuation.retained,
+            "report:done retains the worker: that is the retention this card is about",
+        )
+        self.assertEqual(self.tick()["action"], "gate-pending")
+
+    def sigcont_comments(self) -> list[str]:
+        return [
+            str(comment.get("body") or "")
+            for comment in self.reader.show(CARD_REF)["comments"]
+            if isinstance(comment, dict) and "SIGCONT" in str(comment.get("body") or "")
+        ]
+
+    def test_a_retained_worker_survives_the_pending_gate_unwoken(self) -> None:
+        """Several gate ticks over a deliberately parked worker send no recovery rung at all."""
+        self.run_to_gate_pending(pending_ticks=4)
+        self.host.worker_status_result = self.stopped_worker_status()
+
+        for tick_number in range(3):
+            with self.subTest(gate_tick=tick_number):
+                outcome = self.tick()
+                self.assertEqual(outcome["action"], "gate-pending")
+                self.assertEqual(outcome["status"], "ok")
+
+        record = self.record_of()
+        episode = record.worker_vitality_episode
+        assert episode is not None
+        # Typed, not a boolean special case: head-status and every diagnostic that reads this
+        # record see a retention, not a suspension awaiting recovery and not a suspected stall.
+        self.assertEqual(episode.verdict, VitalityVerdict.RETAINED)
+        self.assertIn("retained@pid_heartbeat", episode.basis)
+        self.assertEqual(episode.recovery_rung, 0)
+        self.assertEqual(self.sigcont_comments(), [])
+        self.assertEqual(record.worker_respawns, 0)
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        # The retention is still on file and still confirmable: the red verdict can reuse it.
+        self.assertTrue(record.worker_continuation.retained)
+        self.assertTrue(self.host.worker_retained_alive(record))
+
+    def test_a_red_gate_over_an_unwoken_retention_reuses_the_session(self) -> None:
+        """The incident's own outcome, corrected: `reuse`, not `replacement`.
+
+        This test owns the first link of the incident chain -- no SIGCONT is sent, so the
+        retention is still confirmable when the red verdict asks. The second link (a retention
+        that really did lose its suspension is replaced, once, through a confirmed stop) is
+        pinned unchanged by ``test_a_session_that_lost_its_suspension_before_the_red_gate_is
+        _replaced_once`` in ``tests/test_dispatcher_launch_intent.py``.
+        """
+        from secretary.dispatcher_gate import GateResult
+
+        self.run_to_gate_pending(pending_ticks=3)
+        self.host.worker_status_result = self.stopped_worker_status()
+        self.tick()
+        self.tick()
+
+        self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
+        red = self.tick()
+
+        self.assertEqual(red["action"], "gate-red-reused-worker")
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        bodies = [
+            str(comment.get("body") or "")
+            for comment in self.reader.show(CARD_REF)["comments"]
+            if isinstance(comment, dict)
+        ]
+        self.assertTrue(
+            any("gate red continuation: reused" in body for body in bodies),
+            bodies[-3:],
+        )
+        self.assertFalse(any("gate red continuation: replacement" in body for body in bodies))
+        self.assertEqual(self.sigcont_comments(), [])
+
+    def test_a_retained_worker_that_died_is_still_seen_as_dead(self) -> None:
+        """The change suppresses the wake, not the truth: death still outranks the retention."""
+        self.run_to_gate_pending(pending_ticks=4)
+        self.host.worker_status_result = {
+            "known": True,
+            "live": False,
+            "reason": "gone",
+            "last_activity": time.time(),
+            "pid_confirmed": False,
+            "idle": False,
+            "pid_status": {
+                "known": True,
+                "alive": False,
+                "match": False,
+                "state": "dead",
+                "stopped": False,
+            },
+        }
+
+        self.tick()
+
+        episode = self.record_of().worker_vitality_episode
+        assert episode is not None
+        self.assertEqual(episode.verdict, VitalityVerdict.DEAD)

@@ -66,6 +66,7 @@ class GuardRefusal(StrEnum):
     HEALTHY_ACTIVE = "healthy-active"
     HEALTHY_QUIET = "healthy-quiet"
     SUSPENDED = "suspended"
+    RETAINED = "retained"
     UNVERIFIABLE = "unverifiable"
     SUSPECTED_STALL = "suspected-stall"
     PID_ONLY_CEILING_UNELAPSED = "pid-only-ceiling-unelapsed"
@@ -90,6 +91,10 @@ _REFUSED_VERDICTS: dict[VitalityVerdict, tuple[GuardRefusal, str]] = {
     VitalityVerdict.SUSPENDED: (
         GuardRefusal.SUSPENDED,
         "the process is parked on a stop signal: SIGCONT territory, not kill territory",
+    ),
+    VitalityVerdict.RETAINED: (
+        GuardRefusal.RETAINED,
+        "the dispatcher's own confirmed retention is holding this process: not a head to recover",
     ),
     VitalityVerdict.SUSPECTED_STALL: (
         GuardRefusal.SUSPECTED_STALL,
