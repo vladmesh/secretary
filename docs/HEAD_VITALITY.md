@@ -81,12 +81,15 @@ must stay visible rather than be read back as words nobody wrote.
 
 The persisted `VitalityEpisode` (`src/secretary/dispatch/head_vitality_episode.py`) is the
 hysteresis layer from the plan's "Vitality reducer": `reduce_vitality(previous, snapshots, now,
-thresholds)` folds one tick's snapshots for a run into a durable conclusion.
+thresholds, retained=...)` folds one tick's snapshots for a run into a durable conclusion.
+`retained` is the caller's declaration that the dispatcher itself is holding this process on a
+stop signal; it is an input, not an observation (see "Retention" below).
 
 ```text
 HealthyActive   a non-advisory source showed advancement now
 HealthyQuiet    alive, no advancement yet, below every threshold
 Suspended       /proc has the process parked on a stop signal (NOT a stall)
+Retained        the same parked process, held there by the dispatcher's OWN retention
 SuspectedStall  strong quiet outlived suspect_after
 ConfirmedStall  strong quiet additionally outlived confirm_after
 Dead            the heartbeat names a gone or unreaped process
@@ -100,6 +103,10 @@ Rules the reducer enforces (each pinned by a named test in `tests/test_head_vita
   old head's history.
 - `Dead` outranks everything. `Suspended` is its own verdict and freezes the stall clocks:
   suspended time feeds no threshold, and quiet references shift past the frozen span on resume.
+- A parked process whose caller passed `retained=True` reduces to `Retained` instead of
+  `Suspended`. The freeze is identical; only the recorded `reason` and the recovery ladder differ.
+  `Dead` still outranks it, and a retention whose process is running again is not `Retained`
+  either — the suppression is of the wake, not of the truth (secretary-1539).
 - Advancement from any non-advisory source ends a suspected or confirmed episode immediately,
   resets the phase timestamps, stamps `last_progress_at`/`last_progress_source`, and bumps
   `activity_epoch`.
@@ -157,6 +164,7 @@ under `DEFAULT_VITALITY_THRESHOLDS`. The asymmetry-of-cost principle behind ever
 | `issue:8f86ed63` (board 1010, secretary-1428): 11 busy-retry cycles in an hour, rollout frozen since 06:50, composer stale ("busy is readiness, not liveness") | `Issue8f86ed63BusyMasksStallTests` | Running + admitted Quiet over the hour ⇒ `SuspectedStall` at +300s, `ConfirmedStall` at +900s from last progress; the busy pane corroborates in `basis` only |
 | `issue:fe04011b` (board 1156, codegen-orchestrator-1197): worker+child in `T (stopped)` 27 min, revived by SIGCONT; ticks wrote `gate-pending ok`, six-hour ceiling applied | `IssueFe04011bStoppedWorkerSixHourCeilingTests`; gate-phase twin: `IssueFe04011bLegacyGatePendingTests` | `/proc` state `T` ⇒ `Suspended` within one tick; stall clocks frozen for the whole stop; never ConfirmedStall, never Dead. Since S1-5 the gate-pending tick runs the same reduction + policy, so a suspended head gets its SIGCONT within one tick instead of waiting out `GATE_PENDING_STALL_SECONDS` |
 | codegen-orchestrator-1194 (board card, sprint 1148): reviewer spawn failed 49 min, 45× identical deterministic `terminal_split_source_not_found` with a live terminal | `CodegenOrchestrator1194DeterministicSplitFailureTests`; `ReviewPaneTests.test_reviewer_falls_back_when_connected_anchor_is_not_split_capable` | the token can occur before or after Orca attempts a child. Reviewer bring-up opens one standalone pane only when before/after worktree inventories show that no pane appeared; otherwise it fails closed. It is not a vitality question: if that launch path cannot recover, snapshot Unavailable with the deterministic reason keeps `Unverifiable` forever; the policy escalates identical authoritative sightings at 3, while a heuristic reason repeated just as often earns only observation |
+| `issue:02fe04d7` (codegen-orchestrator-1248, 2026-09-02; same wording on -1235 the day before): a worker retained on `report:done` at 15:14:53 was SIGCONT'd by the watchdog at 15:17:32; red CI at 15:18:37 then read "retained worker session is no longer confirmably suspended" and took `continuation: replacement` | `Issue02fe04d7RetainedWorkerTests` (gate ticks, red reuse, and death still detected) | a confirmed retention ⇒ `Retained`, never `Suspended`: no SIGCONT and no other rung from any tick that runs the worker vitality policy, so the red gate still finds a confirmable suspension and reuses the session. `Dead` still outranks the retention |
 | `issue:06dcf6cb` (board 656): umbrella contract — child-process existence ≠ liveness | `Issue06dcf6cbUmbrellaLivenessContractTests` | pid-only Running with no progress evidence ages ⇒ SuspectedStall ⇒ ConfirmedStall (see "Pid-only evidence ages" above) |
 
 The legacy decision path itself is characterised in `tests/test_head_vitality_legacy_path.py`:
@@ -164,7 +172,30 @@ what the wait tick and gate do for b5195041, 3e7abdf9 and fe04011b. Since S1-4 t
 characterisation is a REAL assertion (a transcript that advances every tick is never prompted,
 never respawned); since S1-5 fe04011b's gate-phase characterisation is a REAL assertion too
 (the pending-gate tick SIGCONTs a suspended worker within one tick). No `expectedFailure`
-markers remain in the vitality suites.
+markers remain in the vitality suites. Since secretary-1539 the fe04011b gate characterisation is
+explicitly scoped to a head this dispatcher is NOT holding (the fixture clears the card's retention
+first); the retained twin is `Issue02fe04d7RetainedWorkerTests` in the same file.
+
+### Retention: whose stop signal is it
+
+`/proc` state `T` is one fact with two possible owners. The dispatcher parks a finished worker
+itself — `host.retain_worker` sends SIGSTOP on `report:done` and `WorkerContinuation.begin_retention`
+records the confirmed retention — so that the worker stops editing the checkout while CI and the
+reviewer own it, and so that a red verdict can resume the same provider conversation. The watchdog
+reads the same `T` as a head to revive.
+
+Until secretary-1539 both were true at once. On codegen-orchestrator-1248 (2026-09-02) the card
+retained its worker at 15:14:53, the vitality watchdog SIGCONT'd it at 15:17:32, CI came back red at
+15:18:37, and the red continuation found the session "no longer confirmably suspended" and took
+`replacement` instead of `reuse`, losing the conversation that wrote the code. Retention lasts two
+to three minutes and CI takes three to four, so the SIGCONT always won that race.
+
+The fix is typed, not a special case at one call site: `reduce_vitality` takes the intent as an
+input, `_reduce_and_store_vitality_episode` passes `record.worker_continuation.retained` for the
+worker head (the review head has no retention of its own and always passes `False`), and the
+resulting `Retained` verdict earns **no rung at all** — not SIGCONT, not the nudge, not the operator
+escalation, and the guard refuses every destructive step over it (`retained` refusal class). A head
+stopped WITHOUT an active retention keeps the whole fe04011b `Suspended` ladder unchanged.
 
 ### Thresholds
 
@@ -198,6 +229,7 @@ waits). Verdict → action:
 | Verdict | Wait-tick action |
 |---|---|
 | `HealthyActive`, `HealthyQuiet`, `Unverifiable` | `wait`. Fresh evidence of life renews the outer `worker_waiting_since` window; nothing is nudged or signalled. A recovered suspension also lands here, with the recovery ladder cleared. |
+| `Retained` | `wait`, and nothing else: this dispatcher is holding the process on a stop signal itself, so not even the SIGCONT rung applies. The role's wait clock is renewed — a retained head is not late, it is not being waited on. |
 | `Suspended` | **The recovery policy owns this arm (S1-5)** — see the section below: one identity-fenced SIGCONT per suspension span, a response window, then operator escalation. Never a stop. |
 | `SuspectedStall` | At most one idempotent report nudge per round generation (the existing `_prompt_worker_report` machinery), then visible degradation (`{kind}-stall-suspected`). A suspicion never destroys. |
 | `ConfirmedStall` | The existing recovery path: one report prompt if the round has not spent it, else `_trigger_wait_watchdog` → respawn once → escalate to Blocked. Only from this verdict. |
@@ -211,7 +243,7 @@ Every watchdog-driven destructive step passes through
 killed, respawned or replaced. Refusal classes: `missing-episode` (nothing was observed — a step
 nobody observed acts on nobody's evidence), `foreign-run` (the episode names another HeadRun than
 the one being acted on), `healthy-active`, `healthy-quiet`, `unverifiable`, `suspended`,
-`suspected-stall`, and `pid-only-ceiling-unelapsed` (below). Allowed only for `ConfirmedStall`
+`retained`, `suspected-stall`, and `pid-only-ceiling-unelapsed` (below). Allowed only for `ConfirmedStall`
 and `Dead`.
 
 **Belt-and-braces for the first production release:** a confirmation earned by the pid-only aging
@@ -269,6 +301,7 @@ serialisation, so a dispatcher restart resumes the same rung instead of restarti
 |---|---|---|---|
 | 0 | Healthy\*, Unverifiable, Dead | `observe` | Nothing earned. A suspension that recovered lands here too: the ladder clears with it, so a future span starts fresh. |
 | 1 | `SuspectedStall` | `nudge` | The suspicion was seen; its single idempotent nudge is spent by the S1-4 wait-tick arm (`_prompt_worker_report`), unchanged. |
+| — | `Retained` | `observe` | Checked before everything else, including the deterministic-refusal fast path: a process the dispatcher parked itself earns no rung, and the ladder is reset to zero so the retention's end starts a fresh span. |
 | 2→3 | `Suspended`, fresh span | `sigcont` | One identity-fenced SIGCONT per span (see below), then the response window opens. |
 | 3 | `Suspended`, window running | `observe` | Inside the response window; the reduction flips the verdict to Healthy\*/Suspected the moment the head actually resumes. |
 | 4 | `Suspended`, window expired | `escalate_operator` | One durable comment asking a human to look. Holds for the rest of the span (no re-firing). **Never kill** — the guard refuses destruction on this verdict regardless. |

@@ -13,6 +13,7 @@ Verdict ladder, in the plan's vocabulary::
     HealthyActive   strong evidence of advancement right now
     HealthyQuiet    alive, no advancement observed yet, below every threshold
     Suspended       the kernel has the process parked on a stop signal (NOT a stall)
+    Retained        the same parked process, held there by the dispatcher's OWN retention
     SuspectedStall  strong quiet has outlived ``suspect_after``
     ConfirmedStall  strong quiet has additionally outlived ``confirm_after``
     Dead            the heartbeat names a gone or unreaped process
@@ -31,6 +32,12 @@ The invariants encoded here (each pinned by a named test):
     fresh episode rather than splicing a new run's facts into an old run's history;
   * ``Dead`` and ``Suspended`` outrank everything else on their axis; suspension freezes the
     stall clocks instead of feeding them;
+  * a parked process whose card carries a confirmed retention reduces to ``Retained``, not to
+    ``Suspended``: the caller passes that intent in as ``retained=``, so the one fact "the
+    process is in ``T``" stops having two owners with opposite intentions (secretary-1539). Death
+    still outranks it -- a retained head that is provably gone is ``Dead``, not ``Retained`` --
+    and a retention whose process is running again is not ``Retained`` either, so the caller's
+    own "no longer confirmably suspended" failure still fires;
   * advancement from any non-advisory source ends a suspected or confirmed episode immediately;
   * an unavailable source freezes its evidence and never counts as no-progress; with every strong
     source dark the truthful verdict is ``Unverifiable`` -- except that an already-confirmed
@@ -81,6 +88,7 @@ class VitalityVerdict(StrEnum):
     HEALTHY_ACTIVE = "healthy_active"
     HEALTHY_QUIET = "healthy_quiet"
     SUSPENDED = "suspended"
+    RETAINED = "retained"
     SUSPECTED_STALL = "suspected_stall"
     CONFIRMED_STALL = "confirmed_stall"
     DEAD = "dead"
@@ -316,6 +324,8 @@ def reduce_vitality(
     snapshots: Sequence[VitalitySnapshot],
     now: float,
     thresholds: VitalityThresholds = DEFAULT_VITALITY_THRESHOLDS,
+    *,
+    retained: bool = False,
 ) -> VitalityEpisode:
     """Fold one tick's snapshots into the run's episode, purely and deterministically.
 
@@ -324,6 +334,13 @@ def reduce_vitality(
     reading. The function never reads a clock, a file or a host: everything it concludes is a
     function of its arguments, which is what makes a persisted episode replayable and its tests
     able to reproduce historical incidents tick by tick.
+
+    ``retained`` is the caller's declaration that this run is parked on a stop signal the
+    dispatcher itself sent and still holds (a confirmed ``WorkerContinuation`` retention). It is
+    an INPUT, not an observation: the reducer cannot tell an intentional SIGSTOP from a hostile
+    one, and guessing is what let the watchdog SIGCONT a retained worker out from under the gate
+    (secretary-1539). It changes exactly one thing -- a suspended reading becomes ``Retained``
+    instead of ``Suspended`` -- and nothing else about the fold.
     """
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
         raise HeadVitalityError("reduce_vitality needs a finite now")
@@ -334,6 +351,8 @@ def reduce_vitality(
         raise HeadVitalityError("reduce_vitality reduces VitalitySnapshot values")
     if previous is not None and not isinstance(previous, VitalityEpisode):
         raise HeadVitalityError("reduce_vitality continues a VitalityEpisode")
+    if not isinstance(retained, bool):
+        raise HeadVitalityError("reduce_vitality needs a boolean retained")
 
     if not snapshots:
         # No observation, no movement: an episode must not age on ticks that looked at nothing.
@@ -410,17 +429,18 @@ def reduce_vitality(
             )
         )
     elif any(snapshot.process is ProcessState.SUSPENDED for snapshot in strong):
-        verdict = VitalityVerdict.SUSPENDED
-        basis.append(
-            "suspended@pid_heartbeat"
-            if any(
-                snapshot.source is SnapshotSource.PID_HEARTBEAT
-                for snapshot in strong
-                if snapshot.process is ProcessState.SUSPENDED
-            )
-            else "suspended"
+        # One fact, two possible owners. The kernel says the process is parked; only the caller
+        # knows whether the dispatcher is the one holding it there. A declared retention is the
+        # dispatcher's own intent, so it may not also be read as a head to revive.
+        verdict = VitalityVerdict.RETAINED if retained else VitalityVerdict.SUSPENDED
+        by_heartbeat = any(
+            snapshot.source is SnapshotSource.PID_HEARTBEAT
+            for snapshot in strong
+            if snapshot.process is ProcessState.SUSPENDED
         )
-        episode = _freeze_stall_clocks(episode, now)
+        token = verdict.value + ("@pid_heartbeat" if by_heartbeat else "")
+        basis.append(token)
+        episode = _freeze_stall_clocks(episode, now, retained=retained)
     elif any(snapshot.progress is ProgressState.ADVANCING for snapshot in progress_evidence):
         verdict = VitalityVerdict.HEALTHY_ACTIVE
         advancing = max(
@@ -624,15 +644,24 @@ def _latest_per_source(snapshots: Sequence[VitalitySnapshot]) -> dict[SnapshotSo
     return latest
 
 
-def _freeze_stall_clocks(episode: VitalityEpisode, now: float) -> VitalityEpisode:
-    """Park the quiet clock for a suspended reading: suspension is not stall evidence."""
+def _freeze_stall_clocks(episode: VitalityEpisode, now: float, *, retained: bool = False) -> VitalityEpisode:
+    """Park the quiet clock for a suspended reading: suspension is not stall evidence.
+
+    The freeze itself is identical for both owners of the stop signal -- a parked process is not
+    accumulating quiet either way. Only the recorded reason differs, so an operator reading
+    ``head-status`` sees which one it is.
+    """
     episode = replace(
         episode,
         # Suspension is a distinct, recoverable state -- SIGCONT territory, not stall territory.
         suspected_since=0.0,
         confirmed_since=0.0,
         stall_frozen_since=episode.stall_frozen_since or now,
-        reason="process suspended on a stop signal",
+        reason=(
+            "process held on a stop signal by a confirmed retention"
+            if retained
+            else "process suspended on a stop signal"
+        ),
     )
     return episode
 

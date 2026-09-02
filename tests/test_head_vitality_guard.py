@@ -143,6 +143,16 @@ class RefusalClassesTests(unittest.TestCase):
         self.assertIs(decision.refusal, GuardRefusal.SUSPENDED)
         self.assertIn("SIGCONT", decision.reason)
 
+    def test_a_retained_head_is_refused(self) -> None:
+        """secretary-1539: a process the dispatcher parked itself is not a head to recover."""
+        decision = assert_destructive_allowed(
+            episode(VitalityVerdict.RETAINED),
+            "worker-respawn",
+            NOW,
+        )
+        self.assertIs(decision.refusal, GuardRefusal.RETAINED)
+        self.assertIn("retention", decision.reason)
+
     def test_a_suspected_stall_never_reaches_destruction(self) -> None:
         decision = assert_destructive_allowed(
             episode(VitalityVerdict.SUSPECTED_STALL),
@@ -206,6 +216,7 @@ class MutationResistanceTests(unittest.TestCase):
             GuardRefusal.HEALTHY_ACTIVE,
             GuardRefusal.HEALTHY_QUIET,
             GuardRefusal.SUSPENDED,
+            GuardRefusal.RETAINED,
             GuardRefusal.UNVERIFIABLE,
             GuardRefusal.SUSPECTED_STALL,
             GuardRefusal.PID_ONLY_CEILING_UNELAPSED,

@@ -2374,6 +2374,9 @@ class DispatcherRuntime:
           ``wait``. A quiet-below-threshold head is between turns; an unverifiable head
           has no strong witness; a suspended head is SIGCONT territory (S1-5). None of
           them may be nudged into a respawn by a clock.
+        * ``Retained`` -> ``wait``, and nothing else at all: this dispatcher is holding
+          that process on a stop signal itself, so not even the SIGCONT rung applies
+          (secretary-1539). The wait clock is renewed because the head is not late.
         * ``SuspectedStall`` -> at most one idempotent report nudge per round, keyed on
           the round generation like every nudge; a suspicion never destroys.
         * ``ConfirmedStall`` / ``Dead`` -> the ordinary recovery path
@@ -2486,6 +2489,34 @@ class DispatcherRuntime:
                     f"the review head's vitality episode suspects a stall "
                     f"({suspicion_basis}) with no {expectation}"
                 ),
+            }
+        if verdict is VitalityVerdict.RETAINED:
+            # The dispatcher's own retention is holding this head still, and it is the only
+            # thing that ends it. Waking it would be this tick fighting the tick that parked
+            # it (secretary-1539), so nothing is signalled, nudged or escalated here. The
+            # policy still rides along to clear any rung a past suspension span left behind,
+            # and the role's wait clock is renewed because a retained head is not late: it is
+            # not being waited on at all.
+            self._run_recovery_policy(
+                task,
+                record,
+                records,
+                payload,
+                episode=episode,
+                kind=kind,
+                now=now,
+            )
+            setattr(record, f"{kind}_waiting_since", now)
+            self.save_records(payload, records)
+            if runtime_reason:
+                return plain_wait()
+            return {
+                "status": "ok",
+                "step": "review" if kind == "review" else "advance",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "action": f"{kind}-retained",
+                "reason": "the head is held suspended by this card's confirmed retention",
             }
         if verdict is VitalityVerdict.SUSPENDED:
             # The recovery policy owns this arm (S1-5): one identity-fenced SIGCONT per
@@ -3165,8 +3196,17 @@ class DispatcherRuntime:
             ),
             observed_at=now,
         )
+        # The one fact the reduction cannot observe: whether THIS dispatcher is the one holding
+        # the process on a stop signal. `worker_continuation.retained` is that intent, written
+        # only after `host.retain_worker` confirmed the suspension, so a parked process reduces
+        # to `Retained` rather than to `Suspended` and no recovery rung is ever earned over it
+        # (secretary-1539). The review head has no retention of its own, so it always passes
+        # False and its ladder is untouched.
+        retained = kind == "worker" and bool(record.worker_continuation.retained)
         try:
-            episode = _reduce_vitality(previous, snapshots, now, _DEFAULT_VITALITY_THRESHOLDS)
+            episode = _reduce_vitality(
+                previous, snapshots, now, _DEFAULT_VITALITY_THRESHOLDS, retained=retained
+            )
         except Exception as exc:  # noqa: BLE001 - shadow mode must never break the hosting tick
             # Shadow mode may never break the tick that hosts it. A reduction failure is recorded
             # as no episode so the next tick starts clean, and nothing downstream changes --
@@ -4961,6 +5001,12 @@ class DispatcherRuntime:
         stays as the OUTER escalation ceiling for the CI rollup itself -- non-destructive
         per S1-4 semantics -- but it is no longer the first thing to notice a stopped
         process.
+
+        What that watchdog may NOT do is undo the gate's own retention (secretary-1539).
+        A worker parked by ``retain_worker`` on ``report:done`` is stopped on purpose and
+        for exactly as long as this wait lasts; the reduction is told so, reports
+        ``Retained`` rather than ``Suspended``, and this tick then leaves it alone. The
+        ladder above stays in force for a head stopped by anyone else.
         """
         ref = task["ref"]
         now = time.time()
@@ -4981,7 +5027,16 @@ class DispatcherRuntime:
         vitality = self._worker_vitality_for_gate(task, record, records, payload)
         if vitality is not None:
             episode = vitality
-            if episode.verdict is VitalityVerdict.SUSPENDED:
+            if episode.verdict is VitalityVerdict.RETAINED:
+                # The worker is stopped because THIS card stopped it on `report:done`, and it
+                # stays stopped until the gate's own verdict resumes or replaces it. Running the
+                # recovery ladder here is what woke retained workers out from under a pending CI
+                # rollup and then, on the red, cost them their session -- the reviewer's
+                # `confirm_worker_retained` found the head running and the continuation fell back
+                # to `replacement` (secretary-1539, codegen-orchestrator-1248). The gate's own
+                # ceiling below is untouched: it bounds the CI rollup, not the head.
+                pass
+            elif episode.verdict is VitalityVerdict.SUSPENDED:
                 return self._execute_recovery_intent(
                     task,
                     record,
@@ -4992,20 +5047,21 @@ class DispatcherRuntime:
                     kind="worker",
                     now=now,
                 )
-            # Any other verdict still rides the policy once: a deterministic refusal on
-            # file escalates fast even mid-gate, and a recovered suspension resets its rung.
-            outcome = self._recovery_policy_outcome(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                episode=episode,
-                kind="worker",
-                now=now,
-            )
-            if outcome is not None:
-                return outcome
+            else:
+                # Any other verdict still rides the policy once: a deterministic refusal on
+                # file escalates fast even mid-gate, and a recovered suspension resets its rung.
+                outcome = self._recovery_policy_outcome(
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    episode=episode,
+                    kind="worker",
+                    now=now,
+                )
+                if outcome is not None:
+                    return outcome
         if now - record.gate_pending_since <= GATE_PENDING_STALL_SECONDS:
             return {
                 "status": "ok",
