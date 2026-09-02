@@ -1,8 +1,8 @@
 """Whether a registered project's broad-check contract can attest that project.
 
 A card's broad check is the one evidence a worker's round produces about its own code, and the
-contract behind it — which interpreter runs it and which package the run must import — belongs to
-the registered project's adapter. Until secretary-1458 that contract was resolved lazily, inside
+contract behind it — which suite it runs, which package the run must import and, where it matters,
+which interpreter runs it — belongs to the registered project's adapter. Until secretary-1458 that contract was resolved lazily, inside
 the workspace, by the worker itself: an adapter that could not name a usable one was discovered
 after a workspace had been created, a head brought up and the card put in work, and the round was
 already spent by the time anybody could read the refusal.
@@ -28,6 +28,12 @@ the dispatcher test that interpreter in the registered checkout — an assertion
 directory, which approved contracts the worker then refused. Round two had the dispatcher say
 nothing about it — and a silence is not a decision, so nobody could see or test what the caller
 then did with it. Now the state is returned, and every caller must branch on it by name.
+
+Which suite the check runs is part of that contract too, since issue:8b39e60e4df361c6138e. Only the
+project can say what its broad suite is; without a place to say it, the worker task packet printed a
+placeholder and the documentation answered it with repository-wide discovery, which runs every CI
+suite in one process. A declared ``broad_check`` therefore names a ``module`` (and may name the exact
+``args`` vector), and omitting it is `BROAD_CHECK_INCOMPLETE` rather than a quiet fallback.
 
 What each state buys a card is settled here and not re-decided by a caller:
 
@@ -108,11 +114,24 @@ WORKER_ERROR_CODES = {
 
 @dataclass(frozen=True)
 class ModuleContract:
-    """The adapter-owned module-check runtime, plus any legacy-default diagnosis."""
+    """The adapter-owned module-check runtime and suite, plus any legacy-default diagnosis.
+
+    `module` and `args` are the half added for issue:8b39e60e4df361c6138e. Before them the contract
+    could say which interpreter runs a broad check and which package it must import, but not WHICH
+    SUITE it runs — so the worker task packet printed the literal placeholder
+    ``<this project's broad suite module>`` and the documentation answered it with repository-wide
+    discovery, a run that costs every CI suite in one process. Only the project can name its own
+    broad suite, so the project's adapter is where it is named.
+
+    `module` is empty exactly when the contract comes from the legacy default, which names no suite:
+    a declared ``broad_check`` that omits it is `BROAD_CHECK_INCOMPLETE`.
+    """
 
     interpreter: str
     import_package: str
     reason: str = ""
+    module: str = ""
+    args: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, str]:
         if self.reason:
@@ -274,9 +293,40 @@ def _declared_contract(
             adapter_name,
             f"adapter {adapter_name!r} has no broad-check contract",
         )
-    interpreter = str(configured.get("interpreter") or "").strip()
     import_package = str(configured.get("import_package") or "").strip()
-    if not interpreter or not import_package:
+    module = str(configured.get("module") or "").strip()
+    if not import_package or not module:
+        return ContractVerdict.as_refused(
+            BROAD_CHECK_INCOMPLETE,
+            adapter_name,
+            f"adapter {adapter_name!r} has no broad-check contract",
+        )
+    raw_args = configured.get("args")
+    if raw_args is None:
+        args: tuple[str, ...] = ()
+    elif isinstance(raw_args, list) and all(isinstance(entry, str) for entry in raw_args):
+        args = tuple(raw_args)
+    else:  # schema validation above normally catches this.
+        return ContractVerdict.as_refused(
+            BROAD_CHECK_INCOMPLETE,
+            adapter_name,
+            f"adapter {adapter_name!r} declares broad-check arguments that are not a list of strings",
+        )
+    # An omitted interpreter is not an incomplete contract, it is the common case. PR #329 made the
+    # check subprocess prepend the candidate workspace's own import roots to `sys.path` before it
+    # imports the project, so the interpreter that runs the wrapper imports the CANDIDATE and not
+    # whatever a shared editable installation points at. That is what lets a project whose worktrees
+    # have no venv of their own declare a supported contract at all: requiring `workspace/.venv`
+    # here would demand a directory the Secretary worktrees do not have and are not getting
+    # (issue:8b39e60e4df361c6138e). A declared interpreter still means exactly what it always did.
+    if "interpreter" not in configured:
+        return ContractVerdict.as_fit(
+            ModuleContract(sys.executable, import_package, module=module, args=args), adapter_name
+        )
+    interpreter = str(configured.get("interpreter") or "").strip()
+    if not interpreter:
+        # Present but blank is a typo, not an omission: it names nothing runnable, and answering it
+        # with the wrapper's interpreter would silently run a contract nobody wrote down.
         return ContractVerdict.as_refused(
             BROAD_CHECK_INCOMPLETE,
             adapter_name,
@@ -300,7 +350,9 @@ def _declared_contract(
             adapter_name,
             f"could not start configured interpreter {interpreter!r}: it is not an executable file",
         )
-    return ContractVerdict.as_fit(ModuleContract(interpreter, import_package), adapter_name)
+    return ContractVerdict.as_fit(
+        ModuleContract(interpreter, import_package, module=module, args=args), adapter_name
+    )
 
 
 def contract_of(verdict: ContractVerdict) -> ModuleContract:

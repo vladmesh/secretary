@@ -100,7 +100,34 @@ class SchemaValidTests(unittest.TestCase):
         data["broad_check"] = {
             "interpreter": ".venv/bin/python",
             "import_package": "codegen_orchestrator",
+            "module": "tests.broad",
+            "args": ["-v"],
         }
+        self.assertEqual(validate(data, "adapter", "a.yaml"), [])
+
+    def test_adapter_broad_check_contract_may_omit_the_interpreter(self):
+        """issue:8b39e60e4df361c6138e: a supported contract must not require a nonexistent venv.
+
+        The Secretary worktrees have no `.venv` of their own and are not getting one. Since the
+        check subprocess prepends the candidate's own import roots to `sys.path` before importing
+        the project, the interpreter running the wrapper imports the candidate rather than a shared
+        editable installation's production checkout, so naming no interpreter is both legal and
+        correct.
+        """
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["broad_check"] = {"import_package": "secretary", "module": "tests.broad"}
+        self.assertEqual(validate(data, "adapter", "a.yaml"), [])
+
+    def test_adapter_broad_check_contract_may_omit_the_module_at_the_schema_layer(self):
+        """The refusal for a block that names no suite belongs to the contract, not the schema.
+
+        `module` is what an adapter written before issue:8b39e60e4df361c6138e could not say, and
+        such an adapter is not malformed — it is incomplete. `projects.contract` refuses it as
+        `broad_check_incomplete`, the enumerated shape that names what is missing, rather than the
+        schema calling the whole adapter invalid.
+        """
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["broad_check"] = {"interpreter": ".venv/bin/python", "import_package": "secretary"}
         self.assertEqual(validate(data, "adapter", "a.yaml"), [])
 
     def test_onboarding_draft_accepts_required_checks(self):
@@ -291,7 +318,20 @@ class SchemaInvalidTests(unittest.TestCase):
 
     def test_adapter_broad_check_contract_rejects_an_unqualified_package(self):
         data = copy.deepcopy(VALID_ADAPTER)
-        data["broad_check"] = {"interpreter": ".venv/bin/python", "import_package": "-bad"}
+        data["broad_check"] = {
+            "interpreter": ".venv/bin/python",
+            "import_package": "-bad",
+            "module": "tests.broad",
+        }
+        self.assertTrue(validate(data, "adapter", "a.yaml"))
+
+    def test_adapter_broad_check_contract_rejects_non_string_args(self):
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["broad_check"] = {
+            "import_package": "secretary",
+            "module": "tests.broad",
+            "args": [3],
+        }
         self.assertTrue(validate(data, "adapter", "a.yaml"))
 
     def test_manifest_missing_component(self):

@@ -136,12 +136,16 @@ class ProjectContractTests(unittest.TestCase):
             ADAPTER_BODY
             + "broad_check:\n  interpreter: .venv/bin/python\n"
             + "  import_package: codegen_orchestrator\n"
+            + "  module: project_suite\n"
+            + "  args: ['-v']\n"
         )
 
         contract = self.resolve()
 
         self.assertEqual(contract.interpreter, str(interpreter))
         self.assertEqual(contract.import_package, "codegen_orchestrator")
+        self.assertEqual(contract.module, "project_suite")
+        self.assertEqual(contract.args, ("-v",))
         self.assertEqual(contract.as_dict(), {"source": "adapter"})
         self.assertEqual(
             contract.reason,
@@ -149,6 +153,88 @@ class ProjectContractTests(unittest.TestCase):
             "an adapter that declares a contract is not judged by the checkout's layout: the "
             "receipt's own provenance is what catches a check that imported elsewhere",
         )
+
+    # --- The suite the contract names (issue:8b39e60e4df361c6138e) -------------------------------
+
+    def test_the_declared_module_and_args_are_the_exact_argument_vector(self) -> None:
+        """The half the contract could not express before, and the placeholder it left behind.
+
+        Without a place for the project to name its broad suite, the worker task packet printed
+        `<this project's broad suite module>` and every document answered it with repository-wide
+        discovery: all seven CI suites in one process. The vector stays a list because a rendered
+        command line cannot carry one — `--only 'fast lane'` and `--only fast lane` render the same
+        and run different checks.
+        """
+        self.adapter(
+            ADAPTER_BODY
+            + "broad_check:\n"
+            + f"  interpreter: {sys.executable}\n"
+            + "  import_package: thing\n"
+            + "  module: tests.broad\n"
+            + "  args: ['--only', 'fast lane']\n"
+        )
+
+        contract = self.resolve()
+
+        self.assertEqual(contract.module, "tests.broad")
+        self.assertEqual(contract.args, ("--only", "fast lane"))
+
+    def test_a_declared_contract_with_no_interpreter_uses_the_wrappers_own(self) -> None:
+        """AC of issue:8b39e60e4df361c6138e: a supported contract must not require a missing venv.
+
+        The Secretary worktrees have no `.venv` and are not getting one. Since PR #329 the check
+        subprocess prepends the candidate's own import roots to `sys.path` before importing the
+        project, so a shared installation interpreter imports the CANDIDATE, not production —
+        which is what makes "no interpreter named" both a legal and an honest contract, rather
+        than the silent production-import it would have been before.
+        """
+        self.adapter(ADAPTER_BODY + "broad_check:\n  import_package: thing\n  module: tests.broad\n")
+
+        contract = self.resolve()
+
+        self.assertEqual(contract.interpreter, sys.executable)
+        self.assertEqual(contract.module, "tests.broad")
+        self.assertEqual(contract.args, ())
+        self.assertEqual(contract.as_dict(), {"source": "adapter"})
+
+    def test_no_interpreter_is_answerable_at_preflight_too(self) -> None:
+        """It is `fit`, not `undecidable`: there is no relative path needing a candidate tree."""
+        self.adapter(ADAPTER_BODY + "broad_check:\n  import_package: thing\n  module: tests.broad\n")
+
+        verdict = self.ask_preflight()
+
+        self.assertEqual(verdict.state, CONTRACT_FIT)
+        self.assertIsNotNone(verdict.contract)
+        self.assertEqual(verdict.contract.interpreter, sys.executable)
+
+    def test_a_declared_contract_that_names_no_module_is_incomplete(self) -> None:
+        """A declared block is a promise to say which suite; leaving it out is not a quiet fallback.
+
+        Falling back here would put the project straight back to repository-wide discovery under a
+        contract that looks declared, which is the exact confusion this key removes.
+        """
+        self.adapter(
+            ADAPTER_BODY + f"broad_check:\n  interpreter: {sys.executable}\n  import_package: thing\n"
+        )
+
+        refused = self.refusal()
+
+        self.assertEqual(refused.shape, BROAD_CHECK_INCOMPLETE)
+        self.assertEqual(refused.code, "invalid_project_adapter")
+
+    def test_the_legacy_default_names_no_module_at_all(self) -> None:
+        """It cannot: it is a fallback for adapters that said nothing, and it says nothing either.
+
+        Removing that fallback is issue:81a0a1e5c15225fa360e, and it has to come after a live
+        adapter declares its contract — not with this change.
+        """
+        self.adapter()
+        self.package(LEGACY_IMPORT_PACKAGE)
+
+        contract = self.resolve()
+
+        self.assertEqual(contract.module, "")
+        self.assertEqual(contract.args, ())
 
     # --- And every shape of unusable contract is named, once ------------------------------------
 
@@ -180,7 +266,9 @@ class ProjectContractTests(unittest.TestCase):
         `adapter_invalid` below; whitespace is what still reaches this rule, and the rule is what
         keeps the shape from depending on how thorough the schema happens to be.
         """
-        self.adapter(ADAPTER_BODY + "broad_check:\n  interpreter: '   '\n  import_package: thing\n")
+        self.adapter(
+            ADAPTER_BODY + "broad_check:\n  interpreter: '   '\n  import_package: thing\n  module: suite\n"
+        )
 
         refused = self.refusal()
 
@@ -189,7 +277,7 @@ class ProjectContractTests(unittest.TestCase):
 
     def test_a_broad_check_block_the_schema_refuses_is_an_invalid_adapter(self) -> None:
         cases = {
-            "empty interpreter": "broad_check:\n  interpreter: ''\n  import_package: thing\n",
+            "empty interpreter": "broad_check:\n  interpreter: ''\n  import_package: thing\n  module: suite\n",
             "not a mapping": "broad_check: [interpreter]\n",
         }
         for name, block in cases.items():
@@ -199,14 +287,16 @@ class ProjectContractTests(unittest.TestCase):
                 self.assertEqual(self.refusal().shape, ADAPTER_INVALID)
 
     def test_an_interpreter_that_cannot_run_names_that_shape(self) -> None:
-        missing = ADAPTER_BODY + ("broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n")
+        missing = ADAPTER_BODY + (
+            "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n  module: suite\n"
+        )
         unreadable = self.repo / "not-executable"
         unreadable.write_text("", encoding="utf-8")
         unreadable.chmod(stat.S_IRUSR)
         cases = {
             "no such file": missing,
             "not executable": ADAPTER_BODY
-            + (f"broad_check:\n  interpreter: {unreadable}\n  import_package: thing\n"),
+            + (f"broad_check:\n  interpreter: {unreadable}\n  import_package: thing\n  module: suite\n"),
         }
         for name, body in cases.items():
             with self.subTest(case=name):
@@ -237,7 +327,8 @@ class ProjectContractTests(unittest.TestCase):
         tree.
         """
         self.adapter(
-            ADAPTER_BODY + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+            ADAPTER_BODY
+            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n  module: suite\n"
         )
         interpreter = self.relative_interpreter(self.repo)
 
@@ -273,7 +364,8 @@ class ProjectContractTests(unittest.TestCase):
         """The other half of the same boundary: the side holding the tree decides, both ways, and
         it never leaves the question open."""
         self.adapter(
-            ADAPTER_BODY + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+            ADAPTER_BODY
+            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n  module: suite\n"
         )
         workspace = self.root / "worktree"
         workspace.mkdir()
@@ -309,11 +401,12 @@ class ProjectContractTests(unittest.TestCase):
             "no adapter file": None,
             "invalid adapter": "setup:\n  commands: ['true']\n",
             "legacy default": ADAPTER_BODY,
-            "blank runtime": ADAPTER_BODY + ("broad_check:\n  interpreter: '   '\n  import_package: thing\n"),
+            "blank runtime": ADAPTER_BODY
+            + ("broad_check:\n  interpreter: '   '\n  import_package: thing\n  module: suite\n"),
             "relative interpreter": ADAPTER_BODY
-            + ("broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"),
+            + ("broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n  module: suite\n"),
             "absolute interpreter": ADAPTER_BODY
-            + (f"broad_check:\n  interpreter: {sys.executable}\n  import_package: thing\n"),
+            + (f"broad_check:\n  interpreter: {sys.executable}\n  import_package: thing\n  module: suite\n"),
         }
         for name, body in bodies.items():
             with self.subTest(case=name):
@@ -368,7 +461,7 @@ class ProjectContractTests(unittest.TestCase):
         for an absolute path, which names the same file whatever tree the check runs in."""
         self.adapter(
             ADAPTER_BODY
-            + f"broad_check:\n  interpreter: {self.root / 'nowhere' / 'python'}\n"
+            + f"broad_check:\n  interpreter: {self.root / 'nowhere' / 'python'}\n  module: suite\n"
             + "  import_package: thing\n"
         )
 
@@ -385,7 +478,7 @@ class ProjectContractTests(unittest.TestCase):
             ADAPTER_UNAVAILABLE: None,
             ADAPTER_INVALID: "setup:\n  commands: ['true']\n",
             BROAD_CHECK_INCOMPLETE: ADAPTER_BODY
-            + ("broad_check:\n  interpreter: '   '\n  import_package: thing\n"),
+            + ("broad_check:\n  interpreter: '   '\n  import_package: thing\n  module: suite\n"),
             CANNOT_ATTEST_PROJECT: ADAPTER_BODY,
         }
         self.package("codegen_orchestrator")
@@ -504,7 +597,8 @@ class CatalogContractTests(unittest.TestCase):
         """The third state through the real catalog, with `workspace=None` supplied there and
         nowhere else: the dispatcher never has a candidate workspace to answer with."""
         verdict = self.catalog(
-            ADAPTER_BODY + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+            ADAPTER_BODY
+            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n  module: suite\n"
         ).broad_check_verdict("example")
 
         self.assertEqual(verdict.state, CONTRACT_UNDECIDABLE)

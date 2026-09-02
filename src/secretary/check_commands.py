@@ -11,6 +11,13 @@ records its own import provenance and the receipt can be reused while the checko
 shell may change directory or import environment before an interpreter starts; its receipt is a
 summary to read, never a substitute for running the check again.
 
+Neither flag is required. Since issue:8b39e60e4df361c6138e a registered project's adapter names its
+own broad suite, so ``check broad --reuse`` and ``check show`` with no shape flag run exactly the
+suite that project declared. That is what makes the worker task packet able to print a real command
+rather than the placeholder it used to. An explicit ``--module`` still wins, and a project that
+declares no module and is given none is refused by name (``no_broad_check_module``) instead of
+falling back to repository-wide discovery.
+
 Reuse is authorized in exactly one place — ``usable_receipt``, read through
 ``ReceiptLookup.authorized()``. Both commands here ask that one question, so ``check show`` cannot
 report "not usable" while ``--reuse`` quietly skips the run.
@@ -91,11 +98,18 @@ def _common(parser: argparse.ArgumentParser) -> None:
         default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
         help="registered project adapters (default: SECRETARY_INSTANCE or the default instance)",
     )
-    shape = parser.add_mutually_exclusive_group(required=True)
+    # Not `required=True` any more. Since issue:8b39e60e4df361c6138e the registered project's
+    # adapter can name its own broad suite, and when it does, the whole point is that a worker (or
+    # the prompt that tells a worker what to run) does not have to know the module name to run the
+    # project's broad check. The group stays mutually exclusive — `--module` and `--command` are
+    # still two different promises about import provenance — and neither flag falls back silently:
+    # a project that declares no module and is given none fails with `no_broad_check_module`.
+    shape = parser.add_mutually_exclusive_group()
     shape.add_argument(
         "--module",
         help="run `python -m MODULE` in this workspace; the standard shape, which attests the "
-        "project the check process imported",
+        "project the check process imported. Omitted, the registered project's declared broad "
+        "suite is used",
     )
     shape.add_argument(
         "--command",
@@ -121,20 +135,46 @@ def _fail(exc: BroadCheckError) -> int:
 
 
 def _spec(args: argparse.Namespace) -> ResolvedCheck:
+    """The check this invocation names, from the flags and the registered project's contract.
+
+    Three shapes reach here, and the order matters. `--command` is asked first because it resolves
+    no contract at all: it attests nothing about imports, so there is nothing for an adapter to say
+    about it. Otherwise the registered project's contract is resolved once, and an explicit
+    `--module` overrides the suite it names while still taking its interpreter and import package —
+    a worker debugging one module must not thereby run on a different runtime than the broad check
+    does. With no `--module`, the suite comes from the adapter (issue:8b39e60e4df361c6138e), which
+    is what lets the worker prompt print a real command instead of a placeholder.
+
+    There is no fourth, silent shape. A project whose adapter names no module and an invocation
+    that names none either is a usage error with a name on it, not a fallback to whatever
+    repository-wide discovery happens to find.
+    """
+    if args.command:
+        if args.module_arg:
+            raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
+        return ResolvedCheck(CheckSpec.for_shell(args.command))
+    contract = _module_contract(Path(args.root), Path(args.instance))
     if args.module:
-        contract = _module_contract(Path(args.root), Path(args.instance))
-        return ResolvedCheck(
-            CheckSpec.for_module(
-                args.module,
-                args.module_arg,
-                interpreter=contract.interpreter,
-                import_package=contract.import_package,
-            ),
-            contract.as_dict(),
+        module, module_args = args.module, list(args.module_arg)
+    elif contract.module:
+        if args.module_arg:
+            raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
+        module, module_args = contract.module, list(contract.args)
+    else:
+        raise BroadCheckError(
+            "no_broad_check_module",
+            "no --module or --command was given and this project's adapter declares no broad-check "
+            "module; name the suite with --module, or declare `broad_check.module` in the adapter",
         )
-    if args.module_arg:
-        raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
-    return ResolvedCheck(CheckSpec.for_shell(args.command))
+    return ResolvedCheck(
+        CheckSpec.for_module(
+            module,
+            module_args,
+            interpreter=contract.interpreter,
+            import_package=contract.import_package,
+        ),
+        contract.as_dict(),
+    )
 
 
 def _module_contract(root: Path, instance: Path) -> ModuleContract:

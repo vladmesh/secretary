@@ -9,3 +9,17 @@ validation:
   ci: github
 artifact_policy:
   write_project_files: false
+# The project's own broad suite: which module `secretary check broad` runs, and which package that
+# run must have imported from the candidate workspace for its receipt to be reusable. Declaring it
+# is what lets a worker (and the task packet that instructs one) name this project's broad check
+# without guessing (issue:8b39e60e4df361c6138e).
+broad_check:
+  module: project_suite
+  import_package: project_package
+  # The exact argument vector, kept as a list: `--only 'fast lane'` is two arguments, not three.
+  args: ["--only", "fast lane"]
+  # `interpreter` is optional and omitted here. The check subprocess puts the candidate workspace's
+  # own import roots at the front of `sys.path` before importing the project, so the interpreter
+  # running the wrapper still imports the candidate. Name one only when the project needs a
+  # different runtime; a relative path is resolved from the candidate workspace, e.g.:
+  # interpreter: .venv/bin/python

@@ -14,6 +14,7 @@ integration-board tests/test_board_boot_race.py
 integration-board tests/test_board_transport.py
 packaging tests/test_bootstrap.py
 unit tests/test_broad_check.py
+unit tests/test_broad_suite.py
 unit tests/test_candidate_history.py
 integration-recovery tests/test_checkpoint.py
 unit tests/test_ci_shards.py
