@@ -12,6 +12,7 @@ from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
 from secretary.dispatcher_state import OutcomeTerminalPath
 from secretary.dispatcher_gate import GateResult
+from secretary.dispatcher_types import HostError
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 
@@ -521,6 +522,44 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertTrue(outcome["lineage_required"]["report"])
         effect = next(event for event in canon.events(ref=CARD_REF) if event.kind.value == "card.blocked")
         self.assertEqual(effect.data["attempt_outcome_owed"]["lineage_diagnostic"], "attempt_outcome_lineage_missing_report")
+
+    def test_adopted_record_keeps_the_report_required_on_a_verdictless_gate_terminal(self) -> None:
+        """A lost state file must not turn a round that reported into a no-report path."""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        payload = self.runtime.production_state.load()
+        original = self.runtime.production_state.records(payload)[CARD_REF]
+        self.runtime.production_state.put_records(payload, {})
+        payload["attempt_id"] = "attempt-after-state-loss"
+        self.runtime.production_state.save(payload)
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "validate")
+
+        with mock.patch.object(
+            self.host, "gate_check", side_effect=HostError("gate infrastructure is unavailable")
+        ):
+            blocked = self.tick()
+
+        self.assertEqual((blocked["status"], blocked["step"]), ("blocked", "gate"))
+        outcome = self._outcomes()[0].event.data
+        self.assertEqual(outcome["attempt_id"], original.attempt_id)
+        self.assertTrue(outcome["lineage_required"]["report"])
+        self.assertTrue(outcome["lineage_required"]["specification_revision"])
+        self.assertIsNotNone(outcome["source_event_ids"]["report"])
+        self.assertFalse(outcome["lineage_required"]["verdict"])
+        self.assertFalse(outcome["lineage_required"]["decision"])
+
+    def test_adoption_before_any_report_stays_a_no_report_path(self) -> None:
+        """The same rule must not invent a report requirement for a round that never reported."""
+        self._start_worker_round()
+        payload = self.runtime.production_state.load()
+        self.runtime.production_state.put_records(payload, {})
+        payload["attempt_id"] = "attempt-after-state-loss"
+        self.runtime.production_state.save(payload)
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+
+        adopted = self.runtime._adopt(self.reader.show(CARD_REF), "attempt-after-state-loss")
+
+        self.assertIs(adopted.outcome_terminal_path, OutcomeTerminalPath.NO_ACCEPTED_REPORT)
 
     def test_missing_report_handoff_stays_required_for_reviewer_and_post_gate_terminals(self) -> None:
         """One persisted path classification covers every later terminal caller."""

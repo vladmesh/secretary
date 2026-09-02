@@ -258,6 +258,9 @@ from secretary.dispatcher_state import (
     new_attempt_id as _new_attempt_id,
 )
 from secretary.dispatcher_state import (
+    outcome_terminal_path as _outcome_terminal_path,
+)
+from secretary.dispatcher_state import (
     record_attempt as _record_attempt,
 )
 from secretary.dispatcher_state import (
@@ -6561,6 +6564,13 @@ class DispatcherRuntime:
         # And the decision that round was opened on, from the same document. The card's newest
         # decision comment answers "what was decided since", which must not reach a running round.
         report_decision = _task_doc_decision(workspace)
+        # The lost state file took the round's terminal path with it. The card's own lifecycle
+        # state is the same dispatcher-owned fact and outlives that file: a card cannot stand in
+        # Validate or Assessment without an accepted report. The reconstructed record state is
+        # read the same way, and neither reads back a handoff or a marker.
+        adopted_path = _outcome_terminal_path(None, state=str(task.get("state") or ""))
+        if adopted_path is OutcomeTerminalPath.NO_ACCEPTED_REPORT:
+            adopted_path = _outcome_terminal_path(None, state=state)
         record = DispatcherRecord(
             worker=worker,
             workspace=workspace,
@@ -6579,6 +6589,7 @@ class DispatcherRuntime:
             attempt_round=round_record.attempt if round_record else 0,
             worker_run=round_record.worker.to_json() if round_record and round_record.worker else {},
             review_run=round_record.reviewer.to_json() if round_record and round_record.reviewer else {},
+            outcome_terminal_path=adopted_path,
         )
         # A lost record may be recovered from the worker's own heartbeat, but only after its
         # self-described run, role and card binding are promoted into a HeadRun and checked again.
