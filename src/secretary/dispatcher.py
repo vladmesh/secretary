@@ -1073,6 +1073,7 @@ class DispatcherRuntime:
         require_existing_workspace: bool = False,
     ) -> dict[str, Any]:
         ref = claimed["ref"]
+        self._persist_outcome_round_context(claimed, record, phase="worker")
         mismatch = _claim_mismatch(claimed, record.worker, record.head, record.review_head)
         if mismatch:
             divergence = _record_divergence(
@@ -2231,6 +2232,7 @@ class DispatcherRuntime:
             if self.audit.committed_event(launch_request) is not None:
                 record.state = "review_starting"
                 return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
+            self._persist_outcome_round_context(task, record, phase="review")
             self.writer.comment(
                 role="dispatcher",
                 actor=self.owner,
@@ -5361,6 +5363,18 @@ class DispatcherRuntime:
                 "attempt_id": attempt_id,
                 "action": "waiting-observer-decision",
             }
+        visit, recorded = assessment_resolution(self.audit.events(ref))
+        decision_request = str(recorded.get("request_id") or "") if isinstance(recorded, dict) else ""
+        decision_event_id = str(recorded.get("event_id") or "") if isinstance(recorded, dict) else ""
+        if visit and decision_request and decision_event_id:
+            self._persist_outcome_round_context(
+                task,
+                record,
+                phase="decision",
+                assessment_visit=visit,
+                request_ids={decision_request},
+                source_event_id=decision_event_id,
+            )
         if decision == "rework":
             return self._rework_parked(task, record, records, payload, attempt_id, reason=reason)
         if decision == "reslice":
@@ -5856,6 +5870,10 @@ class DispatcherRuntime:
         reviewed = bool(record.review_run)
         reference = str(task.get("ref") or "")
         revision = specification_revision(self.audit.events(reference), str(task.get("description") or ""))
+        # Worker command identities are deterministic, but this journal record is
+        # what makes them a durable hand-off rather than a terminal-time guess.
+        self._persist_outcome_round_context(task, record, phase="worker")
+        context = self._outcome_round_context(reference, record)
         source, diagnostic = self._outcome_lineage_sources(
             reference,
             attempt_id=attempt_id,
@@ -5864,8 +5882,7 @@ class DispatcherRuntime:
             revision=revision,
             verdict=verdict,
             decision=decision,
-            report_ids=_round_report_ids(record.workspace, attempt_id, reference, generation),
-            review_baseline=record.review_baseline,
+            context=context,
             reviewed=reviewed,
         )
         completeness: dict[str, str] = {}
@@ -5876,23 +5893,15 @@ class DispatcherRuntime:
                 continue
             source[f"{role}_usage"] = usage.event_id
             completeness[role] = "collected" if usage.data.get("outcome") == "collected" else "degraded"
-        # A terminal infrastructure or operator path may have a durable round
-        # but no worker report at all.  A report is a forward lineage fact only
-        # once this boundary found the round's exact committed marker.
-        report_consumed = source["report"] is not None
+        # Requiredness is selected from the path before source resolution.  A
+        # null source is evidence of incomplete lineage, never permission to
+        # redefine the path as one that did not consume it.
+        report_relevant = verdict in {"green", "red", "blocked"} or bool(decision)
         required = {
-            # These are path facts, not a retrospective judgement based on
-            # whether a lookup happened to find a source.  A consumed worker
-            # report, reviewer verdict, or observer decision must therefore
-            # fail closed if its exact id was not frozen.
-            "specification_revision": report_consumed,
-            # A marker written by the preceding release has no forward
-            # specification field.  It remains an honestly absent source
-            # during the upgrade window; it is not a reason to strand the
-            # already-authoritative lifecycle effect forever.
-            "report": report_consumed and source["report"] is not None,
-            "verdict": reviewed and verdict in {"green", "red"} and source["verdict"] is not None,
-            "decision": bool(decision) and source["decision"] is not None,
+            "specification_revision": report_relevant,
+            "report": report_relevant,
+            "verdict": reviewed and verdict in {"green", "red"},
+            "decision": bool(decision),
             "effect": True,
             "worker_usage": completeness["worker"] in {"collected", "degraded"},
             "review_usage": completeness["review"] in {"collected", "degraded"},
@@ -5924,8 +5933,7 @@ class DispatcherRuntime:
         revision: str,
         verdict: str,
         decision: str,
-        report_ids: set[str],
-        review_baseline: int,
+        context: dict[str, dict[str, Any]],
         reviewed: bool,
     ) -> tuple[dict[str, str | None], str]:
         """Freeze exact, typed sources from the round that consumed them.
@@ -5953,7 +5961,7 @@ class DispatcherRuntime:
             *,
             exact_ids: set[str],
             assessment_visit: str = "",
-            allow_absent: bool = False,
+            expected_event_id: str = "",
         ) -> str:
             if canon is None:
                 return f"attempt_outcome_lineage_missing_{name}"
@@ -5966,14 +5974,10 @@ class DispatcherRuntime:
             if len(exact) > 1:
                 return f"attempt_outcome_lineage_ambiguous_{name}"
             if not exact:
-                return (
-                    f"attempt_outcome_lineage_incompatible_{name}"
-                    if owned
-                    else ""
-                    if allow_absent
-                    else f"attempt_outcome_lineage_missing_{name}"
-                )
+                return f"attempt_outcome_lineage_incompatible_{name}" if owned else f"attempt_outcome_lineage_missing_{name}"
             event = exact[0]
+            if expected_event_id and event.event_id != expected_event_id:
+                return f"attempt_outcome_lineage_incompatible_{name}"
             data = event.data
             # Pre-v2 markers did not bind a specification revision.  They are
             # an upgrade-window absence, not an incompatible current marker.
@@ -5990,32 +5994,108 @@ class DispatcherRuntime:
         diagnostic = ""
         if report_relevant:
             report_marker = "report:blocked" if verdict == "blocked" else "report:done"
-            diagnostic = one(
-                "report", "card.reported", report_marker, exact_ids=report_ids, allow_absent=True
-            )
+            report_ids = set(context.get("worker", {}).get("request_ids") or ())
+            if not report_ids:
+                diagnostic = "attempt_outcome_lineage_missing_round_context_worker"
+            else:
+                diagnostic = one("report", "card.reported", report_marker, exact_ids=report_ids)
         if reviewed and verdict in {"green", "red"} and not diagnostic:
+            verdict_ids = set(context.get("review", {}).get("request_ids") or ())
+            if not verdict_ids:
+                diagnostic = "attempt_outcome_lineage_missing_round_context_review"
+                return source, diagnostic
             diagnostic = one(
                 "verdict",
                 "card.verdict",
                 f"review:{verdict}",
-                exact_ids={
-                    _attempt_request_id(attempt_id, f"review-{verdict}", reference, str(review_baseline))
-                },
+                exact_ids=verdict_ids,
             )
         if decision and not diagnostic:
-            visit, recorded = assessment_resolution(self.audit.events(reference))
-            request_id = str(recorded.get("request_id") or "") if isinstance(recorded, dict) else ""
-            if not request_id or not visit:
-                diagnostic = "attempt_outcome_lineage_missing_decision"
+            decision_context = context.get("decision", {})
+            request_ids = set(decision_context.get("request_ids") or ())
+            visit = str(decision_context.get("assessment_visit") or "")
+            if not request_ids or not visit:
+                diagnostic = "attempt_outcome_lineage_missing_round_context_decision"
             else:
                 diagnostic = one(
                     "decision",
                     "card.decided",
                     f"decision:{decision}",
-                    exact_ids={request_id},
+                    exact_ids=request_ids,
                     assessment_visit=visit,
+                    expected_event_id=str(decision_context.get("source_event_id") or ""),
                 )
         return source, diagnostic
+
+    def _outcome_round_context_request_id(self, record: DispatcherRecord, reference: str, phase: str) -> str:
+        return _attempt_request_id(
+            record.attempt_id, f"outcome-round-context-{phase}", reference, str(record.report_generation)
+        )
+
+    def _persist_outcome_round_context(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        *,
+        phase: str,
+        assessment_visit: str = "",
+        request_ids: set[str] | None = None,
+        source_event_id: str = "",
+    ) -> None:
+        """Write the exact source request identities before their terminal use."""
+        reference = str(task.get("ref") or "")
+        if not reference or not record.attempt_id or record.attempt_round < 1 or record.report_generation < 1:
+            return
+        context_request = self._outcome_round_context_request_id(record, reference, phase)
+        if self.audit.committed_event(context_request) is not None:
+            return
+        if request_ids is None:
+            if phase == "worker":
+                request_ids = _round_report_ids(
+                    record.workspace, record.attempt_id, reference, record.report_generation
+                )
+            elif phase == "review":
+                request_ids = {
+                    _attempt_request_id(
+                        record.attempt_id, f"review-{kind}", reference, str(record.review_baseline)
+                    )
+                    for kind in ("green", "red")
+                }
+            else:
+                return
+        self.writer.outcome_round_context(
+            role="dispatcher",
+            actor=self.owner,
+            reference=reference,
+            request_id=context_request,
+            data={
+                "version": 1,
+                "phase": phase,
+                "attempt_id": record.attempt_id,
+                "attempt": record.attempt_round,
+                "report_generation": record.report_generation,
+                "request_ids": sorted(request_ids),
+                "assessment_visit": assessment_visit,
+                "source_event_id": source_event_id,
+            },
+        )
+
+    def _outcome_round_context(self, reference: str, record: DispatcherRecord) -> dict[str, dict[str, Any]]:
+        context: dict[str, dict[str, Any]] = {}
+        for phase in ("worker", "review", "decision"):
+            event = self.audit.committed_event(self._outcome_round_context_request_id(record, reference, phase))
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            if (
+                payload.get("version") == 1
+                and payload.get("phase") == phase
+                and payload.get("attempt_id") == record.attempt_id
+                and payload.get("attempt") == record.attempt_round
+                and payload.get("report_generation") == record.report_generation
+            ):
+                context[phase] = payload
+        return context
 
     def _outcome_usage_source(
         self, reference: str, attempt_id: str, attempt: int, generation: int, role: str
@@ -6044,30 +6124,11 @@ class DispatcherRuntime:
             # callers add it below so recovery never consults live card state.
             if not reference:
                 raise ValueError("attempt outcome obligation has no card ref")
-            diagnostic = str(obligation.get("lineage_diagnostic") or "")
-            if diagnostic:
-                raise ValueError(diagnostic)
             source = dict(obligation["source_event_ids"])
             source["effect"] = effect_event_id
             required = obligation.get("lineage_required")
             if not isinstance(required, dict):
                 raise ValueError("attempt_outcome_lineage_requiredness_missing")
-            for name, required_now in required.items():
-                if not required_now:
-                    continue
-                # An unresolved legacy/divergent description boundary is a
-                # deliberately honest null.  Keep the row so the offline
-                # projection exposes that lineage gap; do not turn it into a
-                # permanently owed lifecycle observation.
-                if name == "specification_revision":
-                    continue
-                value = (
-                    obligation.get("specification_revision")
-                    if name == "specification_revision"
-                    else source.get(name)
-                )
-                if value is None:
-                    raise ValueError(f"attempt_outcome_lineage_missing_{name}")
             data = {
                 **{
                     key: value

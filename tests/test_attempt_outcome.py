@@ -392,6 +392,59 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertNotEqual(first["source_event_ids"]["decision"], second["source_event_ids"]["decision"])
         self.assertTrue(all(second["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect")))
 
+    def test_reviewed_release_uses_the_persisted_verdict_context_not_a_mutable_baseline(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference=CARD_REF,
+            kind="green",
+            body="green",
+            request_id=self._review_verdict_request_id("green"),
+        )
+        self.assertEqual(self.tick()["to"], "assessment")
+
+        payload = self.runtime.production_state.load()
+        record = self.runtime.production_state.records(payload)[CARD_REF]
+        record.review_baseline += 99
+        self.runtime.production_state.put_records(payload, {CARD_REF: record})
+        self.runtime.production_state.save(payload)
+
+        self._decide("release", request_id="release-after-baseline-loss")
+        self.tick()
+        outcome = self._outcomes()[0].event.data
+        self.assertIsNotNone(outcome["source_event_ids"]["verdict"])
+        self.assertTrue(outcome["lineage_required"]["verdict"])
+
+    def test_missing_forward_report_commits_an_incomplete_row_with_a_named_obligation_diagnostic(self) -> None:
+        self._start_worker_round()
+        report_id = self._worker_report_request_id("blocked", "external_fact")
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference=CARD_REF,
+            kind="blocked",
+            classification="external_fact",
+            body="worker cannot proceed",
+            request_id=report_id,
+        )
+        canon = self.writer.board_host.canon
+        original = canon.committed
+        with mock.patch.object(
+            canon,
+            "committed",
+            side_effect=lambda request_id: None if request_id == report_id else original(request_id),
+        ):
+            self.tick()
+
+        outcome = self._outcomes()[0].event.data
+        self.assertIsNone(outcome["source_event_ids"]["report"])
+        self.assertTrue(outcome["lineage_required"]["report"])
+        effect = next(event for event in canon.events(ref=CARD_REF) if event.kind.value == "card.blocked")
+        self.assertEqual(effect.data["attempt_outcome_owed"]["lineage_diagnostic"], "attempt_outcome_lineage_missing_report")
+
     def test_divergent_specification_boundary_is_an_incomplete_outcome_not_a_permanent_debt(self) -> None:
         self._start_worker_round()
         self.board.tasks[0]["description"] = "edited outside audited task operations"
@@ -456,7 +509,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         outcome = self._outcomes()[0].event.data
         self.assertIsNone(outcome["source_event_ids"]["report"])
-        self.assertFalse(outcome["lineage_required"]["report"])
+        self.assertTrue(outcome["lineage_required"]["report"])
 
     def test_append_failure_after_a_terminal_effect_is_recovered_without_lifecycle_work(self) -> None:
         """The outcome journal is weaker than the transition it observes."""

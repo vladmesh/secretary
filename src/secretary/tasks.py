@@ -205,6 +205,49 @@ def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _validate_outcome_round_context(data: dict[str, Any]) -> None:
+    """Validate the compact durable identity hand-off used by outcome freezing."""
+    expected = {
+        "version",
+        "phase",
+        "attempt_id",
+        "attempt",
+        "report_generation",
+        "request_ids",
+        "assessment_visit",
+        "source_event_id",
+    }
+    if set(data) != expected or data.get("version") != 1:
+        raise TaskError("validation", "outcome round context has an unsupported field set", 2)
+    if data.get("phase") not in {"worker", "review", "decision"}:
+        raise TaskError("validation", "outcome round context has an unsupported phase", 2)
+    if not isinstance(data.get("attempt_id"), str) or not data["attempt_id"].strip():
+        raise TaskError("validation", "outcome round context needs an attempt id", 2)
+    for name in ("attempt", "report_generation"):
+        value = data.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise TaskError("validation", f"outcome round context needs a positive {name}", 2)
+    request_ids = data.get("request_ids")
+    if not isinstance(request_ids, list) or not request_ids or any(
+        not isinstance(value, str) or not value.strip() for value in request_ids
+    ) or len(set(request_ids)) != len(request_ids):
+        raise TaskError("validation", "outcome round context needs unique request ids", 2)
+    visit = data.get("assessment_visit")
+    if not isinstance(visit, str):
+        raise TaskError("validation", "outcome round context assessment visit must be a string", 2)
+    if data["phase"] == "decision" and not visit:
+        raise TaskError("validation", "decision outcome round context needs an Assessment visit", 2)
+    if data["phase"] != "decision" and visit:
+        raise TaskError("validation", "only decision outcome round context has an Assessment visit", 2)
+    event_id = data.get("source_event_id")
+    if not isinstance(event_id, str):
+        raise TaskError("validation", "outcome round context source event id must be a string", 2)
+    if data["phase"] == "decision" and not event_id:
+        raise TaskError("validation", "decision outcome round context needs its source event id", 2)
+    if data["phase"] != "decision" and event_id:
+        raise TaskError("validation", "only decision outcome round context has a source event id", 2)
+
+
 def specification_revision(events: Iterable[dict[str, Any]], description: str) -> str:
     """Return the durable event id of the description the card currently exposes.
 
@@ -2179,6 +2222,37 @@ class TaskWriter:
             identity=dict(payload),
         )
 
+    def outcome_round_context(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        data: dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Persist one exact forward source identity before its consumer runs.
+
+        This is journal-only.  It is deliberately a typed dispatcher boundary
+        rather than comment prose: recovery reads the request id that names
+        this record and never reconstructs a worker, reviewer, or Assessment
+        identity from card history.
+        """
+        self._role(role, {"dispatcher"})
+        _validate_outcome_round_context(data)
+        if not request_id.strip():
+            raise TaskError("validation", "outcome round context needs the request id it owns", 2)
+        return self._write(
+            "outcome_round_context",
+            role,
+            actor,
+            reference,
+            request_id,
+            dict(data),
+            lambda task: None,
+            identity=dict(data),
+        )
+
     def attempt_usage(
         self,
         *,
@@ -3616,7 +3690,7 @@ class TaskWriter:
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
-                if event.get("kind") in {"sprint_guard_denied", "sprint_guard_override"}:
+                if event.get("kind") in {"sprint_guard_denied", "sprint_guard_override", "outcome_round_context"}:
                     # A guard decision records itself, not a backend row: there is nothing to
                     # re-read, and the decision it names was made whether or not the operation
                     # it authorized went on to succeed.

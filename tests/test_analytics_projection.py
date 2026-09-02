@@ -515,6 +515,21 @@ class AnalyticsProjectionTests(unittest.TestCase):
         projection = project_analytics_checkpoint(self.board)
 
         self.assertEqual(projection.rows[0]["lineage_completeness"], {"complete": True, "missing": []})
+        first["data"] = dict(first["data"]) | {
+            "source_event_ids": dict(first["data"]["source_event_ids"]) | {"report": None}
+        }
+        records[3] = first
+        self.seal(records)
+        incomplete = project_analytics_checkpoint(self.board)
+        self.assertEqual(
+            incomplete.rows[0]["lineage_completeness"], {"complete": False, "missing": ["report"]}
+        )
+        self.assertIn("lineage_missing_report", incomplete.incomplete_reasons)
+
+        first["data"] = dict(first["data"]) | {
+            "source_event_ids": dict(first["data"]["source_event_ids"]) | {"report": "report"}
+        }
+        records[3] = first
         records[-1] = dict(records[-1])
         records[-1]["data"] = dict(records[-1]["data"]) | {"specification_revision": "other"}
         self.seal(records)
