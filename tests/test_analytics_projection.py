@@ -325,9 +325,23 @@ class AnalyticsProjectionTests(unittest.TestCase):
     def test_projection_has_no_live_board_provider_or_comment_dependency(self) -> None:
         self.seal(self.valid_records())
         from secretary.board import analytics
+        from secretary import tasks
+        from secretary.dispatch import attempt_usage
 
         verifier = analytics.verify_analytics_checkpoint
-        with mock.patch.object(analytics, "verify_analytics_checkpoint", wraps=verifier) as checked:
+        with (
+            mock.patch.object(
+                tasks,
+                "TaskReader",
+                side_effect=AssertionError("projection must not read the live board"),
+            ),
+            mock.patch.object(
+                attempt_usage,
+                "collect_usage",
+                side_effect=AssertionError("projection must not read provider usage"),
+            ),
+            mock.patch.object(analytics, "verify_analytics_checkpoint", wraps=verifier) as checked,
+        ):
             projection = project_analytics_checkpoint(self.board)
 
         checked.assert_called_once_with(self.board)
