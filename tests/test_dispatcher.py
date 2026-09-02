@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,9 +21,12 @@ from unittest import mock
 from secretary import dispatcher as dispatcher_module
 from secretary import role_env
 from secretary._fsutil import try_file_lock
+from secretary.board.analytics import project_analytics_checkpoint
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
+from secretary.data import export_board as export_board_snapshot
+from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatch.head_vitality import HeadVitalityError
 from secretary.dispatch.head_vitality_episode import (
@@ -3300,6 +3304,150 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         release_audit = next(item["body"] for item in comments if "release audit" in item["body"])
         self.assertIn("unit-c", release_audit)
         self.assertNotIn("unit-b", release_audit)
+
+    def test_analytics_canary_projects_one_released_round_only_from_a_sealed_copy(self) -> None:
+        """The production lifecycle's terminal evidence projects without control-plane reads.
+
+        This intentionally uses opaque event identities from the typed canon.  The
+        projection is not permitted to recover meaning from a request id, timestamp,
+        comment, live card, provider session, or append order.
+        """
+        self.start_dispatcher()
+        self.catalog._adapter = {"validation": {"ci": "github"}}
+        self.host.commit = "c" * 40
+
+        def receipt(marker: str) -> dict[str, object]:
+            return {
+                "validated_sha": self.host.commit,
+                "base_sha": marker * 40,
+                "gate_mode": "github",
+                "required_checks": [{"name": "canary", "conclusion": "SUCCESS", "url": ""}],
+                "completed_at": "2026-09-02T00:00:00+00:00",
+                "command_or_check_set_digest": marker * 64,
+            }
+
+        self.host.gate_results = [
+            GateResult("green", "initial", attestation=receipt("a")),
+            GateResult("green", "assessment", attestation=receipt("b")),
+            GateResult("green", "release", attestation=receipt("c")),
+        ]
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference=CARD_REF,
+            kind="green",
+            body="independent green review",
+            request_id="opaque-review-verdict",
+        )
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release", request_id="opaque-release-decision")
+        terminal = self.tick()
+
+        self.assertEqual(terminal["to"], "done")
+        self.assertEqual(self.host.completed, [CARD_REF])
+        self.assertLess(self.host.calls.index("complete_green"), self.host.calls.index("teardown"))
+        canon = self.writer.board_host.canon
+        self.assertIsNotNone(canon)
+        outcomes = canon.attempt_outcome_occurrences(ref=CARD_REF)
+        self.assertEqual(len(outcomes), 1)
+        outcome = outcomes[0].event
+        self.assertFalse(outcomes[0].pending)
+        self.assertEqual(outcome.data["verdict"], "green")
+        self.assertEqual(outcome.data["disposition"], "release")
+        self.assertEqual(outcome.data["terminal_state"], "done")
+        effect_id = outcome.data["source_event_ids"]["effect"]
+        effect_index = next(
+            index for index, event in enumerate(canon.events(ref=CARD_REF)) if event.event_id == effect_id
+        )
+        outcome_index = next(
+            index
+            for index, event in enumerate(canon.events(ref=CARD_REF))
+            if event.event_id == outcome.event_id
+        )
+        self.assertLess(
+            effect_index, outcome_index, "outcome publication follows the confirmed terminal effect"
+        )
+        self.assertEqual(
+            set(outcome.data["source_event_ids"]),
+            {"report", "verdict", "decision", "effect", "worker_usage", "review_usage"},
+        )
+        self.assertIsNotNone(outcome.data["source_event_ids"]["worker_usage"])
+        self.assertIsNotNone(outcome.data["source_event_ids"]["review_usage"])
+        self.assertEqual(outcome.data["usage_completeness"], {"worker": "degraded", "review": "degraded"})
+
+        instance = self.data_dir / "sealed-instance"
+        instance.mkdir()
+        git(instance, "init", "--quiet", "--initial-branch", "main")
+        _configure_git_user(instance)
+        (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+        git(instance, "add", "instance.yaml")
+        git(instance, "commit", "--quiet", "-m", "seed checkpoint instance")
+        state_dir = self.data_dir / "checkpoint-state"
+        state_dir.mkdir()
+
+        def export_fixture_board(data_dir: Path, **_kwargs: Any):
+            return export_board_snapshot(
+                data_dir,
+                instance_dir=instance,
+                reader=self.reader,
+                sprint_client=self.board,
+            )
+
+        with mock.patch("secretary.checkpoint.export_board", side_effect=export_fixture_board):
+            checkpoint = CheckpointWriter(self.data_dir, instance, state_dir=state_dir).write()
+        self.assertEqual(checkpoint.status, "committed", checkpoint.reason)
+        sealed = instance / "state" / "board"
+        copied = self.data_dir / "offline-analytics-copy"
+        shutil.copytree(sealed, copied)
+
+        # All mutable sources are poisoned only after the complete cut is copied.
+        # A projection reaching for one fails the canary instead of silently using it.
+        from secretary import tasks
+
+        with (
+            mock.patch.object(self.board, "call", side_effect=AssertionError("live Kanboard read")),
+            mock.patch.object(tasks, "TaskReader", side_effect=AssertionError("live card read")),
+            mock.patch.object(
+                tasks.KanboardClient, "for_instance", side_effect=AssertionError("live board client")
+            ),
+            mock.patch.object(
+                attempt_usage_module,
+                "collect_usage",
+                side_effect=AssertionError("provider session read"),
+            ),
+            mock.patch.object(
+                dispatcher_module,
+                "_collect_usage",
+                side_effect=AssertionError("dispatcher provider read"),
+            ),
+        ):
+            projection = project_analytics_checkpoint(copied)
+
+        self.assertTrue(projection.incomplete)
+        self.assertEqual(
+            projection.incomplete_reasons,
+            ("review_usage_degraded", "worker_usage_degraded"),
+        )
+        self.assertEqual(len(projection.rows), 1)
+        row = projection.rows[0]
+        self.assertEqual(
+            (row["card_ref"], row["attempt_id"], row["report_generation"]),
+            (
+                CARD_REF,
+                outcome.data["attempt_id"],
+                outcome.data["report_generation"],
+            ),
+        )
+        self.assertEqual(row["verdict"], "green")
+        self.assertEqual(row["disposition"], "release")
+        self.assertEqual(row["source_event_ids"], outcome.data["source_event_ids"])
+        self.assertEqual(row["usage_completeness"], outcome.data["usage_completeness"])
+        self.assertEqual(row["worker_usage"]["event_id"], outcome.data["source_event_ids"]["worker_usage"])
+        self.assertEqual(row["review_usage"]["event_id"], outcome.data["source_event_ids"]["review_usage"])
+        self.assertEqual(row["worker_usage"]["outcome"], "source_unavailable")
+        self.assertEqual(row["review_usage"]["outcome"], "source_unavailable")
 
     def test_no_observer_immediate_release_audits_its_fresh_gate_receipt(self) -> None:
         self.start_dispatcher()
