@@ -29,11 +29,23 @@ directory, which approved contracts the worker then refused. Round two had the d
 nothing about it — and a silence is not a decision, so nobody could see or test what the caller
 then did with it. Now the state is returned, and every caller must branch on it by name.
 
-Which suite the check runs is part of that contract too, since issue:8b39e60e4df361c6138e. Only the
-project can say what its broad suite is; without a place to say it, the worker task packet printed a
-placeholder and the documentation answered it with repository-wide discovery, which runs every CI
-suite in one process. A declared ``broad_check`` therefore names a ``module`` (and may name the exact
-``args`` vector), and omitting it is `BROAD_CHECK_INCOMPLETE` rather than a quiet fallback.
+Which suite the check runs may be part of that contract too, since issue:8b39e60e4df361c6138e. Only
+the project can say what its broad suite is; without a place to say it, the worker task packet
+printed a placeholder and the documentation answered it with repository-wide discovery, which runs
+every CI suite in one process. So a declared ``broad_check`` may name a ``module`` (and the exact
+``args`` vector that goes with it), and when it does, the caller no longer has to name the suite.
+
+That ``module`` is an *enrichment* of the contract, not a new requirement of it. PR #330 made a
+declared block that omitted it `BROAD_CHECK_INCOMPLETE`, and that was wrong: a contract written
+before a field existed is not an incomplete contract. Every adapter on the live installation
+predates the field and declares ``interpreter`` and ``import_package`` only — a perfectly good
+contract under the rules that applied when it was written — so the refusal took three registered
+projects out of the pipeline entirely, refused at preflight, no workspace, no head, no round. The
+absence of ``module`` means one thing and one thing only: the caller must name the suite itself,
+which is what every worker did before the field existed. It is required exactly where it is
+actually needed — ``check broad`` / ``check show`` invoked with no ``--module`` — and that path
+already refuses by its own name (``no_broad_check_module``), telling the operator to pass
+``--module`` or to add ``module:`` to the adapter.
 
 What each state buys a card is settled here and not re-decided by a caller:
 
@@ -123,8 +135,9 @@ class ModuleContract:
     discovery, a run that costs every CI suite in one process. Only the project can name its own
     broad suite, so the project's adapter is where it is named.
 
-    `module` is empty exactly when the contract comes from the legacy default, which names no suite:
-    a declared ``broad_check`` that omits it is `BROAD_CHECK_INCOMPLETE`.
+    `module` is empty whenever no suite was named: the legacy default names none, and neither does a
+    declared ``broad_check`` written before the field existed. Neither is a refusal — an empty
+    `module` only means the caller has to name the suite itself, the way every caller did before.
     """
 
     interpreter: str
@@ -294,8 +307,16 @@ def _declared_contract(
             f"adapter {adapter_name!r} has no broad-check contract",
         )
     import_package = str(configured.get("import_package") or "").strip()
+    # An omitted `module` is not an incomplete contract either. It is the shape every adapter on the
+    # installation was written in, before issue:8b39e60e4df361c6138e gave a project anywhere to name
+    # its own broad suite, and a contract written before a field existed is not an incomplete
+    # contract. Refusing it here cost three registered projects their cards: the refusal lands at
+    # preflight, so no workspace was created, no head brought up and no round run. What the absence
+    # actually means is narrow — the caller has to name the suite itself — so it is enforced where
+    # it bites and nowhere else: `check broad`/`check show` with no `--module` fails there by its
+    # own name, `no_broad_check_module`, which says to pass the flag or to declare the key.
     module = str(configured.get("module") or "").strip()
-    if not import_package or not module:
+    if not import_package:
         return ContractVerdict.as_refused(
             BROAD_CHECK_INCOMPLETE,
             adapter_name,

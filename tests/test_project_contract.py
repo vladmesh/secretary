@@ -207,34 +207,83 @@ class ProjectContractTests(unittest.TestCase):
         self.assertIsNotNone(verdict.contract)
         self.assertEqual(verdict.contract.interpreter, sys.executable)
 
-    def test_a_declared_contract_that_names_no_module_is_incomplete(self) -> None:
-        """A declared block is a promise to say which suite; leaving it out is not a quiet fallback.
+    def test_a_declared_contract_that_names_no_module_is_not_a_refusal(self) -> None:
+        """The regression PR #330 shipped, pinned so it cannot come back.
 
-        Falling back here would put the project straight back to repository-wide discovery under a
-        contract that looks declared, which is the exact confusion this key removes.
+        A contract written before a field existed is not an incomplete contract. Every adapter on
+        the live installation was written that way — `interpreter` and `import_package`, which was
+        the whole contract at the time — and #330 turned all of them into `broad_check_incomplete`
+        at preflight. That refusal lands before the card is issued, so three registered projects
+        (codegen-orchestrator, service-template, review-value-research) got no workspace, no head
+        and no round at all, with an open sprint's observer live on one of them.
+
+        `module` is an enrichment: having it lets a caller run the check without naming the suite.
+        Not having it means only that the caller names the suite itself, which is what every worker
+        did before the field existed. The three shapes below are the exact adapter blocks on the
+        installation, asked both at preflight and with a candidate workspace.
+        """
+        self.relative_interpreter(self.repo)
+        workspace = self.root / "worktree"
+        workspace.mkdir()
+        self.relative_interpreter(workspace)
+        cases = {
+            # `.venv/bin/python`, no module: codegen-orchestrator and service-template.
+            "relative interpreter, no module": (
+                "broad_check:\n  interpreter: .venv/bin/python\n  import_package: shared\n",
+                (CONTRACT_UNDECIDABLE, UNDECIDABLE_RELATIVE_INTERPRETER),
+                CONTRACT_FIT,
+            ),
+            # `/usr/bin/python3`-style absolute, no module: review-value-research.
+            "absolute interpreter, no module": (
+                f"broad_check:\n  interpreter: {sys.executable}\n"
+                + "  import_package: scripts.dataset_metrics\n",
+                (CONTRACT_FIT, ""),
+                CONTRACT_FIT,
+            ),
+            # And a contract that DOES name a suite keeps resolving exactly as #330 made it.
+            "absolute interpreter, declared module": (
+                f"broad_check:\n  interpreter: {sys.executable}\n"
+                + "  import_package: thing\n  module: tests.broad\n",
+                (CONTRACT_FIT, ""),
+                CONTRACT_FIT,
+            ),
+        }
+        for name, (block, (preflight_state, question), workspace_state) in cases.items():
+            with self.subTest(case=name):
+                self.adapter(ADAPTER_BODY + block)
+
+                preflight = self.ask_preflight()
+                decided = decide(
+                    self.binding(),
+                    instance=self.instance,
+                    project_root=self.repo,
+                    workspace=workspace,
+                )
+
+                self.assertEqual(preflight.state, preflight_state)
+                self.assertEqual(preflight.question, question)
+                self.assertFalse(preflight.refused, preflight.detail)
+                self.assertEqual(decided.state, workspace_state)
+                self.assertFalse(decided.refused, decided.detail)
+
+    def test_a_contract_without_a_module_simply_names_no_suite(self) -> None:
+        """What the absence actually costs: the caller has to say which suite, and nothing else.
+
+        Everything else the contract says — interpreter, import package, `source: adapter` — is
+        exactly what it said before `module` existed, so a worker passing `--module` runs on the
+        runtime its adapter declared, as it always did.
         """
         self.adapter(
             ADAPTER_BODY + f"broad_check:\n  interpreter: {sys.executable}\n  import_package: thing\n"
         )
 
-        refused = self.refusal()
-
-        self.assertEqual(refused.shape, BROAD_CHECK_INCOMPLETE)
-        self.assertEqual(refused.code, "invalid_project_adapter")
-
-    def test_the_legacy_default_names_no_module_at_all(self) -> None:
-        """It cannot: it is a fallback for adapters that said nothing, and it says nothing either.
-
-        Removing that fallback is issue:81a0a1e5c15225fa360e, and it has to come after a live
-        adapter declares its contract — not with this change.
-        """
-        self.adapter()
-        self.package(LEGACY_IMPORT_PACKAGE)
-
         contract = self.resolve()
 
         self.assertEqual(contract.module, "")
         self.assertEqual(contract.args, ())
+        self.assertEqual(contract.interpreter, sys.executable)
+        self.assertEqual(contract.import_package, "thing")
+        self.assertEqual(contract.as_dict(), {"source": "adapter"})
 
     # --- And every shape of unusable contract is named, once ------------------------------------
 
