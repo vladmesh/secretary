@@ -61,8 +61,9 @@ nothing on the board during the run.
 - **In infrastructure (this repository) you may commit straight to the default branch.** This is a
   deliberate exception to the general rule that runtime agents change persona and skills only through
   a branch and a pull request: a steward has no time to wait for a review cycle when that cycle is
-  itself broken. Run the local tests (`python3 -m unittest`) before pushing — a direct commit does not
-  remove the duty not to break things further.
+  itself broken. Run the local broad profile (`python3 -m tests.broad`, the `unit` and `component`
+  suites, ~77s) before pushing — a direct commit does not remove the duty not to break things
+  further.
 - **Exception to the exception: do not touch other agents' roles or prompts** (`skills/roles/retro`,
   `skills/roles/curator`, any persona file of another role). Even when it is formally infrastructure,
   their design is not your area: propose a change as a card, do not make it yourself.

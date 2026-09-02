@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,6 +42,12 @@ from secretary.dispatcher_tui import provider_progress_for_run
 from secretary.dispatcher_types import HostError
 from secretary.dispatcher_worker_lifecycle import WorkerContinuationLiveness
 from secretary.head_health import HeadReadiness
+from secretary.projects.contract import (
+    LEGACY_IMPORT_PACKAGE,
+    LEGACY_REASON_MISSING_BROAD_CHECK,
+    ContractVerdict,
+    ModuleContract,
+)
 from tests.fakes.host import FakeSessionHost
 from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
@@ -1238,6 +1245,15 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
 
         def default_branch(self, _project: str, override: str | None) -> str:
             return override or "main"
+
+        def broad_check_verdict(self, _project: str) -> ContractVerdict:
+            # The worker task packet resolves the project's broad-check contract to print an exact
+            # command (issue:8b39e60e4df361c6138e). Secretary's own adapter declares none, so the
+            # legacy default is what a real catalog answers here; this stub answers the same.
+            return ContractVerdict.as_fit(
+                ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK),
+                "secretary",
+            )
 
         def head_run(self, task: dict, *, role: str, head: str, workspace: str, **_kwargs) -> HeadRun:
             return HeadRun(

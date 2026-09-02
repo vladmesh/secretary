@@ -838,6 +838,16 @@ class FakeHost:
     _select_revision_bound_worker_feedback = CommandHostRuntime._select_revision_bound_worker_feedback
     _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)
 
+    def _broad_check_invocation(self, project: str) -> tuple[str, str]:
+        """Borrowed from the real host, like the document builder that calls it.
+
+        The packet's broad-check command is resolved from the registered project's contract
+        (issue:8b39e60e4df361c6138e), so a fake that answered this itself would let the document
+        say something the real host never would. `FakeCatalog.broad_check_verdict` is the seam a
+        test moves instead.
+        """
+        return CommandHostRuntime._broad_check_invocation(self, project)  # type: ignore[arg-type]
+
     def _write_task_doc(
         self, task: dict, workspace: Path, attempt_id: str, generation: int, decision: str = ""
     ) -> None:

@@ -15,6 +15,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -35,6 +36,12 @@ from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_ide
 from secretary.dispatcher_launch import launch_intent_liveness
 from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_state import DispatcherRecord
+from secretary.projects.contract import (
+    LEGACY_IMPORT_PACKAGE,
+    LEGACY_REASON_MISSING_BROAD_CHECK,
+    ContractVerdict,
+    ModuleContract,
+)
 from secretary.dispatcher_tui import (
     TuiDeliveryError,
     claude_project_dir_name,
@@ -2664,6 +2671,15 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
 
             def default_branch(self, project: str, override: str | None) -> str:
                 return override or "main"
+
+            def broad_check_verdict(self, project: str) -> ContractVerdict:
+                # The worker task packet resolves this to print an exact broad-check command
+                # (issue:8b39e60e4df361c6138e). Secretary's adapter declares no `broad_check`, so
+                # the legacy default is what a real catalog answers, and this stub answers it too.
+                return ContractVerdict.as_fit(
+                    ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK),
+                    "secretary",
+                )
 
             def adapter(self, project: str) -> dict[str, Any]:
                 return {}

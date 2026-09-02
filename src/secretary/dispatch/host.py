@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -3403,6 +3404,39 @@ class CommandHostRuntime:
             "TASK.md."
         )
 
+    def _broad_check_invocation(self, project: str) -> tuple[str, str]:
+        """The exact `check broad`/`check show` commands this project's contract resolves to.
+
+        Until issue:8b39e60e4df361c6138e there was nowhere for a project to say which suite its
+        broad check runs, so this packet printed the literal placeholder
+        `<this project's broad suite module>` and left the worker to guess. What it guessed, because
+        that is what every document said, was bare `python3 -m unittest`: repository-wide discovery,
+        every CI suite in one process, ~402s for Secretary. A packet that names a command a worker
+        cannot run without inventing part of it is a packet that teaches the expensive habit.
+
+        The contract is read through the same `projects.contract` rules the preflight and the
+        worker's own resolution use, so the command printed here is the command that workspace will
+        actually accept. Two empty strings mean the project declares no suite: the caller then says
+        so in words rather than printing a command that does not exist.
+        """
+        if not project:
+            return "", ""
+        try:
+            verdict = self.catalog.broad_check_verdict(project)
+        except (HostError, DispatcherError):
+            # Rendering a task document never fails over a registry question. A project whose
+            # binding or adapter cannot be read reaches the worker with the honest wording below,
+            # and the refusal itself is the preflight's to report, not this packet's.
+            return "", ""
+        contract = verdict.contract if verdict.fit else None
+        if contract is None or not contract.module:
+            return "", ""
+        arguments = "".join(f" --module-arg {shlex.quote(argument)}" for argument in contract.args)
+        return (
+            f"python3 -m secretary check broad --reuse --module {contract.module}{arguments}",
+            f"python3 -m secretary check show --module {contract.module}{arguments}",
+        )
+
     def _worker_task_doc(
         self,
         task: dict[str, Any],
@@ -3484,6 +3518,25 @@ class CommandHostRuntime:
                 gate_red,
                 "",
             ]
+        broad_command, show_command = self._broad_check_invocation(str(task.get("project") or ""))
+        if broad_command:
+            broad_invocation = [f"    {broad_command}", ""]
+            show_invocation = f"`{show_command}` and quote its summary"
+        else:
+            broad_invocation = [
+                "This project's adapter declares no broad suite, so there is no exact command to",
+                "print here. Work out which suite this card's acceptance criteria require, run that",
+                "one through the wrapper by naming it yourself:",
+                "",
+                "    python3 -m secretary check broad --reuse --module <the suite module you chose>",
+                "",
+                "and say in your report which module you ran and why that is the right suite. Do not",
+                "reach for repository-wide test discovery because it is the easiest thing to type.",
+                "",
+            ]
+            show_invocation = (
+                "`python3 -m secretary check show --module <the same module>` and quote its summary"
+            )
         sections += [
             "## Check-cost contract",
             "",
@@ -3498,8 +3551,7 @@ class CommandHostRuntime:
             "Run that broad suite through the receipt wrapper, so its worker-local broad receipt outlives",
             "the pane:",
             "",
-            "    python3 -m secretary check broad --reuse --module <this project's broad suite module>",
-            "",
+            *broad_invocation,
             "`--reuse` is the default way to invoke it: with a usable worker-local broad receipt it prints",
             "that worker-local broad receipt",
             "and returns the result the run had, and otherwise it runs the suite. So the answer to a",
@@ -3511,7 +3563,7 @@ class CommandHostRuntime:
             "status, and it writes `state/checks/broad-<digest>.json` in this workspace: command and",
             "digest, cwd and imported project, start/end/duration, exit code, parsed verdict and",
             "counts where the runner prints them, and a bounded diagnostic tail. Read it back with",
-            "`python3 -m secretary check show --module <the same module>` and quote its summary",
+            show_invocation,
             "in the report. While that worker-local broad receipt is usable, you already have the answer. An edit to the",
             "content, or a concrete red result you are fixing, opens a new justified run — name which",
             "one in the report. Committing content a receipt already covers is not one of them: the",

@@ -23,7 +23,7 @@ The main areas are:
 python3 -m pip install .
 python3 -m pip install '.[memory]'
 python3 -m pip install '.[dev]'
-python3 -m unittest
+python3 -m tests.broad
 ```
 
 The first form installs the CLI, the second adds the memory runtime, and the third the pinned
@@ -1976,8 +1976,17 @@ A deterministic set, usable as a gate before and after an upgrade:
 secretary doctor --instance <dir>
 secretary role-skills audit --check
 secretary dispatcher production-tick --instance <dir> --probe
-python3 -m unittest
+python3 -m tests.broad
 ```
+
+The three `secretary` commands check the installation; `python3 -m tests.broad` checks the code
+that installation is running, and is the `unit` plus `component` suites — about 1440 tests in ~77
+seconds — not repository-wide discovery, which is all seven CI suites in one 402-second process.
+This set is an operator gate around an upgrade, not the test contract: that is the dispatcher-owned
+exact-SHA GitHub CI run described in [Testing](TESTING.md), and a green health suite never stands
+in for it. When an upgrade touches a contour the profile does not cover — packaging, recovery,
+memory, the local-PTY runtime or the board seam — run that named suite directly, for example
+`python3 scripts/ci_test_shards.py packaging`.
 
 ### Worker-local broad receipt
 
@@ -1985,9 +1994,14 @@ A broad run is expensive enough that its result should survive the terminal it p
 documented form wraps the suite:
 
 ```bash
-python3 -m secretary check broad --module unittest
-python3 -m secretary check show --module unittest
+python3 -m secretary check broad --module tests.broad
+python3 -m secretary check show --module tests.broad
 ```
+
+Where the registered project's adapter declares its own `broad_check` module, both commands run
+that suite with no flag at all (`secretary check broad --reuse`, `secretary check show`); an
+explicit `--module` still overrides it, and a project that declares none and is given none is
+refused as `no_broad_check_module` rather than falling back to repository-wide discovery.
 
 `check broad` streams the check's combined output to stderr while it runs, exits with the check's
 own status (a signal-killed check becomes the usual `128+N`), and writes one worker-local broad
