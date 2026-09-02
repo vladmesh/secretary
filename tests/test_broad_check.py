@@ -81,23 +81,37 @@ class BroadCheckTestCase(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name) / "workspace"
-        self.root.mkdir()
         self.scripts = Path(self.tmpdir.name) / "scripts"
         self.scripts.mkdir()
-        _git(self.root, "init", "-q")
-        _git(self.root, "config", "user.email", "worker@example.invalid")
-        _git(self.root, "config", "user.name", "worker")
+        self._init_workspace(self.root)
+        self.stream = StringIO()
+
+    def _init_workspace(self, root: Path, *, project_package: str = "secretary") -> Path:
+        """A committed candidate checkout, optionally without any importable project package.
+
+        `project_package=""` is not a curiosity: since issue:8b39e60e4df361c6138e the wrapper puts
+        the candidate's own import roots at the front of the check process's `sys.path`, so a
+        candidate that *does* carry the package can no longer be made to import someone else's copy
+        of it. A test about the candidate boundary therefore needs a candidate with nothing of its
+        own to import, which is also a real shape: a checkout mid-rename, or a project whose
+        adapter names a package this checkout does not contain.
+        """
+        root.mkdir(parents=True)
+        _git(root, "init", "-q")
+        _git(root, "config", "user.email", "worker@example.invalid")
+        _git(root, "config", "user.name", "worker")
         # `__pycache__/` is ignored here for the same reason every real checkout ignores it:
         # a Python check writes bytecode as it runs, and that is not a change to the code.
-        (self.root / ".gitignore").write_text("/state/\n__pycache__/\n", encoding="utf-8")
-        (self.root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (root / ".gitignore").write_text("/state/\n__pycache__/\n", encoding="utf-8")
+        (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
         # A candidate workspace is a checkout of the project under check, and reuse is only ever
         # authorized for a check process that imported the project from here.
-        (self.root / "secretary").mkdir()
-        (self.root / "secretary" / "__init__.py").write_text("", encoding="utf-8")
-        _git(self.root, "add", "-A")
-        _git(self.root, "commit", "-q", "-m", "base")
-        self.stream = StringIO()
+        if project_package:
+            (root / project_package).mkdir()
+            (root / project_package / "__init__.py").write_text("", encoding="utf-8")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-q", "-m", "base")
+        return root
 
     def _script(self, name: str, body: str) -> str:
         path = self.scripts / name
@@ -107,9 +121,11 @@ class BroadCheckTestCase(unittest.TestCase):
     def _run(self, command, **kwargs):
         return run_broad_check(command, root=self.root, stream=self.stream, **kwargs)
 
-    def _suite(self, name: str, body: str, args: tuple[str, ...] = ()) -> CheckSpec:
+    def _suite(
+        self, name: str, body: str, args: tuple[str, ...] = (), *, root: Path | None = None
+    ) -> CheckSpec:
         """A module-shaped check: the standard shape, and the only one that attests an import."""
-        (self.root / f"{name}.py").write_text(body, encoding="utf-8")
+        ((root or self.root) / f"{name}.py").write_text(body, encoding="utf-8")
         return CheckSpec.for_module(name, args)
 
 
@@ -808,16 +824,24 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
 
     def test_an_import_from_outside_the_candidate_is_recorded_and_refused(self) -> None:
         """The end-to-end case the second review reproduced: a real subprocess, a real safe-path
-        import environment, and an alternate checkout ordered before the candidate."""
+        import environment, and an alternate checkout ordered before the candidate.
+
+        The candidate here deliberately carries no project package of its own. Since
+        issue:8b39e60e4df361c6138e the wrapper prepends the candidate's import roots, so a
+        candidate that has the package *cannot* be talked into importing another copy -- which is
+        the fix, not a loss of coverage. The invariant this test exists for is the other half: when
+        the check process really did import something else, the receipt says so and refuses.
+        """
         outside = self._outside_project()
-        suite = self._suite("outsidesuite", "import secretary\nprint(secretary.__file__)\n")
+        elsewhere = self._init_workspace(Path(self.tmpdir.name) / "no-package", project_package="")
+        suite = self._suite("outsidesuite", "import secretary\nprint(secretary.__file__)\n", root=elsewhere)
         env = dict(
             os.environ,
             PYTHONSAFEPATH="1",
-            PYTHONPATH=os.pathsep.join([str(outside), str(self.root)]),
+            PYTHONPATH=os.pathsep.join([str(outside), str(elsewhere)]),
         )
 
-        _, receipt = self._run(suite, env=env)
+        _, receipt = run_broad_check(suite, root=elsewhere, stream=self.stream, env=env)
 
         # The receipt tells the truth about what the check process imported...
         provenance = receipt["project_provenance"]
@@ -830,24 +854,29 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
         self.assertIn(str(outside), receipt["tail"])
         # ...and precisely because that import was not this candidate, it cannot stand in for a
         # run of this candidate.
-        lookup = usable_receipt(self.root, suite)
+        lookup = usable_receipt(elsewhere, suite)
         self.assertFalse(lookup.usable)
         self.assertIn("outside this candidate workspace", lookup.reason)
         self.assertIsNone(lookup.authorized())
 
-        # The ordinary candidate-inside run of the same standard shape stays reusable.
-        _, inside_receipt = self._run(suite)
+        # The ordinary candidate-inside run of the same standard shape stays reusable -- and stays
+        # reusable in the very same import environment, because the candidate's roots come first.
+        inside_suite = self._suite("outsidesuite", "import secretary\nprint(secretary.__file__)\n")
+        _, inside_receipt = self._run(inside_suite, env=env)
         self.assertTrue(inside_receipt["project_provenance"]["inside_workspace"])
-        self.assertTrue(usable_receipt(self.root, suite).usable)
+        self.assertTrue(usable_receipt(self.root, inside_suite).usable)
 
     def test_a_check_process_outside_the_candidate_authorizes_nothing_even_when_it_fails(
         self,
     ) -> None:
-        # The suite lives outside the candidate and the safe path keeps the working directory off
-        # `sys.path`, so whatever this check process imported, it was not this checkout. Whether
-        # the project is importable at all from there depends on the machine — an installed copy
-        # in site-packages is exactly the case CI runs — so the assertion is about the candidate
+        # The suite lives outside the candidate and the candidate carries no project package of its
+        # own, so whatever this check process imported, it was not this checkout. Whether the
+        # project is importable at all from there depends on the machine — an installed copy in
+        # site-packages is exactly the case CI runs — so the assertion is about the candidate
         # boundary, which is the invariant, and not about that machine's site configuration.
+        # (The candidate's own import roots now come first, so a candidate that *had* the package
+        # would import it; the package's absence is what keeps this case reachable at all.)
+        elsewhere = self._init_workspace(Path(self.tmpdir.name) / "no-package", project_package="")
         (self.scripts / "crashsuite.py").write_text("raise SystemExit(4)\n", encoding="utf-8")
         suite = CheckSpec.for_module("crashsuite")
         env = {
@@ -856,14 +885,14 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
             "PYTHONPATH": str(self.scripts),
         }
 
-        _, receipt = self._run(suite, env=env)
+        _, receipt = run_broad_check(suite, root=elsewhere, stream=self.stream, env=env)
 
         self.assertEqual(receipt["exit_code"], 4)
         provenance = receipt["project_provenance"]
         self.assertEqual(provenance["origin"], "check-process")
-        self.assertNotIn(str(self.root.resolve()), provenance["imported_project"])
+        self.assertNotIn(str(elsewhere.resolve()), provenance["imported_project"])
         self.assertFalse(provenance["inside_workspace"])
-        lookup = usable_receipt(self.root, suite)
+        lookup = usable_receipt(elsewhere, suite)
         self.assertFalse(lookup.usable)
         self.assertIsNone(lookup.authorized())
 
@@ -916,21 +945,28 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
         """No route may authorize reuse the other would refuse: `check show` and `--reuse` read
         one predicate, so their verdicts cannot drift apart."""
         outside = self._outside_project()
+        # The out-of-candidate case needs a candidate with no project package of its own: the
+        # wrapper prepends the candidate's import roots (issue:8b39e60e4df361c6138e), so a
+        # candidate carrying the package imports it whatever else the environment offers.
+        elsewhere = self._init_workspace(Path(self.tmpdir.name) / "no-package", project_package="")
         cases = {
-            "inside": (self._suite("insidesuite", "print('in')\n"), None),
+            "inside": (self.root, self._suite("insidesuite", "print('in')\n"), None),
             "outside": (
-                self._suite("outsidecase", "print('out')\n"),
+                elsewhere,
+                self._suite("outsidecase", "import secretary\nprint('out')\n", root=elsewhere),
                 dict(
-                    os.environ, PYTHONSAFEPATH="1", PYTHONPATH=os.pathsep.join([str(outside), str(self.root)])
+                    os.environ,
+                    PYTHONSAFEPATH="1",
+                    PYTHONPATH=os.pathsep.join([str(outside), str(elsewhere)]),
                 ),
             ),
-            "shell": (CheckSpec.for_shell("echo shell"), None),
+            "shell": (self.root, CheckSpec.for_shell("echo shell"), None),
         }
-        for name, (spec, env) in cases.items():
+        for name, (root, spec, env) in cases.items():
             with self.subTest(case=name):
-                self._run(spec, **({"env": env} if env else {}))
-                lookup = usable_receipt(self.root, spec)
-                argv = ["check", "broad", "--root", str(self.root), "--reuse"]
+                run_broad_check(spec, root=root, stream=self.stream, **({"env": env} if env else {}))
+                lookup = usable_receipt(root, spec)
+                argv = ["check", "broad", "--root", str(root), "--reuse"]
                 argv += ["--module", spec.module] if spec.shape == "module" else ["--command", spec.command]
                 stdout = StringIO()
                 with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", StringIO()):
@@ -939,6 +975,107 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
 
                 self.assertEqual(reused, lookup.usable, f"{name}: --reuse and the predicate disagree")
                 self.assertEqual(lookup.usable, lookup.authorized() is not None)
+                if name == "outside":
+                    self.assertFalse(lookup.usable, "the outside case must still be refused")
+                    self.assertIn("outside this candidate workspace", lookup.reason)
+
+
+class CandidateImportPrecedenceTests(BroadCheckTestCase):
+    """issue:8b39e60e4df361c6138e: the standard shape must import the candidate, by construction.
+
+    This reproduces the live shape exactly, because nothing weaker reproduced the defect. A head's
+    shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src` (`triggered_agents/runtime/launch_prefix.py`)
+    and every worktree runs on one shared venv that holds an editable install of the production
+    checkout, so a src-layout candidate -- which has nothing importable at its own root -- was
+    checked by a process that imported *production* sources and ran the candidate's test files
+    against them. It printed OK and exited 0. `candidate_import_refusal()` then honestly refused
+    the receipt, so `--reuse` was dead for this project and every round paid for the whole suite
+    again: the wrapper attested the wrong tree and the worker got no reuse out of it either.
+
+    The bootstrap used to import the configured package first and only afterwards *append* the
+    workspace root to `sys.path` -- an append, of a root that a src-layout project has nothing
+    under, after the import had already bound the module. Now the candidate's import roots go to
+    the front, before the import.
+    """
+
+    def _src_layout_checkout(self, path: Path, name: str) -> Path:
+        """A src-layout checkout of "the project": nothing importable at its root."""
+        (path / "src" / "secretary").mkdir(parents=True)
+        (path / "src" / "secretary" / "__init__.py").write_text(f"NAME = {name!r}\n", encoding="utf-8")
+        return path
+
+    def test_the_live_head_shape_checks_the_candidate_and_not_the_production_checkout(self) -> None:
+        production = self._src_layout_checkout(Path(self.tmpdir.name) / "production", "production")
+        candidate = self._init_workspace(Path(self.tmpdir.name) / "candidate", project_package="")
+        self._src_layout_checkout(candidate, "candidate")
+        # The log lives outside the candidate: writing into the checkout would change the very
+        # content identity the receipt is about, and reuse would be refused for that instead.
+        log = self.scripts / "runs.log"
+        suite = self._suite(
+            "livesuite",
+            "import secretary\n"
+            f"open({str(log)!r}, 'a', encoding='utf-8').write(secretary.__file__ + '\\n')\n"
+            "print(secretary.NAME)\n",
+            root=candidate,
+        )
+        _git(candidate, "add", "-A")
+        _git(candidate, "commit", "-q", "-m", "a src-layout candidate")
+        # Exactly what a head hands to the check: the control plane's own sources on PYTHONPATH.
+        env = dict(os.environ, PYTHONPATH=str(production / "src"))
+
+        exit_code, receipt = run_broad_check(suite, root=candidate, stream=self.stream, env=env)
+
+        provenance = receipt["project_provenance"]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(receipt["tail"].strip(), "candidate")
+        self.assertEqual(
+            provenance["imported_project"],
+            str((candidate / "src" / "secretary" / "__init__.py").resolve()),
+        )
+        self.assertTrue(provenance["inside_workspace"])
+        self.assertEqual(
+            provenance["import_roots"],
+            [str(candidate.resolve()), str((candidate / "src").resolve())],
+        )
+        # The receipt therefore attests this checkout, and reuse is alive again.
+        lookup = usable_receipt(candidate, suite)
+        self.assertTrue(lookup.usable, lookup.reason)
+        self.assertIsNotNone(lookup.authorized())
+
+        reused = _run_main(["check", "broad", "--root", str(candidate), "--reuse", "--module", "livesuite"])
+        self.assertTrue(reused["reused"])
+        self.assertEqual(
+            log.read_text(encoding="utf-8").splitlines(),
+            [str((candidate / "src" / "secretary" / "__init__.py").resolve())],
+            "the suite must have run exactly once: the second call reused the receipt",
+        )
+
+    def test_the_recorded_roots_are_the_candidate_s_own_root_and_src(self) -> None:
+        """The argv slot and the receipt field say the same thing, and neither is a workspace path
+        dressed up as evidence: `inside_workspace` is still computed from the observed import."""
+        spec = self._suite("rootsuite", "print('ran')\n")
+
+        _, receipt = self._run(spec)
+
+        self.assertEqual(
+            receipt["argv"][6],
+            "<candidate import roots>",
+            "the displayed argv must keep the same shape as the real one",
+        )
+        self.assertEqual(
+            receipt["project_provenance"]["import_roots"],
+            broad_check.candidate_import_roots(self.root),
+        )
+        self.assertEqual(
+            broad_check.candidate_import_roots(self.root),
+            [str(self.root.resolve()), str((self.root / "src").resolve())],
+        )
+
+    def test_a_shell_check_records_no_import_roots_at_all(self) -> None:
+        _, receipt = self._run("echo shell")
+
+        self.assertEqual(receipt["project_provenance"]["import_roots"], [])
+        self.assertEqual(receipt["project_provenance"]["origin"], "unobservable")
 
 
 class RegisteredProjectContractTests(BroadCheckTestCase):
@@ -1184,8 +1321,16 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         self.assertFalse(broad_check.receipt_dir(self.root).exists())
 
     def test_installed_copy_inside_configured_venv_is_not_candidate_provenance(self) -> None:
-        # A src-layout project has no top-level package directory for cwd to win. Its configured
-        # venv may import an installed copy under the candidate, which must not become reusable.
+        # A candidate whose sources sit at neither of its import roots -- here a `lib/` layout --
+        # has nothing for the wrapper's prepended roots to find, so its configured venv imports an
+        # installed copy that happens to live under the candidate. That must not become reusable:
+        # an import out of the interpreter environment attests the environment, not this checkout.
+        #
+        # The fixture used to put the package in `src/` and prove the same thing about a src-layout
+        # project. Since issue:8b39e60e4df361c6138e that shape cannot arise: `src/` is one of the
+        # candidate import roots the wrapper prepends, so a src-layout candidate imports itself and
+        # the installed copy never wins. The invariant under test is unchanged; only the layout
+        # that can still reach it is.
         (self.root / ".gitignore").write_text(
             (self.root / ".gitignore").read_text(encoding="utf-8") + ".venv/\n",
             encoding="utf-8",
@@ -1202,9 +1347,9 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         package = site_packages / "codegen_orchestrator"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("NAME = 'installed'\n", encoding="utf-8")
-        (self.root / "src").mkdir()
-        (self.root / "src" / "codegen_orchestrator").mkdir()
-        (self.root / "src" / "codegen_orchestrator" / "__init__.py").write_text(
+        (self.root / "lib").mkdir()
+        (self.root / "lib" / "codegen_orchestrator").mkdir()
+        (self.root / "lib" / "codegen_orchestrator" / "__init__.py").write_text(
             "NAME = 'candidate'\n", encoding="utf-8"
         )
         (self.root / "installed_suite.py").write_text(
@@ -1215,9 +1360,9 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         )
 
         # This is how the supported source-checkout invocation reaches the wrapper.  Without an
-        # environment boundary, the child reinterprets its inherited relative `src` entry from
+        # environment boundary, the child reinterprets its inherited relative `lib` entry from
         # this fixture's cwd and imports the candidate instead of the configured installed copy.
-        _, receipt = self._run(spec, env={**os.environ, "PYTHONPATH": "src"})
+        _, receipt = self._run(spec, env={**os.environ, "PYTHONPATH": "lib"})
 
         provenance = receipt["project_provenance"]
         self.assertEqual(provenance["environment_prefix"], str(venv))
