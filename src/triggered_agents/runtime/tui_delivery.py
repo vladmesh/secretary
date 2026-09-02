@@ -348,16 +348,18 @@ class DeliveryEvidence:
 
     @property
     def receipt(self) -> str:
-        """Whether the composer accepted the pointer, as `delivery_receipt_state` answers it."""
-        return delivery_receipt_state(self.to_json_fields())
+        """Whether the composer accepted the pointer, as `delivery_receipt_state` answers it.
 
-    def to_json_fields(self) -> dict[str, Any]:
-        """The stored fields alone, for the derivation that `to_json` then publishes."""
-        return {
-            "stage": self.stage,
-            "payload_left_in_composer": self.payload_left_in_composer,
-            "turn_confirmed": self.turn_confirmed,
-        }
+        The three stored fields are handed over rather than `self`, because `to_json` publishes
+        this derivation and asking it for the whole record here would be a cycle.
+        """
+        return delivery_receipt_state(
+            {
+                "stage": self.stage,
+                "payload_left_in_composer": self.payload_left_in_composer,
+                "turn_confirmed": self.turn_confirmed,
+            }
+        )
 
     @classmethod
     def from_json(cls, payload: Any) -> DeliveryEvidence:
@@ -1125,11 +1127,9 @@ def _failure_reason(evidence: DeliveryEvidence) -> str:
     """Name the stage the delivery stopped at, in the words the telemetry keeps."""
     if evidence.payload_left_in_composer:
         return "payload-left-in-composer"
-    if evidence.pre_delivery_after in PRE_DELIVERY_DIALOGS or evidence.pre_delivery_after == (
-        PRE_DELIVERY_STARTING
-    ):
-        # The pane fell back into a pre-delivery state after the send; naming the stage would hide
-        # the state that is actually holding the prompt.
+    if evidence.pre_delivery_after:
+        # The pane fell into a pre-delivery state after the send; naming the stage would hide the
+        # state that is actually holding the prompt.
         return f"pre-delivery-{evidence.pre_delivery_after}"
     if evidence.stage == STAGE_TURN_OBSERVED:
         return "turn-observed-but-unconfirmed"

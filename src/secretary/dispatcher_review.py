@@ -24,7 +24,6 @@ from secretary.dispatcher_launch import (
     forget_role_head,
     launch_aborted,
     launch_deferred,
-    launch_delivery_receipt,
     launch_intent_unwritable,
     launch_left_a_head,
     mark_launch_aborted,
