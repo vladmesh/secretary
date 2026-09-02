@@ -250,6 +250,21 @@ none of those, so the pull request is closed and reopened on the same head commi
 event the project's own CI answers. A backend that refuses either half is a determinate gate
 failure and says which half it refused.
 
+Retargeting is deliberately **not** bounded by the authorship record that bounds the description,
+and the asymmetry is worth stating because closing somebody's pull request is a heavier outward act
+than editing prose. Two different things are being protected. The description rule protects a
+person's *words*, which the gate can only claim when it can show it wrote them; there is no way to
+read authorship out of a body, so the safe answer is to leave it alone. The base protects the
+delivery topology of a branch the dispatcher owns outright: `pipeline/<ref>` is the namespace the
+dispatcher publishes into and nothing else may write to, a pull request from that head is a release
+pull request for that card by construction, and one pointing somewhere the project's CI cannot run
+is a card that will sit until a human notices — the failure this whole section exists to prevent. A
+gate that refused to repair it because it could not prove it opened it would reproduce the incident
+whenever the record was lost to a restore or a re-adoption. The scope is narrow on purpose: only the
+base is touched, only for a head in the dispatcher's own namespace, only when the base is not the
+card's integration base, and the pull request is left open at the end. A person's title and body are
+never rewritten by this path.
+
 What bounds that is the dispatcher's own record, never the pull request's text. When the gate
 opens or edits a pull request and the backend accepts the write, it records on the card's
 dispatcher record which pull request it wrote and a digest of the exact title and body it sent.

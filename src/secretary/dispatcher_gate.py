@@ -1235,6 +1235,15 @@ def _retarget_pr(host, workspace: str, number: int, observed: str, base: str) ->
     `reopened` on the same head commit, which is what makes the project's own CI run against the
     exact candidate. Both halves are refusals when the backend rejects them: a pull request left
     closed, or left on the wrong base, is a determinate gate failure and says so.
+
+    Deliberately not bounded by `_gate_owns_pr`, which one call later refuses to rewrite the prose of
+    a pull request the gate has no record of writing. That rule protects a person's words, which
+    cannot be read out of a body and so are left alone by default. This one protects the delivery
+    topology of `pipeline/<ref>` — a branch the dispatcher publishes into and nothing else writes to
+    — where a pull request is a release pull request for that card by construction, and a gate that
+    refused to repair the base because its record was lost to a restore would reproduce the very
+    incident this exists to prevent. Only the base is touched, only for that namespace, only when it
+    is wrong, and the pull request is left open. `docs/PROTOCOLS.md` carries the same argument.
     """
     if observed == base:
         return

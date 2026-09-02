@@ -304,8 +304,10 @@ def _gated_workspace(root: Path, base: str, branch: str, *, workflow: str) -> Pa
 
 
 class _Catalog:
-    def __init__(self, adapter: dict) -> None:
+    def __init__(self, adapter: dict, *, repo: Path | None = None) -> None:
         self._adapter = adapter
+        self._repo = repo
+        self.instance_dir = Path("/nonexistent-instance")
 
     def adapter(self, project: str) -> dict:
         return self._adapter
@@ -323,7 +325,8 @@ class _Catalog:
         )
 
     def binding(self, project: str) -> dict:
-        return {"repo": f"/home/dev/{project}", "default_branch": "main"}
+        repo = str(self._repo) if self._repo is not None else f"/home/dev/{project}"
+        return {"repo": repo, "default_branch": "main"}
 
 
 class _GateHost(CommandHostRuntime):
@@ -403,7 +406,7 @@ class GateTopologyTests(unittest.TestCase):
 
     def test_a_seeded_successor_opens_its_pr_into_the_default_branch(self) -> None:
         """The successor inherits the predecessor's content, and lands on `main` all the same."""
-        host = _GateHost(self.root, check_runs={"check_runs": []})
+        host = _GateHost(self.root, check_runs=[])
         task = self._task(
             {
                 "seed_ref": "pipeline/codegen-orchestrator-1235",
@@ -420,7 +423,7 @@ class GateTopologyTests(unittest.TestCase):
         self.assertEqual(result.status, "pending")
 
     def test_an_ordinary_card_opens_the_same_pull_request_it_always_did(self) -> None:
-        host = _GateHost(self.root, check_runs={"check_runs": []})
+        host = _GateHost(self.root, check_runs=[])
 
         gate_check(host, self._task({}), self._record())
 
@@ -431,9 +434,7 @@ class GateTopologyTests(unittest.TestCase):
 
     def test_a_pull_request_on_a_card_branch_is_retargeted_and_made_to_run(self) -> None:
         """The repair the PO did by hand: base to `main`, CI on the same candidate, no rework."""
-        host = _GateHost(
-            self.root, pr_base="pipeline/codegen-orchestrator-1235", check_runs={"check_runs": []}
-        )
+        host = _GateHost(self.root, pr_base="pipeline/codegen-orchestrator-1235", check_runs=[])
 
         result = gate_check(host, self._task({}), self._record())
 
@@ -454,7 +455,7 @@ class GateTopologyTests(unittest.TestCase):
             "pipeline/codegen-orchestrator-1197",
             workflow="name: CI\non:\n  pull_request:\n    branches: [develop]\njobs: {}\n",
         )
-        host = _GateHost(self.root, check_runs={"check_runs": []})
+        host = _GateHost(self.root, check_runs=[])
         record = SimpleNamespace(workspace=str(workspace), gate_pr_authorship={})
 
         result = gate_check(
@@ -526,6 +527,265 @@ class MergeBaseTests(unittest.TestCase):
             host.complete_green(self.task, self.record)
 
         self.assertEqual([run for run in host.runs if run[:3] == ["gh", "pr", "merge"]], [])
+
+
+class _SeedRepo:
+    """A bare `origin` with `main` and a predecessor card branch, plus the project checkout."""
+
+    def __init__(self, root: Path) -> None:
+        self.remote = root / "origin.git"
+        self.repo = root / "project"
+        author = root / "author"
+        git(root, "init", "--quiet", "--bare", "--initial-branch", "main", str(self.remote))
+        git(root, "clone", "--quiet", str(self.remote), str(author))
+        git(author, "config", "user.name", "Test User")
+        git(author, "config", "user.email", "test@example.invalid")
+        (author / "README.md").write_text("seed\n", encoding="utf-8")
+        git(author, "add", "-A")
+        git(author, "commit", "--quiet", "-m", "seed")
+        git(author, "push", "--quiet", "origin", "main")
+        self.main_sha = git(author, "rev-parse", "HEAD")
+        # The project checkout the dispatcher cuts worktrees from, cloned before the predecessor
+        # published anything: a seed genuinely has to be fetched rather than found sitting there.
+        git(root, "clone", "--quiet", str(self.remote), str(self.repo))
+        git(self.repo, "config", "user.name", "Test User")
+        git(self.repo, "config", "user.email", "test@example.invalid")
+        # The predecessor's candidate: published on its card branch, never merged to main.
+        git(author, "checkout", "--quiet", "-b", "pipeline/codegen-orchestrator-1235")
+        (author / "predecessor.txt").write_text("unreleased content\n", encoding="utf-8")
+        git(author, "add", "-A")
+        git(author, "commit", "--quiet", "-m", "predecessor candidate")
+        git(author, "push", "--quiet", "origin", "pipeline/codegen-orchestrator-1235")
+        self.candidate_sha = git(author, "rev-parse", "HEAD")
+
+
+class SeedFetchTests(unittest.TestCase):
+    """`_fetch_seed`: what is fetched, what the worktree is cut at, and what is refused."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.fixture = _SeedRepo(self.root)
+        self.host = CommandHostRuntime(_Catalog({}), self.root, mode="real")  # type: ignore[arg-type]
+
+    def _resolves(self, ref: str) -> str:
+        return git(self.fixture.repo, "rev-parse", f"{ref}^{{commit}}")
+
+    def test_a_branch_seed_is_fetched_by_name_and_cut_at_its_tracking_ref(self) -> None:
+        start = self.host._fetch_seed(self.fixture.repo, "pipeline/codegen-orchestrator-1235")
+
+        self.assertEqual(start, "origin/pipeline/codegen-orchestrator-1235")
+        self.assertEqual(self._resolves(start), self.fixture.candidate_sha)
+
+    def test_an_object_id_seed_is_cut_at_the_object_itself(self) -> None:
+        """A remote will not serve an object id by name, so the whole remote is fetched instead."""
+        start = self.host._fetch_seed(self.fixture.repo, self.fixture.candidate_sha)
+
+        self.assertEqual(start, self.fixture.candidate_sha)
+        self.assertEqual(self._resolves(start), self.fixture.candidate_sha)
+
+    def test_a_seed_object_the_remote_does_not_carry_is_this_cards_own_contract(self) -> None:
+        """Not a host that failed: the predecessor candidate this card inherits is not there."""
+        absent = "0" * 39 + "1"
+
+        with self.assertRaises(HostError) as refused:
+            self.host._fetch_seed(self.fixture.repo, absent)
+
+        self.assertEqual(getattr(refused.exception, "bring_up_cause", ""), CAUSE_BASE_BRANCH_CONTRACT)
+        self.assertIn(absent[:12], str(refused.exception))
+        self.assertIn("never published", str(refused.exception))
+
+    def test_a_branch_seed_the_remote_does_not_carry_is_a_determinate_git_refusal(self) -> None:
+        with self.assertRaises(HostError) as refused:
+            self.host._fetch_seed(self.fixture.repo, "pipeline/never-existed")
+
+        self.assertIn("git fetch", str(refused.exception))
+
+
+class _WorktreeHost(CommandHostRuntime):
+    """`_create_workspace` end to end, with Orca's three JSON calls served by real `git worktree`.
+
+    Only the worktree manager is stood in for; the fetch, the start point and the checkout are real,
+    which is the whole point — this is the test that says a successor's workspace really does carry
+    the predecessor's content.
+    """
+
+    def __init__(self, catalog, root: Path, repo: Path) -> None:
+        super().__init__(catalog, root, mode="real")  # type: ignore[arg-type]
+        self._root = root
+        self._repo = repo
+        self._worktrees: dict[str, str] = {}
+        self.start_points: list[str] = []
+
+    def _run_json(self, args, label: str = "") -> dict:  # type: ignore[override]
+        if args[:3] == ["orca", "repo", "list"]:
+            return {"repos": [{"id": "repo-1", "path": str(self._repo)}]}
+        if args[:3] == ["orca", "worktree", "create"]:
+            name = args[args.index("--name") + 1]
+            start = args[args.index("--base-branch") + 1]
+            self.start_points.append(start)
+            path = self._root / "worktrees" / name
+            # `-b` is what Orca does: a named branch at the start point, whether that start point is
+            # a remote-tracking ref or a raw object id — the latter cuts a branch, not a detached HEAD.
+            git(self._repo, "worktree", "add", "--quiet", "-b", f"work/{name}", str(path), start)
+            self._worktrees[str(path)] = name
+            return {"worktree": {"path": str(path)}}
+        if args[:3] == ["orca", "worktree", "show"]:
+            path = args[args.index("--worktree") + 1].removeprefix("path:")
+            return {"worktree": {"repoId": "repo-1", "displayName": self._worktrees.get(path, "")}}
+        raise AssertionError(f"unexpected orca call: {args}")
+
+
+class SeededWorkspaceTests(unittest.TestCase):
+    """The card's central new mechanism: a successor's checkout carries its predecessor's content."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.fixture = _SeedRepo(self.root)
+        self.catalog = _Catalog({}, repo=self.fixture.repo)
+        self.host = _WorktreeHost(self.catalog, self.root, self.fixture.repo)
+
+    def _cut(self, task: dict, worker_id: str) -> Path:
+        """Exactly what `prepare_worker` does: seed for the checkout, base for everything else."""
+        seed = self.catalog.workspace_seed("secretary", task)
+        return Path(self.host._create_workspace("secretary", worker_id, seed))
+
+    def test_a_successor_is_cut_from_the_predecessor_candidate_and_still_integrates_into_main(self) -> None:
+        task = {
+            "ref": "codegen-orchestrator-1236",
+            "project": "secretary",
+            "workspace": {
+                "seed_ref": self.fixture.candidate_sha,
+                "supersedes": "codegen-orchestrator-1235",
+            },
+        }
+
+        workspace = self._cut(task, "codegen-orchestrator-1236-successor")
+
+        # The content is genuinely there: the predecessor's unreleased file, at its exact commit.
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), self.fixture.candidate_sha)
+        self.assertEqual((workspace / "predecessor.txt").read_text(encoding="utf-8"), "unreleased content\n")
+        self.assertEqual(self.host.start_points, [self.fixture.candidate_sha])
+        # An object id start point still leaves the worktree on a branch, not a detached HEAD.
+        self.assertEqual(
+            git(workspace, "rev-parse", "--abbrev-ref", "HEAD"),
+            "work/codegen-orchestrator-1236-successor",
+        )
+        # And nothing about the seed moved where the increment lands.
+        self.assertEqual(
+            self.catalog.integration_base("secretary", task["workspace"].get("base_branch")), "main"
+        )
+
+    def test_a_branch_seed_cuts_the_same_content_through_its_tracking_ref(self) -> None:
+        task = {
+            "ref": "codegen-orchestrator-1236",
+            "project": "secretary",
+            "workspace": {
+                "seed_ref": "pipeline/codegen-orchestrator-1235",
+                "supersedes": "codegen-orchestrator-1235",
+            },
+        }
+
+        workspace = self._cut(task, "codegen-orchestrator-1236-branch-seed")
+
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), self.fixture.candidate_sha)
+        self.assertEqual(self.host.start_points, ["origin/pipeline/codegen-orchestrator-1235"])
+
+    def test_an_ordinary_card_is_still_cut_from_its_integration_base(self) -> None:
+        """No seed, no change: the checkout starts where every card's checkout always started."""
+        task = {"ref": "secretary-1", "project": "secretary", "workspace": {}}
+
+        workspace = self._cut(task, "secretary-1-ordinary")
+
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), self.fixture.main_sha)
+        self.assertEqual(self.host.start_points, ["origin/main"])
+        self.assertFalse((workspace / "predecessor.txt").exists())
+
+
+class _PushCatalog:
+    """A non-GitHub project whose repo is not the instance repo: `complete_green`'s plain path."""
+
+    def __init__(self, *, integration_bases: list[str] | None = None) -> None:
+        self.instance_dir = Path("/nonexistent-instance")
+        self._integration_bases = list(integration_bases or [])
+
+    def adapter(self, project: str) -> dict:
+        return {"validation": {"ci": "local", "command": "true"}}
+
+    def binding(self, project: str) -> dict:
+        return {"repo": f"/nonexistent-projects/{project}", "default_branch": "main"}
+
+    def project_default_branch(self, project: str) -> str:
+        return "main"
+
+    def integration_base(self, project: str, override: str | None) -> str:
+        return resolve_integration_base(
+            default_branch="main", declared=self._integration_bases, override=override
+        )
+
+    def workspace_seed(self, project: str, task: dict) -> str:
+        workspace = task.get("workspace") or {}
+        return str(workspace.get("seed_ref") or "") or self.integration_base(
+            project, workspace.get("base_branch")
+        )
+
+
+class _PushHost(CommandHostRuntime):
+    def __init__(self, catalog, root: Path) -> None:
+        super().__init__(catalog, root, mode="real")  # type: ignore[arg-type]
+        self.runs: list[list[str]] = []
+
+    def _run(self, args, label, *, cwd=None):  # type: ignore[override]
+        self.runs.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+class NonGithubPublishTests(unittest.TestCase):
+    """The publish path that is not a pull request lands on the card's integration base too.
+
+    It hard-coded `main` while everything around it honoured the base. That was unreachable for any
+    sanctioned configuration until `integration_bases` made a non-default base sanctionable, which
+    is exactly the kind of latent line a change like this one wakes up.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.record = SimpleNamespace(workspace=str(self.root / "ws"))
+
+    def _publish(self, catalog, workspace: dict) -> list[str]:
+        host = _PushHost(catalog, self.root)
+        host.complete_green(
+            {"ref": "secretary-770", "project": "secretary", "workspace": workspace}, self.record
+        )
+        return [" ".join(run) for run in host.runs]
+
+    def test_an_ordinary_card_still_publishes_onto_the_default_branch(self) -> None:
+        commands = self._publish(_PushCatalog(), {})
+
+        self.assertTrue(
+            any(command.endswith("push origin pipeline/secretary-770:main") for command in commands), commands
+        )
+        self.assertTrue(
+            any(command.endswith("merge --ff-only origin/main") for command in commands), commands
+        )
+
+    def test_a_declared_integration_base_is_published_onto_and_never_main(self) -> None:
+        commands = self._publish(_PushCatalog(integration_bases=["develop"]), {"base_branch": "develop"})
+
+        self.assertTrue(
+            any(command.endswith("push origin pipeline/secretary-770:develop") for command in commands),
+            commands,
+        )
+        self.assertTrue(
+            any(command.endswith("merge --ff-only origin/develop") for command in commands), commands
+        )
+        self.assertFalse(any(command.endswith(":main") for command in commands), commands)
+        self.assertFalse(any("origin/main" in command for command in commands), commands)
 
 
 class TopologyRedRoutingTests(DispatcherRuntimeFixture, unittest.TestCase):

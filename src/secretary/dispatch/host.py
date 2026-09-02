@@ -1944,11 +1944,17 @@ class CommandHostRuntime:
         if _same_repo(repo, Path(self.catalog.instance_dir)):
             self._complete_green_instance_repo(record, branch, base, repo)
             return
-        # Publish as main (a non-fast-forward push is rejected, never force-landed), then fast-forward
-        # the checkout: that is how a merged self-modification reaches the next oneshot tick.
-        self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:main"], "merge push")
-        self._run(["git", "-C", str(repo), "fetch", "origin", "main"], "post-merge fetch")
-        self._run(["git", "-C", str(repo), "merge", "--ff-only", "origin/main"], "post-merge fast-forward")
+        # Publish onto the card's integration base (a non-fast-forward push is rejected, never
+        # force-landed), then fast-forward the checkout: that is how a merged self-modification
+        # reaches the next oneshot tick. The base is read from the card rather than hard-coded to
+        # `main`: `integration_bases` makes a non-default base sanctioned for the first time
+        # (secretary-1541), and pushing a card that declared one onto `main` anyway would land an
+        # increment on a branch it was never validated against.
+        self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:{base}"], "merge push")
+        self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
+        self._run(
+            ["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward"
+        )
 
     def _no_diff_research_delivery_is_complete(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         """Whether a dispatcher-dispatched research candidate has no delivery effect left.
