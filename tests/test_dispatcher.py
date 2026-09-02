@@ -1475,7 +1475,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             reference="secretary-510-pilot",
             kind="red",
             body="fix the outage regression",
-            request_id="production-review-red",
+            request_id=self._review_verdict_request_id("red"),
         )
         self.assertEqual(self.runtime.production_tick()["actions"][0]["to"], "assessment")
         self._decide("rework", request_id="production-decision-rework")
@@ -3339,7 +3339,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             reference=CARD_REF,
             kind="green",
             body="independent green review",
-            request_id="opaque-review-verdict",
+            request_id=self._review_verdict_request_id("green"),
         )
         self.assertEqual(self.tick()["to"], "assessment")
         self._decide("release", request_id="opaque-release-decision")

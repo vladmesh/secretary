@@ -211,7 +211,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             reference=CARD_REF,
             kind="green",
             body="green",
-            request_id="outcome-no-observer-green",
+            request_id=self._review_verdict_request_id("green"),
         )
 
         released = self.tick()
@@ -346,7 +346,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             reference=CARD_REF,
             kind="green",
             body="looks good",
-            request_id="outcome-review-green",
+            request_id=self._review_verdict_request_id("green"),
         )
 
         self._park_and_decide("release")
@@ -361,6 +361,102 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         data = outcomes[0].event.data
         self.assertTrue(all(data["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect")))
         self.assertTrue(data["lineage_required"]["specification_revision"])
+
+    def test_second_reviewed_red_round_freezes_its_own_exact_sources(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()
+        self._review_red()
+        self._park_and_decide("rework", request_id="first-round-decision")
+
+        self.host.commit = "second-round-c0ffee"
+        self._report_done("second round done")
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()
+        self._review_red()
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("rework", request_id="second-round-decision")
+        with mock.patch.object(
+            self.writer,
+            "attempt_outcome",
+            side_effect=TaskError("audit_pending", "append interrupted", 4),
+        ):
+            self.assertEqual(self.tick()["action"], "rework-started")
+        self.assertEqual(len(self._outcomes()), 1)
+        self.assertEqual(self.runtime.publish_pending_attempt_outcomes(), [])
+
+        outcomes = self._outcomes()
+        self.assertEqual(len(outcomes), 2)
+        first, second = (occurrence.event.data for occurrence in outcomes)
+        self.assertNotEqual(first["source_event_ids"]["verdict"], second["source_event_ids"]["verdict"])
+        self.assertNotEqual(first["source_event_ids"]["decision"], second["source_event_ids"]["decision"])
+        self.assertTrue(all(second["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect")))
+
+    def test_divergent_specification_boundary_is_an_incomplete_outcome_not_a_permanent_debt(self) -> None:
+        self._start_worker_round()
+        self.board.tasks[0]["description"] = "edited outside audited task operations"
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference=CARD_REF,
+            kind="blocked",
+            classification="external_fact",
+            body="worker cannot proceed",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+
+        self.tick()
+
+        outcome = self._outcomes()[0].event.data
+        self.assertIsNone(outcome["specification_revision"])
+        self.assertIsNotNone(outcome["source_event_ids"]["report"])
+        self.assertTrue(outcome["lineage_required"]["specification_revision"])
+
+    def test_pre_v2_report_is_an_honestly_absent_upgrade_window_source(self) -> None:
+        self._start_worker_round()
+        report_id = self._worker_report_request_id("blocked", "external_fact")
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference=CARD_REF,
+            kind="blocked",
+            classification="external_fact",
+            body="worker cannot proceed",
+            request_id=report_id,
+        )
+        canon = self.writer.board_host.canon
+        original = canon.committed
+        current = original(report_id)
+        assert current is not None
+        legacy = Event(
+            event_id=current.event_id,
+            kind=current.kind,
+            entity_kind=current.entity_kind,
+            ref=current.ref,
+            actor=current.actor,
+            reason=current.reason,
+            occurred_at=current.occurred_at,
+            data={key: value for key, value in current.data.items() if key != "specification_revision"},
+        )
+        with (
+            mock.patch.object(
+                canon,
+                "committed",
+                side_effect=lambda request_id: legacy if request_id == report_id else original(request_id),
+            ),
+            mock.patch.object(
+                self.writer,
+                "attempt_outcome",
+                side_effect=TaskError("audit_pending", "append interrupted", 4),
+            ),
+        ):
+            self.tick()
+        self.assertEqual(self._outcomes(), ())
+        self.assertEqual(self.runtime.publish_pending_attempt_outcomes(), [])
+
+        outcome = self._outcomes()[0].event.data
+        self.assertIsNone(outcome["source_event_ids"]["report"])
+        self.assertFalse(outcome["lineage_required"]["report"])
 
     def test_append_failure_after_a_terminal_effect_is_recovered_without_lifecycle_work(self) -> None:
         """The outcome journal is weaker than the transition it observes."""

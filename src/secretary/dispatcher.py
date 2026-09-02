@@ -367,6 +367,7 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
+    assessment_resolution,
     specification_revision,
     standing_decision,
 )
@@ -5864,6 +5865,7 @@ class DispatcherRuntime:
             verdict=verdict,
             decision=decision,
             report_ids=_round_report_ids(record.workspace, attempt_id, reference, generation),
+            review_baseline=record.review_baseline,
             reviewed=reviewed,
         )
         completeness: dict[str, str] = {}
@@ -5874,18 +5876,23 @@ class DispatcherRuntime:
                 continue
             source[f"{role}_usage"] = usage.event_id
             completeness[role] = "collected" if usage.data.get("outcome") == "collected" else "degraded"
-        report_consumed = verdict in {"green", "red"} or bool(decision) or source["report"] is not None
-        if diagnostic.endswith("_report"):
-            report_consumed = True
+        # A terminal infrastructure or operator path may have a durable round
+        # but no worker report at all.  A report is a forward lineage fact only
+        # once this boundary found the round's exact committed marker.
+        report_consumed = source["report"] is not None
         required = {
             # These are path facts, not a retrospective judgement based on
             # whether a lookup happened to find a source.  A consumed worker
             # report, reviewer verdict, or observer decision must therefore
             # fail closed if its exact id was not frozen.
             "specification_revision": report_consumed,
-            "report": report_consumed,
-            "verdict": reviewed and verdict in {"green", "red"},
-            "decision": bool(decision),
+            # A marker written by the preceding release has no forward
+            # specification field.  It remains an honestly absent source
+            # during the upgrade window; it is not a reason to strand the
+            # already-authoritative lifecycle effect forever.
+            "report": report_consumed and source["report"] is not None,
+            "verdict": reviewed and verdict in {"green", "red"} and source["verdict"] is not None,
+            "decision": bool(decision) and source["decision"] is not None,
             "effect": True,
             "worker_usage": completeness["worker"] in {"collected", "degraded"},
             "review_usage": completeness["review"] in {"collected", "degraded"},
@@ -5918,13 +5925,16 @@ class DispatcherRuntime:
         verdict: str,
         decision: str,
         report_ids: set[str],
+        review_baseline: int,
         reviewed: bool,
     ) -> tuple[dict[str, str | None], str]:
-        """Select only a unique typed marker compatible with this frozen spec.
+        """Freeze exact, typed sources from the round that consumed them.
 
-        This runs while the dispatcher is accepting the terminal path.  A
-        repeated compatible marker is intentionally an ambiguity diagnostic,
-        not an append-order tie-breaker.  Recovery never calls it.
+        Request ids name worker and reviewer rounds.  The observer decision
+        names the Assessment visit it resolves.  Those authoritative
+        identities let this boundary reject a wrong source without scanning a
+        card's marker history, which is ambiguous after a second review under
+        the same specification.  Recovery never calls this method.
         """
         source: dict[str, str | None] = {
             "report": None,
@@ -5934,56 +5944,77 @@ class DispatcherRuntime:
             "worker_usage": None,
             "review_usage": None,
         }
-        events = tuple(self.writer.board_host.canon.events(ref=reference)) if self.writer.board_host.canon else ()
+        canon = self.writer.board_host.canon
 
-        def one(name: str, kind: str, marker: str, *, exact_ids: set[str] | None = None) -> str:
-            if exact_ids:
-                exact = [
-                    event
-                    for event in events
-                    if event.kind.value == kind
-                    and event.data.get("marker") == marker
-                    and event.data.get("specification_revision") == (revision or None)
-                    and any(
-                        self.writer.board_host.canon.committed(request_id) == event
-                        for request_id in exact_ids
-                    )
-                ]
-                if len(exact) == 1:
-                    source[name] = exact[0].event_id
-                    return ""
-                if len(exact) > 1:
-                    return f"attempt_outcome_lineage_ambiguous_{name}"
-            candidates = [
+        def one(
+            name: str,
+            kind: str,
+            marker: str,
+            *,
+            exact_ids: set[str],
+            assessment_visit: str = "",
+            allow_absent: bool = False,
+        ) -> str:
+            if canon is None:
+                return f"attempt_outcome_lineage_missing_{name}"
+            owned = [event for request_id in exact_ids if (event := canon.committed(request_id)) is not None]
+            exact = [
                 event
-                for event in events
-                if event.kind.value == kind
-                and event.data.get("marker") == marker
-                and event.data.get("specification_revision") == (revision or None)
+                for event in owned
+                if event.kind.value == kind and event.ref == reference and event.data.get("marker") == marker
             ]
-            incompatible = [
-                event
-                for event in events
-                if event.kind.value == kind and event.data.get("marker") == marker
-            ]
-            if len(candidates) == 1:
-                source[name] = candidates[0].event_id
-                return ""
-            if len(candidates) > 1:
+            if len(exact) > 1:
                 return f"attempt_outcome_lineage_ambiguous_{name}"
-            if incompatible:
+            if not exact:
+                return (
+                    f"attempt_outcome_lineage_incompatible_{name}"
+                    if owned
+                    else ""
+                    if allow_absent
+                    else f"attempt_outcome_lineage_missing_{name}"
+                )
+            event = exact[0]
+            data = event.data
+            # Pre-v2 markers did not bind a specification revision.  They are
+            # an upgrade-window absence, not an incompatible current marker.
+            if "specification_revision" not in data:
+                return ""
+            if data.get("specification_revision") != (revision or None):
                 return f"attempt_outcome_lineage_incompatible_{name}"
+            if assessment_visit and data.get("assessment_visit") != assessment_visit:
+                return f"attempt_outcome_lineage_incompatible_{name}"
+            source[name] = event.event_id
             return ""
 
         report_relevant = verdict in {"green", "red", "blocked"} or bool(decision)
         diagnostic = ""
         if report_relevant:
             report_marker = "report:blocked" if verdict == "blocked" else "report:done"
-            diagnostic = one("report", "card.reported", report_marker, exact_ids=report_ids)
+            diagnostic = one(
+                "report", "card.reported", report_marker, exact_ids=report_ids, allow_absent=True
+            )
         if reviewed and verdict in {"green", "red"} and not diagnostic:
-            diagnostic = one("verdict", "card.verdict", f"review:{verdict}")
+            diagnostic = one(
+                "verdict",
+                "card.verdict",
+                f"review:{verdict}",
+                exact_ids={
+                    _attempt_request_id(attempt_id, f"review-{verdict}", reference, str(review_baseline))
+                },
+            )
         if decision and not diagnostic:
-            diagnostic = one("decision", "card.decided", f"decision:{decision}")
+            visit, recorded = assessment_resolution(self.audit.events(reference))
+            request_id = str(recorded.get("request_id") or "") if isinstance(recorded, dict) else ""
+            if not request_id or not visit:
+                diagnostic = "attempt_outcome_lineage_missing_decision"
+            else:
+                diagnostic = one(
+                    "decision",
+                    "card.decided",
+                    f"decision:{decision}",
+                    exact_ids={request_id},
+                    assessment_visit=visit,
+                )
         return source, diagnostic
 
     def _outcome_usage_source(
@@ -6023,6 +6054,12 @@ class DispatcherRuntime:
                 raise ValueError("attempt_outcome_lineage_requiredness_missing")
             for name, required_now in required.items():
                 if not required_now:
+                    continue
+                # An unresolved legacy/divergent description boundary is a
+                # deliberately honest null.  Keep the row so the offline
+                # projection exposes that lineage gap; do not turn it into a
+                # permanently owed lifecycle observation.
+                if name == "specification_revision":
                     continue
                 value = (
                     obligation.get("specification_revision")
