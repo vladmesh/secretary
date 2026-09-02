@@ -3774,7 +3774,11 @@ class DispatcherRuntime:
             and self._is_stale_no_diff_research_gate_recovery(task, record, current_sha)
         )
         record.rejected_sha = current_sha
-        record.rejected_failure_class = "substantive"
+        # `publication` is carried through instead of flattened to `substantive`: the candidate was
+        # never offered to CI, and the record has to say so where a later tick reads the class.
+        record.rejected_failure_class = (
+            "publication" if result.failure_class == "publication" else "substantive"
+        )
         record.rejected_failure_reason = result.failure_reason
         if not preserve_stale_no_diff_retry:
             record.rejected_done_reports = 0
@@ -3785,10 +3789,19 @@ class DispatcherRuntime:
         fingerprint = result.fingerprint or _gate_fingerprint("fallback", log or detail)
         repeat = _gate_red_repeat_count(task, fingerprint)
         prefix = f"Repeat return (round {repeat + 1}, the reason has not changed). " if repeat else ""
-        body = (
-            f"{prefix}The mechanical validation gate is red: {detail}. The card is back in "
-            f"In progress for rework."
-        )
+        if result.failure_class == "publication":
+            # The distinction the card has to show: nothing was validated, so this is not a red CI
+            # run and rerunning it changes nothing until the branch itself is dealt with.
+            body = (
+                f"{prefix}The mechanical validation gate never reached CI: the candidate branch "
+                f"could not be published — {detail}. No check ran. The card is back in In progress; "
+                "the branch has to be reconciled before another report can publish it."
+            )
+        else:
+            body = (
+                f"{prefix}The mechanical validation gate is red: {detail}. The card is back in "
+                f"In progress for rework."
+            )
         if log:
             body += f"\nTail:\n```\n{log}\n```"
         body += f"\n<!-- gate-fingerprint: {fingerprint} -->"

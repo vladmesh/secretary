@@ -130,6 +130,11 @@ class DispatcherRecord:
     gate_infrastructure_rerun_reason: str = ""
     # Gate-authored PR identity lives outside editable PR text; absence forbids refresh.
     gate_pr_authorship: dict[str, Any] = field(default_factory=dict)
+    # The card branch and object id the gate last published (secretary-1540).  A held worker
+    # rebases, so publication is a rewrite of the ref the dispatcher itself wrote; this durable
+    # observation is the lease that rewrite is fenced against, and a remote sitting anywhere else
+    # is a foreign push the gate refuses instead of clobbering.
+    gate_published_ref: dict[str, Any] = field(default_factory=dict)
     # Dispatcher-owned CI invocation for a base-identical research candidate.  The SHA and
     # discovered Actions run id survive a restart, so a later tick polls this invocation instead
     # of creating another run or accepting an unrelated base check.
@@ -299,6 +304,7 @@ class DispatcherRecord:
             "gate_infrastructure_rerun_run_id": self.gate_infrastructure_rerun_run_id,
             "gate_infrastructure_rerun_reason": self.gate_infrastructure_rerun_reason,
             "gate_pr_authorship": dict(self.gate_pr_authorship),
+            "gate_published_ref": dict(self.gate_published_ref),
             "gate_workflow_dispatch": dict(self.gate_workflow_dispatch),
             "handle": self.handle,
             "head": self.head,
@@ -426,6 +432,7 @@ class DispatcherRecord:
             gate_infrastructure_rerun_run_id=str(payload.get("gate_infrastructure_rerun_run_id") or ""),
             gate_infrastructure_rerun_reason=str(payload.get("gate_infrastructure_rerun_reason") or ""),
             gate_pr_authorship=_run_snapshot(payload.get("gate_pr_authorship")),
+            gate_published_ref=_run_snapshot(payload.get("gate_published_ref")),
             gate_workflow_dispatch=_run_snapshot(payload.get("gate_workflow_dispatch")),
             rejected_sha=str(payload.get("rejected_sha") or ""),
             rejected_failure_class=str(payload.get("rejected_failure_class") or "substantive"),

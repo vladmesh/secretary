@@ -4907,6 +4907,47 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         # worker prepared once at claim, once on the gate-red relaunch
         self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
 
+    def test_a_publication_refusal_reads_as_one_on_the_card_and_is_bounded(self) -> None:
+        """secretary-1540. A branch that could not be published is not a red CI run, and the card
+        has to say which one happened: no check ran, so there is nothing for the worker to fix in
+        the code. The class is persisted, so it is not flattened into `substantive` where a later
+        tick reads it, and the ordinary stale-done bound is what stops it from repeating forever —
+        one bounce, then Blocked for a human, because nothing the worker does moves a foreign ref.
+        """
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateResult(
+                "red",
+                "branch `pipeline/secretary-510-pilot` was not published: `origin/...` is at "
+                "`beefbeefbeef`, not the `c0ffeec0ffee` this dispatcher last published — someone "
+                "else pushed to the card branch",
+                "expected origin/... = c0ffee\nobserved origin/... = beefbeef",
+                failure_class="publication",
+                failure_reason="remote-branch-moved",
+            )
+        ]
+        self._run_worker_to_validate()
+
+        gated = self.tick()
+
+        self.assertEqual(gated["action"], "gate-red-rework")
+        body = self.reader.show("secretary-510-pilot")["comments"][-2]["body"]
+        self.assertIn("never reached CI", body)
+        self.assertIn("could not be published", body)
+        self.assertIn("No check ran", body)
+        self.assertNotIn("The mechanical validation gate is red", body)
+        record = self._pilot_record()
+        self.assertEqual(record["rejected_failure_class"], "publication")
+        self.assertEqual(record["rejected_failure_reason"], "remote-branch-moved")
+
+        # An unchanged done report is not a retry of the publication: it takes the stale-done
+        # bound, one bounce and then a human.
+        self._report_done("the branch is not mine to move")
+        self.assertEqual(self.tick()["action"], "stale-done-rework")
+        self._report_done("still not mine")
+        self.assertEqual(self.tick()["reason"], "worker repeatedly reported rejected SHA")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
     def test_repeated_gate_red_for_the_same_reason_is_marked_as_a_second_pass(self) -> None:
         """secretary-766: a second bounce for the identical failure must say so, or it reads to
         the worker (and the PO) as if `restart_worker` silently did nothing the first time."""
@@ -13341,6 +13382,216 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(result.status, "green")
         self.assertEqual(self._pr_calls(host, "create"), [], "an open PR must not be duplicated")
 
+    # secretary-1540: what the gate publishes, and what it refuses to publish over.
+    #
+    # The incident is card codegen-orchestrator-1213 (sprint:1410, 2026-08-28): a worker held
+    # between rounds rebased onto fresh main, the remote branch still carried the pre-rebase
+    # commit, and the plain `git push` the gate ran was rejected non-fast-forward before CI was
+    # ever dispatched. Retrying could not help — the same local branch against the same unmoved
+    # remote is rejected identically — so the card stood until a human force-pushed by hand.
+
+    def _foreign_push(self, tmp: Path, branch: str, content: str) -> str:
+        """Someone else's commit on the card branch, pushed to the same origin. Returns its sha."""
+        other = tmp / f"foreign-{content}"
+        git(tmp, "clone", "--quiet", str(tmp / "origin.git"), str(other))
+        git(other, "config", "user.name", "Someone Else")
+        git(other, "config", "user.email", "else@example.invalid")
+        git(other, "checkout", "-B", branch, f"origin/{branch}")
+        (other / f"{content}.txt").write_text(f"{content}\n", encoding="utf-8")
+        git(other, "add", f"{content}.txt")
+        git(other, "commit", "-m", f"foreign {content}")
+        git(other, "push", "--quiet", "origin", branch)
+        return git(other, "rev-parse", "HEAD")
+
+    def _remote_sha(self, ws: Path, branch: str) -> str:
+        return git(ws, "ls-remote", "origin", f"refs/heads/{branch}").split()[0]
+
+    def test_a_rebased_held_worker_publishes_over_the_pre_rebase_remote_and_reaches_ci(self) -> None:
+        """The incident shape, end to end: remote at the pre-rebase commit, the candidate rebased
+        onto a newer base, and no ancestry between them. The publication is a rewrite of the ref
+        the dispatcher itself wrote, so it is leased and it goes through; the gate reaches CI."""
+        branch = "pipeline/secretary-633"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = _build_gated_workspace(root, "main", branch)
+            record = self._record(ws)
+            first = GithubGateHost(
+                root,
+                self._github_adapter(),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            self.assertEqual(first.gate_check(self._task(), record).status, "green")
+            pre_rebase = git(ws, "rev-parse", "HEAD")
+            self.assertEqual(record.gate_published_ref, {"branch": branch, "sha": pre_rebase})
+
+            # main moves; the held worker rebases its one commit onto it and reports again.
+            git(ws, "checkout", "main")
+            (ws / "base.txt").write_text("base\n", encoding="utf-8")
+            git(ws, "add", "base.txt")
+            git(ws, "commit", "-m", "base moves")
+            git(ws, "push", "origin", "main")
+            git(ws, "checkout", branch)
+            git(ws, "rebase", "main")
+            rebased = git(ws, "rev-parse", "HEAD")
+            self.assertNotEqual(rebased, pre_rebase)
+            self.assertEqual(self._remote_sha(ws, branch), pre_rebase)
+
+            second = GithubGateHost(
+                root,
+                self._github_adapter(),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            result = second.gate_check(self._task(), record)
+
+            self.assertEqual(result.status, "green", result.summary)
+            self.assertEqual(self._remote_sha(ws, branch), rebased)
+            self.assertEqual(record.gate_published_ref, {"branch": branch, "sha": rebased})
+            self.assertTrue(
+                any(
+                    call[1:3] == ["api", f"repos/example-org/sample/commits/{rebased}/check-runs"]
+                    for call in second.gh
+                ),
+                "the gate has to have reached CI for the rebased candidate",
+            )
+
+    def test_a_foreign_commit_on_the_card_branch_is_a_typed_publication_refusal(self) -> None:
+        """A divergence the lease does not authorise is not a rebase: someone else wrote to the
+        card branch. It stays refused, it says so in those words rather than as a rejected
+        non-fast-forward, and the foreign commit is still on the remote afterwards."""
+        branch = "pipeline/secretary-633"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = _build_gated_workspace(root, "main", branch)
+            record = self._record(ws)
+            first = GithubGateHost(
+                root,
+                self._github_adapter(),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            self.assertEqual(first.gate_check(self._task(), record).status, "green")
+            published = git(ws, "rev-parse", "HEAD")
+            foreign = self._foreign_push(root, branch, "theirs")
+
+            (ws / "mine.txt").write_text("mine\n", encoding="utf-8")
+            git(ws, "add", "mine.txt")
+            git(ws, "commit", "-m", "more work")
+            candidate = git(ws, "rev-parse", "HEAD")
+            host = GithubGateHost(
+                root,
+                self._github_adapter(),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+
+            result = host.gate_check(self._task(), record)
+
+            self.assertEqual(result.status, "red")
+            self.assertEqual(result.failure_class, "publication")
+            self.assertEqual(result.failure_reason, "remote-branch-moved")
+            self.assertIn("someone else pushed to the card branch", result.summary)
+            self.assertNotIn("non-fast-forward", result.summary)
+            self.assertIn(foreign, result.log)
+            self.assertIn(published, result.log)
+            self.assertIn(candidate, result.log)
+            self.assertEqual(self._remote_sha(ws, branch), foreign, "the foreign commit stands")
+            self.assertEqual(host.gh, [], "no CI was polled: nothing was published")
+            self.assertEqual(record.gate_published_ref["sha"], published, "the lease is unchanged")
+
+    def test_the_remote_moving_between_the_lease_read_and_the_push_is_refused(self) -> None:
+        """The race the fence exists for. With no recorded publication the lease is seeded from a
+        read, and the remote moves after that read and before the push lands. The lease carries
+        the read's value, so the push is refused rather than clobbering the foreign commit."""
+        branch = "pipeline/secretary-633"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = _build_gated_workspace(root, "main", branch)
+            git(ws, "push", "--quiet", "origin", branch)
+            seeded = git(ws, "rev-parse", "HEAD")
+            (ws / "mine.txt").write_text("mine\n", encoding="utf-8")
+            git(ws, "add", "mine.txt")
+            git(ws, "commit", "-m", "more work")
+            host = GithubGateHost(
+                root,
+                self._github_adapter(),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            foreign: list[str] = []
+            real = host.run_capture
+
+            def move_the_remote_after_the_read(args, label, *, cwd=None):
+                answer = real(args, label, cwd=cwd)
+                if label == "gate remote branch sha" and not foreign:
+                    foreign.append(self._foreign_push(root, branch, "race"))
+                return answer
+
+            with mock.patch.object(host, "run_capture", move_the_remote_after_the_read):
+                result = host.gate_check(self._task(), self._record(ws))
+
+            self.assertEqual(result.status, "red")
+            self.assertEqual(result.failure_class, "publication")
+            self.assertIn(seeded, result.log, "the lease is the value the read returned")
+            self.assertIn(foreign[0], result.log)
+            self.assertEqual(self._remote_sha(ws, branch), foreign[0], "the race lost nothing")
+
+    def test_a_remote_already_in_the_candidate_history_is_re_leased_once(self) -> None:
+        """Two things leave the record's lease behind a remote the candidate already contains: a
+        publication whose record write was lost, and the human repair that force-pushed this very
+        head. Neither loses a commit, so the gate adopts the observation and publishes."""
+        branch = "pipeline/secretary-633"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = _build_gated_workspace(root, "main", branch)
+            record = self._record(ws)
+            first = GithubGateHost(
+                root,
+                self._github_adapter(),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            self.assertEqual(first.gate_check(self._task(), record).status, "green")
+            stale = git(ws, "rev-parse", "HEAD")
+            (ws / "mine.txt").write_text("mine\n", encoding="utf-8")
+            git(ws, "add", "mine.txt")
+            git(ws, "commit", "-m", "more work")
+            candidate = git(ws, "rev-parse", "HEAD")
+            # The push landed but the record write did not: the remote is this very candidate.
+            git(ws, "push", "--quiet", "origin", f"{branch}:refs/heads/{branch}")
+            record.gate_published_ref = {"branch": branch, "sha": stale}
+
+            host = GithubGateHost(
+                root,
+                self._github_adapter(),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            result = host.gate_check(self._task(), record)
+
+            self.assertEqual(result.status, "green", result.summary)
+            self.assertEqual(record.gate_published_ref, {"branch": branch, "sha": candidate})
+
+    def test_a_lease_refusal_is_an_answer_and_a_dead_remote_is_not(self) -> None:
+        """`_backend_answered` has to keep these apart with the lease in play: the refusal below is
+        git 2.43.0's own text for a push whose lease was stale, and the remote produced it. A
+        transport failure on the same command is still no answer at all."""
+        from secretary.dispatcher_gate import _backend_answered
+
+        push = ["git", "-C", "/ws", "push", "--force-with-lease=refs/heads/x:" + "a" * 40, "origin", "x:x"]
+        refused = (
+            "To https://github.com/example-org/sample.git\n"
+            " ! [rejected]        pipeline/secretary-633 -> pipeline/secretary-633 (stale info)\n"
+            "error: failed to push some refs to 'https://github.com/example-org/sample.git'"
+        )
+        silence = (
+            "fatal: unable to access 'https://github.com/example-org/sample.git/': "
+            "Could not resolve host: github.com"
+        )
+        self.assertTrue(_backend_answered(refused, push))
+        self.assertFalse(_backend_answered(silence, push))
+
     def test_no_diff_research_dispatches_ci_and_accepts_its_exact_sha(self) -> None:
         """A research result can be all prose, yet its base-identical candidate still gets CI."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -13626,11 +13877,26 @@ class DispatcherGateTests(unittest.TestCase):
                 check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
             )
             record = self._record(ws)
+            head = git(ws, "rev-parse", "HEAD")
             flushed: list[dict] = []
-            with host.committing(lambda: flushed.append(dict(record.gate_pr_authorship))):
+
+            def snapshot() -> None:
+                flushed.append(
+                    {
+                        "published": dict(record.gate_published_ref),
+                        "authorship": dict(record.gate_pr_authorship),
+                    }
+                )
+
+            with host.committing(snapshot):
                 host.gate_check(self._described_task(), record)
-        self.assertEqual(flushed, [dict(record.gate_pr_authorship)])
-        self.assertEqual(flushed[0]["number"], 42)
+        # secretary-1540 added a second durable write on the same flush: the published object id,
+        # which the next publication is leased against. It lands before the pull request exists,
+        # because it is what the push it records already did.
+        self.assertEqual(flushed[0]["published"], {"branch": "pipeline/secretary-633", "sha": head})
+        self.assertEqual(flushed[0]["authorship"], {})
+        self.assertEqual(flushed[-1]["authorship"], dict(record.gate_pr_authorship))
+        self.assertEqual(flushed[-1]["authorship"]["number"], 42)
 
     def test_an_open_pr_the_gate_wrote_is_updated_with_the_better_description(self) -> None:
         """The stub used to be permanent: `_ensure_pr` returned on the first open PR and nothing
@@ -14096,7 +14362,8 @@ class DispatcherGateTests(unittest.TestCase):
             seen,
             [
                 "gate base fetch",  # git fetch origin main
-                "gate publish branch",  # git push origin <branch>
+                "gate remote branch sha",  # git ls-remote origin <branch> (seeds the push lease)
+                "gate publish branch",  # git push --force-with-lease origin <branch>
                 "gate pr list",  # gh pr list (is a PR already open?)
                 "gate pr create",  # gh pr create
                 "gate pr list",  # gh pr list (which number did it get, to record it?)

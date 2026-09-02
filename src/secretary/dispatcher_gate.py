@@ -411,17 +411,164 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     )
 
 
+# A ref update the remote refused because the branch is not where the push expected it to be.
+# Under `--force-with-lease` every divergence collapses into `stale info`; the other two shapes
+# are what the same divergence reads as when no lease was in play. Anything else a remote refuses
+# — a protected branch, a pre-receive hook, a permission — is a determinate failure of this gate
+# and stays a HostError, because it is not a statement about where the branch points.
+_LEASE_REFUSED_RE = re.compile(
+    r"(?im)^\s*!\s*\[(?:remote )?rejected\][^\n]*\((?:stale info|fetch first|non-fast-forward)\)\s*$"
+)
+
+
+def _published_ref_entry(record, branch: str) -> dict:
+    """What the dispatcher last published to `branch`, or {} when it has published nothing.
+
+    Keyed on the branch name so a record carrying an observation for another ref — a legacy
+    worker branch the card was renamed away from — is no lease at all rather than a wrong one.
+    """
+    entry = getattr(record, "gate_published_ref", None)
+    if not isinstance(entry, dict) or entry.get("branch") != branch:
+        return {}
+    return entry
+
+
+def _remember_published_ref(host, record, branch: str, sha: str) -> None:
+    """Record the object id this gate just put on the remote branch, before another tick pushes.
+
+    This is the lease the next publication is fenced against, and it is a durable record rather
+    than a read taken at push time on purpose: a read taken now authorises whatever a foreign
+    push already landed, which is precisely the thing the fence exists to refuse.
+    """
+    entry = {"branch": branch, "sha": sha}
+    commit = getattr(host, "commit_gate_published_ref", None)
+    if callable(commit):
+        commit(record, entry)
+    else:
+        # Focused gate hosts own no dispatcher state file, but need the same tick-to-tick identity.
+        record.gate_published_ref = dict(entry)
+
+
+def _remote_branch_sha(host, workspace: str, branch: str) -> str:
+    """The object id `origin/<branch>` carries right now, or "" when the remote has no such ref."""
+    listing = _backend_call(
+        host,
+        ["git", "-C", workspace, "ls-remote", "origin", f"refs/heads/{branch}"],
+        "gate remote branch sha",
+    )
+    if listing.returncode != 0:
+        raise HostError(
+            "gate could not read the remote branch: "
+            f"{_tail((listing.stderr or listing.stdout or '').strip())}"
+        )
+    first = (listing.stdout or "").strip().splitlines()
+    sha = first[0].split()[0].strip() if first and first[0].split() else ""
+    return sha if is_exact_sha(sha) else ""
+
+
+def _contained_in_candidate(host, workspace: str, sha: str, head: str) -> bool:
+    """Is `sha` already reachable from the candidate head, so publishing over it loses nothing?
+
+    An unreadable answer is not containment: the gate refuses rather than guessing that a commit
+    it cannot place is one it already has.
+    """
+    if not is_exact_sha(sha) or not is_exact_sha(head):
+        return False
+    contained = host.run_capture(
+        ["git", "-C", workspace, "merge-base", "--is-ancestor", sha, head],
+        "gate remote branch containment",
+    )
+    return contained.returncode == 0
+
+
+def _push_leased(host, workspace: str, branch: str, expected: str):
+    """Push the candidate under a lease on `expected` — the empty string meaning "must not exist"."""
+    return _backend_call(
+        host,
+        [
+            "git",
+            "-C",
+            workspace,
+            "push",
+            f"--force-with-lease=refs/heads/{branch}:{expected}",
+            "origin",
+            f"{branch}:refs/heads/{branch}",
+        ],
+        "gate publish branch",
+    )
+
+
+def _publish_branch(host, record, workspace: str, branch: str, sha: str) -> GateResult | None:
+    """Publish the candidate branch under a lease, or refuse and say what moved.
+
+    A worker held between rounds rebases, so its branch is routinely not a fast-forward of what
+    the remote carries; that is the normal path this gate has to publish, and a plain push failed
+    it before CI ever started (secretary-1540, card codegen-orchestrator-1213). The lease is the
+    object id this dispatcher itself last published, so the rewrite it authorises is exactly the
+    history the dispatcher already accounted for — and a commit someone else pushed to the same
+    branch is not in that history and is refused.
+
+    Two observations are not divergence and are re-leased once rather than refused: the branch the
+    dispatcher has never published (the lease is seeded from a read, and the push still fences that
+    read against the moment it lands), and a remote already contained in the candidate — a publish
+    whose record write was lost, or the human repair that force-pushed this very head.
+
+    Returns None when the branch is published, and a typed publication red otherwise. `HostError`
+    still means a determinate failure that is not about where the branch points.
+    """
+    expected = str(_published_ref_entry(record, branch).get("sha") or "")
+    leased = bool(expected)
+    if not leased:
+        expected = _remote_branch_sha(host, workspace, branch)
+    push = _push_leased(host, workspace, branch, expected)
+    if push.returncode != 0:
+        text = _tail((push.stderr or push.stdout or "").strip())
+        if not _LEASE_REFUSED_RE.search(text):
+            raise HostError(f"gate publish branch failed: {text}")
+        observed = _remote_branch_sha(host, workspace, branch)
+        if leased and _contained_in_candidate(host, workspace, observed, sha):
+            push = _push_leased(host, workspace, branch, observed)
+            text = _tail((push.stderr or push.stdout or "").strip())
+        if push.returncode != 0:
+            if not _LEASE_REFUSED_RE.search(text):
+                raise HostError(f"gate publish branch failed: {text}")
+            return _publication_refused(branch, sha, expected, observed)
+    _remember_published_ref(host, record, branch, sha)
+    return None
+
+
+def _publication_refused(branch: str, sha: str, expected: str, observed: str) -> GateResult:
+    """The remote branch moved under the dispatcher: a red gate that never reached CI.
+
+    It is deliberately not worded as a rejected non-fast-forward. The candidate is fine and the
+    worker has nothing to rebase; someone else wrote to the card branch, and the two object ids
+    that say so travel on the card. `publication` keeps it apart from a red CI run in diagnostics,
+    and from an infrastructure red, which is the only class the dispatcher retries by itself.
+    """
+    return GateResult(
+        "red",
+        f"branch `{branch}` was not published: `origin/{branch}` is at "
+        f"`{(observed or '(absent)')[:12]}`, not the `{(expected or '(absent)')[:12]}` this "
+        "dispatcher last published — someone else pushed to the card branch, so the candidate "
+        f"`{sha[:12]}` was not written over it",
+        f"expected origin/{branch} = {expected or '(absent)'}\n"
+        f"observed origin/{branch} = {observed or '(absent)'}\n"
+        f"candidate HEAD = {sha or '(unavailable)'}",
+        fingerprint=_fingerprint("publish-lease", branch, expected, observed),
+        failure_class="publication",
+        failure_reason="remote-branch-moved",
+    )
+
+
 def _github_gate(
     host, task: dict, record, workspace: str, base: str, required: list[str] | None = None
 ) -> GateResult:
     branch = _legacy_worker_branch(task["ref"])
     no_diff_research = _is_no_diff_research_candidate(host, task, workspace, base)
-    push = _backend_call(
-        host, ["git", "-C", workspace, "push", "origin", f"{branch}:{branch}"], "gate publish branch"
-    )
-    if push.returncode != 0:
-        raise HostError(f"gate publish branch failed: {_tail((push.stderr or push.stdout or '').strip())}")
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
+    refused = _publish_branch(host, record, workspace, branch, sha)
+    if refused is not None:
+        return refused
     if no_diff_research:
         repo = _name_with_owner(host, workspace)
         return _no_diff_research_gate(host, record, workspace, branch, base, repo, sha, required or [])

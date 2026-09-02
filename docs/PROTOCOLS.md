@@ -223,6 +223,44 @@ a backend that refuses the update leaves the pull request as it is and the gate'
 while a pull request that cannot be opened at all is still a gate failure, because without it the
 project's CI never runs.
 
+## Publishing the candidate branch
+
+The gate publishes the worker's branch itself, and that publication is a rewrite of a ref this
+dispatcher owns. A worker held between rounds rebases — after a reslice, after a red review, after
+the base moved — so its branch is routinely not a fast-forward of what the remote carries. A plain
+push fails that case before CI ever starts, and retrying cannot help: the same local branch against
+the same unmoved remote ref is rejected identically, so the card stands until a human force-pushes
+by hand, looking the whole time as if its code failed validation.
+
+So the push is fenced rather than plain, and fenced rather than forced. It carries a lease on the
+object id this dispatcher last published to that branch, which is recorded on the card's dispatcher
+record the moment a publication succeeds. The lease is that durable record and not a read taken just
+before the push, because a read taken then authorises whatever a foreign push has already landed,
+which is the one thing the fence exists to refuse. A branch the dispatcher has never published seeds
+the lease from a read of the remote, and the push still fences that read against the moment it
+lands: a remote that moves in between is refused, not overwritten.
+
+A refusal the lease produces is a red gate of its own kind, not a rejected non-fast-forward and not
+a red CI run. Nothing was published, so no check ran and there is nothing in the code for the worker
+to repair; the card says exactly that, and carries both object ids — the one the dispatcher expected
+and the one it observed. It is classified `publication` on the gate result and on the record, which
+keeps it out of the infrastructure class the dispatcher reruns by itself. The remote's answer is
+still an answer: a lease refusal is git's own push report from the server, so it is never mistaken
+for a backend that went silent, and a transport failure on the same push is never mistaken for a
+refusal.
+
+Two observations are not divergence and are re-leased once instead of refused: a remote already
+contained in the candidate's history loses nothing when it is published over. That is the
+publication whose record write was lost, and the human repair that force-pushed this very head. The
+re-lease is fenced on the value just observed, so a remote moving again is still refused, and it
+happens at most once per gate run.
+
+Nothing bounds a repeated refusal inside the gate, because nothing the worker does moves a ref
+somebody else owns. The ordinary stale-done bound is what ends it: the refusal returns the card to
+its worker, an unchanged done report on the same rejected SHA is bounced once with instructions, and
+the next one moves the card to Blocked for a human. The gate never force-pushes past the refusal on
+its own.
+
 ## Candidate history
 
 Before a gate publishes or validates anything, the dispatcher reads the candidate's own commit
@@ -262,7 +300,7 @@ deciding as before — a failed required check is still a red gate and still ret
 worker.
 
 "No answer came back" is decided where the question is asked, not afterwards from the wording of an
-error. Every remote question the gate puts — the base fetch, the branch publish, the open-PR probe,
+error. Every remote question the gate puts — the base fetch, the remote branch read, the branch publish, the open-PR probe,
 the PR create, the repository name, the check rollup, the failed-job log — goes through one call
 helper, and only that helper raises the transport failure. A step that talks to nothing therefore
 cannot produce one: a local validation command that hangs past its own ceiling is a determinate

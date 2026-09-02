@@ -2213,6 +2213,12 @@ class CommandHostRuntime:
         if self.commit_state is not None:
             self.commit_state()
 
+    def commit_gate_published_ref(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
+        """Persist the branch and object id the gate just published, as the next push's lease."""
+        record.gate_published_ref = dict(entry)
+        if self.commit_state is not None:
+            self.commit_state()
+
     def worker_lifecycle_run(self, record: DispatcherRecord) -> head_ops.HeadRun:
         """This card's worker as the head operations see it."""
         stored = record.worker_head_run if isinstance(record.worker_head_run, dict) else {}
