@@ -135,6 +135,7 @@ from secretary.dispatcher_worker_lifecycle import (
 )
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
+from secretary.projects.integration_base import resolve_integration_base
 from secretary.routing_journal import (
     attempts as routing_attempts,
 )
@@ -12096,7 +12097,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertTrue(any("gh pr merge pipeline/secretary-510-pilot --merge" in c for c in cmds))
         self.assertTrue(fetch_attempted)
 
-    def test_complete_green_refreshes_checkout_from_default_branch_for_stacked_base(self) -> None:
+    def test_complete_green_refreshes_checkout_from_default_branch_for_a_seeded_card(self) -> None:
         from types import SimpleNamespace
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -12106,19 +12107,21 @@ class DispatcherLauncherTests(unittest.TestCase):
                 {
                     "ref": "secretary-510-pilot",
                     "project": "codegen_orchestrator",
-                    "workspace": {"base_branch": "pipeline/secretary-890"},
+                    # secretary-1541: the predecessor's branch is the seed the checkout started
+                    # from, never the branch this increment integrates into.
+                    "workspace": {"seed_ref": "pipeline/secretary-890", "supersedes": "secretary-890"},
                 },
                 record,
             )
         cmds = [" ".join(run) for run in host.runs]
         self.assertTrue(any("gh pr merge pipeline/secretary-510-pilot --merge" in c for c in cmds), cmds)
-        # The checkout tracks main, so the stacked base is never what it is fast-forwarded to.
+        # The checkout tracks main, so the seed branch is never what it is fast-forwarded to.
         self.assertFalse(any("origin/pipeline/secretary-890" in c for c in cmds), cmds)
         self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
 
-    def test_complete_green_survives_stacked_base_diverged_from_default_branch(self) -> None:
-        """secretary-899: a stacked card's PR merges on GitHub, and an unrelated card has landed on
-        the default branch since the base branch was cut. The post-merge refresh of the project
+    def test_complete_green_survives_seed_branch_diverged_from_default_branch(self) -> None:
+        """secretary-899: a seeded card's PR merges on GitHub, and an unrelated card has landed on
+        the default branch since the seed branch was cut. The post-merge refresh of the project
         checkout must not report that merge as failed, and must leave the checkout on the default
         branch at the remote tip."""
         from types import SimpleNamespace
@@ -12133,7 +12136,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             _configure_git_user(repo)
             _commit_file(repo, "README.md", "seed\n", "seed")
             git(repo, "push", "--quiet", "origin", "main")
-            # The stacked base, cut from the seed and already carrying the parent card.
+            # The seed branch, cut from the first commit and already carrying the parent card.
             git(repo, "checkout", "--quiet", "-b", "pipeline/secretary-890")
             _commit_file(repo, "parent.txt", "parent card\n", "parent card")
             git(repo, "push", "--quiet", "origin", "pipeline/secretary-890")
@@ -12159,7 +12162,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 {
                     "ref": "secretary-899",
                     "project": "secretary",
-                    "workspace": {"base_branch": "pipeline/secretary-890"},
+                    "workspace": {"seed_ref": "pipeline/secretary-890", "supersedes": "secretary-890"},
                 },
                 SimpleNamespace(workspace=str(workspace)),
             )
@@ -12508,12 +12511,16 @@ class DispatcherLauncherTests(unittest.TestCase):
 
 
 class _RecordingMergeHost(CommandHostRuntime):
-    def __init__(self, root: Path, adapter: dict | None = None) -> None:
+    def __init__(self, root: Path, adapter: dict | None = None, *, pr_base: str = "main") -> None:
         super().__init__(FakeCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
         self.runs: list[list[str]] = []
+        # What GitHub says the open pull request targets; the merge refuses any other answer.
+        self.pr_base = pr_base
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
+        if args[:3] == ["gh", "pr", "view"] and "baseRefName" in args:
+            return subprocess.CompletedProcess(args, 0, f"{self.pr_base}\n", "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
@@ -12525,19 +12532,30 @@ class _StackedBaseCatalog:
     def binding(self, project: str) -> dict:
         return {"repo": str(self._repo), "default_branch": "main", "orca_binding": project}
 
-    def default_branch(self, project: str, override: str | None) -> str:
-        return override or "main"
+    def project_default_branch(self, project: str) -> str:
+        return "main"
+
+    def integration_base(self, project: str, override: str | None) -> str:
+        return resolve_integration_base(default_branch="main", declared=None, override=override)
+
+    def workspace_seed(self, project: str, task: dict) -> str:
+        workspace = task.get("workspace") or {}
+        seed = str(workspace.get("seed_ref") or "")
+        return seed or self.integration_base(project, workspace.get("base_branch"))
 
     def adapter(self, project: str) -> dict:
         return {"validation": {"ci": "github"}}
 
 
 class _FakeGhMergeHost(CommandHostRuntime):
-    """Real git over real repos, with `gh pr merge` stubbed: the PR merge is GitHub's side."""
+    """Real git over real repos, with `gh` stubbed: the PR merge is GitHub's side."""
+
+    pr_base = "main"
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         if args and args[0] == "gh":
-            return subprocess.CompletedProcess(list(args), 0, "", "")
+            stdout = f"{self.pr_base}\n" if args[:3] == ["gh", "pr", "view"] else ""
+            return subprocess.CompletedProcess(list(args), 0, stdout, "")
         return super()._run(args, label, cwd=cwd)
 
 
@@ -12735,8 +12753,16 @@ class _InstanceRepoCatalog:
     def binding(self, project: str) -> dict:
         return {"repo": str(self.instance_dir), "default_branch": "main"}
 
-    def default_branch(self, project: str, override: str | None) -> str:
-        return override or "main"
+    def project_default_branch(self, project: str) -> str:
+        return "main"
+
+    def integration_base(self, project: str, override: str | None) -> str:
+        return resolve_integration_base(default_branch="main", declared=None, override=override)
+
+    def workspace_seed(self, project: str, task: dict) -> str:
+        workspace = task.get("workspace") or {}
+        seed = str(workspace.get("seed_ref") or "")
+        return seed or self.integration_base(project, workspace.get("base_branch"))
 
     def adapter(self, project: str) -> dict:
         return {}
@@ -12804,22 +12830,38 @@ def git(cwd: Path, *args: str) -> str:
 
 
 class GateCatalog:
-    def __init__(self, adapter: dict) -> None:
+    def __init__(self, adapter: dict, *, integration_bases: list[str] | None = None) -> None:
         self._adapter = adapter
+        # The long-lived branches this project declares it integrates into, besides "main".
+        self._integration_bases = list(integration_bases or [])
 
     def adapter(self, project: str) -> dict:
         return self._adapter
 
-    def default_branch(self, project: str, override: str | None) -> str:
-        return override or "main"
+    def project_default_branch(self, project: str) -> str:
+        return "main"
+
+    def integration_base(self, project: str, override: str | None) -> str:
+        return resolve_integration_base(
+            default_branch="main", declared=self._integration_bases, override=override
+        )
+
+    def workspace_seed(self, project: str, task: dict) -> str:
+        workspace = task.get("workspace") or {}
+        seed = str(workspace.get("seed_ref") or "")
+        return seed or self.integration_base(project, workspace.get("base_branch"))
 
     def binding(self, project: str) -> dict:
         return {"repo": f"/home/dev/{project}"}
 
 
 class GateHost(CommandHostRuntime):
-    def __init__(self, root: Path, adapter: dict) -> None:
-        super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
+    def __init__(self, root: Path, adapter: dict, *, integration_bases: list[str] | None = None) -> None:
+        super().__init__(
+            GateCatalog(adapter, integration_bases=integration_bases),  # type: ignore[arg-type]
+            root,
+            mode="real",
+        )
 
 
 class GithubGateHost(CommandHostRuntime):
@@ -12840,6 +12882,7 @@ class GithubGateHost(CommandHostRuntime):
         gh_errors: dict | None = None,
         pr_title: str = "old title",
         pr_body: str | None = None,
+        pr_base: str = "main",
         workflow_runs: list | None = None,
     ) -> None:
         super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
@@ -12849,6 +12892,10 @@ class GithubGateHost(CommandHostRuntime):
         # `DispatcherGateTests._record(ws, wrote=host)` is how a test says the gate wrote it.
         self.pr_title = pr_title
         self.pr_body = "old body" if pr_body is None else pr_body
+        # Which branch the open pull request targets. The gate reads it back and retargets a PR
+        # pointing anywhere but the card's integration base (secretary-1541).
+        self.pr_base = pr_base
+        self.pr_closed_reopened = 0
         self._check_runs = check_runs
         self._statuses = statuses or []
         self._run_log = run_log
@@ -12878,20 +12925,30 @@ class GithubGateHost(CommandHostRuntime):
         if args[1:3] == ["repo", "view"]:
             return done("example-org/sample\n")
         if args[1:3] == ["pr", "list"]:
-            return done("42\n" if self._pr_open else "\n")
+            listing = [{"number": 42, "baseRefName": self.pr_base}] if self._pr_open else []
+            return done(json.dumps(listing))
         if args[1:3] == ["pr", "create"]:
             self._pr_open = True
+            self.pr_base = args[args.index("--base") + 1]
             self.pr_title = args[args.index("--title") + 1]
             self.pr_body = args[args.index("--body") + 1]
             if self._pr_list_after_create_fails:
                 self._gh_errors["pr list"] = self._pr_list_after_create_fails
             return done("https://github.com/example-org/sample/pull/42\n")
         if args[1:3] == ["pr", "view"]:
+            if "baseRefName" in args:
+                return done(f"{self.pr_base}\n")
             return done(json.dumps({"title": self.pr_title, "body": self.pr_body}))
         if args[1:3] == ["pr", "edit"]:
+            if "--base" in args:
+                self.pr_base = args[args.index("--base") + 1]
+                return done("https://github.com/example-org/sample/pull/42\n")
             self.pr_title = args[args.index("--title") + 1]
             self.pr_body = args[args.index("--body") + 1]
             return done("https://github.com/example-org/sample/pull/42\n")
+        if args[1:3] in (["pr", "close"], ["pr", "reopen"]):
+            self.pr_closed_reopened += 1
+            return done()
         if args[1:3] == ["workflow", "run"]:
             return done()
         if args[1:3] == ["run", "list"]:
@@ -14278,7 +14335,7 @@ class DispatcherGateTests(unittest.TestCase):
     #     failed to get run: HTTP 404: Not Found (https://api.github.com/repos/.../runs/1?...)
     #   $ gh repo view --json nameWithOwner -q .nameWithOwner   (origin = an absent repository)
     #     GraphQL: Could not resolve to a Repository with the name 'vladmesh/...'. (repository)
-    #   $ gh pr list --head foo --state open --json number -q .[0].number   (same origin)
+    #   $ gh pr list --head foo --state open --json number,baseRefName        (same origin)
     #     GraphQL: Could not resolve to a Repository with the name 'vladmesh/...'. (repository)
     #   $ git push origin main:main            (the remote moved on)
     #     To ../bare.git
@@ -14325,7 +14382,11 @@ class DispatcherGateTests(unittest.TestCase):
         "gate pr list",
         "gate pr create",
         "gate pr view",
+        "gate pr base",
         "gate pr edit",
+        "gate pr close",
+        "gate pr reopen",
+        "gate pr retarget",
         "gate gh api",
         "gate failed log",
     }
@@ -14668,7 +14729,13 @@ class DispatcherGateTests(unittest.TestCase):
         transport silence and must reach the dispatcher as a one-tick blocking failure."""
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
-            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+            # The project declares this branch an integration target, so the base survives the
+            # card's own admission and the fetch is what refuses it — which is this test's subject.
+            host = GateHost(
+                Path(tmp),
+                {"validation": {"ci": "local", "command": "true"}},
+                integration_bases=["removed-base"],
+            )
             task = self._task()
             task["workspace"] = {"base_branch": "removed-base"}
 

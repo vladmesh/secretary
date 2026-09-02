@@ -46,6 +46,7 @@ from secretary.projects.contract import (
     ContractVerdict,
     ModuleContract,
 )
+from secretary.projects.integration_base import resolve_integration_base
 from tests.fakes.host import FakeSessionHost
 from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
@@ -1241,8 +1242,16 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         def head_launch(self, _head: str, _prompt_file: str, **_kwargs) -> HeadCommand:
             return HeadCommand("run-codex", prompt_after_start=True, adapter="codex")
 
-        def default_branch(self, _project: str, override: str | None) -> str:
-            return override or "main"
+        def project_default_branch(self, project: str) -> str:
+            return "main"
+
+        def integration_base(self, project: str, override: str | None) -> str:
+            return resolve_integration_base(default_branch="main", declared=None, override=override)
+
+        def workspace_seed(self, project: str, task: dict) -> str:
+            workspace = task.get("workspace") or {}
+            seed = str(workspace.get("seed_ref") or "")
+            return seed or self.integration_base(project, workspace.get("base_branch"))
 
         def broad_check_verdict(self, _project: str) -> ContractVerdict:
             # The worker task packet resolves the project's broad-check contract to print an exact

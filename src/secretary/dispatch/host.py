@@ -61,6 +61,7 @@ from secretary.dispatcher_helpers import (
     safe_one_line as _safe_one_line,
 )
 from secretary.dispatcher_launch import (
+    CAUSE_BASE_BRANCH_CONTRACT,
     CAUSE_WORKSPACE_CONTRACT,
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -184,6 +185,14 @@ from secretary.projects.contract import (
     ContractVerdict,
 )
 from secretary.projects.contract import decide as _decide_broad_check_contract
+from secretary.projects.integration_base import (
+    IntegrationBaseError,
+    resolve_integration_base,
+    seed_ref_refusal,
+)
+from secretary.projects.integration_base import (
+    is_exact_sha as _is_exact_ref_sha,
+)
 from secretary.routing_journal import (
     HEAD_FROM_CARD,
     HEAD_FROM_FALLBACK,
@@ -378,11 +387,51 @@ class InstanceCatalog:
             self.binding(project), instance=self.instance_dir or Path("."), workspace=None
         )
 
-    def default_branch(self, project: str, override: str | None) -> str:
-        if override:
-            return override
+    def project_default_branch(self, project: str) -> str:
+        """The branch this project's binding declares as its own default. No card is consulted."""
         branch = self.binding(project).get("default_branch")
         return str(branch or "main")
+
+    def integration_base(self, project: str, override: str | None) -> str:
+        """Where this card's increment lands: its PR base, history range, receipt base and merge.
+
+        A card may override it only with a branch the project declares it integrates into — its
+        default branch, or one of the binding's `integration_bases`. Anything else, a predecessor's
+        `pipeline/*` card branch above all, is refused here with the reason on it (secretary-1541):
+        opening a release pull request into a branch the project's workflows do not trigger for
+        produces zero check-runs, which is indistinguishable from checks that have not appeared yet.
+        """
+        binding = self.binding(project)
+        declared = binding.get("integration_bases")
+        try:
+            return resolve_integration_base(
+                default_branch=str(binding.get("default_branch") or "main"),
+                declared=list(declared) if isinstance(declared, list) else None,
+                override=override,
+            )
+        except IntegrationBaseError as exc:
+            raise HostError(
+                f"project {project!r}: {exc}", bring_up_cause=CAUSE_BASE_BRANCH_CONTRACT
+            ) from None
+
+    def workspace_seed(self, project: str, task: dict[str, Any]) -> str:
+        """The git ref this card's checkout is cut from.
+
+        A reslice successor inherits its predecessor's unreleased content, so it starts from that
+        candidate — `workspace.seed_ref`, a card branch or the exact object id that was assessed.
+        A card with no seed starts from its integration base, which is what every card did before
+        this field existed and what every ordinary card still does.
+        """
+        workspace = task.get("workspace") if isinstance(task.get("workspace"), dict) else {}
+        seed = str((workspace or {}).get("seed_ref") or "").strip()
+        if not seed:
+            return self.integration_base(project, (workspace or {}).get("base_branch"))
+        refusal = seed_ref_refusal(seed)
+        if refusal:
+            raise HostError(
+                f"project {project!r}: {refusal}", bring_up_cause=CAUSE_BASE_BRANCH_CONTRACT
+            ) from None
+        return seed
 
     def worker_head(self, task: dict[str, Any]) -> str:
         requested = task.get("routing", {}).get("head_override")
@@ -896,7 +945,8 @@ class CommandHostRuntime:
         heartbeat_run_id: str = "",
     ) -> dict[str, Any]:
         project = task["project"]
-        base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
+        base = self.catalog.integration_base(project, task.get("workspace", {}).get("base_branch"))
+        seed = self.catalog.workspace_seed(project, task)
         workspace = self.restore_workspace(task, worker_id)
         reused = Path(workspace).exists()
         if reused:
@@ -907,7 +957,7 @@ class CommandHostRuntime:
                 # checkout is gone. No host repairs it and no later tick finds it: this is the one
                 # bring-up family that is about the card rather than the host.
                 raise HostError("resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
-            workspace = self._create_workspace(project, worker_id, base, expected=workspace)
+            workspace = self._create_workspace(project, worker_id, seed, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
             self._run_setup(project, workspace)
         self._clear_report_bodies(task["ref"])
@@ -949,7 +999,7 @@ class CommandHostRuntime:
             # Same family as the missing resume workspace above: the checkout this card's rework
             # continues in is not there, which is this card's own bring-up contract, not the host's.
             raise HostError("rework workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
-        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+        base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             workspace / "TASK.md",
@@ -1780,7 +1830,7 @@ class CommandHostRuntime:
             return False
         if not _same_repo(repo, Path(self.catalog.instance_dir)):
             return False
-        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+        base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         try:
             self._run(["git", "-C", record.workspace, "fetch", "origin", base], "review recovery fetch")
             remote_head = self._run(
@@ -1884,7 +1934,7 @@ class CommandHostRuntime:
         if os.environ.get("SECRETARY_DISPATCHER_AUTOMERGE", "on").strip().lower() == "off":
             return
         branch = _legacy_worker_branch(task["ref"])
-        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+        base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         if _validation_ci(self, task) == "github":
             if self._no_diff_research_delivery_is_complete(task, record):
                 return
@@ -2000,6 +2050,24 @@ class CommandHostRuntime:
             return False
         return True
 
+    def _require_pr_base(self, record: DispatcherRecord, branch: str, base: str) -> None:
+        """Refuse the merge unless the open pull request for `branch` targets `base`.
+
+        Unreadable is refused too: the delivery boundary is irreversible, and "the backend would not
+        say where this lands" is not evidence that it lands on the integration base.
+        """
+        completed = self._run(
+            ["gh", "pr", "view", branch, "--json", "baseRefName", "-q", ".baseRefName"],
+            "merge pr base",
+            cwd=Path(record.workspace),
+        )
+        observed = (completed.stdout or "").strip()
+        if observed != base:
+            raise HostError(
+                f"pull request for {branch!r} targets {observed or '(unreadable)'!r}, not the "
+                f"integration base {base!r}; nothing was merged"
+            )
+
     def _merge_github_pr(
         self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str
     ) -> None:
@@ -2009,10 +2077,16 @@ class CommandHostRuntime:
         gh honours branch protection and refuses to merge while required checks are unsatisfied. The
         checkout tracks the project's default branch, not the card's base, and the refresh stays
         best-effort: the card is already merged by then, so a failed refresh is not the card's failure.
+
+        `gh pr merge` lands the pull request in *its own* base, whatever that is, so the base is read
+        back and required to be this card's integration base before the irreversible call is made
+        (secretary-1541). A pull request still pointing somewhere else — a card branch a stale PR was
+        opened against — is refused here rather than merged into a branch nothing releases from.
         """
+        self._require_pr_base(record, branch, base)
         self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
-        default_branch = self.catalog.default_branch(task["project"], None)
+        default_branch = self.catalog.project_default_branch(task["project"])
         # `gh pr merge` is the irreversible delivery boundary. Refreshing this checkout afterwards is
         # only a convenience for future worktree bases, and a preserved local commit can make
         # ff-only impossible: never report an already-merged card as failed because it did not apply.
@@ -2463,8 +2537,35 @@ class CommandHostRuntime:
         except HostError:
             pass
 
-    def _create_workspace(self, project: str, worker_id: str, base: str, *, expected: str = "") -> str:
-        """Cut the card's worktree and accept it only as this card's workspace of this repo.
+    def _fetch_seed(self, repo: Path, seed: str) -> str:
+        """Bring `seed` into the project checkout and return the start point a worktree is cut at.
+
+        A branch seed is fetched by name and cut at its remote-tracking ref, which is what every
+        card did before seeds existed. An exact object id — the predecessor candidate a reslice
+        successor inherits — is not a ref the remote will serve by name, so the whole remote is
+        fetched and the object is then required to be present: a seed that is not there is this
+        card's own contract failing, not a checkout to invent.
+        """
+        if _is_exact_ref_sha(seed):
+            self._run(["git", "-C", str(repo), "fetch", "origin"], "git fetch")
+            try:
+                self._run(["git", "-C", str(repo), "cat-file", "-e", f"{seed}^{{commit}}"], "git seed probe")
+            except HostError:
+                raise HostError(
+                    f"seed commit {seed[:12]} is not on the project remote; the predecessor "
+                    "candidate this card inherits was never published or has been removed",
+                    bring_up_cause=CAUSE_BASE_BRANCH_CONTRACT,
+                ) from None
+            return seed
+        self._run(["git", "-C", str(repo), "fetch", "origin", seed], "git fetch")
+        return f"origin/{seed}"
+
+    def _create_workspace(self, project: str, worker_id: str, seed: str, *, expected: str = "") -> str:
+        """Cut the card's worktree from `seed` and accept it only as this card's workspace of this repo.
+
+        `seed` is where the checkout starts, not where the card integrates: an ordinary card seeds
+        from its integration base, and a reslice successor from the predecessor candidate its
+        `workspace.seed_ref` names (secretary-1541).
 
         What Orca returns is checked against what Orca itself registered — the repo registration this
         project's binding resolves to, and this card's worker id as the worktree name — and against the
@@ -2481,7 +2582,7 @@ class CommandHostRuntime:
         if not repo.is_absolute() or not repo.is_dir():
             raise HostError(f"project repo for {project!r} is unavailable")
         registration = self._orca_repo(project)
-        self._run(["git", "-C", str(repo), "fetch", "origin", base], "git fetch")
+        start = self._fetch_seed(repo, seed)
         result = self._run_json(
             [
                 "orca",
@@ -2492,7 +2593,7 @@ class CommandHostRuntime:
                 "--name",
                 worker_id,
                 "--base-branch",
-                f"origin/{base}",
+                start,
                 "--setup",
                 "skip",
                 "--no-parent",
@@ -3256,7 +3357,7 @@ class CommandHostRuntime:
             # The dispatcher may have died after the provider started but before it recorded that
             # confirmation. Returning lets recovery checkpoint it without touching TASK.md.
             return
-        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+        base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         # One generation and one decision, read once: the document the worker is sent back to and
         # the prompt that sends it there name the same round and adjudication because they share
         # these values, not because separate call sites happen to agree.

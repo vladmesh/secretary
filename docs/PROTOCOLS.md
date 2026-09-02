@@ -182,6 +182,53 @@ receives only a bounded pointer to it. `TASK.md` is likewise a generated, git-ig
 handoff packet. These are operational projections, not repository documentation or candidate
 changes. A receipt is evidence, not permission to skip the pre-merge check or independent review.
 
+## Seed and integration base
+
+A card names at most two git refs and they answer different questions. The **seed** is where its
+checkout starts: `workspace.seed_ref`, a ref name or an exact object id. The **integration base** is
+where its increment lands: `workspace.base_branch`, which is the pull request's base, the range the
+candidate history is read over, the `base_sha` of the exact-SHA gate receipt, and the branch the
+merge writes to. A card with no seed starts from its integration base, which is what every card did
+before the two were separated and what every ordinary card still does; a card with neither field
+starts from and lands on the project's default branch.
+
+They were one field until secretary-1541, and that is exactly the defect. A reslice successor
+legitimately needs its predecessor's unreleased content, so the successor was created with
+`base_branch` pointing at the predecessor's `pipeline/*` card branch. The checkout was then right
+and everything else was wrong: the gate opened the release pull request into that card branch, the
+project's `pull_request` workflow triggers only for its own long-lived branches, GitHub created
+**zero** check-runs, and an empty rollup is `PENDING`. The card answered `gate-pending` every tick
+until the six-hour pending ceiling, twice — `codegen-orchestrator-1197`
+(issue:a858c044707de792a10f) and `codegen-orchestrator-1236` (issue:2c82ba8f5d1c3bf5b8cc) — and both
+times a person, not the pipeline, was what noticed.
+
+A successor therefore inherits its predecessor's **content**, never its branch as a target:
+
+    secretary task create --project <p> --type code --title '<t>' \
+      --seed-ref <predecessor candidate sha> --supersedes <predecessor card ref>
+
+Provenance is required rather than encouraged: a seed without `--supersedes` is refused, because
+without it nobody can tell an intentional reslice from a stray ref, and `--supersedes` without a
+seed is refused for the same reason in reverse. A seed may be a branch or an exact object id; an
+object id is fetched with the whole remote and then required to be present, since a predecessor
+candidate that was never published is this card's own contract failing rather than a checkout to
+invent.
+
+An integration base is **refused at creation**, not normalised. The two were weighed and refusal
+won: normalising `base_branch: pipeline/x` into a seed would silently rewrite what somebody typed
+into something with a different meaning, and the case where that guess is wrong — a card that really
+did mean to integrate somewhere else — is the case where being wrong is most expensive. A refusal is
+one error message at the cheapest possible moment, before a workspace, a head or a pull request
+exists, and it names the flag that does what the writer wanted. The rule it enforces: an override
+must be a branch the project declares it integrates into — its binding's `default_branch`, or one of
+the optional `integration_bases` beside it. A per-card `pipeline/*` branch is refused by name; an
+object id is refused as "that is a seed"; anything else is refused with the declared set listed.
+
+Cards admitted before the split, and cards a restore reproduces, still carry whatever they hold —
+restore replays history rather than admitting new work. They are refused instead by the runtime, the
+first time a tick reads them, as a task-class bring-up outcome with cause `base_branch_contract`:
+fast, typed, once, and never as an infrastructure failure the dispatcher would retry.
+
 ## The pull request a GitHub gate opens
 
 A `github` gate opens the pull request the `pull_request` workflow needs, and that pull request is
@@ -193,6 +240,15 @@ into, quotes the card's statement, and carries the worker's own account of the r
 omitted when the gate runs before it exists. The gate re-runs on every later tick and once more
 before the merge, and each run brings an already-open pull request up to the better description it
 can now build.
+
+An already-open pull request is also checked against the card's integration base on every tick, and
+retargeted when it points anywhere else. That repair is topology, not code: the candidate is
+untouched, the card keeps its state, and the worker is not run again — it is the repair the PO made
+by hand on `codegen-orchestrator-1236`. The base edit alone would not be enough, because
+`pull_request` workflows subscribe to `opened`, `synchronize` and `reopened` and a base change is
+none of those, so the pull request is closed and reopened on the same head commit to produce an
+event the project's own CI answers. A backend that refuses either half is a determinate gate
+failure and says which half it refused.
 
 What bounds that is the dispatcher's own record, never the pull request's text. When the gate
 opens or edits a pull request and the backend accepts the write, it records on the card's
@@ -261,6 +317,27 @@ its worker, an unchanged done report on the same rejected SHA is bounced once wi
 the next one moves the card to Blocked for a human. The gate never force-pushes past the refusal on
 its own.
 
+## A rollup nothing can fill
+
+Zero checks on a candidate has two causes that look identical in the rollup: they have not appeared
+yet, or nothing can ever post them. The second one used to be indistinguishable from the first and
+therefore cost the whole `GATE_PENDING_STALL_SECONDS` ceiling before anybody learned anything.
+
+So when the rollup is empty, the gate reads the candidate's own `.github/workflows` — which is where
+GitHub resolves a `pull_request` workflow from — and asks whether any of them declares a
+pull-request trigger admitting this base, honouring `branches`, `branches-ignore` and GitHub's glob
+where `*` stops at a `/`. Only a positive answer changes anything: workflow files exist, every one
+of them parses, and not one admits the base. Then the verdict is a red of class `topology` with
+reason `ci-trigger-impossible`, naming the base and the files that were read. A missing directory, a
+file that will not parse, or one workflow that does admit the base all leave the verdict where it
+was — ordinary pending — because a project may also be checked by something that is not Actions.
+
+A `topology` red is the one red class that does not go back to the worker. Nothing was validated and
+no round of rework could change that, so the card goes to Blocked with the cause on it, for a person
+to repair the card's integration base or the project's triggers. It is kept apart from `publication`
+(the branch could not be published) and from `infrastructure` (the only class the dispatcher reruns
+by itself).
+
 ## Candidate history
 
 Before a gate publishes or validates anything, the dispatcher reads the candidate's own commit
@@ -300,21 +377,22 @@ deciding as before — a failed required check is still a red gate and still ret
 worker.
 
 "No answer came back" is decided where the question is asked, not afterwards from the wording of an
-error. Every remote question the gate puts — the base fetch, the remote branch read, the branch publish, the open-PR probe,
-the PR create, the repository name, the check rollup, the failed-job log — goes through one call
-helper, and only that helper raises the transport failure. A step that talks to nothing therefore
-cannot produce one: a local validation command that hangs past its own ceiling is a determinate
-answer about the branch and blocks the card immediately with that reason, however its message reads.
-Each call carries the tool's own output into that decision, so a probe never converts silence into a
-positive fact about the backend's state — an unanswered open-PR probe is not "there is no PR". Where
-a failed remote command still has to be sorted into answered and unanswered, that judgement lives
-inside the helper, and it recognises the answer rather than the failure: an HTTP status the tool
-quotes (unless it is a 5xx, which is the backend failing to serve one), a GraphQL error or a
-response body it parsed, or git's push report from the remote. Anything else a backend call prints —
-a transport message, an empty stderr, a wording nobody has captured yet — is silence, and the card
-waits. The default runs that way round on purpose: a wrong "no answer" costs a few retries and a
-Blocked reason that quotes the tool, while a wrong "answer" costs an immediate Blocked on a moment
-of bad network, which is the failure this contract exists to prevent.
+error. Every remote question the gate puts — the base fetch, the remote branch read, the branch
+publish, the open-PR probe, the PR create and retarget, the repository name, the check rollup, the
+failed-job log — goes through one call helper, and only that helper raises the transport failure. A
+step that talks to nothing therefore cannot produce one: a local validation command that hangs past
+its own ceiling is a determinate answer about the branch and blocks the card immediately with that
+reason, however its message reads. Each call carries the tool's own output into that decision, so a
+probe never converts silence into a positive fact about the backend's state — an unanswered open-PR
+probe is not "there is no PR". Where a failed remote command still has to be sorted into answered
+and unanswered, that judgement lives inside the helper, and it recognises the answer rather than
+the failure: an HTTP status the tool quotes (unless it is a 5xx, which is the backend failing to
+serve one), a GraphQL error or a response body it parsed, or git's push report from the remote.
+Anything else a backend call prints — a transport message, an empty stderr, a wording nobody has
+captured yet — is silence, and the card waits. The default runs that way round on purpose: a wrong
+"no answer" costs a few retries and a Blocked reason that quotes the tool, while a wrong "answer"
+costs an immediate Blocked on a moment of bad network, which is the failure this contract exists to
+prevent.
 
 A reviewer that cannot be started is a failure of the review stage, not a verdict on the candidate.
 A split pane that will not open, an unavailable reviewer resource, or an unwritable launch intent:
@@ -1972,7 +2050,9 @@ outcome has:
   everything else the host could not do, from a pane that would not open or an inventory that would
   not answer to a registry that cannot supply a usable broad-check contract;
 - `task` — `workspace_contract`, a failure of this card's own bring-up contract: the checkout it was
-  requeued onto is gone, or is not the worktree on the branch its claim recorded.
+  requeued onto is gone, or is not the worktree on the branch its claim recorded;
+  `base_branch_contract`, the card names an integration base this project cannot integrate into, or
+  a seed the project remote does not carry.
 
 The cause decides the class, so no raise site and no caller may pair them freely, and a cause
 nobody recognises is ignored rather than trusted. The rule behind the split is what the failure says

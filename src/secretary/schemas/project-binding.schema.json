@@ -50,6 +50,12 @@
       "type": "string",
       "minLength": 1
     },
+    "integration_bases": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true,
+      "description": "Long-lived branches besides default_branch that this project integrates into and whose CI its workflows trigger for. A card's workspace.base_branch may name one of these or the default branch, and nothing else; a per-card branch is never an integration target."
+    },
     "plane": {
       "type": "string",
       "enum": ["orchestrator", "project", "memory", "ops"],

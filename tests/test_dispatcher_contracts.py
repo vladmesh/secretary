@@ -190,7 +190,13 @@ class HostSurfaceContractTests(unittest.TestCase):
 
     def test_fake_catalog_covers_the_real_catalog_surface(self) -> None:
         # The gate reads the catalog through the host, so its calls count as runtime usage too.
-        used = _used_attributes("catalog") | {"adapter", "binding", "default_branch"}
+        used = _used_attributes("catalog") | {
+            "adapter",
+            "binding",
+            "integration_base",
+            "project_default_branch",
+            "workspace_seed",
+        }
         for name in sorted(used):
             with self.subTest(method=name):
                 self.assertTrue(

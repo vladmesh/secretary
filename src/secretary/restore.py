@@ -692,6 +692,8 @@ def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str)
         review_head=fields["review_head"],
         slug=fields["slug"],
         base_branch=fields["base_branch"],
+        seed_ref=fields["seed_ref"],
+        supersedes=fields["supersedes"],
         complexity=fields["complexity"],
         family_preference=fields["family_preference"],
         codex_launch_mode=fields["codex_launch_mode"],
@@ -792,6 +794,8 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
         "review_head": value("review_head"),
         "slug": value("slug"),
         "base_branch": value("base_branch"),
+        "seed_ref": value("seed_ref"),
+        "supersedes": value("supersedes"),
         "complexity": _enum_or_default(
             value("complexity"), {"cheap", "standard", "hard", "frontier"}, "standard"
         ),
@@ -832,6 +836,8 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
         "workspace": {
             "slug": metadata.get("slug") or None,
             "base_branch": metadata.get("base_branch") or None,
+            "seed_ref": metadata.get("seed_ref") or None,
+            "supersedes": metadata.get("supersedes") or None,
         },
         # Absolute position is intentionally not compared; see _restored_order_mismatch.
         "swimlane": str(card.get("swimlane") or "") or None,

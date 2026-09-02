@@ -55,6 +55,7 @@ from secretary.dispatcher_worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
 )
+from secretary.projects.integration_base import resolve_integration_base
 from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
@@ -2667,8 +2668,16 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
                     binding["orca_binding"] = test.binding_name
                 return binding
 
-            def default_branch(self, project: str, override: str | None) -> str:
-                return override or "main"
+            def project_default_branch(self, project: str) -> str:
+                return "main"
+
+            def integration_base(self, project: str, override: str | None) -> str:
+                return resolve_integration_base(default_branch="main", declared=None, override=override)
+
+            def workspace_seed(self, project: str, task: dict) -> str:
+                workspace = task.get("workspace") or {}
+                seed = str(workspace.get("seed_ref") or "")
+                return seed or self.integration_base(project, workspace.get("base_branch"))
 
             def broad_check_verdict(self, project: str) -> ContractVerdict:
                 # The worker task packet resolves this to print an exact broad-check command

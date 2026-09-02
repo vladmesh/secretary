@@ -103,7 +103,19 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--head", default="")
     task_create.add_argument("--review-head", default="")
     task_create.add_argument("--slug", default="")
-    task_create.add_argument("--base-branch", default="")
+    task_create.add_argument(
+        "--base-branch",
+        default="",
+        help="the branch this card integrates into; only a branch the project declares",
+    )
+    task_create.add_argument(
+        "--seed-ref",
+        default="",
+        help="git ref or object id the card's checkout starts from (a reslice successor's predecessor candidate)",
+    )
+    task_create.add_argument(
+        "--supersedes", default="", help="reference of the predecessor card a --seed-ref inherits from"
+    )
     task_create.add_argument(
         "--complexity", choices=("cheap", "standard", "hard", "frontier"), default="standard"
     )
@@ -289,6 +301,8 @@ def run_task_create(args: argparse.Namespace) -> int:
             review_head=args.review_head,
             slug=args.slug,
             base_branch=args.base_branch,
+            seed_ref=args.seed_ref,
+            supersedes=args.supersedes,
             complexity=args.complexity,
             family_preference=args.family_preference,
             codex_launch_mode=args.codex_mode,

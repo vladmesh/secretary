@@ -252,6 +252,29 @@ A release the dispatcher could not carry out lands the card in Blocked with the 
 back in Assessment. Read the reason there before you recut it: a merge the remote rejected and a
 checkout that moved under the park are different problems, and neither is fixed by deciding again.
 
+### Recutting a reslice: the seed is not the base
+
+A reslice successor usually needs the predecessor's unreleased content. It inherits that content as
+a **seed**, and never inherits the predecessor's branch as an integration base:
+
+```bash
+python3 -P -m secretary task create --role observer --actor observer \
+  --project <project> --type code --title '<title>' --body-file <spec.md> --sprint <sprint-ref> \
+  --seed-ref <predecessor candidate sha> --supersedes <predecessor card ref>
+```
+
+`--seed-ref` is where the successor's checkout starts: the exact candidate object id the predecessor
+was assessed on, or that card's branch. `--supersedes` names the predecessor, and is required with a
+seed so the provenance is readable off the card. The successor's integration base stays the
+project's default branch, which is where its pull request is opened, where its CI actually triggers
+and where its merge lands.
+
+Never pass `--base-branch pipeline/<predecessor>`. That field is the branch the increment lands on,
+not the branch it starts from, and a card branch is neither a place to merge into nor one the
+project's `pull_request` workflow triggers for. It is refused at creation with that reason; the two
+cards that were created that way before the refusal existed each burned six hours of empty,
+pending-looking CI before a person noticed.
+
 Default to release. The seam exists so drift is caught at every round, not so every round is
 argued: hold a card only when there is a reason to think about recutting or fixing the task, and say
 what that reason is in the decision.
