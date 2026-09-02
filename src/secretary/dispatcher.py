@@ -1551,6 +1551,10 @@ class DispatcherRuntime:
                 record.workspace, record.attempt_id or attempt_id, ref, record.report_generation
             ),
         )
+        if marker in {"report:done", "report:blocked"}:
+            self._capture_outcome_source(
+                task, record, phase="report", kind="card.reported", marker=marker
+            )
         continuation = record.worker_continuation
         if continuation.delivery_pending:
             if marker in {"report:done", "report:blocked"}:
@@ -1667,6 +1671,7 @@ class DispatcherRuntime:
                     ),
                     terminal_state="blocked",
                     disposition="blocked",
+                    report_consumed=True,
                     blocked_reason="implementation",
                 )
                 records.pop(ref, None)
@@ -1989,6 +1994,7 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
+            report_consumed=True,
             blocked_reason="infrastructure",
         )
         records.pop(ref, None)
@@ -2035,6 +2041,7 @@ class DispatcherRuntime:
                 ),
                 terminal_state="blocked",
                 disposition="blocked",
+                report_consumed=True,
                 blocked_reason="implementation",
             )
             records.pop(ref, None)
@@ -2145,8 +2152,14 @@ class DispatcherRuntime:
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
+            self._capture_outcome_source(
+                task, record, phase="verdict", kind="card.verdict", marker=marker
+            )
             return self._park_green_verdict(task, record, records, payload, attempt_id)
         if marker == "review:red":
+            self._capture_outcome_source(
+                task, record, phase="verdict", kind="card.verdict", marker=marker
+            )
             # Only the reviewer's lifecycle ends here: a full `stop` would take the worktree's
             # terminals down, and this checkout is about to be parked and is never re-created from
             # base. An unconfirmed stop ends the tick before the card moves. The commit is read
@@ -3512,6 +3525,7 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
+            report_consumed=True,
             blocked_reason="operator",
         )
         records.pop(ref, None)
@@ -3568,6 +3582,7 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-blocked", ref),
                 terminal_state="blocked",
                 disposition="blocked",
+                report_consumed=True,
                 blocked_reason="gate",
             )
             records.pop(ref, None)
@@ -3677,6 +3692,7 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-receipt-blocked", ref),
             terminal_state="blocked",
             disposition="blocked",
+            report_consumed=True,
             blocked_reason="gate",
         )
         records.pop(ref, None)
@@ -3920,6 +3936,7 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
+            report_consumed=True,
             # The failed gate is the terminal cause.  Its original runner
             # outage explains the bounded reruns, not this Blocked effect.
             blocked_reason="gate",
@@ -3965,6 +3982,7 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
+            report_consumed=True,
             # A rerun that cannot be requested leaves a gate obligation
             # unresolved; it is not a head bring-up infrastructure outcome.
             blocked_reason="gate",
@@ -4579,6 +4597,7 @@ class DispatcherRuntime:
         retained_run = dict(record.worker_run)
         self.open_worker_round(record, round_number=rework_round)
         self.record_worker_routing(task, record, retained_run)
+        self._persist_outcome_round_context(task, record, phase="worker")
         self._record_worker_continuation(ref, record, "reused", phase, "retained worker resumed")
         record.worker_started_at = record.worker_progress_at = time.time()
         records[ref] = record
@@ -4654,6 +4673,7 @@ class DispatcherRuntime:
         record.state = "claimed"
         self.open_worker_round(record, round_number=rework_round)
         self.record_worker_routing(task, record, launched.run)
+        self._persist_outcome_round_context(task, record, phase="worker")
         self._record_worker_continuation(ref, record, continuation, phase, continuation_reason)
         _clear_launch_intent(record)
         record.worker_started_at = record.worker_progress_at = time.time()
@@ -5005,6 +5025,7 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{action}-stall", ref),
             terminal_state="blocked",
             disposition="blocked",
+            report_consumed=True,
             blocked_reason="gate",
         )
         records.pop(ref, None)
@@ -5367,14 +5388,21 @@ class DispatcherRuntime:
         decision_request = str(recorded.get("request_id") or "") if isinstance(recorded, dict) else ""
         decision_event_id = str(recorded.get("event_id") or "") if isinstance(recorded, dict) else ""
         if visit and decision_request and decision_event_id:
-            self._persist_outcome_round_context(
-                task,
-                record,
-                phase="decision",
-                assessment_visit=visit,
-                request_ids={decision_request},
-                source_event_id=decision_event_id,
-            )
+            try:
+                self._persist_outcome_round_context(
+                    task,
+                    record,
+                    phase="decision",
+                    assessment_visit=visit,
+                    request_ids={decision_request},
+                    source_event_id=decision_event_id,
+                    marker=f"decision:{decision}",
+                )
+            except (OSError, TaskError, ValueError):
+                # The decision has already committed.  Do not turn a journal
+                # outage into a new lifecycle authority; terminal projection
+                # will retain an explicit missing-decision diagnostic instead.
+                pass
         if decision == "rework":
             return self._rework_parked(task, record, records, payload, attempt_id, reason=reason)
         if decision == "reslice":
@@ -5854,6 +5882,7 @@ class DispatcherRuntime:
         disposition: str,
         verdict: str = "missing",
         decision: str = "",
+        report_consumed: bool = False,
         taxonomy: TerminalTaxonomy,
     ) -> dict[str, Any] | None:
         """Freeze the forward lineage before its lifecycle effect is issued.
@@ -5862,28 +5891,35 @@ class DispatcherRuntime:
         never reopen a card, walk comments, or search the journal for a newer
         source after the effect has happened.
         """
-        attempt_id = record.attempt_id
-        attempt = record.attempt_round
-        generation = record.report_generation
-        if not attempt_id or attempt < 1 or generation < 1:
-            return None
-        reviewed = bool(record.review_run)
         reference = str(task.get("ref") or "")
-        revision = specification_revision(self.audit.events(reference), str(task.get("description") or ""))
-        # Worker command identities are deterministic, but this journal record is
-        # what makes them a durable hand-off rather than a terminal-time guess.
-        self._persist_outcome_round_context(task, record, phase="worker")
+        if not record.attempt_id or record.attempt_round < 1:
+            return None
         context = self._outcome_round_context(reference, record)
+        worker_context = context.get("worker", {})
+        attempt_id = str(worker_context.get("attempt_id") or record.attempt_id or "")
+        attempt = worker_context.get("attempt", record.attempt_round)
+        generation = worker_context.get("report_generation", record.report_generation)
+        if not attempt_id or not isinstance(attempt, int) or attempt < 1 or not isinstance(generation, int) or generation < 1:
+            return None
+        reviewed = bool(context.get("review")) or bool(record.review_run)
+        revision = context.get("report", {}).get("specification_revision", worker_context.get("specification_revision"))
+        if revision is not None and not isinstance(revision, str):
+            revision = None
+        report_relevant = (
+            report_consumed
+            or bool(context.get("report"))
+            or verdict in {"green", "red", "blocked"}
+            or bool(decision)
+        )
+        verdict_relevant = reviewed and verdict in {"green", "red"}
+        decision_relevant = bool(decision)
         source, diagnostic = self._outcome_lineage_sources(
             reference,
-            attempt_id=attempt_id,
-            attempt=attempt,
-            generation=generation,
             revision=revision,
-            verdict=verdict,
-            decision=decision,
             context=context,
-            reviewed=reviewed,
+            report_required=report_relevant,
+            verdict_required=verdict_relevant,
+            decision_required=decision_relevant,
         )
         completeness: dict[str, str] = {}
         for role, ledger_role in (("worker", "worker"), ("review", "reviewer")):
@@ -5896,12 +5932,15 @@ class DispatcherRuntime:
         # Requiredness is selected from the path before source resolution.  A
         # null source is evidence of incomplete lineage, never permission to
         # redefine the path as one that did not consume it.
-        report_relevant = verdict in {"green", "red", "blocked"} or bool(decision)
+        # The terminal caller knows whether it is acting on a report handler,
+        # but never resolves that report here.  A missing durable source handoff
+        # is therefore an incomplete outcome, not a reason to make the source
+        # optional.  Verdict and decision paths are necessarily report-derived.
         required = {
             "specification_revision": report_relevant,
             "report": report_relevant,
-            "verdict": reviewed and verdict in {"green", "red"},
-            "decision": bool(decision),
+            "verdict": verdict_relevant,
+            "decision": decision_relevant,
             "effect": True,
             "worker_usage": completeness["worker"] in {"collected", "degraded"},
             "review_usage": completeness["review"] in {"collected", "degraded"},
@@ -5927,22 +5966,17 @@ class DispatcherRuntime:
         self,
         reference: str,
         *,
-        attempt_id: str,
-        attempt: int,
-        generation: int,
-        revision: str,
-        verdict: str,
-        decision: str,
+        revision: str | None,
         context: dict[str, dict[str, Any]],
-        reviewed: bool,
+        report_required: bool,
+        verdict_required: bool,
+        decision_required: bool,
     ) -> tuple[dict[str, str | None], str]:
-        """Freeze exact, typed sources from the round that consumed them.
+        """Read only the already-durable exact source handoff.
 
-        Request ids name worker and reviewer rounds.  The observer decision
-        names the Assessment visit it resolves.  Those authoritative
-        identities let this boundary reject a wrong source without scanning a
-        card's marker history, which is ambiguous after a second review under
-        the same specification.  Recovery never calls this method.
+        Source handlers recorded the event ids before they selected a terminal
+        effect.  This method deliberately does not search marker history or
+        reconstruct a request id, so it remains valid after dispatcher adoption.
         """
         source: dict[str, str | None] = {
             "report": None,
@@ -5953,79 +5987,42 @@ class DispatcherRuntime:
             "review_usage": None,
         }
         canon = self.writer.board_host.canon
+        events = {event.event_id: event for event in canon.events(ref=reference)} if canon is not None else {}
 
-        def one(
-            name: str,
-            kind: str,
-            marker: str,
-            *,
-            exact_ids: set[str],
-            assessment_visit: str = "",
-            expected_event_id: str = "",
-        ) -> str:
+        def one(name: str, phase: str, kind: str, marker: str) -> str:
             if canon is None:
                 return f"attempt_outcome_lineage_missing_{name}"
-            owned = [event for request_id in exact_ids if (event := canon.committed(request_id)) is not None]
-            exact = [
-                event
-                for event in owned
-                if event.kind.value == kind and event.ref == reference and event.data.get("marker") == marker
-            ]
-            if len(exact) > 1:
-                return f"attempt_outcome_lineage_ambiguous_{name}"
-            if not exact:
-                return f"attempt_outcome_lineage_incompatible_{name}" if owned else f"attempt_outcome_lineage_missing_{name}"
-            event = exact[0]
-            if expected_event_id and event.event_id != expected_event_id:
-                return f"attempt_outcome_lineage_incompatible_{name}"
+            handoff = context.get(phase, {})
+            event_id = handoff.get("source_event_id")
+            if not isinstance(event_id, str) or not event_id:
+                return f"attempt_outcome_lineage_missing_{name}"
+            event = events.get(event_id)
+            if event is None:
+                return f"attempt_outcome_lineage_dangling_{name}"
             data = event.data
-            # Pre-v2 markers did not bind a specification revision.  They are
-            # an upgrade-window absence, not an incompatible current marker.
-            if "specification_revision" not in data:
-                return ""
-            if data.get("specification_revision") != (revision or None):
+            if event.kind.value != kind or event.ref != reference or data.get("marker") != marker:
                 return f"attempt_outcome_lineage_incompatible_{name}"
-            if assessment_visit and data.get("assessment_visit") != assessment_visit:
+            if "specification_revision" not in data:
+                return f"attempt_outcome_lineage_legacy_{name}"
+            if data.get("specification_revision") != revision:
+                return f"attempt_outcome_lineage_incompatible_{name}"
+            if phase == "decision" and data.get("assessment_visit") != handoff.get("assessment_visit"):
                 return f"attempt_outcome_lineage_incompatible_{name}"
             source[name] = event.event_id
             return ""
 
-        report_relevant = verdict in {"green", "red", "blocked"} or bool(decision)
-        diagnostic = ""
-        if report_relevant:
-            report_marker = "report:blocked" if verdict == "blocked" else "report:done"
-            report_ids = set(context.get("worker", {}).get("request_ids") or ())
-            if not report_ids:
-                diagnostic = "attempt_outcome_lineage_missing_round_context_worker"
-            else:
-                diagnostic = one("report", "card.reported", report_marker, exact_ids=report_ids)
-        if reviewed and verdict in {"green", "red"} and not diagnostic:
-            verdict_ids = set(context.get("review", {}).get("request_ids") or ())
-            if not verdict_ids:
-                diagnostic = "attempt_outcome_lineage_missing_round_context_review"
-                return source, diagnostic
-            diagnostic = one(
-                "verdict",
-                "card.verdict",
-                f"review:{verdict}",
-                exact_ids=verdict_ids,
-            )
-        if decision and not diagnostic:
-            decision_context = context.get("decision", {})
-            request_ids = set(decision_context.get("request_ids") or ())
-            visit = str(decision_context.get("assessment_visit") or "")
-            if not request_ids or not visit:
-                diagnostic = "attempt_outcome_lineage_missing_round_context_decision"
-            else:
-                diagnostic = one(
-                    "decision",
-                    "card.decided",
-                    f"decision:{decision}",
-                    exact_ids=request_ids,
-                    assessment_visit=visit,
-                    expected_event_id=str(decision_context.get("source_event_id") or ""),
-                )
-        return source, diagnostic
+        diagnostics = [
+            one("report", "report", "card.reported", str(context.get("report", {}).get("marker") or ""))
+            if report_required
+            else "",
+            one("verdict", "verdict", "card.verdict", str(context.get("verdict", {}).get("marker") or ""))
+            if verdict_required
+            else "",
+            one("decision", "decision", "card.decided", str(context.get("decision", {}).get("marker") or ""))
+            if decision_required
+            else "",
+        ]
+        return source, next((diagnostic for diagnostic in diagnostics if diagnostic), "")
 
     def _outcome_round_context_request_id(self, record: DispatcherRecord, reference: str, phase: str) -> str:
         return _attempt_request_id(
@@ -6041,12 +6038,31 @@ class DispatcherRuntime:
         assessment_visit: str = "",
         request_ids: set[str] | None = None,
         source_event_id: str = "",
+        marker: str = "",
+        source_revision: str | None = None,
+        freeze_source_revision: bool = False,
     ) -> None:
-        """Write the exact source request identities before their terminal use."""
+        """Write a stable forward round handoff at a launch or source boundary.
+
+        This method is intentionally never called from ``terminal_effect``.
+        The worker launch creates the stable identity; review and source records
+        carry that identity forward without consulting mutable dispatcher state.
+        """
         reference = str(task.get("ref") or "")
         if not reference or not record.attempt_id or record.attempt_round < 1 or record.report_generation < 1:
             return
-        context_request = self._outcome_round_context_request_id(record, reference, phase)
+        existing_context = self._outcome_round_context(reference, record)
+        worker = existing_context.get("worker", {})
+        round_id = str(worker.get("round_id") or "")
+        if phase == "worker":
+            context_request = self._outcome_round_context_request_id(record, reference, phase)
+            round_id = context_request
+        elif not round_id:
+            # A pre-v2 or unavailable launch handoff cannot be repaired from a
+            # terminal path.  Its terminal outcome is honestly incomplete.
+            return
+        else:
+            context_request = _attempt_request_id(round_id, f"outcome-round-context-{phase}", reference)
         if self.audit.committed_event(context_request) is not None:
             return
         if request_ids is None:
@@ -6063,38 +6079,132 @@ class DispatcherRuntime:
                 }
             else:
                 return
+        revision = source_revision if phase != "worker" else None
+        if phase != "worker" and not freeze_source_revision and source_revision is None:
+            revision = worker.get("specification_revision") if worker else None
+        if phase == "worker":
+            revision = specification_revision(self.audit.events(reference), str(task.get("description") or "")) or None
         self.writer.outcome_round_context(
             role="dispatcher",
             actor=self.owner,
             reference=reference,
             request_id=context_request,
             data={
-                "version": 1,
+                "version": 2,
                 "phase": phase,
-                "attempt_id": record.attempt_id,
-                "attempt": record.attempt_round,
-                "report_generation": record.report_generation,
+                "round_id": round_id,
+                "attempt_id": worker.get("attempt_id", record.attempt_id) if phase != "worker" else record.attempt_id,
+                "attempt": worker.get("attempt", record.attempt_round) if phase != "worker" else record.attempt_round,
+                "report_generation": worker.get("report_generation", record.report_generation)
+                if phase != "worker"
+                else record.report_generation,
                 "request_ids": sorted(request_ids),
                 "assessment_visit": assessment_visit,
                 "source_event_id": source_event_id,
+                "specification_revision": revision,
+                "marker": marker,
             },
         )
 
+    def _capture_outcome_source(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        *,
+        phase: str,
+        kind: str,
+        marker: str,
+        assessment_visit: str = "",
+    ) -> None:
+        """Attach the exact marker id as soon as this dispatcher consumes it.
+
+        A journal outage here must not veto the later lifecycle effect.  In
+        that case there is no invented identity: the effect carries the named
+        missing-source diagnostic and projection marks the required lineage
+        incomplete.
+        """
+        reference = str(task.get("ref") or "")
+        context = self._outcome_round_context(reference, record)
+        owner = context.get("worker" if phase == "report" else "review", {})
+        request_ids = owner.get("request_ids") if isinstance(owner, dict) else None
+        if not isinstance(request_ids, list):
+            return
+        canon = self.writer.board_host.canon
+        if canon is None:
+            return
+        matches = [
+            event
+            for request_id in request_ids
+            if (event := canon.committed(str(request_id))) is not None
+            and event.kind.value == kind
+            and event.ref == reference
+            and event.data.get("marker") == marker
+        ]
+        if len(matches) != 1:
+            return
+        try:
+            self._persist_outcome_round_context(
+                task,
+                record,
+                phase=phase,
+                assessment_visit=assessment_visit,
+                request_ids={str(matches[0].event_id)},
+                source_event_id=matches[0].event_id,
+                marker=marker,
+                source_revision=matches[0].data.get("specification_revision"),
+                freeze_source_revision=True,
+            )
+        except (OSError, TaskError, ValueError):
+            return
+
     def _outcome_round_context(self, reference: str, record: DispatcherRecord) -> dict[str, dict[str, Any]]:
-        context: dict[str, dict[str, Any]] = {}
-        for phase in ("worker", "review", "decision"):
-            event = self.audit.committed_event(self._outcome_round_context_request_id(record, reference, phase))
-            payload = event.get("payload") if isinstance(event, dict) else None
-            if not isinstance(payload, dict):
-                continue
-            if (
-                payload.get("version") == 1
-                and payload.get("phase") == phase
-                and payload.get("attempt_id") == record.attempt_id
-                and payload.get("attempt") == record.attempt_round
-                and payload.get("report_generation") == record.report_generation
-            ):
-                context[phase] = payload
+        """Find one unsettled durable handoff without re-estimating its identity.
+
+        The fast path keeps ordinary dispatch cheap.  Adoption can lose the
+        process-local attempt id and report generation, so its fallback uses
+        only durable handoffs and excludes rounds already sealed by a lifecycle
+        effect.  It never uses card comments, workspace text, event order or
+        request-id grammar to choose a source.
+        """
+        payloads: list[dict[str, Any]] = []
+        for event in self.audit.events(reference, kind="outcome_round_context"):
+            payload = event.get("data") if event.get("record_type") == "board.protocol_event" else event.get("payload")
+            if isinstance(payload, dict) and payload.get("version") == 2 and isinstance(payload.get("round_id"), str):
+                payloads.append(payload)
+        workers = [payload for payload in payloads if payload.get("phase") == "worker"]
+        exact = [
+            payload
+            for payload in workers
+            if payload.get("attempt_id") == record.attempt_id
+            and payload.get("attempt") == record.attempt_round
+            and payload.get("report_generation") == record.report_generation
+        ]
+        if len(exact) == 1:
+            worker = exact[0]
+        else:
+            sealed = {
+                (
+                    data.get("attempt_id"),
+                    data.get("attempt"),
+                    data.get("report_generation"),
+                )
+                for event in self.writer.board_host.canon.events(ref=reference)
+                if isinstance((data := event.data.get("attempt_outcome_owed")), dict)
+            }
+            unsettled = [
+                payload
+                for payload in workers
+                if (payload.get("attempt_id"), payload.get("attempt"), payload.get("report_generation")) not in sealed
+            ]
+            if len(unsettled) != 1:
+                return {}
+            worker = unsettled[0]
+        round_id = worker["round_id"]
+        context = {"worker": worker}
+        for payload in payloads:
+            phase = payload.get("phase")
+            if phase in {"review", "report", "verdict", "decision"} and payload.get("round_id") == round_id:
+                context[str(phase)] = payload
         return context
 
     def _outcome_usage_source(
@@ -6171,6 +6281,7 @@ class DispatcherRuntime:
         verdict: str = "missing",
         blocked_reason: str | None = None,
         decision: str = "",
+        report_consumed: bool = False,
     ) -> dict[str, Any]:
         """The lifecycle-owned terminal effect and its non-blocking finisher."""
         taxonomy: TerminalTaxonomy | None = None
@@ -6188,6 +6299,7 @@ class DispatcherRuntime:
                 disposition=disposition,
                 verdict=verdict,
                 decision=decision,
+                report_consumed=report_consumed,
                 taxonomy=taxonomy,
             )
             if taxonomy is not None

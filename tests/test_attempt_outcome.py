@@ -181,6 +181,58 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
         self.assertEqual(self._outcomes(), ())
 
+    def test_terminal_effect_never_repairs_or_writes_round_context(self) -> None:
+        """A failed observational handoff cannot veto the lifecycle transaction."""
+        _payload, record = self._start_worker_round()
+        with mock.patch.object(
+            self.runtime,
+            "_persist_outcome_round_context",
+            side_effect=TaskError("audit_pending", "context journal unavailable", 4),
+        ) as persist:
+            effect = self.runtime.terminal_effect(
+                self.reader.show(CARD_REF),
+                record,
+                target="blocked",
+                reason="terminal lifecycle effect survives a context outage",
+                request_id="context-outage-terminal-effect",
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="infrastructure",
+            )
+        persist.assert_not_called()
+        self.assertTrue(effect["event_id"])
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+
+    def test_reviewed_release_after_adoption_uses_the_original_durable_round(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()  # gate green -> review launch, including its durable handoff
+        payload = self.runtime.production_state.load()
+        original = self.runtime.production_state.records(payload)[CARD_REF]
+        verdict_request = self._review_verdict_request_id("green")
+        self.runtime.production_state.put_records(payload, {})
+        payload["attempt_id"] = "attempt-after-restart"
+        self.runtime.production_state.save(payload)
+
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference=CARD_REF,
+            kind="green",
+            body="green after dispatcher restart",
+            request_id=verdict_request,
+        )
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release", request_id="release-after-adoption")
+        self.tick()
+
+        outcome = self._outcomes()[0].event.data
+        self.assertEqual(outcome["attempt_id"], original.attempt_id)
+        self.assertEqual(outcome["report_generation"], original.report_generation)
+        self.assertTrue(
+            all(outcome["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect"))
+        )
+
     def test_done_then_red_gate_seals_rework_before_opening_the_next_round(self) -> None:
         self.start_dispatcher()
         self.host.gate_results = [GateResult("red", "test gate rejected the candidate")]
@@ -197,6 +249,30 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIsNotNone(occurrence["source_event_ids"]["report"])
         self.assertIsNone(occurrence["source_event_ids"]["verdict"])
         self.assertIsNone(occurrence["source_event_ids"]["decision"])
+
+    def test_verdictless_gate_termination_keeps_the_consumed_report_required(self) -> None:
+        self._start_worker_round()
+        self._report_done("gate will terminate this report round")
+        self.assertEqual(self.tick()["to"], "validate")
+        payload = self.runtime.production_state.load()
+        record = self.runtime.production_state.records(payload)[CARD_REF]
+        self.runtime.terminal_effect(
+            self.reader.show(CARD_REF),
+            record,
+            target="blocked",
+            reason="gate infrastructure terminal",
+            request_id="verdictless-gate-terminal",
+            terminal_state="blocked",
+            disposition="blocked",
+            report_consumed=True,
+            blocked_reason="gate",
+        )
+        outcome = self._outcomes()[0].event.data
+        self.assertTrue(outcome["lineage_required"]["report"])
+        self.assertTrue(outcome["lineage_required"]["specification_revision"])
+        self.assertIsNotNone(outcome["source_event_ids"]["report"])
+        self.assertFalse(outcome["lineage_required"]["verdict"])
+        self.assertFalse(outcome["lineage_required"]["decision"])
 
     def test_no_observer_green_release_seals_the_reviewed_round(self) -> None:
         self.start_dispatcher()

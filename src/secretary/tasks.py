@@ -217,10 +217,29 @@ def _validate_outcome_round_context(data: dict[str, Any]) -> None:
         "assessment_visit",
         "source_event_id",
     }
-    if set(data) != expected or data.get("version") != 1:
+    version = data.get("version")
+    if version == 2:
+        expected = expected | {"round_id", "specification_revision", "marker"}
+    if set(data) != expected or version not in {1, 2}:
         raise TaskError("validation", "outcome round context has an unsupported field set", 2)
-    if data.get("phase") not in {"worker", "review", "decision"}:
+    phases = {"worker", "review", "decision"} if version == 1 else {
+        "worker", "review", "decision", "report", "verdict"
+    }
+    if data.get("phase") not in phases:
         raise TaskError("validation", "outcome round context has an unsupported phase", 2)
+    if version == 2 and (not isinstance(data.get("round_id"), str) or not data["round_id"].strip()):
+        raise TaskError("validation", "outcome round context needs a stable round id", 2)
+    if version == 2:
+        revision = data.get("specification_revision")
+        if revision is not None and (not isinstance(revision, str) or not revision.strip()):
+            raise TaskError("validation", "outcome round context specification revision must be a string or null", 2)
+        marker = data.get("marker")
+        if not isinstance(marker, str):
+            raise TaskError("validation", "outcome round context marker must be a string", 2)
+        if data["phase"] in {"report", "verdict", "decision"} and not marker:
+            raise TaskError("validation", "source outcome round context needs its marker", 2)
+        if data["phase"] not in {"report", "verdict", "decision"} and marker:
+            raise TaskError("validation", "only source outcome round context has a marker", 2)
     if not isinstance(data.get("attempt_id"), str) or not data["attempt_id"].strip():
         raise TaskError("validation", "outcome round context needs an attempt id", 2)
     for name in ("attempt", "report_generation"):
@@ -242,10 +261,11 @@ def _validate_outcome_round_context(data: dict[str, Any]) -> None:
     event_id = data.get("source_event_id")
     if not isinstance(event_id, str):
         raise TaskError("validation", "outcome round context source event id must be a string", 2)
-    if data["phase"] == "decision" and not event_id:
-        raise TaskError("validation", "decision outcome round context needs its source event id", 2)
-    if data["phase"] != "decision" and event_id:
-        raise TaskError("validation", "only decision outcome round context has a source event id", 2)
+    source_phases = {"decision"} if version == 1 else {"report", "verdict", "decision"}
+    if data["phase"] in source_phases and not event_id:
+        raise TaskError("validation", "source outcome round context needs its source event id", 2)
+    if data["phase"] not in source_phases and event_id:
+        raise TaskError("validation", "only source outcome round context has a source event id", 2)
 
 
 def specification_revision(events: Iterable[dict[str, Any]], description: str) -> str:
