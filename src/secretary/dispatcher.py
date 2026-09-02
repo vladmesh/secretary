@@ -161,6 +161,7 @@ from secretary.dispatcher_launch import (
 )
 from secretary.dispatcher_launch import (
     confirm_launch_intent as _confirm_launch_intent,
+    launch_delivery_receipt as _launch_delivery_receipt,
 )
 from secretary.dispatcher_launch import (
     forget_role_head as _forget_role_head,
@@ -1227,6 +1228,8 @@ class DispatcherRuntime:
         _record_worker_delivery_evidence(record, prepared.get("delivery_evidence"))
         # The intent carries the pane, the launch snapshot and this head's own run before the record
         # is told anything else: from here every failure is one over a worker that is already running.
+        # The delivery receipt goes with them, because a recovery of this launch has to be able to
+        # tell a worker that received its TASK pointer from one whose composer swallowed it.
         _confirm_launch_intent(
             self,
             payload,
@@ -1237,6 +1240,7 @@ class DispatcherRuntime:
             leaf=str(prepared.get("leaf") or ""),
             run=prepared.get("run"),
             head_run=dict(prepared.get("head_run") or {}),
+            delivery=_launch_delivery_receipt(prepared.get("delivery_evidence")),
         )
         try:
             self._settle_worker_pane(
@@ -1477,6 +1481,7 @@ class DispatcherRuntime:
             leaf=launched.leaf,
             run=launched.run,
             head_run=dict(launched.head_run),
+            delivery=_launch_delivery_receipt(launched.delivery_evidence),
         )
         _record_worker_delivery_evidence(record, launched.delivery_evidence)
         try:

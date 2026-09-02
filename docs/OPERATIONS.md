@@ -906,7 +906,10 @@ and remains pending until one later delivery reaches the ordinary confirmation b
 whose document nudge sees busy keeps the exact run, pane
 binding and pending delivery in its launch intent; recovery retries that same nudge on its capped
 durable schedule before it may freeze the worker, record reviewer routing, set reviewer lifecycle
-state or clear the intent. Busy is neither a failed wake nor an acknowledgement.
+state or clear the intent. Busy is neither a failed wake nor an acknowledgement. The same retry now
+carries every other state in which the pointer was not accepted — the pane held in a dialog, a head
+still starting, or the pointer found sitting in the composer — because they are one fact for this
+purpose: the reviewer has not received the document.
 
 `unavailable` and `stale_handle` are different evidence states. An unreadable or malformed wait,
 or a real transport refusal, is unavailable; `error.code: terminal_handle_stale` is stale-handle
@@ -1086,6 +1089,34 @@ not close, or the reviewer came up but the worker head could not be stopped. The
 distinct aborted outcome and the tick reports a launch-aborted action, status degraded. The card does not go to
 Blocked and the record is not deleted: a live head would be left with no pointer to it. The intent stays on disk
 together with the handle from the error, and the next tick resolves it like any other.
+
+What the delivery boundary saw travels on that intent too, and it is what the next tick reads before anything else.
+A launch whose pointer the composer never accepted is **not adopted as a claim**, however alive its pid is: no
+routing event, no `claimed`, no `review_starting`, no `reviewing`, no `waiting-review-verdict`, no worker freeze,
+and the intent is not cleared. The tick reports `worker-launch-undelivered` or `review-launch-undelivered`,
+degraded, with the state that is holding the pointer (`busy`, `blocked`, a pre-delivery state such as
+`update-modal`, `starting` or `unknown-dialog`, or `refused` when the pointer was found sitting in the composer)
+and which attempt it was. A reviewer re-delivers the same document pointer over its exact retained run on a capped
+schedule. Past `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` (five) the head is stopped through its own intent first and
+the ordinary path launches again: `worker-launch-undeliverable` / `review-launch-undeliverable`. Nothing is ever
+opened beside a head that has not been stopped, and a stop the host will not confirm reports
+`*-stop-unconfirmed` and keeps the intent.
+
+Two field incidents are the reason. On `issue:6afc6644` a reviewer delivery correctly returned blocked, unconfirmed
+and zero bytes written, and the next tick adopted the retained launch as `reviewing` because the pid was alive; the
+system reported `waiting-review-verdict` for over an hour against a reviewer that had never received the document.
+On `issue:2fdac531` Orca reported `tui-idle/ready` for a Codex head that was still starting its MCP servers, the
+TASK pointer stayed in the composer through three Enters, and recovery adopted the live head as a successful claim —
+80 minutes to a manual Enter. A live pid, a writable pane and Orca's own `accepted` / `bytesWritten` are not a
+provider taking a prompt, and none of them authorises a claim.
+
+The codex update prompt (`Update available! … 1. Update now  2. Skip  3. Skip until next version`) is normally
+prevented rather than answered: preflight sets `dismissed_version` in the runtime `CODEX_HOME`'s `version.json`
+before the pane exists, which is what codex itself writes when a person picks "Skip until next version". If one
+appears anyway the delivery answers that one documented choice, a bounded number of times, and proves readiness
+again before writing the pointer. **No delivery ever upgrades codex to get past a dialog**; an upgrade is a
+separate, explicit action. A dialog the code does not recognise gets no keystrokes at all — it is a typed refusal
+that takes the bounded bring-up deferral above and then the operator-visible infrastructure Blocked.
 
 Reviewer launch prefers a split from the worker pane. Orca can return
 `terminal_split_source_not_found` before or after it attempts to create the child, so the dispatcher
@@ -1558,12 +1589,18 @@ been restarted, without waiting for the final Blocked.
   default 300 seconds.
 - `SECRETARY_BRINGUP_DEFER_ATTEMPTS` — how many bring-ups of one role's head are deferred over a pane that is not
   ready for its launch prompt before the card is blocked over that pane, default 5 attempts.
+- `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` — how many ticks a live head may hold its card while its pointer is
+  still unaccepted before it is stopped and launched again, default 5 attempts.
+- `SECRETARY_TUI_PRE_DELIVERY_TIMEOUT_S` — how long a pane that is not yet sendable is given to become sendable
+  inside one delivery, default 45 seconds.
+- `SECRETARY_TUI_MODAL_ANSWER_ATTEMPTS` — how many times the one known update modal is answered on screen before
+  the delivery is refused, default 2.
 
 All five are read at check time; garbage or a zero value falls back to the default, so a typo in a unit file does
 not stop the dispatcher from starting.
 
-A bring-up can also fail before the head has said anything at all: the pane it was launched into is working, or is
-held in a dialog the head cannot leave on its own — a codex update prompt is the one seen in production. The launch
+A bring-up can also fail before the head has said anything at all: the pane it was launched into is working, is
+held in a dialog the head cannot leave on its own, or is still starting up. The launch
 prompt then goes nowhere, and the pane is closed behind it. That is not a failed round. The card keeps its claim and
 its record, the tick reports `worker-launch-deferred` or `review-launch-deferred` with the pane's state and which
 attempt it was, and the next tick makes the same bring-up again. Once the attempts above are spent the card does go

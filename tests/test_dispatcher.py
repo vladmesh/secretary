@@ -79,6 +79,7 @@ from secretary.dispatcher_launcher import (
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
 )
+from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
 from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_review import (
     start_review as start_reviewer,
@@ -11771,6 +11772,60 @@ class DispatcherLauncherTests(unittest.TestCase):
                     ensure_codex_workspace_trusted({"adapter": "codex"}, str(workspace), config)
 
             self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+    def test_the_codex_update_modal_is_answered_before_the_pane_exists(self) -> None:
+        """The same answer as the trust dialog, in the file codex reads it from.
+
+        Picking "Skip until next version" on the modal is exactly a write of
+        `dismissed_version = latest_version` into `$CODEX_HOME/version.json`. Doing it at preflight
+        is what keeps `issue:e4d6f307` — 51 minutes of a reviewer sitting on that dialog with the
+        review pointer swallowed — from being a screen anybody has to type at.
+        """
+        with tempfile.TemporaryDirectory() as name:
+            home = Path(name)
+            version = home / "version.json"
+            version.write_text(
+                json.dumps(
+                    {
+                        "latest_version": "0.152.1",
+                        "last_checked_at": "2026-09-02T00:16:16.684056373Z",
+                        "dismissed_version": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(ensure_codex_update_modal_dismissed({"codex_home": str(home)}), "prevented")
+
+            settled = json.loads(version.read_text(encoding="utf-8"))
+            self.assertEqual(settled["dismissed_version"], "0.152.1")
+            # Nothing is upgraded and no version is pinned: the check's own findings are untouched.
+            self.assertEqual(settled["latest_version"], "0.152.1")
+            self.assertEqual(settled["last_checked_at"], "2026-09-02T00:16:16.684056373Z")
+            # And it is idempotent, so a second bring-up under the same home rewrites nothing.
+            self.assertEqual(
+                ensure_codex_update_modal_dismissed({"codex_home": str(home)}), "already-dismissed"
+            )
+
+    def test_an_unpreventable_update_check_never_fails_a_bring_up(self) -> None:
+        """Prevention is best effort by construction; the on-screen answer is the guarantee.
+
+        The file belongs to codex: it may not exist yet under a fresh runtime home, and a check
+        that runs after this write can raise the modal again. A symlink somebody left in that path
+        is the one refusal, because a bring-up may never follow one into installation state.
+        """
+        with tempfile.TemporaryDirectory() as name:
+            home = Path(name)
+            self.assertEqual(ensure_codex_update_modal_dismissed({"codex_home": str(home)}), "not-pending")
+            (home / "version.json").write_text("{not json", encoding="utf-8")
+            self.assertEqual(ensure_codex_update_modal_dismissed({"codex_home": str(home)}), "unpreventable")
+
+            target = home / "elsewhere.json"
+            target.write_text("{}", encoding="utf-8")
+            linked = home / "linked.json"
+            linked.symlink_to(target)
+            with self.assertRaisesRegex(RuntimeError, "refusing symlinked codex version file"):
+                ensure_codex_update_modal_dismissed({}, linked)
 
     def test_prepare_worker_lands_on_legacy_pipeline_branch_for_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

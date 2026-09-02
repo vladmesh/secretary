@@ -214,20 +214,30 @@ object id is fetched with the whole remote and then required to be present, sinc
 candidate that was never published is this card's own contract failing rather than a checkout to
 invent.
 
-An integration base is **refused at creation**, not normalised. The two were weighed and refusal
-won: normalising `base_branch: pipeline/x` into a seed would silently rewrite what somebody typed
-into something with a different meaning, and the case where that guess is wrong — a card that really
-did mean to integrate somewhere else — is the case where being wrong is most expensive. A refusal is
-one error message at the cheapest possible moment, before a workspace, a head or a pull request
-exists, and it names the flag that does what the writer wanted. The rule it enforces: an override
-must be a branch the project declares it integrates into — its binding's `default_branch`, or one of
-the optional `integration_bases` beside it. A per-card `pipeline/*` branch is refused by name; an
-object id is refused as "that is a seed"; anything else is refused with the declared set listed.
+An integration base is **refused**, not normalised. The two were weighed and refusal won:
+normalising `base_branch: pipeline/x` into a seed would silently rewrite what somebody typed into
+something with a different meaning, and the case where that guess is wrong — a card that really did
+mean to integrate somewhere else — is the case where being wrong is most expensive. A refusal names
+the flag that does what the writer wanted.
+
+The rule is one sentence — an override must be a branch the project declares it integrates into,
+its binding's `default_branch` or one of the optional `integration_bases` beside it — but it is
+**enforced in two places, and which place is not a choice**:
+
+  * **at admission**, by the board, are the refusals that need only the value: a per-card
+    `pipeline/*` branch, refused by name; an object id, refused as "that is a seed"; and any value
+    that is not a well-formed git ref. These cost one error message at the cheapest possible
+    moment, before a workspace, a head or a pull request exists;
+  * **at run time**, by the dispatcher, is "not a declared integration target". It cannot happen at
+    admission: the answer lives in the project's binding, and the board does not read bindings. So
+    the catalog resolves the card's project first, and only then can a well-formed branch outside
+    the declared set be refused with that set listed.
 
 Cards admitted before the split, and cards a restore reproduces, still carry whatever they hold —
-restore replays history rather than admitting new work. They are refused instead by the runtime, the
-first time a tick reads them, as a task-class bring-up outcome with cause `base_branch_contract`:
-fast, typed, once, and never as an infrastructure failure the dispatcher would retry.
+restore replays history rather than admitting new work. They too are refused by the runtime, the
+first time a tick reads them, on the same path as the declared-target refusal above: a task-class
+bring-up outcome with cause `base_branch_contract` — fast, typed, once, and never as an
+infrastructure failure the dispatcher would retry.
 
 ## The pull request a GitHub gate opens
 
@@ -434,6 +444,64 @@ retry schedule. Until a later nudge confirms delivery, recovery does not freeze 
 worker, write reviewer routing or lifecycle attribution, clear the intent, or replace the pane.
 Successful confirmation crosses the ordinary launch adoption boundary once; `unavailable`, malformed
 and stale-handle evidence remain separately typed and use their existing conservative recovery paths.
+
+### A pane that is ready is not a pane that is sendable
+
+Orca answers `tui-idle` from the pane's agent status and, failing that, from a quiescence window.
+A TUI holding its own update dialog, or still starting its MCP servers, is perfectly quiescent: it
+answers `tui-idle` satisfied, `terminal send` answers `accepted` with a byte count, and nothing
+reaches a provider. So readiness and sendability are two questions, and the delivery boundary asks
+both. Before a single byte is written it classifies the screen into a **pre-delivery state**, typed
+and named, distinct from `busy` and from `blocked`:
+
+  * `update-modal` — Codex's own `Update available! … 1. Update now 2. Skip 3. Skip until next
+    version`. Preferably it never appears: the runtime `CODEX_HOME`'s `version.json` has
+    `dismissed_version` set to the version the check found at preflight, before the pane exists,
+    which is exactly what codex writes when a person picks "Skip until next version" — the same
+    place and the same shape as the directory-trust answer. If one appears anyway it is answered on
+    screen with that one documented choice, a bounded number of times, and readiness is proved
+    again before the pointer is written. **Upgrading is a separate, explicit action; no delivery
+    ever performs one to get past a dialog**, so the other two choices are not reachable from here;
+  * `starting` — `Starting MCP servers`, and the composer that queues rather than submits (`tab to
+    queue message`). It clears on its own and is waited out inside a bounded window;
+  * `unknown-dialog` — anything else that is dialog-shaped: Orca naming a `blockedReason`, or
+    Codex's `Press enter to continue` footer under a screen none of the known patterns match. It
+    **fails closed**. No keystroke is sent at a screen the code does not recognise; the refusal is
+    typed, the caller's retry is bounded, and the ceiling produces an operator-visible
+    infrastructure outcome. It never silently opens a second head beside the first.
+
+The evidence records which state was observed, and it keeps three facts apart that used to be one
+"delivered" bit: **modal resolution** (`modal_resolution`, `modal_answers`, `pre_delivery_*`),
+**delivery receipt** (`delivery_receipt`, from `payload_left_in_composer` and `turn_confirmed`) and
+**provider binding** (`provider_bound`, the caller's own criterion — what the provider wrote down
+about the turn). A head that cannot be made sendable inside the window is a typed refusal, never a
+pane that keeps being typed at.
+
+### A live head is not a delivered pointer
+
+`delivery_receipt` is the one predicate the launch, the recovery and the adoption all ask, so they
+cannot answer it differently. It reads the delivery boundary's own evidence and nothing else: a
+live pid, a writable pane and Orca's `accepted`/`bytesWritten` are exactly what used to be mistaken
+for delivery and are never consulted. Positive `payload_left_in_composer` evidence is a determinate
+`refused`, not an ambiguity, and it outranks a provider turn — a journal can gain a user record
+from another turn while this pointer is still sitting in the composer.
+
+A bring-up that aborted with its pane already open carries that receipt onto its launch intent.
+Adoption then refuses an undelivered launch outright: no claim, no routing event, no
+`review_starting`, no `reviewing`, no `waiting-review-verdict`, no worker freeze, and the intent is
+**not spent** — the head stays recoverable and its pointer stays owed. The refusal is bounded by
+`SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` (five). Inside it, a reviewer re-delivers the *same*
+immutable pointer at the same path over the exact run the launch recorded — never a rebuilt or
+duplicated one, and the document body never enters the terminal — so a tick that died between the
+modal, the write and the confirmation resumes one delivery transaction rather than starting a
+second. Past the ceiling the head is stopped through its own intent first and the ordinary path
+launches again, which is why replacement never puts a second head beside the first; a stop the host
+will not confirm keeps the intent instead.
+
+This is about delivery and adoption only. It does not change the vitality watchdog's rungs or the
+`healthy_quiet` ceiling for an idle Codex shell, and the headless Blocked→In-progress adopt with no
+worker identity keeps its own missing-identity relaunch: the two meet in `_adopt`, where this
+contract governs the delivery-evidence refusal and nothing else.
 
 ### Broad-check handling
 

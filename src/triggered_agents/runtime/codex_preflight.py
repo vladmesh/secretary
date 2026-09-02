@@ -37,6 +37,17 @@ if TYPE_CHECKING:  # Avoid a runtime import cycle with head.command.
 CODEX_HOME_DEFAULT = str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home")
 # The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
 CODEX_CONFIG_FILE = "config.toml"
+# The file codex keeps its update check in, inside the same CODEX_HOME: a `VersionInfo` of
+# `latest_version`, `last_checked_at` and `dismissed_version`. Picking "Skip until next version"
+# on the update modal is exactly a write of `dismissed_version = latest_version` here, which is
+# why the modal can be answered before the pane exists rather than typed at afterwards.
+CODEX_VERSION_FILE = "version.json"
+
+# What `ensure_codex_update_modal_dismissed` did, as an answer a caller can record.
+UPDATE_MODAL_PREVENTED = "prevented"
+UPDATE_MODAL_ALREADY_DISMISSED = "already-dismissed"
+UPDATE_MODAL_NOT_PENDING = "not-pending"
+UPDATE_MODAL_UNPREVENTABLE = "unpreventable"
 
 # Provider-schema protocol version, not a Codex version.
 FANOUT_ATTESTATION_VERSION = 1
@@ -188,6 +199,61 @@ def ensure_codex_workspace_trusted(
     _save_codex_config(config_path, body)
 
 
+def codex_version_file(profile: Mapping[str, Any]) -> Path:
+    """Where the head with this profile keeps its update check."""
+    return Path(codex_home(profile)) / CODEX_VERSION_FILE
+
+
+def ensure_codex_update_modal_dismissed(
+    profile: Mapping[str, Any],
+    version_file: Path | None = None,
+) -> str:
+    """Answer codex's update prompt for this runtime before a head starts under it.
+
+    Same shape and the same reason as `ensure_codex_workspace_trusted`: nobody is sitting in front
+    of the pane, so a dialog that waits for a person is a head that never receives its prompt. On
+    `issue:e4d6f307` this exact modal held a `codex-high` reviewer for 51 minutes with the review
+    pointer swallowed, `tui-idle` satisfied throughout and the codex process at zero CPU.
+
+    The answer written here is the file codex itself writes when a human picks "Skip until next
+    version": `dismissed_version` set to the version the check found. Nothing is upgraded, nothing
+    is downloaded, and no version is pinned — an upgrade is a separate, explicit action.
+
+    Prevention is best effort by construction: the file belongs to codex, it may not exist yet on a
+    fresh runtime home, and a check that runs after this write can raise the modal again. So this
+    returns what it did rather than raising for a state it could not reach, and the delivery
+    boundary's on-screen answer stays the guarantee. A path that is not a regular file is the one
+    exception and is refused, because a bring-up must never follow a symlink somebody left there.
+    """
+    path = version_file or codex_version_file(profile)
+    reject_symlinked_config(path, "codex version file")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Codex has not run its check under this home yet; there is no pending update to dismiss.
+        return UPDATE_MODAL_NOT_PENDING
+    except (OSError, UnicodeError):
+        return UPDATE_MODAL_UNPREVENTABLE
+    try:
+        info = json.loads(raw)
+    except ValueError:
+        return UPDATE_MODAL_UNPREVENTABLE
+    if not isinstance(info, dict):
+        return UPDATE_MODAL_UNPREVENTABLE
+    latest = info.get("latest_version")
+    if not isinstance(latest, str) or not latest:
+        return UPDATE_MODAL_NOT_PENDING
+    if info.get("dismissed_version") == latest:
+        return UPDATE_MODAL_ALREADY_DISMISSED
+    updated = dict(info)
+    updated["dismissed_version"] = latest
+    try:
+        _save_codex_json(path, updated)
+    except CodexPreflightError:
+        return UPDATE_MODAL_UNPREVENTABLE
+    return UPDATE_MODAL_PREVENTED
+
+
 def preflight_codex_launch(
     profile: Mapping[str, Any],
     workspace: str,
@@ -220,6 +286,13 @@ def preflight_codex_launch(
     except CodexPreflightError as exc:
         refused = _unknown_run(attested, f"workspace trust preflight failed: {exc}")
         raise CodexFanoutPolicyError(str(exc), run=refused) from None
+    # The update modal is prevented here for the same reason trust is, and it is not a launch
+    # requirement for the same reason telemetry is not: a runtime home this could not settle still
+    # produces a head, and the delivery boundary answers the modal on screen if one appears.
+    try:
+        ensure_codex_update_modal_dismissed(profile)
+    except CodexPreflightError:
+        pass
     return attested
 
 
@@ -445,6 +518,11 @@ def _codex_config_projects(text: str, config: Path) -> dict[str, Any]:
     return projects
 
 
+def _save_codex_json(path: Path, payload: dict[str, Any]) -> None:
+    """Replace one of codex's own JSON state files atomically, under the same symlink rule."""
+    _atomic_write(path, json.dumps(payload) + "\n", kind="codex version file")
+
+
 def _save_codex_config(config: Path, text: str) -> None:
     """Replace the codex config with `text`, but only once it parses as the TOML codex will read.
 
@@ -454,22 +532,25 @@ def _save_codex_config(config: Path, text: str) -> None:
     before it replaces anything.
     """
     _codex_config_projects(text, config)
+    _atomic_write(config, text, kind="codex config")
+
+
+def _atomic_write(path: Path, text: str, *, kind: str) -> None:
+    """Replace one file of a head runtime's own state, never following a symlink into it."""
     temp_path: Path | None = None
     try:
-        config.parent.mkdir(parents=True, exist_ok=True)
-        reject_symlinked_config(config, "codex")
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{config.name}.", suffix=".tmp", dir=config.parent, text=True
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        reject_symlinked_config(path, kind)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
         temp_path = Path(temp_name)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        reject_symlinked_config(config, "codex")
-        os.replace(temp_path, config)
+        reject_symlinked_config(path, kind)
+        os.replace(temp_path, path)
     except OSError as exc:
-        raise CodexPreflightError(f"cannot update codex config {config}: {exc}") from None
+        raise CodexPreflightError(f"cannot update {kind} {path}: {exc}") from None
     finally:
         if temp_path is not None and temp_path.exists():
             try:
