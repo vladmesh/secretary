@@ -2021,12 +2021,19 @@ Two check shapes are accepted, and they differ in one promise:
   `broad_check.import_package`; the interpreter is relative to the candidate workspace unless
   absolute, and the package is the one that process imports for provenance. For example,
   `codegen-orchestrator` uses `.venv/bin/python` and `codegen_orchestrator`. This is an explicit
-  adapter contract, not a package-name or tree-layout heuristic. Unconfigured and unregistered
-  checkouts retain the legacy `sys.executable`/`secretary` default; the command's JSON response
-  names that fallback as `module_contract.reason` (`no_project_binding`,
-  `project_binding_disabled`, or `adapter_missing_broad_check`). Adding `broad_check` changes the
-  adapter bytes and therefore its digest, so run `project gate` again after adding it: until that
-  gate re-enables the binding, the disabled binding uses the named legacy fallback.
+  adapter contract, not a package-name or tree-layout heuristic, and declaring it is **mandatory**
+  for every registered project that gets cards: an adapter that declares no `broad_check` is
+  refused as `broad_check_not_declared`, both here and at the dispatcher's preflight. Silence no
+  longer means "the same broad check as Secretary" — an adapter that said nothing used to inherit
+  the `sys.executable`/`secretary` default, which was a true contract for the Secretary project
+  alone.
+  A checkout that matches **no registered project at all** is a different case and is unaffected:
+  running `secretary check broad --module ...` by hand in a plain clone keeps the CLI's own
+  `sys.executable`/`secretary` default, and the JSON response names that fallback as
+  `module_contract.source: cli_default` with a `module_contract.reason` of `no_project_binding` or
+  `project_binding_disabled`. Adding `broad_check` changes the adapter bytes and therefore its
+  digest, so run `project gate` again after adding it: until that gate re-enables the binding, the
+  binding is disabled and the workspace falls into that unregistered case.
   If the configured interpreter cannot start, `check broad` returns the structured
   `interpreter_start_failed` error with exit status 2; this is distinct from a completed red suite
   and writes no receipt because no check process ran.
@@ -2037,9 +2044,9 @@ Two check shapes are accepted, and they differ in one promise:
 
 The dispatcher asks the same question of the same registry before it gives a card to a worker at
 all, so a card is not issued on a contract its worker would then refuse. That preflight reads the
-binding and the adapter and nothing else: an adapter that is unavailable or invalid, a `broad_check`
-that is incomplete, an absolute interpreter that cannot be started, and the legacy default in a
-checkout that does not hold Secretary's own sources (`cannot_attest_project`) are refusals, and they
+binding and the adapter and nothing else: an adapter that is unavailable or invalid, an adapter
+that declares no `broad_check` at all (`broad_check_not_declared`), a `broad_check` that is
+incomplete, and an absolute interpreter that cannot be started are refusals, and they
 block the card before a workspace or a head exists, with the infrastructure class of
 [Bring-up outcomes](PROTOCOLS.md#bring-up-outcomes). A relative interpreter is not refused there:
 the schema resolves it from the candidate workspace, which does not exist yet, so the question is

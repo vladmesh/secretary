@@ -374,10 +374,8 @@ class InstanceCatalog:
         point, so `workspace=None`: a question that needs one comes back as `undecidable` with its
         name on it rather than as an approval this side is not entitled to give.
         """
-        binding = self.binding(project)
-        repo = Path(str(binding.get("repo") or "")).expanduser()
         return _decide_broad_check_contract(
-            binding, instance=self.instance_dir or Path("."), project_root=repo, workspace=None
+            self.binding(project), instance=self.instance_dir or Path("."), workspace=None
         )
 
     def default_branch(self, project: str, override: str | None) -> str:

@@ -43,8 +43,6 @@ from secretary.dispatcher_types import HostError
 from secretary.dispatcher_worker_lifecycle import WorkerContinuationLiveness
 from secretary.head_health import HeadReadiness
 from secretary.projects.contract import (
-    LEGACY_IMPORT_PACKAGE,
-    LEGACY_REASON_MISSING_BROAD_CHECK,
     ContractVerdict,
     ModuleContract,
 )
@@ -1248,10 +1246,11 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
 
         def broad_check_verdict(self, _project: str) -> ContractVerdict:
             # The worker task packet resolves the project's broad-check contract to print an exact
-            # command (issue:8b39e60e4df361c6138e). Secretary's own adapter declares none, so the
-            # legacy default is what a real catalog answers here; this stub answers the same.
+            # command (issue:8b39e60e4df361c6138e). Secretary's own adapter declares one, and an
+            # adapter that declares none is refused by name now, so a `fit` here is a declared
+            # contract; this stub answers the same shape a real catalog does.
             return ContractVerdict.as_fit(
-                ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK),
+                ModuleContract(sys.executable, "secretary", module="tests.broad"),
                 "secretary",
             )
 

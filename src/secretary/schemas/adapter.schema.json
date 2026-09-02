@@ -86,7 +86,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["import_package"],
-      "description": "The project's own broad suite: which module `check broad --module` runs, which package that run must import, and optionally which interpreter runs it. `additionalProperties: false` is why an unknown key here is refused outright, so this block has to describe the whole contract.",
+      "description": "The project's own broad suite: which module `check broad --module` runs, which package that run must import, and optionally which interpreter runs it. `additionalProperties: false` is why an unknown key here is refused outright, so this block has to describe the whole contract. Declaring it is mandatory for a project that gets cards: an adapter without it is refused as `broad_check_not_declared` and its cards block at preflight (issue:81a0a1e5c15225fa360e). It is not `required` here, because a missing contract is a fact about the project rather than a malformed adapter, and refusing it as `adapter_invalid` would hide which of the two is wrong.",
       "properties": {
         "interpreter": {
           "type": "string",
@@ -101,7 +101,7 @@
         "module": {
           "type": "string",
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$",
-          "description": "The module a `python -m` runs: this project's broad suite. Without it nobody but the project itself could say which suite a broad check means, and the worker prompt had to print a placeholder. Not required by the schema, so an adapter written before this key existed is not suddenly malformed; a declared block that omits it is refused by the contract layer as `broad_check_incomplete`, which is the shape that says what is actually wrong."
+          "description": "The module a `python -m` runs: this project's broad suite. Without it nobody but the project itself could say which suite a broad check means, and the worker prompt had to print a placeholder. Not required by the schema, so an adapter written before this key existed is not suddenly malformed, and PR #331 stopped the contract layer refusing such a block too: omitting it means only that the caller has to name the suite itself, which `check broad`/`check show` with no `--module` reports as `no_broad_check_module`."
         },
         "args": {
           "type": "array",

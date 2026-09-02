@@ -87,6 +87,7 @@ from secretary.dispatcher_state import (
     DispatcherRecord,
 )
 from secretary.projects.contract import (
+    BROAD_CHECK_NOT_DECLARED,
     CANNOT_ATTEST_PROJECT,
     CONTRACT_REFUSALS,
     UNDECIDABLE_NO_REGISTERED_PROJECT,
@@ -7294,6 +7295,36 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 self.assertEqual(self.runtime.production_state.load()["records"], {})
                 self.assertFalse((self.data_dir / "workspaces").exists())
 
+    def test_an_adapter_that_declares_no_broad_check_blocks_before_the_claim(self) -> None:
+        """The shape this issue adds, on the seam the other refusals already use.
+
+        It is worth its own test beside the loop because it is the live case: eight registered
+        projects said `cannot_attest_project` before this change and say this instead. What is
+        asserted is the boundary — the card is refused before `writer.claim` does anything with a
+        workspace or a head — and that the refusal carried is the new shape rather than the one it
+        used to be masked by.
+        """
+        message = self._refused_contract(BROAD_CHECK_NOT_DECLARED)
+        self.start_dispatcher()
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["step"], "contract-preflight")
+        self.assertEqual(
+            blocked["contract_refusal"],
+            {"shape": BROAD_CHECK_NOT_DECLARED, "adapter": "secretary", "detail": message},
+        )
+        self.assertNotIn(CANNOT_ATTEST_PROJECT, self.reader.show(CARD_REF)["comments"][-1]["body"])
+        self.assertEqual(
+            self.asked_while,
+            [("secretary", "ready", [])],
+            "asked off the registry with the card still in Ready and the host untouched",
+        )
+        self.assertEqual(self.host.calls, [], "no workspace was created and no head brought up")
+        self.assertEqual(self.host.prepared, [])
+        self.assertFalse((self.data_dir / "workspaces").exists())
+
     def test_the_preflight_block_is_the_infrastructure_class_the_budget_reads(self) -> None:
         """AC2: not a new branch — the class is in the transition, where the budget already looks."""
         blocked = self._preflight_blocked()
@@ -7336,9 +7367,10 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_a_project_whose_contract_attests_it_is_claimed_exactly_as_before(self) -> None:
         """AC4 and the `fit` state, the regression that would stop this very sprint.
 
-        The pilot project is Secretary, whose adapter declares no `broad_check` — as no adapter in
-        the live installation does — so it is dispatched on the legacy default, and that default
-        does attest a Secretary checkout.
+        The pilot project is Secretary, whose adapter declares its own `broad_check`, so the card
+        is claimed on a contract its owner wrote down. It used to be dispatched on the default an
+        adapter that declared nothing inherited; that default is gone, and silence is now the
+        `broad_check_not_declared` refusal covered by the shape loop above.
         """
         self._watch_the_preflight()
         self.start_dispatcher()
@@ -9976,12 +10008,19 @@ class HeadPromptTests(unittest.TestCase):
         )
 
     def test_a_project_with_no_declared_suite_gets_words_not_a_fake_command(self) -> None:
-        """The legacy default names no suite, and the packet says so instead of inventing one.
+        """A contract that names no suite, and the packet says so instead of inventing one.
 
-        This is the live shape until an installation declares its contract by hand, and removing
-        the legacy default is issue:81a0a1e5c15225fa360e, a later step. Until then the honest
-        answer is to tell the worker it has to choose, and to name the habit it must not fall into.
+        The fixture used to reach this through the default an adapter declaring nothing inherited;
+        issue:81a0a1e5c15225fa360e removed that, so silence is a refusal and never reaches a task
+        packet at all. The branch is still live for a DECLARED contract written before `module`
+        existed — `codegen-orchestrator` and `service-template` are exactly that today — and the
+        honest answer is still to tell the worker it has to choose and to name the habit it must
+        not fall into.
         """
+        self.host.catalog.broad_check_state = ContractVerdict.as_fit(
+            ModuleContract(sys.executable, "secretary"), "secretary"
+        )
+
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
         self.assertIn("This project's adapter declares no broad suite", doc)

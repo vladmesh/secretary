@@ -6,10 +6,12 @@ workspace, after a head had been brought up — the round was gone before the re
 The rules therefore live in `secretary.projects.contract`, and both sides ask them: the worker's
 own `secretary check broad --module` and the dispatcher's preflight before a card is given out.
 
-The live constraint on the day this was written: not one adapter in the installation declares
-`broad_check`, so every registered project resolves the legacy default. For Secretary itself that
-default is a true contract — the checkout being attested holds the very sources the check imports —
-and it has to keep working, because the pipeline running this card is made of Secretary cards.
+The live shape has moved twice since. Adapters now declare `broad_check` — `secretary` and
+`review-value-research` resolve `fit`, `codegen-orchestrator` and `service-template` resolve
+`undecidable relative_interpreter` — and the default an adapter that declares none used to inherit
+is gone. Silence from a registered project's adapter is `broad_check_not_declared`, a refusal that
+names the one true thing about it, rather than Secretary's contract lent to a project that never
+asked for it.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from secretary.projects.contract import (
     ADAPTER_INVALID,
     ADAPTER_UNAVAILABLE,
     BROAD_CHECK_INCOMPLETE,
+    BROAD_CHECK_NOT_DECLARED,
     CANNOT_ATTEST_PROJECT,
     CONTRACT_FIT,
     CONTRACT_REFUSALS,
@@ -32,8 +35,6 @@ from secretary.projects.contract import (
     CONTRACT_STATES,
     CONTRACT_UNDECIDABLE,
     INTERPRETER_UNAVAILABLE,
-    LEGACY_IMPORT_PACKAGE,
-    LEGACY_REASON_MISSING_BROAD_CHECK,
     UNDECIDABLE_QUESTIONS,
     UNDECIDABLE_RELATIVE_INTERPRETER,
     ContractStateError,
@@ -73,22 +74,17 @@ class ProjectContractTests(unittest.TestCase):
 
     def resolve(self, binding: dict | None = None):
         return module_contract(
-            binding if binding is not None else {"adapter": "example", "repo": str(self.repo)},
+            binding if binding is not None else self.binding(),
             instance=self.instance,
             project_root=self.repo,
         )
 
     def binding(self) -> dict:
-        return {"adapter": "example", "repo": str(self.repo)}
+        return {"id": "example", "adapter": "example", "repo": str(self.repo)}
 
-    def ask_preflight(self, project_root: Path | None = None) -> ContractVerdict:
+    def ask_preflight(self) -> ContractVerdict:
         """The dispatcher's side: the same rules, asked with no candidate workspace."""
-        return decide(
-            self.binding(),
-            instance=self.instance,
-            project_root=self.repo if project_root is None else project_root,
-            workspace=None,
-        )
+        return decide(self.binding(), instance=self.instance, workspace=None)
 
     def relative_interpreter(self, tree: Path) -> Path:
         """The `.venv/bin/python` an adapter's relative contract means, inside one tree."""
@@ -102,31 +98,53 @@ class ProjectContractTests(unittest.TestCase):
             self.resolve(binding)
         return caught.exception
 
-    # --- The project whose contract can attest it goes to work exactly as before ----------------
+    # --- A registered project that declares no contract is refused by its own name --------------
 
-    def test_the_legacy_default_still_attests_the_secretary_project_itself(self) -> None:
-        """AC4, and the reason this card cannot be naive: a regression here stops the pipeline.
+    def test_an_adapter_that_declares_no_broad_check_is_refused_by_that_name(self) -> None:
+        """The whole of this issue: silence gets a refusal of its own, not somebody else's default.
 
-        No adapter in the live installation declares `broad_check`, so this is the contract every
-        Secretary card in flight — including this one — is dispatched on.
+        Both sides read the shape off the one enumeration — this is the worker's own resolution,
+        and `test_the_preflight_names_the_same_silence` below is the dispatcher's — so neither can
+        invent a refusal for a case the other spells differently.
         """
         self.adapter()
-        self.package(LEGACY_IMPORT_PACKAGE)
 
-        contract = self.resolve()
+        refused = self.refusal()
 
-        self.assertEqual(contract.interpreter, sys.executable)
-        self.assertEqual(contract.import_package, LEGACY_IMPORT_PACKAGE)
-        self.assertEqual(
-            contract.as_dict(),
-            {"source": "legacy_default", "reason": LEGACY_REASON_MISSING_BROAD_CHECK},
+        self.assertEqual(refused.shape, BROAD_CHECK_NOT_DECLARED)
+        self.assertEqual(refused.adapter, "example")
+        self.assertIn("example", refused.message)
+        self.assertIn("broad_check", refused.message)
+        self.assertIn(
+            "declares no broad-check contract",
+            refused.message,
+            "the message says the one true thing about this project: it declared nothing. It does "
+            "not name a package the project never asked for, which is what made the old "
+            "`cannot_attest_project` wording mislead every reader of it",
         )
 
-    def test_a_flat_layout_holds_the_package_just_as_well_as_src(self) -> None:
-        self.adapter()
-        self.package(LEGACY_IMPORT_PACKAGE, under="")
+    def test_a_secretary_shaped_checkout_earns_the_same_refusal_as_any_other(self) -> None:
+        """The second bad outcome the default had, and the less visible one.
 
-        self.assertEqual(self.resolve().import_package, LEGACY_IMPORT_PACKAGE)
+        A checkout that happens to hold a `secretary` package used to be handed a contract its
+        owner never declared and attested against it. Layout decides nothing here any more: the
+        adapter's silence is the answer, whatever the tree looks like.
+        """
+        self.adapter()
+        self.package("secretary")
+
+        self.assertEqual(self.refusal().shape, BROAD_CHECK_NOT_DECLARED)
+
+    def test_the_preflight_names_the_same_silence(self) -> None:
+        """Refused before the card is issued, so no workspace and no head are spent finding it."""
+        self.adapter()
+
+        verdict = self.ask_preflight()
+
+        self.assertEqual(verdict.state, CONTRACT_REFUSED)
+        self.assertEqual(verdict.refusal.shape, BROAD_CHECK_NOT_DECLARED)
+        self.assertEqual(verdict.evidence()["shape"], BROAD_CHECK_NOT_DECLARED)
+        self.assertEqual(verdict.refusal.code, "invalid_project_adapter")
 
     def test_an_adapters_own_contract_is_taken_at_its_word(self) -> None:
         interpreter = self.repo / ".venv" / "bin" / "python"
@@ -253,12 +271,7 @@ class ProjectContractTests(unittest.TestCase):
                 self.adapter(ADAPTER_BODY + block)
 
                 preflight = self.ask_preflight()
-                decided = decide(
-                    self.binding(),
-                    instance=self.instance,
-                    project_root=self.repo,
-                    workspace=workspace,
-                )
+                decided = decide(self.binding(), instance=self.instance, workspace=workspace)
 
                 self.assertEqual(preflight.state, preflight_state)
                 self.assertEqual(preflight.question, question)
@@ -420,7 +433,7 @@ class ProjectContractTests(unittest.TestCase):
         workspace.mkdir()
         self.relative_interpreter(self.repo)
 
-        refused = decide(self.binding(), instance=self.instance, project_root=workspace, workspace=workspace)
+        refused = decide(self.binding(), instance=self.instance, workspace=workspace)
 
         self.assertEqual(refused.state, CONTRACT_REFUSED)
         self.assertEqual(refused.refusal.shape, INTERPRETER_UNAVAILABLE)
@@ -445,11 +458,10 @@ class ProjectContractTests(unittest.TestCase):
         `decide` answers `fit` or `refused` for every shape a fixture can produce."""
         workspace = self.root / "worktree"
         workspace.mkdir()
-        self.package(LEGACY_IMPORT_PACKAGE)
         bodies = {
             "no adapter file": None,
             "invalid adapter": "setup:\n  commands: ['true']\n",
-            "legacy default": ADAPTER_BODY,
+            "no declared contract": ADAPTER_BODY,
             "blank runtime": ADAPTER_BODY
             + ("broad_check:\n  interpreter: '   '\n  import_package: thing\n  module: suite\n"),
             "relative interpreter": ADAPTER_BODY
@@ -465,12 +477,7 @@ class ProjectContractTests(unittest.TestCase):
                 else:
                     self.adapter(body)
 
-                verdict = decide(
-                    self.binding(),
-                    instance=self.instance,
-                    project_root=self.repo,
-                    workspace=workspace,
-                )
+                verdict = decide(self.binding(), instance=self.instance, workspace=workspace)
 
                 self.assertIn(verdict.state, (CONTRACT_FIT, CONTRACT_REFUSED))
 
@@ -528,7 +535,7 @@ class ProjectContractTests(unittest.TestCase):
             ADAPTER_INVALID: "setup:\n  commands: ['true']\n",
             BROAD_CHECK_INCOMPLETE: ADAPTER_BODY
             + ("broad_check:\n  interpreter: '   '\n  import_package: thing\n  module: suite\n"),
-            CANNOT_ATTEST_PROJECT: ADAPTER_BODY,
+            BROAD_CHECK_NOT_DECLARED: ADAPTER_BODY,
         }
         self.package("codegen_orchestrator")
         for shape, body in cases.items():
@@ -555,21 +562,21 @@ class ProjectContractTests(unittest.TestCase):
         self.assertEqual(verdict.state, CONTRACT_REFUSED)
         self.assertEqual(verdict.refusal.shape, ADAPTER_INVALID)
 
-    def test_the_legacy_default_over_somebody_elses_checkout_cannot_attest_it(self) -> None:
-        """The live shape: 13 adapters, none declaring `broad_check`, one Secretary checkout.
+    def test_no_checkout_layout_decides_anything_here_any_more(self) -> None:
+        """`cannot_attest_project` stops being the mask an undeclared contract wore.
 
-        For every other registered project the same default imports an installed Secretary — a
-        check that can neither pass nor fail for a reason about that project.
+        It was only ever produced by the layout heuristic behind the default, so `decide` no longer
+        reaches it at all: a declared contract is executed as declared, and what such a run
+        actually imported is caught afterwards by the receipt's own import provenance. The shape
+        stays enumerated for that meaning — a *declared* contract that cannot attest its own
+        checkout — and this test pins that no adapter shape reaches it by declaring nothing.
         """
         self.adapter()
         self.package("codegen_orchestrator")
 
-        refused = self.refusal()
-
-        self.assertEqual(refused.shape, CANNOT_ATTEST_PROJECT)
-        self.assertEqual(refused.adapter, "example")
-        self.assertIn(LEGACY_IMPORT_PACKAGE, refused.message)
-        self.assertIn(str(self.repo), refused.message)
+        self.assertEqual(self.refusal().shape, BROAD_CHECK_NOT_DECLARED)
+        self.assertNotEqual(self.refusal().shape, CANNOT_ATTEST_PROJECT)
+        self.assertIn(CANNOT_ATTEST_PROJECT, CONTRACT_REFUSALS)
 
     def test_every_enumerated_shape_has_one_worker_error_code(self) -> None:
         """The enumeration is the whole list, and neither side may grow a sixth of its own."""
@@ -628,13 +635,25 @@ class CatalogContractTests(unittest.TestCase):
         return InstanceCatalog(instance / "instance.yaml")
 
     def test_a_usable_contract_reaches_the_preflight_as_fit(self) -> None:
-        """The live AC4 case, through the dispatcher's own catalog: a Secretary checkout on the
-        legacy default. It is a named state with the contract in it, not an absence of refusal."""
-        verdict = self.catalog().broad_check_verdict("example")
+        """The live AC4 case, through the dispatcher's own catalog: `secretary`'s own adapter, which
+        declares its contract. It is a named state with the contract in it, not an absence of a
+        refusal."""
+        verdict = self.catalog(
+            ADAPTER_BODY + "broad_check:\n  import_package: secretary\n  module: tests.broad\n"
+        ).broad_check_verdict("example")
 
         self.assertEqual(verdict.state, CONTRACT_FIT)
-        self.assertEqual(verdict.contract.import_package, LEGACY_IMPORT_PACKAGE)
-        self.assertEqual(verdict.contract.reason, LEGACY_REASON_MISSING_BROAD_CHECK)
+        self.assertEqual(verdict.contract.import_package, "secretary")
+        self.assertEqual(verdict.contract.module, "tests.broad")
+        self.assertEqual(verdict.contract.reason, "", "a project contract carries no CLI fallback")
+
+    def test_an_adapter_that_declares_nothing_reaches_the_preflight_refused(self) -> None:
+        """Through the real catalog, the live case this issue renames: every registered project
+        whose adapter is silent now blocks its card under a shape that says why."""
+        verdict = self.catalog().broad_check_verdict("example")
+
+        self.assertEqual(verdict.state, CONTRACT_REFUSED)
+        self.assertEqual(verdict.refusal.shape, BROAD_CHECK_NOT_DECLARED)
 
     def test_an_unusable_one_reaches_the_preflight_as_the_shared_refusal(self) -> None:
         verdict = self.catalog(adapter_body=None).broad_check_verdict("example")

@@ -37,8 +37,6 @@ from secretary.dispatcher_launch import launch_intent_liveness
 from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.projects.contract import (
-    LEGACY_IMPORT_PACKAGE,
-    LEGACY_REASON_MISSING_BROAD_CHECK,
     ContractVerdict,
     ModuleContract,
 )
@@ -2674,10 +2672,11 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
 
             def broad_check_verdict(self, project: str) -> ContractVerdict:
                 # The worker task packet resolves this to print an exact broad-check command
-                # (issue:8b39e60e4df361c6138e). Secretary's adapter declares no `broad_check`, so
-                # the legacy default is what a real catalog answers, and this stub answers it too.
+                # (issue:8b39e60e4df361c6138e). Secretary's adapter declares one, and an adapter
+                # that declares none is refused by name now, so a real catalog answers a declared
+                # contract here and this stub answers the same shape.
                 return ContractVerdict.as_fit(
-                    ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK),
+                    ModuleContract(sys.executable, "secretary", module="tests.broad"),
                     "secretary",
                 )
 

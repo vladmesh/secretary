@@ -17,7 +17,7 @@ and a silence:
 
 * ``fit`` — the contract is declared usably, and here it is;
 * ``refused(shape)`` — one of the enumerated refusal shapes, which are enumerated once, below,
-  and neither side may add a sixth on its own;
+  and neither side may add one of its own;
 * ``undecidable(question)`` — the question cannot be answered without something the asker does not
   have. This is a state with a name, an evidence record and tests, not the absence of an answer.
 
@@ -55,17 +55,23 @@ What each state buys a card is settled here and not re-decided by a caller:
   to work, and the side that holds the tree answers the question there. A relative interpreter is
   the documented and recommended spelling; breaking that published promise to make an internal
   check convenient would move the product contract the wrong way, and absolute paths are
-  machine-specific. The live cost of this today is zero: no adapter on the installation declares
-  ``broad_check``, so no project reaches ``undecidable`` at all.
+  machine-specific. This branch is reachable in production and is taken on every tick: the
+  ``codegen-orchestrator`` and ``service-template`` adapters both declare a relative interpreter,
+  and their cards are issued through ``undecidable``, not through ``fit``. (The docstring used to
+  say the live cost was zero because no adapter declared ``broad_check`` at all. That stopped being
+  true on 2026-08-28, and ``secretary``'s own adapter declares one now too.)
 * ``fit`` goes to work, as it always did.
 
-The other half of usability is asked relative to a project. An adapter that declares no
-``broad_check`` falls back to the long-standing Secretary default — this interpreter, importing
-``secretary`` — and for the Secretary project itself that default is a true contract: the checkout
-being attested is exactly the sources that get imported. For any other project the same default
-attests an installed copy of somebody else's package, which is a check that cannot fail for the
-right reason and cannot pass for one either. So the question is: can this contract attest THIS
-checkout, rather than does the adapter happen to spell the key.
+Declaring ``broad_check`` is mandatory for a project that gets cards. Until this issue an adapter
+that declared none fell back to a default nobody wrote down for it — this interpreter, importing
+``secretary`` — which was a true contract for the Secretary project alone. Every other registered
+project got one of two wrong answers: a checkout with no ``secretary`` package was refused as
+``cannot_attest_project``, whose wording blamed a substituted package instead of naming the real
+cause, and a checkout that happened to hold one was attested against a contract its owner never
+wrote. Silence is now its own named refusal, ``broad_check_not_declared``, which says the one true
+thing about it. ``cannot_attest_project`` is left to mean what it says: a *declared* contract that
+cannot attest its own checkout. Nothing here judges a checkout by its layout any more — what a
+declared run actually imported is caught afterwards, by the receipt's own import provenance.
 """
 
 from __future__ import annotations
@@ -82,12 +88,21 @@ from secretary.config import ConfigError, load_config, validate
 ADAPTER_UNAVAILABLE = "adapter_unavailable"
 ADAPTER_INVALID = "adapter_invalid"
 BROAD_CHECK_INCOMPLETE = "broad_check_incomplete"
+# An adapter that declares no `broad_check` at all. Its own shape since
+# issue:81a0a1e5c15225fa360e, so that silence is diagnosed as silence rather than through a
+# contract substituted for it.
+BROAD_CHECK_NOT_DECLARED = "broad_check_not_declared"
 INTERPRETER_UNAVAILABLE = "interpreter_unavailable"
+# A DECLARED contract that cannot attest its own checkout. It used to double as the diagnosis for
+# an adapter that declared nothing, which is what made its wording mislead: it named a package the
+# project never asked for. `decide` no longer reaches it — a declared contract is executed as
+# declared, and what such a run imported is caught afterwards by the receipt's own provenance.
 CANNOT_ATTEST_PROJECT = "cannot_attest_project"
 CONTRACT_REFUSALS = (
     ADAPTER_UNAVAILABLE,
     ADAPTER_INVALID,
     BROAD_CHECK_INCOMPLETE,
+    BROAD_CHECK_NOT_DECLARED,
     INTERPRETER_UNAVAILABLE,
     CANNOT_ATTEST_PROJECT,
 )
@@ -110,15 +125,12 @@ UNDECIDABLE_QUESTIONS = (
     UNDECIDABLE_PROJECT_UNAVAILABLE,
 )
 
-# Legacy default and its public diagnosis.
-LEGACY_IMPORT_PACKAGE = "secretary"
-LEGACY_REASON_MISSING_BROAD_CHECK = "adapter_missing_broad_check"
-
 # CLI names for refusals; preflight preserves the existing missing-interpreter code.
 WORKER_ERROR_CODES = {
     ADAPTER_UNAVAILABLE: "invalid_project_adapter",
     ADAPTER_INVALID: "invalid_project_adapter",
     BROAD_CHECK_INCOMPLETE: "invalid_project_adapter",
+    BROAD_CHECK_NOT_DECLARED: "invalid_project_adapter",
     INTERPRETER_UNAVAILABLE: "interpreter_start_failed",
     CANNOT_ATTEST_PROJECT: "invalid_project_adapter",
 }
@@ -126,7 +138,7 @@ WORKER_ERROR_CODES = {
 
 @dataclass(frozen=True)
 class ModuleContract:
-    """The adapter-owned module-check runtime and suite, plus any legacy-default diagnosis.
+    """The adapter-owned module-check runtime and suite, plus any CLI-default diagnosis.
 
     `module` and `args` are the half added for issue:8b39e60e4df361c6138e. Before them the contract
     could say which interpreter runs a broad check and which package it must import, but not WHICH
@@ -135,9 +147,14 @@ class ModuleContract:
     discovery, a run that costs every CI suite in one process. Only the project can name its own
     broad suite, so the project's adapter is where it is named.
 
-    `module` is empty whenever no suite was named: the legacy default names none, and neither does a
-    declared ``broad_check`` written before the field existed. Neither is a refusal — an empty
-    `module` only means the caller has to name the suite itself, the way every caller did before.
+    `module` is empty whenever no suite was named, which a declared ``broad_check`` written before
+    the field existed does not. That is not a refusal — an empty `module` only means the caller has
+    to name the suite itself, the way every caller did before.
+
+    `reason` is set on exactly one contract now, and it is not a project's: the default
+    ``check_commands`` uses for a checkout that matches no registered project at all. A registered
+    project never reaches here without a declared contract, so no verdict from `decide` carries a
+    reason (see `BROAD_CHECK_NOT_DECLARED`).
     """
 
     interpreter: str
@@ -148,7 +165,7 @@ class ModuleContract:
 
     def as_dict(self) -> dict[str, str]:
         if self.reason:
-            return {"source": "legacy_default", "reason": self.reason}
+            return {"source": "cli_default", "reason": self.reason}
         return {"source": "adapter"}
 
 
@@ -240,7 +257,6 @@ def decide(
     binding: dict[str, Any],
     *,
     instance: Path,
-    project_root: Path,
     workspace: Path | None,
 ) -> ContractVerdict:
     """The one decision point about one registered project's broad-check contract.
@@ -249,9 +265,13 @@ def decide(
     exists yet. The workspace-independent questions are asked first and a refusal among them always
     wins; only once they are all answered can what is left be `undecidable`.
 
-    Cheap and offline by construction: the binding it was handed, the adapter beside it, and the
-    project's own checkout. Nothing here starts a process, creates a workspace or brings up a head,
-    which is what lets the dispatcher ask it before a claim.
+    It takes no project checkout any more. The only thing that ever looked at one was the legacy
+    default's layout heuristic, and a declared contract is executed as declared rather than checked
+    against a layout — what such a run imported is caught afterwards by the receipt's provenance.
+
+    Cheap and offline by construction: the binding it was handed and the adapter beside it. Nothing
+    here starts a process, creates a workspace or brings up a head, which is what lets the
+    dispatcher ask it before a claim.
     """
     adapter_name = binding.get("adapter")
     if not isinstance(adapter_name, str) or not adapter_name:
@@ -268,30 +288,18 @@ def decide(
         )
     configured = adapter.get("broad_check")
     if configured is None:
-        return _legacy_default(adapter_name, Path(project_root))
+        # Silence is a refusal with its own name, not somebody else's contract substituted for it.
+        # A project that gets cards declares its own broad check; until this issue an adapter that
+        # declared none inherited Secretary's default, which either refused the project under a
+        # diagnosis about a package it never named or attested a contract its owner never wrote.
+        project = str(binding.get("id") or "")
+        return ContractVerdict.as_refused(
+            BROAD_CHECK_NOT_DECLARED,
+            adapter_name,
+            f"project {project!r} declares no broad-check contract: adapter {adapter_name!r} has "
+            "no `broad_check` block",
+        )
     return _declared_contract(configured, adapter_name, workspace)
-
-
-def _legacy_default(adapter_name: str, project_root: Path) -> ContractVerdict:
-    """The contract an adapter that declares none falls back to, judged against this checkout."""
-    contract = ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK)
-    # The default names the running interpreter and is always answerable.
-    if not _executable(contract.interpreter):
-        return ContractVerdict.as_refused(
-            INTERPRETER_UNAVAILABLE,
-            adapter_name,
-            f"could not start configured interpreter {contract.interpreter!r}: it is not an executable file",
-        )
-    if not _attests(project_root, contract.import_package):
-        # Only the legacy default uses checkout layout; declared contracts use receipt provenance.
-        return ContractVerdict.as_refused(
-            CANNOT_ATTEST_PROJECT,
-            adapter_name,
-            f"adapter {adapter_name!r} declares no broad-check contract, so the legacy default "
-            f"attests package {contract.import_package!r}, which is not part of this project's "
-            f"checkout {project_root}",
-        )
-    return ContractVerdict.as_fit(contract, adapter_name)
 
 
 def _declared_contract(
@@ -402,7 +410,7 @@ def module_contract(binding: dict[str, Any], *, instance: Path, project_root: Pa
     when it resolves a relative interpreter. Having that tree, this side leaves no question open —
     and it does not re-decide anything either: the state it acts on is the one `decide` returned.
     """
-    return contract_of(decide(binding, instance=instance, project_root=project_root, workspace=project_root))
+    return contract_of(decide(binding, instance=instance, workspace=project_root))
 
 
 def _executable(interpreter: str) -> bool:
@@ -410,24 +418,3 @@ def _executable(interpreter: str) -> bool:
         return os.access(interpreter, os.X_OK) and Path(interpreter).is_file()
     except OSError:
         return False
-
-
-def _attests(project_root: Path, import_package: str) -> bool:
-    """Whether the package the check must import has its sources in this project's checkout.
-
-    A check that imports the project attests the project; a check that imports something the
-    checkout does not contain attests whatever the interpreter's environment happens to hold. The
-    common layouts are covered directly — flat, ``src/``, and one level of subdirectory for a
-    repository that holds its service beside other things — rather than by importing anything.
-    """
-    top = import_package.split(".", 1)[0]
-    if not top:
-        return False
-    try:
-        roots = [project_root, project_root / "src"]
-        for child in sorted(project_root.iterdir()):
-            if child.is_dir() and not child.name.startswith("."):
-                roots += [child, child / "src"]
-    except OSError:
-        return False
-    return any((root / top / "__init__.py").is_file() or (root / f"{top}.py").is_file() for root in roots)
