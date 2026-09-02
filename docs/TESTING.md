@@ -85,9 +85,45 @@ workspace.
 The profile is intentionally narrow: it proves the existing isolation seams rather than testing
 real host, systemd, Orca, credentials, Docker, VM, Ansible or provisioning behaviour. Those runtime
 contours remain in their named CI suites or explicit operator checks. Start with focused checks and
-`--fast`; when a task or repository contract requires the canonical local broad suite, run it once
-through the reusable receipt wrapper. Complete validation remains dispatcher-owned exact-SHA GitHub
-CI.
+`--fast`; when a task or repository contract requires the canonical local broad suite, run the
+control-host broad profile below once through the reusable receipt wrapper. Complete validation
+remains dispatcher-owned exact-SHA GitHub CI.
+
+## Control-host broad profile
+
+    python3 -m tests.broad
+
+This is the Secretary project's local broad suite: the manifest's `unit` and `component` modules and
+nothing else — about 1440 tests in roughly 77 seconds (unit ~58s, component ~19s). It replaces bare
+`python3 -m unittest` as the local answer to "run the broad suite". That form is repository-wide
+discovery: 3782 tests, about 402 seconds, all seven suites in one process — too expensive to run
+between edits, so in practice it was either skipped or paid for once and stretched far past the
+point where it still described the code.
+
+The other five suites — `runtime-component` (~128s), `integration-board` (~122s), `packaging`
+(~41s), `integration-recovery` (~26s) and `integration-memory` (~13s) — are not part of this
+profile. They run in dispatcher-owned exact-SHA GitHub CI, which is still the complete gate and is
+not weakened by anything here. A green local broad receipt is a worker's evidence about its own
+round, never a substitute for that gate.
+
+The module list is read from `tests/ci-shards.txt` at run time, through the same parser
+`scripts/ci_test_shards.py` uses, so the profile cannot drift from the taxonomy: a new top-level
+test file assigned to `unit` or `component` joins it with no second list to update, and an invalid
+or unreadable manifest fails loudly instead of running a smaller set. `tests/broad.py` lives inside
+the `tests` package, so this invocation imports `tests/__init__.py` — and every hermetic default
+above — before any test module, which is the secretary-748 invariant
+`tests/test_health_suite_command.py` pins.
+
+A registered project names its own broad suite in its adapter's `broad_check` block
+(`module`, optional `args`, `import_package`, optional `interpreter`), so the receipt wrapper can
+run it with no flag at all:
+
+    python3 -m secretary check broad --reuse
+    python3 -m secretary check show
+
+An explicit `--module` still overrides the declared suite. A project whose adapter declares no
+module and is given none is refused by name (`no_broad_check_module`) rather than falling back to
+repository-wide discovery.
 
 ## Runtime deadline boundary
 

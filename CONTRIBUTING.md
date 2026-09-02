@@ -17,7 +17,7 @@ the intended contract in an issue or pull request will make it easier to work th
 ```bash
 python3 -m pip install -e '.[memory]'
 python3 -m pip install -e '.[dev]'
-python3 -m unittest
+python3 -m tests.broad
 ```
 
 The `dev` extra is the pinned `ruff`. The pin is enforced by `required-version` in
@@ -51,21 +51,32 @@ explicit, separately opted-in integration test against a disposable endpoint, ne
 
 ## Pull requests
 
-If the change is ready for a full check, run:
+If the change is ready for a full check, run the local broad profile and the skills audit:
 
 ```bash
-python3 -m unittest
+python3 -m tests.broad
 python3 -m secretary role-skills audit --check
 ```
+
+`python3 -m tests.broad` is the `unit` and `component` suites, about 1440 tests in ~77 seconds. It
+is a local profile, not the gate: the complete test contract is the dispatcher-owned exact-SHA
+GitHub CI run described in [Testing](docs/TESTING.md), which runs all seven suites in parallel and
+is what a pull request is judged by. Run a suite outside the profile directly by name
+(`python3 -m unittest tests.test_bootstrap`) when a change touches it; do not reach for
+repository-wide discovery, which is the same seven suites in one 402-second process.
 
 To keep the suite's result after the terminal scrolls, run it through the receipt wrapper instead;
 it streams the same output, exits with the same status, and leaves a structured summary in the
 ignored `state/checks/` path that `check show` can read back without running anything again:
 
 ```bash
-python3 -m secretary check broad --module unittest
-python3 -m secretary check show --module unittest
+python3 -m secretary check broad --module tests.broad
+python3 -m secretary check show --module tests.broad
 ```
+
+A registered project can name its own broad suite in its adapter's `broad_check` block, and then
+the flag is not needed at all: `secretary check broad --reuse` and `secretary check show` run
+exactly the suite that project declared.
 
 `--module` is the shape to prefer: the wrapper builds the command itself, so the suite runs in a
 process that records which project it imported, and the receipt can be read back in place of a

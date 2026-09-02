@@ -85,18 +85,28 @@
     "broad_check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["interpreter", "import_package"],
-      "description": "Explicit Python runtime and project package for reusable `check broad --module` receipts.",
+      "required": ["import_package"],
+      "description": "The project's own broad suite: which module `check broad --module` runs, which package that run must import, and optionally which interpreter runs it. `additionalProperties: false` is why an unknown key here is refused outright, so this block has to describe the whole contract.",
       "properties": {
         "interpreter": {
           "type": "string",
           "minLength": 1,
-          "description": "Interpreter for module broad checks. A relative path is resolved from the candidate workspace, for example .venv/bin/python."
+          "description": "Optional interpreter for module broad checks. A relative path is resolved from the candidate workspace, for example .venv/bin/python. Omitted, the check runs on the interpreter that runs the wrapper: since the check subprocess prepends the candidate's own import roots to sys.path, a shared installation interpreter still imports the candidate rather than production, and a project whose worktrees have no venv of their own needs no nonexistent workspace/.venv (issue:8b39e60e4df361c6138e)."
         },
         "import_package": {
           "type": "string",
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$",
           "description": "Package the check process must import and prove came from the candidate workspace."
+        },
+        "module": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$",
+          "description": "The module a `python -m` runs: this project's broad suite. Without it nobody but the project itself could say which suite a broad check means, and the worker prompt had to print a placeholder. Not required by the schema, so an adapter written before this key existed is not suddenly malformed; a declared block that omits it is refused by the contract layer as `broad_check_incomplete`, which is the shape that says what is actually wrong."
+        },
+        "args": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "The exact argument vector passed after the module. Kept as a list, never a rendered string, because `-k a b` and `-k 'a b'` render identically while running different checks."
         }
       }
     }

@@ -1081,7 +1081,7 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
 class RegisteredProjectContractTests(BroadCheckTestCase):
     """A non-Secretary project owns both sides of reusable module provenance."""
 
-    def _register(self, *, interpreter: str, import_package: str) -> Path:
+    def _register(self, *, interpreter: str, import_package: str, module: str = "project_suite") -> Path:
         instance = Path(self.tmpdir.name) / "instance"
         (instance / "projects").mkdir(parents=True)
         (instance / "adapters").mkdir()
@@ -1096,7 +1096,8 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
             "artifact_policy:\n  write_project_files: false\n"
             "broad_check:\n"
             f"  interpreter: {interpreter}\n"
-            f"  import_package: {import_package}\n",
+            f"  import_package: {import_package}\n"
+            f"  module: {module}\n",
             encoding="utf-8",
         )
         return instance
@@ -1371,6 +1372,201 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         lookup = usable_receipt(self.root, spec)
         self.assertFalse(lookup.usable)
         self.assertIn("interpreter environment", lookup.reason)
+
+
+class DeclaredBroadSuiteTests(BroadCheckTestCase):
+    """issue:8b39e60e4df361c6138e: the adapter names the suite, so the flag does not have to.
+
+    Before this, `--module` was mandatory and nothing in the registry could say what the project's
+    broad suite was. The worker task packet printed the literal placeholder
+    `<this project's broad suite module>` and every document answered it with repository-wide
+    discovery — every CI suite in one process. A contract that names the suite is what lets
+    `check broad --reuse` and `check show` mean one exact thing per project.
+    """
+
+    def _register(self, block: str) -> Path:
+        instance = Path(self.tmpdir.name) / "instance"
+        (instance / "projects").mkdir(parents=True)
+        (instance / "adapters").mkdir()
+        (instance / "projects" / "example.yaml").write_text(
+            f"id: example\nrepo: {self.root}\nadapter: example\nenabled: true\n",
+            encoding="utf-8",
+        )
+        (instance / "adapters" / "example.yaml").write_text(
+            "setup:\n  commands: ['true']\n"
+            "smoke:\n  command: 'true'\n"
+            "validation:\n  ci: github\n"
+            "artifact_policy:\n  write_project_files: false\n" + block,
+            encoding="utf-8",
+        )
+        return instance
+
+    def _suite_file(self, name: str) -> None:
+        (self.root / f"{name}.py").write_text(
+            "import sys\nimport secretary\nprint('ran ' + ' '.join(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-q", "-m", f"add {name}")
+
+    def test_a_declared_module_and_args_resolve_to_the_exact_argument_vector(self) -> None:
+        self._suite_file("project_suite")
+        instance = self._register(
+            "broad_check:\n"
+            "  import_package: secretary\n"
+            "  module: project_suite\n"
+            "  args: ['--only', 'fast lane']\n"
+        )
+
+        payload = _run_main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+
+        self.assertEqual(payload["receipt"]["check_set"]["module"], "project_suite")
+        # The vector is a list, never a rendered string: `'fast lane'` is one argument.
+        self.assertEqual(payload["receipt"]["check_set"]["args"], ["--only", "fast lane"])
+        self.assertEqual(payload["receipt"]["tail"], "ran --only fast lane")
+        self.assertEqual(payload["module_contract"], {"source": "adapter"})
+
+    def test_a_declared_contract_with_no_interpreter_runs_on_the_wrappers_own(self) -> None:
+        """A supported contract must not require a `workspace/.venv` that does not exist.
+
+        The Secretary worktrees have no venv of their own. Since the check subprocess prepends the
+        candidate's own import roots to `sys.path`, the wrapper's interpreter imports the candidate,
+        so naming none is correct rather than merely convenient (issue:8b39e60e4df361c6138e).
+        """
+        self._suite_file("project_suite")
+        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+
+        payload = _run_main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+
+        self.assertEqual(payload["receipt"]["check_set"]["interpreter"], sys.executable)
+        self.assertEqual(payload["receipt"]["check_set"]["module"], "project_suite")
+        # And it really did import the candidate, not whatever this interpreter's environment holds.
+        self.assertTrue(
+            payload["receipt"]["project_provenance"]["inside_workspace"],
+            payload["receipt"]["project_provenance"],
+        )
+
+    def test_check_show_reads_back_the_receipt_the_declared_suite_wrote(self) -> None:
+        self._suite_file("project_suite")
+        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        common = ["--root", str(self.root), "--instance", str(instance)]
+
+        _run_main(["check", "broad", *common])
+        shown = _run_main(["check", "show", *common])
+
+        self.assertTrue(shown["usable"], shown)
+        reused = _run_main(["check", "broad", "--reuse", *common])
+        self.assertTrue(reused["reused"])
+
+    def test_an_explicit_module_overrides_the_declared_one(self) -> None:
+        self._suite_file("project_suite")
+        self._suite_file("other_suite")
+        instance = self._register(
+            "broad_check:\n"
+            "  import_package: secretary\n"
+            "  module: project_suite\n"
+            "  args: ['--only', 'fast lane']\n"
+        )
+
+        payload = _run_main(
+            [
+                "check",
+                "broad",
+                "--root",
+                str(self.root),
+                "--instance",
+                str(instance),
+                "--module",
+                "other_suite",
+            ]
+        )
+
+        self.assertEqual(payload["receipt"]["check_set"]["module"], "other_suite")
+        # The declared args belong to the declared suite; they are not smuggled onto another one.
+        self.assertEqual(payload["receipt"]["check_set"]["args"], [])
+
+    def test_a_project_that_declares_no_module_and_is_given_none_is_refused_by_name(self) -> None:
+        instance = self._register("")
+
+        stderr = StringIO()
+        with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
+            status = main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+
+        self.assertEqual(status, 2)
+        error = json.loads(stderr.getvalue())["error"]
+        self.assertEqual(error["code"], "no_broad_check_module")
+        self.assertIn("--module", error["message"])
+
+    def test_module_and_command_are_still_two_different_promises(self) -> None:
+        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+
+        stderr = StringIO()
+        with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
+            status = main(
+                [
+                    "check",
+                    "broad",
+                    "--root",
+                    str(self.root),
+                    "--instance",
+                    str(instance),
+                    "--module",
+                    "a",
+                    "--command",
+                    "true",
+                ]
+            )
+
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "usage")
+
+    def test_module_args_without_a_module_flag_still_names_that_error(self) -> None:
+        """The declared suite owns its argument vector, so `--module-arg` still needs `--module`.
+
+        Silently appending a worker's ad-hoc argument to the contract's vector would run a check
+        nobody declared while the receipt claimed the declared one.
+        """
+        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+
+        stderr = StringIO()
+        with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
+            status = main(
+                [
+                    "check",
+                    "broad",
+                    "--root",
+                    str(self.root),
+                    "--instance",
+                    str(instance),
+                    "--module-arg",
+                    "extra",
+                ]
+            )
+
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "module_arg_without_module")
+
+    def test_a_declared_block_without_a_module_is_broad_check_incomplete(self) -> None:
+        instance = self._register("broad_check:\n  interpreter: '   '\n  import_package: secretary\n")
+
+        stderr = StringIO()
+        with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
+            status = main(
+                [
+                    "check",
+                    "broad",
+                    "--root",
+                    str(self.root),
+                    "--instance",
+                    str(instance),
+                    "--module",
+                    "project_suite",
+                ]
+            )
+
+        self.assertEqual(status, 2)
+        # The adapter is unusable, which the CLI has always reported under this code.
+        self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "invalid_project_adapter")
 
 
 class CheckSetIdentityTests(BroadCheckTestCase):

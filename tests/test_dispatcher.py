@@ -93,6 +93,7 @@ from secretary.projects.contract import (
     UNDECIDABLE_PROJECT_UNAVAILABLE,
     UNDECIDABLE_RELATIVE_INTERPRETER,
     ContractVerdict,
+    ModuleContract,
 )
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
@@ -7350,8 +7351,12 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIsNone(self.catalog.broad_check_state, "the fixture answered `fit`")
         self.assertEqual(
             [state for _, state, _ in self.asked_while],
-            ["ready"],
-            "and it was asked before the claim, exactly as a refusal is",
+            ["ready", "in_progress"],
+            "asked before the claim, exactly as a refusal is — and asked again after it, when\n"
+            "the task packet renders the exact broad-check command the contract names\n"
+            "(issue:8b39e60e4df361c6138e). The question is offline and cheap by construction —\n"
+            "a binding and the adapter beside it, no workspace and no process — and the second\n"
+            "ask is what stopped the packet printing a placeholder the worker had to guess at.",
         )
 
     def test_an_undecidable_contract_issues_the_card_and_says_so_by_name(self) -> None:
@@ -7389,7 +7394,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                     "in_progress",
                     "no card is blocked on a question nobody was in a position to answer",
                 )
-                self.assertEqual([state for _, state, _ in self.asked_while], ["ready"])
+                self.assertEqual([state for _, state, _ in self.asked_while], ["ready", "in_progress"])
 
     def test_an_unreadable_contract_state_is_never_a_default_allow(self) -> None:
         """The hole this card kept re-growing: "nothing came back, so the card may go".
@@ -9929,6 +9934,72 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("opens a new justified run", doc)
         self.assertIn("worker-local broad receipt", doc)
         self.assertIn("dispatcher-owned exact-SHA gate receipt", doc)
+
+    def test_the_packet_prints_the_suite_the_project_declared(self) -> None:
+        """issue:8b39e60e4df361c6138e: a resolved command, not `<this project's broad suite module>`.
+
+        The placeholder was not a cosmetic gap. A worker cannot run it, so it had to substitute
+        something, and what every document told it to substitute was bare `python3 -m unittest`:
+        repository-wide discovery, all seven CI suites in one process, ~402s. Now that an adapter
+        can name its own suite, the packet resolves it through the same `projects.contract` rules
+        the preflight and the worker's own `check broad` use, so what is printed is what that
+        workspace will accept.
+        """
+        self.host.catalog.broad_check_state = ContractVerdict.as_fit(
+            ModuleContract(sys.executable, "secretary", module="tests.broad", args=("-v",)),
+            "secretary",
+        )
+
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn(
+            "    python3 -m secretary check broad --reuse --module tests.broad --module-arg -v",
+            doc,
+        )
+        self.assertIn("python3 -m secretary check show --module tests.broad --module-arg -v", doc)
+        self.assertNotIn("<this project's broad suite module>", doc)
+        self.assertNotIn("<the same module>", doc)
+
+    def test_a_declared_argument_vector_reaches_the_packet_one_argument_at_a_time(self) -> None:
+        # A rendered command line cannot carry a vector, so each argument gets its own flag and is
+        # quoted: `--only 'fast lane'` is two arguments, and pasting it must stay two.
+        self.host.catalog.broad_check_state = ContractVerdict.as_fit(
+            ModuleContract(sys.executable, "secretary", module="tests.broad", args=("--only", "fast lane")),
+            "secretary",
+        )
+
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn(
+            "--module tests.broad --module-arg --only --module-arg 'fast lane'",
+            doc,
+        )
+
+    def test_a_project_with_no_declared_suite_gets_words_not_a_fake_command(self) -> None:
+        """The legacy default names no suite, and the packet says so instead of inventing one.
+
+        This is the live shape until an installation declares its contract by hand, and removing
+        the legacy default is issue:81a0a1e5c15225fa360e, a later step. Until then the honest
+        answer is to tell the worker it has to choose, and to name the habit it must not fall into.
+        """
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("This project's adapter declares no broad suite", doc)
+        self.assertIn("<the suite module you chose>", doc)
+        self.assertIn("say in your report which module you ran and why", doc)
+        self.assertNotIn("<this project's broad suite module>", doc)
+
+    def test_an_unreadable_registry_never_stops_the_packet_from_rendering(self) -> None:
+        # Refusing a contract is the preflight's job; a task document that could not be written
+        # would cost the round it was trying to protect.
+        def refuse(_project: str) -> None:
+            raise HostError("project 'secretary' is not enabled in the instance")
+
+        self.host.catalog.broad_check_probe = refuse
+
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("This project's adapter declares no broad suite", doc)
 
     def test_github_worker_keeps_the_reusable_broad_receipt_contract(self) -> None:
         self.host.catalog._adapter = {"validation": {"ci": "github"}}
