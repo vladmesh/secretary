@@ -1015,6 +1015,8 @@ def _adopt_launch_intent(
         deferred = _record_adopted_routing(runtime, task, records, payload, record, intent, role, step)
         if deferred is not None:
             return deferred
+        if role == WORKER_ROLE:
+            runtime._persist_outcome_round_context(task, record, phase="worker")
         clear_launch_intent(record)
     else:
         record.state = "claimed"
@@ -1033,6 +1035,8 @@ def _adopt_launch_intent(
         deferred = _record_adopted_routing(runtime, task, records, payload, record, intent, role, step)
         if deferred is not None:
             return deferred
+        if role == WORKER_ROLE:
+            runtime._persist_outcome_round_context(task, record, phase="worker")
         clear_launch_intent(record)
     records[ref] = record
     _persist_quietly(runtime, payload, records)

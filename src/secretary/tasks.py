@@ -205,6 +205,69 @@ def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _validate_outcome_round_context(data: dict[str, Any]) -> None:
+    """Validate the compact durable identity hand-off used by outcome freezing."""
+    expected = {
+        "version",
+        "phase",
+        "attempt_id",
+        "attempt",
+        "report_generation",
+        "request_ids",
+        "assessment_visit",
+        "source_event_id",
+    }
+    version = data.get("version")
+    if version == 2:
+        expected = expected | {"round_id", "specification_revision", "marker"}
+    if set(data) != expected or version not in {1, 2}:
+        raise TaskError("validation", "outcome round context has an unsupported field set", 2)
+    phases = {"worker", "review", "decision"} if version == 1 else {
+        "worker", "review", "decision", "report", "verdict"
+    }
+    if data.get("phase") not in phases:
+        raise TaskError("validation", "outcome round context has an unsupported phase", 2)
+    if version == 2 and (not isinstance(data.get("round_id"), str) or not data["round_id"].strip()):
+        raise TaskError("validation", "outcome round context needs a stable round id", 2)
+    if version == 2:
+        revision = data.get("specification_revision")
+        if revision is not None and (not isinstance(revision, str) or not revision.strip()):
+            raise TaskError("validation", "outcome round context specification revision must be a string or null", 2)
+        marker = data.get("marker")
+        if not isinstance(marker, str):
+            raise TaskError("validation", "outcome round context marker must be a string", 2)
+        if data["phase"] in {"report", "verdict", "decision"} and not marker:
+            raise TaskError("validation", "source outcome round context needs its marker", 2)
+        if data["phase"] not in {"report", "verdict", "decision"} and marker:
+            raise TaskError("validation", "only source outcome round context has a marker", 2)
+    if not isinstance(data.get("attempt_id"), str) or not data["attempt_id"].strip():
+        raise TaskError("validation", "outcome round context needs an attempt id", 2)
+    for name in ("attempt", "report_generation"):
+        value = data.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise TaskError("validation", f"outcome round context needs a positive {name}", 2)
+    request_ids = data.get("request_ids")
+    if not isinstance(request_ids, list) or not request_ids or any(
+        not isinstance(value, str) or not value.strip() for value in request_ids
+    ) or len(set(request_ids)) != len(request_ids):
+        raise TaskError("validation", "outcome round context needs unique request ids", 2)
+    visit = data.get("assessment_visit")
+    if not isinstance(visit, str):
+        raise TaskError("validation", "outcome round context assessment visit must be a string", 2)
+    if data["phase"] == "decision" and not visit:
+        raise TaskError("validation", "decision outcome round context needs an Assessment visit", 2)
+    if data["phase"] != "decision" and visit:
+        raise TaskError("validation", "only decision outcome round context has an Assessment visit", 2)
+    event_id = data.get("source_event_id")
+    if not isinstance(event_id, str):
+        raise TaskError("validation", "outcome round context source event id must be a string", 2)
+    source_phases = {"decision"} if version == 1 else {"report", "verdict", "decision"}
+    if data["phase"] in source_phases and not event_id:
+        raise TaskError("validation", "source outcome round context needs its source event id", 2)
+    if data["phase"] not in source_phases and event_id:
+        raise TaskError("validation", "only source outcome round context has a source event id", 2)
+
+
 def specification_revision(events: Iterable[dict[str, Any]], description: str) -> str:
     """Return the durable event id of the description the card currently exposes.
 
@@ -1939,6 +2002,42 @@ class TaskWriter:
         if kind == "done":
             if classification:
                 raise TaskError("validation", "a done report carries no classification", 2)
+        request_id = request_id or str(uuid.uuid4())
+        # Resolve immutable ownership before either fresh admission or a card
+        # read.  A replay must stay a pure replay, including when its worker
+        # checkout has since become dirty or the card is no longer readable.
+        legacy_owned = False
+        try:
+            owned = self.board_host.canon.event(request_id)
+        except ValueError:
+            owned = None
+            legacy_owned = self.audit.committed_event(request_id) is not None or self.audit.pending_event(
+                request_id
+            ) is not None
+            if not legacy_owned:
+                raise
+        marker_data = owned.data if owned is not None else {}
+        if owned is None and not legacy_owned:
+            if kind == "done":
+                self._require_committed_workspace()
+            # This is the writer boundary for a worker report.  Bind the
+            # report to the specification it actually answered now, rather
+            # than asking a later terminal projection to guess from a mutable
+            # card description.
+            current = self.reader.show(reference)
+            revision = specification_revision(self.audit.events(reference), current["description"])
+            specification_data = {
+                "description_sha256": _digest(current["description"]),
+                "specification_revision": revision or None,
+            }
+        else:
+            # Released marker records remain replayable without being
+            # rewritten into the forward-lineage shape.
+            specification_data = {
+                name: marker_data[name]
+                for name in ("description_sha256", "specification_revision")
+                if name in marker_data
+            }
         return self._marker_write(
             action="reported",
             event_kind=EventKind.CARD_REPORTED,
@@ -1952,9 +2051,10 @@ class TaskWriter:
                 "status": kind,
                 "body": body,
                 "body_sha256": _digest(body),
+                **specification_data,
                 "classification": classification or None,
             },
-            fresh_admission=self._require_committed_workspace if kind == "done" else None,
+            fresh_admission=None,
         )
 
     def verdict(
@@ -2140,6 +2240,37 @@ class TaskWriter:
             dict(payload),
             lambda task: None,
             identity=dict(payload),
+        )
+
+    def outcome_round_context(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        data: dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Persist one exact forward source identity before its consumer runs.
+
+        This is journal-only.  It is deliberately a typed dispatcher boundary
+        rather than comment prose: recovery reads the request id that names
+        this record and never reconstructs a worker, reviewer, or Assessment
+        identity from card history.
+        """
+        self._role(role, {"dispatcher"})
+        _validate_outcome_round_context(data)
+        if not request_id.strip():
+            raise TaskError("validation", "outcome round context needs the request id it owns", 2)
+        return self._write(
+            "outcome_round_context",
+            role,
+            actor,
+            reference,
+            request_id,
+            dict(data),
+            lambda task: None,
+            identity=dict(data),
         )
 
     def attempt_usage(
@@ -3579,7 +3710,7 @@ class TaskWriter:
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
-                if event.get("kind") in {"sprint_guard_denied", "sprint_guard_override"}:
+                if event.get("kind") in {"sprint_guard_denied", "sprint_guard_override", "outcome_round_context"}:
                     # A guard decision records itself, not a backend row: there is nothing to
                     # re-read, and the decision it names was made whether or not the operation
                     # it authorized went on to succeed.

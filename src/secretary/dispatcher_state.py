@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from secretary.dispatcher_types import DispatcherError
@@ -32,6 +33,32 @@ CLAIM_SKIP_ACTIONS = frozenset(
         CLAIM_SKIP_FAILOVER_COLLAPSE,
     }
 )
+
+
+class OutcomeTerminalPath(str, Enum):
+    """Whether a terminal effect follows the round's accepted worker report.
+
+    This is deliberately independent of the report handoff.  The handoff may
+    be unavailable precisely when the terminal obligation needs to say that
+    its forward lineage is incomplete.
+    """
+
+    NO_ACCEPTED_REPORT = "no_accepted_report"
+    FOLLOWS_ACCEPTED_REPORT = "follows_accepted_report"
+
+
+def outcome_terminal_path(value: Any, *, state: str) -> OutcomeTerminalPath:
+    """Read the durable path, conservatively classifying pre-field records."""
+    if value in {path.value for path in OutcomeTerminalPath}:
+        return OutcomeTerminalPath(str(value))
+    if value not in (None, ""):
+        raise DispatcherError("invalid_outcome_terminal_path", f"unknown outcome terminal path {value!r}")
+    # A record from before the explicit field can already have accepted a
+    # report and left In progress.  Its state is the dispatcher-owned path
+    # fact, never a source-handoff or marker lookup.
+    if state in {"validate", "review_starting", "reviewing", "assessment"}:
+        return OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT
+    return OutcomeTerminalPath.NO_ACCEPTED_REPORT
 
 
 def is_claim_skip(outcome: dict[str, Any]) -> bool:
@@ -61,6 +88,10 @@ class DispatcherRecord:
     preferred_head: str = ""
     preferred_review_head: str = ""
     report_generation: int = 0
+    # Frozen when the dispatcher accepts a worker report, before any source
+    # handoff is consulted.  Every later terminal effect reads this one typed
+    # classification, so losing a report handoff cannot redefine the path.
+    outcome_terminal_path: OutcomeTerminalPath = OutcomeTerminalPath.NO_ACCEPTED_REPORT
     # The observer decision that opened the round `report_generation` names, empty when no decision
     # opened it (secretary-1064). Frozen here with the generation, in the same write, because the
     # worker of the round must be handed the adjudication its round was opened on: reading "the
@@ -279,6 +310,7 @@ class DispatcherRecord:
             "paused_worker_at": self.paused_worker_at,
             "report_generation": self.report_generation,
             "report_decision": self.report_decision,
+            "outcome_terminal_path": self.outcome_terminal_path.value,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
             "previous_reviewed_sha": self.previous_reviewed_sha,
@@ -355,6 +387,7 @@ class DispatcherRecord:
                 "'worker_continuation'. Let the recorded worker finish or clear the record "
                 "before upgrading.",
             )
+        state = str(payload.get("state") or "claimed")
         return cls(
             worker=str(payload.get("worker") or ""),
             workspace=str(payload.get("workspace") or ""),
@@ -378,7 +411,8 @@ class DispatcherRecord:
             # previous one issued for the round still running.
             report_generation=int(payload.get("report_generation") or payload.get("review_baseline") or 0),
             report_decision=str(payload.get("report_decision") or ""),
-            state=str(payload.get("state") or "claimed"),
+            outcome_terminal_path=outcome_terminal_path(payload.get("outcome_terminal_path"), state=state),
+            state=state,
             claimed_at=float(payload.get("claimed_at") or time.time()),
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),

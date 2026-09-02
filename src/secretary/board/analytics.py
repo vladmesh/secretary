@@ -214,6 +214,7 @@ def _outcome_rows(
         _validate_non_usage_sources(recorded, refs, events)
         worker = _usage_source(recorded, "worker", refs["worker_usage"], events)
         review = _usage_source(recorded, "reviewer", refs["review_usage"], events)
+        lineage = _lineage_completeness(data)
         rows.append(
             {
                 "projection_version": ANALYTICS_PROJECTION_VERSION,
@@ -230,6 +231,7 @@ def _outcome_rows(
                 "blocked_reason": data["blocked_reason"],
                 "source_event_ids": dict(refs),
                 "usage_completeness": dict(data["usage_completeness"]),
+                "lineage_completeness": lineage,
                 "worker_usage": worker,
                 "review_usage": review,
             }
@@ -256,6 +258,13 @@ def _validate_non_usage_sources(
                 outcome,
                 f"{name} does not name this card's {expected_kind.value}",
             )
+        if outcome.event.data["version"] >= 2:
+            if source.event.data.get("specification_revision") != outcome.event.data["specification_revision"]:
+                _fail(
+                    "analytics_incompatible_lineage_specification",
+                    outcome,
+                    f"{name} does not bind this outcome specification revision",
+                )
     effect_id = refs["effect"]
     if effect_id is None:
         return
@@ -270,6 +279,15 @@ def _validate_non_usage_sources(
         _fail(
             "analytics_incompatible_source_event_ref", outcome, "effect does not name this card's transition"
         )
+    if outcome.event.data["version"] >= 2:
+        owed = effect.event.data.get("attempt_outcome_owed")
+        key = ("attempt_id", "attempt", "report_generation")
+        if not isinstance(owed, dict) or any(owed.get(name) != outcome.event.data[name] for name in key):
+            _fail(
+                "analytics_incompatible_lineage_effect",
+                outcome,
+                "effect does not retain this outcome round identity",
+            )
 
 
 def _usage_source(
@@ -332,11 +350,29 @@ def _validate_usage_completeness(
             )
 
 
+def _lineage_completeness(data: dict[str, Any]) -> dict[str, Any]:
+    """Expose v2 forward-lineage gaps independently from provider usage."""
+    if data["version"] == 1:
+        return {"complete": True, "missing": []}
+    required = data["lineage_required"]
+    refs = data["source_event_ids"]
+    missing = [
+        name
+        for name, required_now in required.items()
+        if required_now
+        and (data["specification_revision"] if name == "specification_revision" else refs[name]) is None
+    ]
+    return {"complete": not missing, "missing": missing}
+
+
 def _incomplete_reasons(rows: list[dict[str, Any]]) -> list[str]:
     if not rows:
         return ["no_attempt_outcome_v1"]
     reasons: set[str] = set()
     for row in rows:
+        if not row["lineage_completeness"]["complete"]:
+            for name in row["lineage_completeness"]["missing"]:
+                reasons.add(f"lineage_missing_{name}")
         if row["verdict"] == "legacy":
             reasons.add("legacy_outcome")
         for role, state in row["usage_completeness"].items():

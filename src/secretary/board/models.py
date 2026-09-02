@@ -581,10 +581,15 @@ def _validate_attempt_outcome_event(
         "source_event_ids",
         "usage_completeness",
     }
-    if set(data) != required:
-        raise ValueError("attempt outcome v1 has an unsupported field set")
-    if data["version"] != 1:
+    version = data.get("version")
+    if version == 1:
+        expected = required
+    elif version == 2:
+        expected = required | {"lineage_required"}
+    else:
         raise ValueError("unsupported attempt outcome version")
+    if set(data) != expected:
+        raise ValueError(f"attempt outcome v{version} has an unsupported field set")
     for name in ("attempt_id",):
         value = data[name]
         if not isinstance(value, str) or not value.strip():
@@ -633,6 +638,22 @@ def _validate_attempt_outcome_event(
             raise ValueError(f"attempt outcome {role} completeness requires its usage event ref")
         if state in {"missing", "legacy"} and usage_ref is not None:
             raise ValueError(f"attempt outcome {role} missingness carries no usage event ref")
+    if version != 2:
+        return
+    required_lineage = data["lineage_required"]
+    expected_lineage = {
+        "specification_revision",
+        "report",
+        "verdict",
+        "decision",
+        "effect",
+        "worker_usage",
+        "review_usage",
+    }
+    if not isinstance(required_lineage, dict) or set(required_lineage) != expected_lineage:
+        raise ValueError("attempt outcome lineage requiredness is incomplete")
+    if not all(isinstance(value, bool) for value in required_lineage.values()):
+        raise ValueError("attempt outcome lineage requiredness must be boolean")
 
 
 def _validate_terminal_taxonomy_event(

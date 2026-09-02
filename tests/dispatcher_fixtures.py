@@ -21,7 +21,7 @@ from unittest import mock
 from secretary._fsutil import file_lock
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, HostError
 from secretary.dispatcher_heartbeat import heartbeat_identity
-from secretary.dispatcher_state import new_attempt_id, now_rfc3339, record_attempt
+from secretary.dispatcher_state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
 from secretary.dispatcher_watchdog import idle_stall_seconds
 from secretary.dispatcher_worker_lifecycle import head_run_binding
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
@@ -236,14 +236,24 @@ class DispatcherRuntimeFixture:
             request_id=self._worker_report_request_id(),
         )
 
-    def _review_red(self, request_id: str = "review-red", body: str = "fix the hermetic test") -> None:
+    def _review_red(self, request_id: str = "", body: str = "fix the hermetic test") -> None:
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
             reference="secretary-510-pilot",
             kind="red",
             body=body,
-            request_id=request_id,
+            request_id=request_id or self._review_verdict_request_id("red"),
+        )
+
+    def _review_verdict_request_id(self, kind: str) -> str:
+        """The exact verdict command issued to the reviewer for this review round."""
+        record = self._pilot_record()
+        return attempt_request_id(
+            str(record["attempt_id"]),
+            f"review-{kind}",
+            CARD_REF,
+            str(record["review_baseline"]),
         )
 
     def _worker_report_request_id(self, kind: str = "done", classification: str = "") -> str:
