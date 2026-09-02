@@ -72,8 +72,8 @@ def project_analytics_checkpoint(directory: str | Path) -> AnalyticsProjection:
     ``export.json`` remains a verifier-checked summary, never row evidence.
     """
     checkpoint = verify_analytics_checkpoint(Path(directory))
-    cards = _references(checkpoint, "cards.ndjson", "card")
-    sprints = _references(checkpoint, "sprints.ndjson", "sprint")
+    cards = _references(checkpoint, "cards.ndjson")
+    sprints = _references(checkpoint, "sprints.ndjson")
     events = _events(checkpoint)
     _validate_subject_references(events, cards, sprints)
     rows = _outcome_rows(checkpoint, events, cards, sprints)
@@ -110,20 +110,16 @@ def _read_ndjson(checkpoint: AnalyticsCheckpoint, name: str) -> list[tuple[int, 
     return rows
 
 
-def _references(checkpoint: AnalyticsCheckpoint, name: str, label: str) -> set[str]:
-    path = checkpoint.directory / name
+def _references(checkpoint: AnalyticsCheckpoint, name: str) -> set[str]:
     references: set[str] = set()
-    for number, row in _read_ndjson(checkpoint, name):
+    for _, row in _read_ndjson(checkpoint, name):
         reference = row.get("reference")
-        if not isinstance(reference, str) or not reference.strip():
-            raise AnalyticsProjectionError(
-                "analytics_malformed_row", path, number, f"{label} reference must be a non-empty string"
-            )
-        if reference in references:
-            raise AnalyticsProjectionError(
-                "analytics_conflicting_reference", path, number, f"duplicate {label} reference {reference!r}"
-            )
-        references.add(reference)
+        # Board exports retain archived rows.  The projection only needs to
+        # establish that an event subject belongs to the cut, so this is a
+        # membership collection, not an identity table.  Ignore rows that do
+        # not contribute a usable reference, including unrelated board rows.
+        if isinstance(reference, str) and reference.strip():
+            references.add(reference)
     return references
 
 

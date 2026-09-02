@@ -1257,6 +1257,9 @@ after that manifest-verifier boundary succeeds does it parse `cards.ndjson`, `sp
 `events.ndjson` below that verified directory. `export.json` is verifier-checked only as a count summary;
 it is not evidence for an analytics row or an alternative proof of the cut. The reader has no live board,
 dispatcher, provider session, comment, transcript or lifecycle dependency and never mutates a checkpoint.
+`cards.ndjson` and `sprints.ndjson` are membership sources for typed event subjects: repeated references,
+including an archived and live Card row with the same reference, and rows without a usable reference do not
+create an analytics identity or invalidate unrelated evidence.
 
 The versioned result has `checkpoint_id`, `rows`, `incomplete` and `incomplete_reasons`; `ndjson()` emits
 one deterministic object per row. Every row is keyed exactly by `card_ref`, `attempt_id` and
@@ -1274,8 +1277,8 @@ and remain visibly distinct from each other and from a null token dimension. No 
 id, prose, marker, provider state or live Card field participates in a join.
 
 The projection fails closed with named `AnalyticsProjectionError` diagnostics: `analytics_malformed_row`,
-`analytics_invalid_typed_event`, `analytics_conflicting_event_identity`,
-`analytics_conflicting_request_ownership`, `analytics_conflicting_reference`,
+`analytics_read_failed`, `analytics_invalid_typed_event`, `analytics_conflicting_event_identity`,
+`analytics_conflicting_request_ownership`,
 `analytics_conflicting_outcome_natural_key`, `analytics_dangling_card_ref`,
 `analytics_dangling_sprint_ref`, `analytics_dangling_source_event_ref`,
 `analytics_incompatible_source_event_ref`, and `analytics_incompatible_usage_join`. Each names its sealed

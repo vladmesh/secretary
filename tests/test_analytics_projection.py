@@ -192,6 +192,19 @@ class AnalyticsProjectionTests(unittest.TestCase):
 
         self.assertEqual(len(projection.rows), 2)
 
+    def test_archived_and_live_card_rows_with_one_reference_are_membership(self) -> None:
+        self.seal(
+            self.valid_records(),
+            cards=[
+                {"reference": CARD, "archived": True},
+                {"reference": CARD, "archived": False},
+            ],
+        )
+
+        projection = project_analytics_checkpoint(self.board)
+
+        self.assertEqual([row["attempt_id"] for row in projection.rows], ["round-1", "round-2"])
+
     def test_conflicting_natural_key_event_identity_and_request_owner_fail_closed(self) -> None:
         cases: dict[str, list[dict]] = {}
         natural = self.valid_records()
@@ -311,12 +324,11 @@ class AnalyticsProjectionTests(unittest.TestCase):
 
     def test_projection_has_no_live_board_provider_or_comment_dependency(self) -> None:
         self.seal(self.valid_records())
-        with (
-            mock.patch("secretary.tasks.TaskReader", side_effect=AssertionError("live board read")),
-            mock.patch(
-                "secretary.dispatch.attempt_usage.collect_usage", side_effect=AssertionError("provider read")
-            ),
-        ):
+        from secretary.board import analytics
+
+        verifier = analytics.verify_analytics_checkpoint
+        with mock.patch.object(analytics, "verify_analytics_checkpoint", wraps=verifier) as checked:
             projection = project_analytics_checkpoint(self.board)
 
+        checked.assert_called_once_with(self.board)
         self.assertEqual(len(projection.rows), 2)
