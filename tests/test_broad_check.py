@@ -1546,7 +1546,59 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self.assertEqual(status, 2)
         self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "module_arg_without_module")
 
-    def test_a_declared_block_without_a_module_is_broad_check_incomplete(self) -> None:
+    def test_a_declared_contract_without_a_module_is_a_usage_error_not_a_refusal(self) -> None:
+        """The CLI half of the #330 regression: no module declared, none passed, no refusal.
+
+        The adapter here is the shape every project on the installation was written in before
+        `module` existed. The contract itself is fine — it names a runtime and an import package —
+        so nothing is refused; what is missing is only the suite, and only this invocation needs
+        it. The error therefore names itself and says both ways out.
+        """
+        instance = self._register("broad_check:\n  import_package: secretary\n")
+
+        stderr = StringIO()
+        with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
+            status = main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+
+        self.assertEqual(status, 2)
+        error = json.loads(stderr.getvalue())["error"]
+        self.assertEqual(error["code"], "no_broad_check_module")
+        self.assertIn("--module", error["message"])
+        self.assertIn("broad_check.module", error["message"])
+
+    def test_check_show_without_a_module_says_the_same_thing(self) -> None:
+        instance = self._register("broad_check:\n  import_package: secretary\n")
+
+        stderr = StringIO()
+        with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
+            status = main(["check", "show", "--root", str(self.root), "--instance", str(instance)])
+
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "no_broad_check_module")
+
+    def test_a_module_flag_still_runs_a_contract_that_declares_no_suite(self) -> None:
+        """And naming the suite is all it takes: the adapter's runtime is used, as it always was."""
+        self._suite_file("project_suite")
+        instance = self._register("broad_check:\n  import_package: secretary\n")
+
+        payload = _run_main(
+            [
+                "check",
+                "broad",
+                "--root",
+                str(self.root),
+                "--instance",
+                str(instance),
+                "--module",
+                "project_suite",
+            ]
+        )
+
+        self.assertEqual(payload["receipt"]["check_set"]["module"], "project_suite")
+        self.assertEqual(payload["module_contract"], {"source": "adapter"})
+
+    def test_a_declared_block_with_a_blank_interpreter_is_broad_check_incomplete(self) -> None:
+        """Present but blank names nothing runnable — a typo, and a refusal since before #330."""
         instance = self._register("broad_check:\n  interpreter: '   '\n  import_package: secretary\n")
 
         stderr = StringIO()
