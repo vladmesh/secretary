@@ -3357,6 +3357,14 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(outcome.data["verdict"], "green")
         self.assertEqual(outcome.data["disposition"], "release")
         self.assertEqual(outcome.data["terminal_state"], "done")
+        self.assertEqual(outcome.data["version"], 2)
+        self.assertTrue(
+            all(
+                outcome.data["source_event_ids"][name]
+                for name in ("report", "verdict", "decision", "effect", "worker_usage", "review_usage")
+            )
+        )
+        self.assertIsNotNone(outcome.data["specification_revision"])
         effect_id = outcome.data["source_event_ids"]["effect"]
         effect_index = next(
             index for index, event in enumerate(canon.events(ref=CARD_REF)) if event.event_id == effect_id
@@ -3443,6 +3451,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(row["verdict"], "green")
         self.assertEqual(row["disposition"], "release")
         self.assertEqual(row["source_event_ids"], outcome.data["source_event_ids"])
+        self.assertEqual(row["lineage_completeness"], {"complete": True, "missing": []})
         self.assertEqual(row["usage_completeness"], outcome.data["usage_completeness"])
         self.assertEqual(row["worker_usage"]["event_id"], outcome.data["source_event_ids"]["worker_usage"])
         self.assertEqual(row["review_usage"]["event_id"], outcome.data["source_event_ids"]["review_usage"])

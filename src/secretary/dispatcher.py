@@ -367,6 +367,7 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
+    specification_revision,
     standing_decision,
 )
 from triggered_agents.runtime import head as head_ops
@@ -5837,30 +5838,169 @@ class DispatcherRuntime:
         terminal_state: str,
         disposition: str,
         verdict: str = "missing",
+        decision: str = "",
         taxonomy: TerminalTaxonomy,
     ) -> dict[str, Any] | None:
-        """The durable, pre-effect facts a terminal transition owes.
+        """Freeze the forward lineage before its lifecycle effect is issued.
 
-        No identity is guessed for a stop/drop path.  The ordinal is observed
-        from the live attempt record and remains outside the outcome key.
+        The finisher and recovery path consume this exact object only.  They
+        never reopen a card, walk comments, or search the journal for a newer
+        source after the effect has happened.
         """
         attempt_id = record.attempt_id
         attempt = record.attempt_round
         generation = record.report_generation
         if not attempt_id or attempt < 1 or generation < 1:
             return None
+        reviewed = bool(record.review_run)
+        reference = str(task.get("ref") or "")
+        revision = specification_revision(self.audit.events(reference), str(task.get("description") or ""))
+        source, diagnostic = self._outcome_lineage_sources(
+            reference,
+            attempt_id=attempt_id,
+            attempt=attempt,
+            generation=generation,
+            revision=revision,
+            verdict=verdict,
+            decision=decision,
+            report_ids=_round_report_ids(record.workspace, attempt_id, reference, generation),
+            reviewed=reviewed,
+        )
+        completeness: dict[str, str] = {}
+        for role, ledger_role in (("worker", "worker"), ("review", "reviewer")):
+            usage = self._outcome_usage_source(reference, attempt_id, attempt, generation, ledger_role)
+            if usage is None:
+                completeness[role] = "missing"
+                continue
+            source[f"{role}_usage"] = usage.event_id
+            completeness[role] = "collected" if usage.data.get("outcome") == "collected" else "degraded"
+        report_consumed = verdict in {"green", "red"} or bool(decision) or source["report"] is not None
+        if diagnostic.endswith("_report"):
+            report_consumed = True
+        required = {
+            # These are path facts, not a retrospective judgement based on
+            # whether a lookup happened to find a source.  A consumed worker
+            # report, reviewer verdict, or observer decision must therefore
+            # fail closed if its exact id was not frozen.
+            "specification_revision": report_consumed,
+            "report": report_consumed,
+            "verdict": reviewed and verdict in {"green", "red"},
+            "decision": bool(decision),
+            "effect": True,
+            "worker_usage": completeness["worker"] in {"collected", "degraded"},
+            "review_usage": completeness["review"] in {"collected", "degraded"},
+        }
         return {
-            "version": 1,
+            "version": 2,
             "attempt_id": attempt_id,
             "attempt": attempt,
             "report_generation": generation,
             "sprint_ref": task.get("sprint") or None,
-            "specification_revision": None,
+            "specification_revision": revision or None,
             "terminal_state": terminal_state,
             "verdict": verdict,
             "disposition": taxonomy.disposition,
             "blocked_reason": taxonomy.blocked_reason,
+            "source_event_ids": source,
+            "usage_completeness": completeness,
+            "lineage_required": required,
+            **({"lineage_diagnostic": diagnostic} if diagnostic else {}),
         }
+
+    def _outcome_lineage_sources(
+        self,
+        reference: str,
+        *,
+        attempt_id: str,
+        attempt: int,
+        generation: int,
+        revision: str,
+        verdict: str,
+        decision: str,
+        report_ids: set[str],
+        reviewed: bool,
+    ) -> tuple[dict[str, str | None], str]:
+        """Select only a unique typed marker compatible with this frozen spec.
+
+        This runs while the dispatcher is accepting the terminal path.  A
+        repeated compatible marker is intentionally an ambiguity diagnostic,
+        not an append-order tie-breaker.  Recovery never calls it.
+        """
+        source: dict[str, str | None] = {
+            "report": None,
+            "verdict": None,
+            "decision": None,
+            "effect": None,
+            "worker_usage": None,
+            "review_usage": None,
+        }
+        events = tuple(self.writer.board_host.canon.events(ref=reference)) if self.writer.board_host.canon else ()
+
+        def one(name: str, kind: str, marker: str, *, exact_ids: set[str] | None = None) -> str:
+            if exact_ids:
+                exact = [
+                    event
+                    for event in events
+                    if event.kind.value == kind
+                    and event.data.get("marker") == marker
+                    and event.data.get("specification_revision") == (revision or None)
+                    and any(
+                        self.writer.board_host.canon.committed(request_id) == event
+                        for request_id in exact_ids
+                    )
+                ]
+                if len(exact) == 1:
+                    source[name] = exact[0].event_id
+                    return ""
+                if len(exact) > 1:
+                    return f"attempt_outcome_lineage_ambiguous_{name}"
+            candidates = [
+                event
+                for event in events
+                if event.kind.value == kind
+                and event.data.get("marker") == marker
+                and event.data.get("specification_revision") == (revision or None)
+            ]
+            incompatible = [
+                event
+                for event in events
+                if event.kind.value == kind and event.data.get("marker") == marker
+            ]
+            if len(candidates) == 1:
+                source[name] = candidates[0].event_id
+                return ""
+            if len(candidates) > 1:
+                return f"attempt_outcome_lineage_ambiguous_{name}"
+            if incompatible:
+                return f"attempt_outcome_lineage_incompatible_{name}"
+            return ""
+
+        report_relevant = verdict in {"green", "red", "blocked"} or bool(decision)
+        diagnostic = ""
+        if report_relevant:
+            report_marker = "report:blocked" if verdict == "blocked" else "report:done"
+            diagnostic = one("report", "card.reported", report_marker, exact_ids=report_ids)
+        if reviewed and verdict in {"green", "red"} and not diagnostic:
+            diagnostic = one("verdict", "card.verdict", f"review:{verdict}")
+        if decision and not diagnostic:
+            diagnostic = one("decision", "card.decided", f"decision:{decision}")
+        return source, diagnostic
+
+    def _outcome_usage_source(
+        self, reference: str, attempt_id: str, attempt: int, generation: int, role: str
+    ) -> Any | None:
+        canon = self.writer.board_host.canon
+        if canon is None:
+            return None
+        matches = [
+            occurrence.event
+            for occurrence in canon.attempt_usage_occurrences(ref=reference)
+            if occurrence.event.data.get("attempt_id") == attempt_id
+            and occurrence.event.data.get("attempt") == attempt
+            and occurrence.event.data.get("report_generation") == generation
+            and occurrence.event.data.get("role") == role
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def _finish_attempt_outcome(self, obligation: dict[str, Any], effect_event_id: str) -> dict[str, Any]:
         """Stage/append one owed row, reporting degradation without lifecycle work."""
@@ -5873,34 +6013,31 @@ class DispatcherRuntime:
             # callers add it below so recovery never consults live card state.
             if not reference:
                 raise ValueError("attempt outcome obligation has no card ref")
-            attempt_id = str(obligation["attempt_id"])
-            generation = int(obligation["report_generation"])
-            usages = {
-                str(occurrence.event.data["role"]): occurrence.event
-                for occurrence in canon.attempt_usage_occurrences(ref=reference)
-                if occurrence.event.data.get("attempt_id") == attempt_id
-                and occurrence.event.data.get("report_generation") == generation
-            }
-            source: dict[str, str | None] = {
-                "report": None,
-                "verdict": None,
-                "decision": None,
-                "effect": effect_event_id,
-                "worker_usage": None,
-                "review_usage": None,
-            }
-            completeness: dict[str, str] = {}
-            for role, ledger_role in (("worker", "worker"), ("review", "reviewer")):
-                usage = usages.get(ledger_role)
-                if usage is None:
-                    completeness[role] = "missing"
+            diagnostic = str(obligation.get("lineage_diagnostic") or "")
+            if diagnostic:
+                raise ValueError(diagnostic)
+            source = dict(obligation["source_event_ids"])
+            source["effect"] = effect_event_id
+            required = obligation.get("lineage_required")
+            if not isinstance(required, dict):
+                raise ValueError("attempt_outcome_lineage_requiredness_missing")
+            for name, required_now in required.items():
+                if not required_now:
                     continue
-                source[f"{role}_usage"] = usage.event_id
-                completeness[role] = "collected" if usage.data.get("outcome") == "collected" else "degraded"
+                value = (
+                    obligation.get("specification_revision")
+                    if name == "specification_revision"
+                    else source.get(name)
+                )
+                if value is None:
+                    raise ValueError(f"attempt_outcome_lineage_missing_{name}")
             data = {
-                **{key: value for key, value in obligation.items() if key != "card_ref"},
+                **{
+                    key: value
+                    for key, value in obligation.items()
+                    if key not in {"card_ref", "lineage_diagnostic", "source_event_ids"}
+                },
                 "source_event_ids": source,
-                "usage_completeness": completeness,
             }
             return self.writer.attempt_outcome(
                 role="dispatcher",
@@ -5908,7 +6045,12 @@ class DispatcherRuntime:
                 reference=reference,
                 data=data,
                 reason="confirmed terminal lifecycle effect",
-                request_id=_attempt_request_id(attempt_id, "attempt-outcome", reference, str(generation)),
+                request_id=_attempt_request_id(
+                    str(obligation["attempt_id"]),
+                    "attempt-outcome",
+                    reference,
+                    str(obligation["report_generation"]),
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - analytics never gates a lifecycle effect
             return {
@@ -5947,6 +6089,7 @@ class DispatcherRuntime:
                 terminal_state=terminal_state,
                 disposition=disposition,
                 verdict=verdict,
+                decision=decision,
                 taxonomy=taxonomy,
             )
             if taxonomy is not None

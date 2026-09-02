@@ -85,7 +85,8 @@ class AttemptOutcomeTests(unittest.TestCase):
     def test_unknown_version_and_missingness_are_rejected_by_event_reader(self) -> None:
         event = outcome()
         record = event.to_record("outcome-1")
-        record["data"] = dict(record["data"], version=2)
+        # v2 adds forward lineage; v3 remains unknown at the typed boundary.
+        record["data"] = dict(record["data"], version=3)
         with self.assertRaisesRegex(ValueError, "unsupported attempt outcome version"):
             Event.from_record(record)
         record = event.to_record("outcome-1")
@@ -124,6 +125,11 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual((occurrence["verdict"], occurrence["disposition"]), ("blocked", "blocked"))
         self.assertEqual(occurrence["blocked_reason"], "other")
         self.assertEqual(occurrence["usage_completeness"]["review"], "missing")
+        self.assertEqual(occurrence["version"], 2)
+        self.assertIsNotNone(occurrence["specification_revision"])
+        self.assertIsNotNone(occurrence["source_event_ids"]["report"])
+        self.assertIsNone(occurrence["source_event_ids"]["verdict"])
+        self.assertIsNone(occurrence["source_event_ids"]["decision"])
 
     def test_worker_wrong_task_definition_maps_forward_to_task_contract(self) -> None:
         self._start_worker_round()
@@ -188,6 +194,9 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             (occurrence["terminal_state"], occurrence["verdict"], occurrence["disposition"]),
             ("in_progress", "red", "rework"),
         )
+        self.assertIsNotNone(occurrence["source_event_ids"]["report"])
+        self.assertIsNone(occurrence["source_event_ids"]["verdict"])
+        self.assertIsNone(occurrence["source_event_ids"]["decision"])
 
     def test_no_observer_green_release_seals_the_reviewed_round(self) -> None:
         self.start_dispatcher()
@@ -210,6 +219,9 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(released["to"], "done")
         occurrence = self._outcomes()[0].event.data
         self.assertEqual((occurrence["verdict"], occurrence["disposition"]), ("green", "release"))
+        self.assertIsNotNone(occurrence["source_event_ids"]["report"])
+        self.assertIsNotNone(occurrence["source_event_ids"]["verdict"])
+        self.assertIsNone(occurrence["source_event_ids"]["decision"])
 
     def test_infrastructure_bringup_block_seals_the_claimed_round(self) -> None:
         self.start_dispatcher()
@@ -321,6 +333,8 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         outcome = self._outcomes()[0].event.data
         self.assertEqual((outcome["verdict"], outcome["disposition"]), ("red", "reslice"))
         self.assertEqual(outcome["terminal_state"], "blocked")
+        self.assertTrue(outcome["lineage_required"]["decision"])
+        self.assertTrue(all(outcome["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect")))
 
     def test_reviewed_green_release_has_one_sealed_outcome(self) -> None:
         self.start_dispatcher()
@@ -344,6 +358,9 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             ("green", "release"),
         )
         self.assertFalse(outcomes[0].pending)
+        data = outcomes[0].event.data
+        self.assertTrue(all(data["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect")))
+        self.assertTrue(data["lineage_required"]["specification_revision"])
 
     def test_append_failure_after_a_terminal_effect_is_recovered_without_lifecycle_work(self) -> None:
         """The outcome journal is weaker than the transition it observes."""

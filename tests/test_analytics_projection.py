@@ -80,6 +80,27 @@ def effect(*, event_id: str) -> Event:
     )
 
 
+def report(*, event_id: str, specification_revision: str) -> Event:
+    return Event(
+        event_id=event_id,
+        kind=EventKind.CARD_REPORTED,
+        entity_kind=EntityKind.CARD,
+        ref=CARD,
+        actor=Actor("worker", "worker"),
+        reason="done",
+        occurred_at=datetime(2026, 9, 1, tzinfo=UTC),
+        data={
+            "marker": "report:done",
+            "status": "done",
+            "body": "done",
+            "body_sha256": "body",
+            "description_sha256": "description",
+            "specification_revision": specification_revision,
+            "classification": None,
+        },
+    )
+
+
 def outcome(
     *,
     event_id: str,
@@ -457,6 +478,48 @@ class AnalyticsProjectionTests(unittest.TestCase):
         projection = project_analytics_checkpoint(self.board)
         self.assertTrue(projection.incomplete)
         self.assertEqual(projection.incomplete_reasons, ("no_attempt_outcome_v1",))
+
+    def test_v2_lineage_completeness_and_specification_binding_are_offline_verified(self) -> None:
+        records = self.valid_records()
+        source = report(event_id="report", specification_revision="spec-revision")
+        records.append(self.record(source, "report-request"))
+        first = dict(records[3])
+        first["data"] = dict(first["data"])
+        first["data"].update(
+            {
+                "version": 2,
+                "specification_revision": "spec-revision",
+                "source_event_ids": dict(first["data"]["source_event_ids"]) | {"report": "report"},
+                "lineage_required": {
+                    "specification_revision": True,
+                    "report": True,
+                    "verdict": False,
+                    "decision": False,
+                    "effect": True,
+                    "worker_usage": True,
+                    "review_usage": True,
+                },
+            }
+        )
+        records[3] = first
+        records[0] = dict(records[0])
+        records[0]["data"] = {
+            "attempt_outcome_owed": {
+                "attempt_id": "round-1",
+                "attempt": 1,
+                "report_generation": 1,
+            }
+        }
+        self.seal(records)
+
+        projection = project_analytics_checkpoint(self.board)
+
+        self.assertEqual(projection.rows[0]["lineage_completeness"], {"complete": True, "missing": []})
+        records[-1] = dict(records[-1])
+        records[-1]["data"] = dict(records[-1]["data"]) | {"specification_revision": "other"}
+        self.seal(records)
+        with self.assertRaisesRegex(AnalyticsProjectionError, "analytics_incompatible_lineage_specification"):
+            project_analytics_checkpoint(self.board)
 
     def test_projection_has_no_live_board_provider_or_comment_dependency(self) -> None:
         self.seal(self.valid_records())

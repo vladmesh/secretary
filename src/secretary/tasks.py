@@ -1939,6 +1939,42 @@ class TaskWriter:
         if kind == "done":
             if classification:
                 raise TaskError("validation", "a done report carries no classification", 2)
+        request_id = request_id or str(uuid.uuid4())
+        # Resolve immutable ownership before either fresh admission or a card
+        # read.  A replay must stay a pure replay, including when its worker
+        # checkout has since become dirty or the card is no longer readable.
+        legacy_owned = False
+        try:
+            owned = self.board_host.canon.event(request_id)
+        except ValueError:
+            owned = None
+            legacy_owned = self.audit.committed_event(request_id) is not None or self.audit.pending_event(
+                request_id
+            ) is not None
+            if not legacy_owned:
+                raise
+        marker_data = owned.data if owned is not None else {}
+        if owned is None and not legacy_owned:
+            if kind == "done":
+                self._require_committed_workspace()
+            # This is the writer boundary for a worker report.  Bind the
+            # report to the specification it actually answered now, rather
+            # than asking a later terminal projection to guess from a mutable
+            # card description.
+            current = self.reader.show(reference)
+            revision = specification_revision(self.audit.events(reference), current["description"])
+            specification_data = {
+                "description_sha256": _digest(current["description"]),
+                "specification_revision": revision or None,
+            }
+        else:
+            # Released marker records remain replayable without being
+            # rewritten into the forward-lineage shape.
+            specification_data = {
+                name: marker_data[name]
+                for name in ("description_sha256", "specification_revision")
+                if name in marker_data
+            }
         return self._marker_write(
             action="reported",
             event_kind=EventKind.CARD_REPORTED,
@@ -1952,9 +1988,10 @@ class TaskWriter:
                 "status": kind,
                 "body": body,
                 "body_sha256": _digest(body),
+                **specification_data,
                 "classification": classification or None,
             },
-            fresh_admission=self._require_committed_workspace if kind == "done" else None,
+            fresh_admission=None,
         )
 
     def verdict(
