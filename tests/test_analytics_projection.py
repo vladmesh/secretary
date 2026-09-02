@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -15,15 +16,28 @@ from secretary.checkpoint import _write_analytics_manifest
 
 CARD = "secretary-1535"
 SPRINT = "sprint:1419"
+LEDGER_1418_ROUNDS = (
+    ("secretary-1418-01", "1418-round-01", 1, "rework"),
+    ("secretary-1418-02", "1418-round-02", 1, "rework"),
+    ("secretary-1418-03", "1418-round-03", 2, "rework"),
+    ("secretary-1418-04", "1418-round-04", 1, "rework"),
+    ("secretary-1418-05", "1418-round-05", 3, "rework"),
+    ("secretary-1418-06", "1418-round-06", 2, "rework"),
+    ("secretary-1418-07", "1418-round-07", 1, "reslice"),
+    ("secretary-1418-08", "1418-round-08", 2, "reslice"),
+    ("secretary-1418-09", "1418-round-09", 1, "reslice"),
+    ("secretary-1418-10", "1418-round-10", 4, "reslice"),
+    ("secretary-1418-11", "1418-round-11", 1, "reslice"),
+)
 
 
-def usage(*, event_id: str, attempt: int, attempt_id: str, role: str) -> Event:
+def usage(*, event_id: str, attempt: int, attempt_id: str, role: str, card_ref: str = CARD) -> Event:
     phase = "worker" if role == "worker" else "review"
     return Event(
         event_id=event_id,
         kind=EventKind.ATTEMPT_USAGE,
         entity_kind=EntityKind.CARD,
-        ref=CARD,
+        ref=card_ref,
         actor=Actor("dispatcher", "dispatcher"),
         reason="recorded provider phase usage",
         occurred_at=datetime(2026, 9, 1, tzinfo=UTC),
@@ -77,12 +91,16 @@ def outcome(
     review_completeness: str = "collected",
     sprint_ref: str | None = SPRINT,
     verdict: str = "green",
+    card_ref: str = CARD,
+    terminal_state: str = "done",
+    disposition: str = "release",
+    effect_id: str | None = "effect",
 ) -> Event:
     return Event(
         event_id=event_id,
         kind=EventKind.ATTEMPT_OUTCOME,
         entity_kind=EntityKind.CARD,
-        ref=CARD,
+        ref=card_ref,
         actor=Actor("dispatcher", "dispatcher"),
         reason="confirmed terminal lifecycle effect",
         occurred_at=datetime(2026, 9, 1, tzinfo=UTC),
@@ -93,15 +111,15 @@ def outcome(
             "report_generation": 1,
             "sprint_ref": sprint_ref,
             "specification_revision": None,
-            "terminal_state": "done",
+            "terminal_state": terminal_state,
             "verdict": verdict,
-            "disposition": "release",
+            "disposition": disposition,
             "blocked_reason": None,
             "source_event_ids": {
                 "report": None,
                 "verdict": None,
                 "decision": None,
-                "effect": "effect",
+                "effect": effect_id,
                 "worker_usage": worker_usage,
                 "review_usage": review_usage,
             },
@@ -123,17 +141,21 @@ class AnalyticsProjectionTests(unittest.TestCase):
     def seal(
         self, events: list[dict], *, cards: list[dict] | None = None, sprints: list[dict] | None = None
     ) -> None:
+        self.seal_at(self.board, events, cards=cards, sprints=sprints)
+
+    @staticmethod
+    def seal_at(
+        board: Path, events: list[dict], *, cards: list[dict] | None = None, sprints: list[dict] | None = None
+    ) -> None:
         cards = cards if cards is not None else [{"reference": CARD, "comments": ["ignored"]}]
         sprints = sprints if sprints is not None else [{"reference": SPRINT}]
         for name, values in (("cards.ndjson", cards), ("sprints.ndjson", sprints), ("events.ndjson", events)):
-            (self.board / name).write_text(
-                "".join(json.dumps(value) + "\n" for value in values), encoding="utf-8"
-            )
-        (self.board / "export.json").write_text(
+            (board / name).write_text("".join(json.dumps(value) + "\n" for value in values), encoding="utf-8")
+        (board / "export.json").write_text(
             json.dumps({"version": 1, "card_count": len(cards), "sprint_count": len(sprints)}) + "\n",
             encoding="utf-8",
         )
-        _write_analytics_manifest(self.board)
+        _write_analytics_manifest(board)
 
     @staticmethod
     def record(event: Event, request: str) -> dict:
@@ -163,6 +185,58 @@ class AnalyticsProjectionTests(unittest.TestCase):
             )
         return [self.record(event, f"request-{number}") for number, event in enumerate(events, start=1)]
 
+    def ledger_1418_records(self) -> tuple[list[dict], dict[tuple[str, str, int], dict[str, Event]]]:
+        """Build the eleven-round red ledger only from typed event facts."""
+        events: list[Event] = []
+        expected: dict[tuple[str, str, int], dict[str, Event]] = {}
+        for index, (card_ref, attempt_id, attempt, disposition) in enumerate(LEDGER_1418_ROUNDS, start=1):
+            worker = usage(
+                event_id=f"fixture-1418-worker-{index}",
+                card_ref=card_ref,
+                attempt=attempt,
+                attempt_id=attempt_id,
+                role="worker",
+            )
+            reviewer = usage(
+                event_id=f"fixture-1418-reviewer-{index}",
+                card_ref=card_ref,
+                attempt=attempt,
+                attempt_id=attempt_id,
+                role="reviewer",
+            )
+            terminal_state = "in_progress" if disposition == "rework" else "blocked"
+            result = outcome(
+                event_id=f"fixture-1418-outcome-{index}",
+                card_ref=card_ref,
+                attempt=attempt,
+                attempt_id=attempt_id,
+                worker_usage=worker.event_id,
+                review_usage=reviewer.event_id,
+                verdict="red",
+                terminal_state=terminal_state,
+                disposition=disposition,
+                effect_id=None,
+            )
+            events.extend((result, reviewer, worker))
+            expected[(card_ref, attempt_id, 1)] = {"worker": worker, "reviewer": reviewer}
+        return (
+            [self.record(event, f"fixture-record-{number}") for number, event in enumerate(events, start=1)],
+            expected,
+        )
+
+    def seal_1418_offline_copy(self, name: str, events: list[dict]) -> Path:
+        source = Path(self.tmpdir.name) / f"{name}-source"
+        offline_copy = Path(self.tmpdir.name) / f"{name}-offline-copy"
+        source.mkdir()
+        self.seal_at(
+            source,
+            events,
+            cards=[{"reference": card_ref} for card_ref, *_ in LEDGER_1418_ROUNDS],
+            sprints=[{"reference": SPRINT}],
+        )
+        shutil.copytree(source, offline_copy)
+        return offline_copy
+
     def test_projects_a_typed_multi_round_cut_through_explicit_usage_ids(self) -> None:
         self.seal(self.valid_records())
 
@@ -183,6 +257,68 @@ class AnalyticsProjectionTests(unittest.TestCase):
 
         self.assertEqual([row["attempt_id"] for row in projection.rows], ["round-1", "round-2"])
         self.assertEqual(projection.rows[0]["worker_usage"]["event_id"], "worker-1")
+
+    def test_1418_shaped_red_ledger_is_complete_and_order_independent(self) -> None:
+        """Eleven typed red rounds retain their explicit 22 phase facts offline."""
+        records, expected = self.ledger_1418_records()
+        event_rows = [Event.from_record(record) for record in records]
+        self.assertEqual(sum(event.kind is EventKind.ATTEMPT_OUTCOME for event in event_rows), 11)
+        self.assertEqual(sum(event.kind is EventKind.ATTEMPT_USAGE for event in event_rows), 22)
+
+        projection = project_analytics_checkpoint(self.seal_1418_offline_copy("ordered", records))
+        shuffled = project_analytics_checkpoint(
+            self.seal_1418_offline_copy("shuffled", list(reversed(records)))
+        )
+
+        def semantic_rows(rows: tuple[dict, ...]) -> list[dict]:
+            return [{name: value for name, value in row.items() if name != "checkpoint_id"} for row in rows]
+
+        self.assertEqual(semantic_rows(projection.rows), semantic_rows(shuffled.rows))
+        self.assertFalse(projection.incomplete)
+        self.assertFalse(shuffled.incomplete)
+        self.assertEqual(len(projection.rows), 11)
+        self.assertEqual(len(projection.ndjson().splitlines()), 11)
+        keys = {(row["card_ref"], row["attempt_id"], row["report_generation"]) for row in projection.rows}
+        self.assertEqual(keys, set(expected))
+        self.assertEqual(len(keys), 11)
+        self.assertEqual({row["verdict"] for row in projection.rows}, {"red"})
+        self.assertEqual(
+            {
+                disposition: sum(row["disposition"] == disposition for row in projection.rows)
+                for disposition in ("rework", "reslice")
+            },
+            {"rework": 6, "reslice": 5},
+        )
+
+        usage_source_ids = [
+            row["source_event_ids"][field]
+            for row in projection.rows
+            for field in ("worker_usage", "review_usage")
+        ]
+        self.assertEqual(len(usage_source_ids), 22)
+        self.assertEqual(len(set(usage_source_ids)), 22)
+        for row in projection.rows:
+            key = (row["card_ref"], row["attempt_id"], row["report_generation"])
+            self.assertEqual(row["usage_completeness"], {"worker": "collected", "review": "collected"})
+            self.assertEqual(
+                row["source_event_ids"],
+                {
+                    "report": None,
+                    "verdict": None,
+                    "decision": None,
+                    "effect": None,
+                    "worker_usage": expected[key]["worker"].event_id,
+                    "review_usage": expected[key]["reviewer"].event_id,
+                },
+            )
+            for role, field in (("worker", "worker_usage"), ("reviewer", "review_usage")):
+                source = expected[key][role]
+                joined = row[field]
+                self.assertEqual(source.ref, row["card_ref"])
+                self.assertEqual(source.data["attempt_id"], row["attempt_id"])
+                self.assertEqual(source.data["attempt"], row["attempt"])
+                self.assertEqual(source.data["report_generation"], row["report_generation"])
+                self.assertEqual(joined, {"event_id": source.event_id, **source.data})
 
     def test_exact_duplicate_replay_is_one_row(self) -> None:
         records = self.valid_records()
@@ -324,8 +460,8 @@ class AnalyticsProjectionTests(unittest.TestCase):
 
     def test_projection_has_no_live_board_provider_or_comment_dependency(self) -> None:
         self.seal(self.valid_records())
-        from secretary.board import analytics
         from secretary import tasks
+        from secretary.board import analytics
         from secretary.dispatch import attempt_usage
 
         verifier = analytics.verify_analytics_checkpoint
