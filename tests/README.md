@@ -99,6 +99,28 @@ ordinary process environment value the `with` block shadows. Note that a test wh
 it and then *reads* a pause flag is back to reading the host — pop it only to assert about
 a resolved path, as `test_pipeline_paths.py:LegacyMirrorPathTests` does.
 
+## The suite must have imported the checkout it lives in
+
+Every seam above keeps a *host* fact out of the run. One fact was never checked at all: which
+sources the run imported. A head's shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src`
+(`src/triggered_agents/runtime/launch_prefix.py`), and every worktree on the pipeline host runs on
+one shared venv whose editable install points at the production checkout's `src`. Both outrank a
+worktree's own sources for a src-layout project, which has nothing importable at its root -- so a
+worker could run this suite inside a candidate worktree, watch it pass, and have exercised
+production's `secretary` with the candidate's test files (issue:8b39e60e4df361c6138e).
+
+`tests/test_hermetic_source_tree.py` is the assertion nobody had written: `secretary.__file__` and
+`triggered_agents.__file__` must resolve inside the checkout that contains `tests/`. It installs no
+seam and shadows nothing -- there is no default to patch here, only a fact about the process.
+
+It is also the one guard in this family that is legitimately red on a perfectly good checkout: run
+a worktree's suite with the production interpreter and no `PYTHONPATH` of your own, and it fails
+and names both paths. That is the signal, not a defect. Point the interpreter at your own sources:
+
+```
+PYTHONPATH=$PWD/src python3 -m unittest ...
+```
+
 ## Board reads are hermetic by construction, not by a patch
 
 There is no default Kanboard fake to install any more, because there is nothing left to

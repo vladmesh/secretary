@@ -53,6 +53,7 @@ component tests/test_hermetic_codex.py
 component tests/test_hermetic_kanboard.py
 component tests/test_hermetic_orca.py
 component tests/test_hermetic_pipeline_state.py
+unit tests/test_hermetic_source_tree.py
 packaging tests/test_host.py
 packaging tests/test_installation.py
 unit tests/test_knowledge_write.py

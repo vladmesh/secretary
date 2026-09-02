@@ -13,9 +13,13 @@ identity, or a receipt for other content is not usable evidence, and the reader 
 
 A receipt only reports the project a check imported when the check process itself said so, which
 is why the standard shape is a module this wrapper launches; an arbitrary shell may `cd` elsewhere
-before any work starts, so that shape records no import. The runner's verdict is scanned off the
-stream while it goes past rather than reconstructed from the diagnostic tail, because output
-printed after a summary must not be able to erase it.
+before any work starts, so that shape records no import. That shape also makes the candidate the
+project by construction: the wrapper puts the candidate's own import roots at the front of the
+check process's `sys.path` before anything imports the project, ahead of whatever `PYTHONPATH` and
+whatever editable install the launching head happened to carry (issue:8b39e60e4df361c6138e).
+
+The runner's verdict is scanned off the stream while it goes past rather than reconstructed from
+the diagnostic tail, because output printed after a summary must not be able to erase it.
 
 This is deliberately not the exact-SHA gate receipt in ``dispatcher_gate_receipt``: that one is
 machinery-owned attestation that travels downstream, this one is a worker's own note-to-self.
@@ -99,12 +103,29 @@ class ContentIdentity:
         return self.resolved and other.resolved and self.as_dict() == other.as_dict()
 
 
-#: Record import provenance in the check process, then restore workspace import precedence.
+#: Give the candidate import precedence, then record what the check process actually imported.
+#
+# The order of these two steps is the whole fix for issue:8b39e60e4df361c6138e. This block used to
+# import the configured package first and only afterwards *append* the workspace root to
+# `sys.path`, which could never make a src-layout candidate importable and would have been too late
+# if it could: by then the package object was already bound. Every head runs with
+# `PYTHONPATH=$TA_SECRETARY_REPO/src` (see `triggered_agents/runtime/launch_prefix.py`) and every
+# worktree shares one venv holding an editable install of the production checkout, so the check
+# process imported production sources, ran the candidate's test files against them, printed OK and
+# exited 0. `candidate_import_refusal()` then honestly refused the receipt, which made `--reuse`
+# dead for this project and made every round pay for the full suite again.
+#
+# So the candidate's own import roots go to the FRONT of `sys.path`, ahead of any inherited
+# control-plane `PYTHONPATH`, and they go there before the import. Provenance is still *observed*
+# rather than asserted: the record says what `importlib` actually returned, and the roots are
+# recorded as what the process was told to prefer, not as a claim about where the import landed.
 _PROVENANCE_BOOTSTRAP = """\
 import importlib, json, os, runpy, sys
 
-_record, _module, _package, _workspace = sys.argv[1:5]
+_record, _module, _package, _roots = sys.argv[1:5]
 sys.argv = [_module, *sys.argv[5:]]
+_import_roots = [_entry for _entry in _roots.split(os.pathsep) if _entry]
+sys.path[:0] = [_entry for _entry in _import_roots if _entry not in sys.path]
 try:
     _project = importlib.import_module(_package)
     _imported = getattr(_project, "__file__", "") or ""
@@ -118,13 +139,31 @@ with open(_record, "w", encoding="utf-8") as _handle:
             "cwd": os.getcwd(),
             "imported_package": _package,
             "imported_project": _imported,
+            "import_roots": _import_roots,
         },
         _handle,
     )
-if _workspace not in sys.path:
-    sys.path.append(_workspace)
 runpy.run_module(_module, run_name="__main__", alter_sys=True)
 """
+
+
+def candidate_import_roots(root: Path) -> list[str]:
+    """The paths a check process must prefer so that "the project" means *this* checkout.
+
+    Two entries, and the order matters. The workspace root comes first because that is what an
+    ordinary `python -m` in the checkout already puts at `sys.path[0]`, so a flat-layout candidate
+    keeps behaving exactly as it did before this list existed. `src/` follows, because a src-layout
+    project (Secretary itself, `src/secretary/`) has nothing importable at its root and the root
+    entry alone silently resolves the package from wherever else it happens to be installed --
+    which is the defect in issue:8b39e60e4df361c6138e.
+
+    Both entries are handed over unconditionally, whether or not they exist: a candidate that has
+    no `src/` is not a candidate that should start importing one from somewhere else, and a
+    non-existent `sys.path` entry costs a failed stat.
+    """
+    resolved = Path(root).resolve()
+    return [str(resolved), str(resolved / "src")]
+
 
 _CHECK_SET_SCHEMA = 1
 _SHAPE_MODULE = "module"
@@ -139,6 +178,7 @@ _UNOBSERVED_PROVENANCE = {
     "imported_package": "",
     "imported_project": "",
     "inside_workspace": False,
+    "import_roots": [],
 }
 
 
@@ -235,7 +275,7 @@ class CheckSpec:
                 str(record),
                 self.module,
                 self.import_package,
-                str(root.resolve()),
+                os.pathsep.join(candidate_import_roots(root)),
                 *self.module_args,
             ]
         return ["bash", "-lc", self.command]
@@ -249,7 +289,7 @@ class CheckSpec:
                 "<provenance record>",
                 self.module,
                 self.import_package,
-                "<workspace>",
+                "<candidate import roots>",
                 *self.module_args,
             ]
         return ["bash", "-lc", self.command]
@@ -340,6 +380,9 @@ def _read_provenance(record: Path | None, root: Path) -> dict[str, object]:
     if not isinstance(payload, Mapping):
         return dict(_UNOBSERVED_PROVENANCE)
     imported = str(payload.get("imported_project") or "")
+    recorded_roots = payload.get("import_roots")
+    if not isinstance(recorded_roots, list):
+        recorded_roots = []
     inside = False
     if imported:
         try:
@@ -354,6 +397,11 @@ def _read_provenance(record: Path | None, root: Path) -> dict[str, object]:
         "imported_package": str(payload.get("imported_package") or ""),
         "imported_project": imported,
         "inside_workspace": inside,
+        # What the check process was told to prefer, as it saw it. This is not evidence about where
+        # the import landed -- `imported_project` above is, and `candidate_import_refusal()` reads
+        # only that -- but it is what a reader needs to explain a refusal that should have been
+        # impossible: roots the process never received, or received and could not use.
+        "import_roots": [str(entry) for entry in recorded_roots],
     }
 
 
