@@ -37,6 +37,10 @@ from secretary.board_transport import (
     resolve,
     transport_path,
 )
+from secretary.projects.integration_base import (
+    integration_base_refusal,
+    seed_ref_refusal,
+)
 from secretary.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
 from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
@@ -129,6 +133,8 @@ _KNOWN_METADATA = {
     "claim",
     "slug",
     "base_branch",
+    "seed_ref",
+    "supersedes",
     "head",
     "resolved_head",
     "review_head",
@@ -747,6 +753,8 @@ class TaskReader:
                     "claim": _text(meta.get("claim")),
                     "slug": _text(meta.get("slug")),
                     "base_branch": _text(meta.get("base_branch")),
+                    "seed_ref": _text(meta.get("seed_ref")),
+                    "supersedes": _text(meta.get("supersedes")),
                     "comments": [
                         {
                             "ts": _text(comment.get("date_creation")),
@@ -857,6 +865,8 @@ class TaskReader:
             "workspace": {
                 "slug": _null_if_empty(meta.get("slug")),
                 "base_branch": _null_if_empty(meta.get("base_branch")),
+                "seed_ref": _null_if_empty(meta.get("seed_ref")),
+                "supersedes": _null_if_empty(meta.get("supersedes")),
             },
             "retry": {
                 "same": _nonnegative_int(meta.get("retry_same")),
@@ -1518,6 +1528,8 @@ class TaskWriter:
         review_head: str = "",
         slug: str = "",
         base_branch: str = "",
+        seed_ref: str = "",
+        supersedes: str = "",
         complexity: str = "standard",
         family_preference: str = "auto",
         codex_launch_mode: str = "",
@@ -1544,6 +1556,8 @@ class TaskWriter:
             review_head=review_head,
             slug=slug,
             base_branch=base_branch,
+            seed_ref=seed_ref,
+            supersedes=supersedes,
             complexity=complexity,
             family_preference=family_preference,
             codex_launch_mode=codex_launch_mode,
@@ -1573,6 +1587,8 @@ class TaskWriter:
         review_head: str = "",
         slug: str = "",
         base_branch: str = "",
+        seed_ref: str = "",
+        supersedes: str = "",
         complexity: str = "standard",
         family_preference: str = "auto",
         codex_launch_mode: str = "",
@@ -1598,6 +1614,8 @@ class TaskWriter:
         review_head = review_head.strip()
         slug = slug.strip()
         base_branch = base_branch.strip()
+        seed_ref = seed_ref.strip()
+        supersedes = supersedes.strip()
         complexity = complexity.strip() or "standard"
         family_preference = family_preference.strip() or "auto"
         codex_launch_mode = codex_launch_mode.strip()
@@ -1647,6 +1665,28 @@ class TaskWriter:
             raise TaskError("validation", "tasks do not accept product priority", 2)
         if slug and not _SLUG_RE.match(slug):
             raise TaskError("validation", "slug must match [a-z0-9-]{1,30}", 2)
+        # Seed and integration base are two different refs (secretary-1541). A restore reproduces
+        # cards that were admitted under the older single-field contract, so it carries whatever
+        # they hold; the dispatcher refuses such a base fast and typed when it next runs the card.
+        if not restoring:
+            base_refusal = integration_base_refusal(base_branch) if base_branch else ""
+            if base_refusal:
+                raise TaskError("base_branch_not_integration_target", base_refusal, 2)
+            seed_refusal = seed_ref_refusal(seed_ref) if seed_ref else ""
+            if seed_refusal:
+                raise TaskError("validation", seed_refusal, 2)
+            if supersedes and not seed_ref:
+                raise TaskError(
+                    "validation", "supersedes names the predecessor of a seed; it requires --seed-ref", 2
+                )
+            if seed_ref and not supersedes:
+                # A seed is inherited content, and whose content it is has to be readable off the
+                # card: without it nobody can tell an intentional reslice from a stray ref.
+                raise TaskError(
+                    "validation",
+                    "a seed requires --supersedes naming the predecessor card it inherits from",
+                    2,
+                )
         linked_sprint: dict[str, Any] | None = None
         if sprint:
             from secretary.sprints import SprintReader
@@ -1690,6 +1730,8 @@ class TaskWriter:
             "review_head": review_head or None,
             "slug": slug or None,
             "base_branch": base_branch or None,
+            "seed_ref": seed_ref or None,
+            "supersedes": supersedes or None,
             "complexity": complexity,
             "family_preference": family_preference,
             "codex_launch_mode": codex_launch_mode or None,
@@ -1764,6 +1806,8 @@ class TaskWriter:
                 review_head=review_head,
                 slug=slug,
                 base_branch=base_branch,
+                seed_ref=seed_ref,
+                supersedes=supersedes,
                 complexity=complexity,
                 family_preference=family_preference,
                 codex_launch_mode=codex_launch_mode,
@@ -1835,6 +1879,8 @@ class TaskWriter:
         review_head: str,
         slug: str,
         base_branch: str,
+        seed_ref: str,
+        supersedes: str,
         complexity: str,
         family_preference: str,
         codex_launch_mode: str,
@@ -1905,6 +1951,10 @@ class TaskWriter:
                     values["slug"] = slug
                 if base_branch:
                     values["base_branch"] = base_branch
+                if seed_ref:
+                    values["seed_ref"] = seed_ref
+                if supersedes:
+                    values["supersedes"] = supersedes
                 if codex_launch_mode:
                     values["codex_launch_mode"] = codex_launch_mode
                 if sprint:
@@ -4283,6 +4333,8 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         ("review_head", "review_head"),
         ("slug", "slug"),
         ("base_branch", "base_branch"),
+        ("seed_ref", "seed_ref"),
+        ("supersedes", "supersedes"),
         ("codex_launch_mode", "codex_launch_mode"),
         ("sprint", "sprint_ref"),
     ):

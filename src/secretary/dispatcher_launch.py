@@ -564,11 +564,15 @@ CAUSE_PANE_NEVER_READY = "pane_never_ready"
 CAUSE_LAUNCH_ABORTED = "launch_aborted"
 CAUSE_HOST_UNAVAILABLE = "host_unavailable"
 CAUSE_WORKSPACE_CONTRACT = "workspace_contract"
+# The card names an integration base this project cannot integrate into (secretary-1541). Nothing
+# about the code was judged, but no host repairs it either: it is the card's own contract.
+CAUSE_BASE_BRANCH_CONTRACT = "base_branch_contract"
 BRING_UP_CAUSE_CLASSES = {
     CAUSE_PANE_NEVER_READY: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_LAUNCH_ABORTED: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_HOST_UNAVAILABLE: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_WORKSPACE_CONTRACT: FAILURE_CLASS_TASK,
+    CAUSE_BASE_BRANCH_CONTRACT: FAILURE_CLASS_TASK,
 }
 STAGE_CLAIM = "claim"
 STAGE_RESPAWN = "respawn"

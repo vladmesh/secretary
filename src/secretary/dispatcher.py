@@ -3758,6 +3758,27 @@ class DispatcherRuntime:
         comment, mirroring the review-red rework path. `phase` distinguishes the pre-review gate
         from the pre-merge re-check in the request-id and the log line."""
         ref = task["ref"]
+        if result.failure_class == "topology":
+            # The candidate was never offered to CI, and no round of rework could change that: the
+            # pull request's base or the project's triggers are what is wrong (secretary-1541).
+            # Sending the worker back over its own code would spend a round on the wrong file, so
+            # this goes to a human with the cause named instead.
+            return self._block_merge_path(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                action=f"{phase}-gate-topology-blocked",
+                reason=(
+                    "the mechanical validation gate cannot produce this project's required CI for "
+                    f"this card: {scrub_host_output(result.summary)}. No check ran and no rework "
+                    "changes that; the card's integration base or the project's workflow triggers "
+                    "have to be repaired."
+                ),
+                step="gate",
+                outcome="gate ci topology",
+            )
         if result.failure_class == "infrastructure":
             return self._retry_infrastructure_gate(
                 task,

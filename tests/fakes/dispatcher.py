@@ -24,6 +24,7 @@ from secretary.dispatcher import (
 )
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_heartbeat import run_heartbeat_identity
+from secretary.dispatcher_launch import CAUSE_BASE_BRANCH_CONTRACT
 from secretary.dispatcher_launcher import claude_launch_model, role_launch_env
 from secretary.dispatcher_observer import OBSERVER_HEAD_FALLBACK
 from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch
@@ -33,6 +34,11 @@ from secretary.dispatcher_worker_lifecycle import head_run_binding
 from secretary.projects.contract import (
     ContractVerdict,
     ModuleContract,
+)
+from secretary.projects.integration_base import (
+    IntegrationBaseError,
+    resolve_integration_base,
+    seed_ref_refusal,
 )
 from secretary.routing_journal import HeadRun, head_run_from_profile
 from secretary.sprints import SPRINT_BOARD_NAME
@@ -548,9 +554,36 @@ class FakeCatalog:
         self.broad_check_state: ContractVerdict | None = None
         self.broad_check_probe: Callable[[str], None] | None = None
 
-    def default_branch(self, project: str, override: str | None) -> str:
-        # Same precedence as InstanceCatalog: card override, then the binding, then "main".
-        return override or self.binding(project).get("default_branch") or "main"
+    def project_default_branch(self, project: str) -> str:
+        return str(self.binding(project).get("default_branch") or "main")
+
+    def integration_base(self, project: str, override: str | None) -> str:
+        # Same rule as InstanceCatalog: an override is honoured only when the project declares it
+        # as an integration target, and refused with the reason on it otherwise.
+        binding = self.binding(project)
+        declared = binding.get("integration_bases")
+        try:
+            return resolve_integration_base(
+                default_branch=str(binding.get("default_branch") or "main"),
+                declared=list(declared) if isinstance(declared, list) else None,
+                override=override,
+            )
+        except IntegrationBaseError as exc:
+            raise HostError(
+                f"project {project!r}: {exc}", bring_up_cause=CAUSE_BASE_BRANCH_CONTRACT
+            ) from None
+
+    def workspace_seed(self, project: str, task: dict) -> str:
+        workspace = task.get("workspace") if isinstance(task.get("workspace"), dict) else {}
+        seed = str((workspace or {}).get("seed_ref") or "").strip()
+        if not seed:
+            return self.integration_base(project, (workspace or {}).get("base_branch"))
+        refusal = seed_ref_refusal(seed)
+        if refusal:
+            raise HostError(
+                f"project {project!r}: {refusal}", bring_up_cause=CAUSE_BASE_BRANCH_CONTRACT
+            ) from None
+        return seed
 
     def broad_check_verdict(self, project: str) -> ContractVerdict:
         """The card's project can be broad-checked, as every card in this suite always could.

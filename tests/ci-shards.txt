@@ -102,3 +102,4 @@ unit tests/test_tasks.py
 integration-board tests/test_triggered_dispatch.py
 runtime-component tests/test_triggered_dispatch_local_pty.py
 packaging tests/test_upgrade.py
+component tests/test_reslice_seed.py

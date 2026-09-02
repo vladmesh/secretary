@@ -28,6 +28,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 from secretary.candidate_history import (
     Commit,
     ai_attributions,
@@ -177,7 +179,8 @@ class GateResult:
     log: str = ""
     fingerprint: str = ""
     # Structured terminal reds decide whether the exact SHA may rerun.
-    failure_class: str = "substantive"  # "substantive" | "infrastructure"
+    # "substantive" | "infrastructure" | "publication" | "topology"
+    failure_class: str = "substantive"
     failure_reason: str = ""
     # The Actions run which supplied an infrastructure-classified red.  Only this concrete run
     # can be rerun; an external status or a log without a run URL remains a red verdict.
@@ -221,7 +224,7 @@ def gate_check(host, task: dict, record) -> GateResult:
     # Every mode, including none, needs a readable checkout for candidate preflight.
     if not workspace or not Path(workspace).is_dir():
         raise HostError("gate workspace is missing")
-    base = host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
+    base = host.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
     if ci != "none" and _recover_base(host, workspace, base) == "conflict":
         return GateResult(
             "red",
@@ -388,7 +391,7 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
         base_sha=_base_sha(
             host,
             workspace,
-            host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch")),
+            host.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch")),
         ),
         gate_mode="local",
         required_checks=[
@@ -626,6 +629,21 @@ def _github_gate(
             failed_run_repo=repo,
             attestation=receipt,
         )
+    if not checked:
+        # Zero checks on the candidate. Either they have not appeared yet, or nothing can ever
+        # post them for this base — and those two must not read the same on the card, because the
+        # second one otherwise burns the whole pending ceiling before anybody learns anything
+        # (secretary-1541, issue:a858c044707de792a10f and issue:2c82ba8f5d1c3bf5b8cc).
+        impossible = _impossible_trigger_reason(workspace, base)
+        if impossible:
+            return GateResult(
+                "red",
+                f"CI cannot run for `{branch}` @ `{short}`: {impossible}",
+                f"candidate = {sha}\npull request base = {base}",
+                fingerprint=_fingerprint("ci-trigger-impossible", base, branch),
+                failure_class="topology",
+                failure_reason="ci-trigger-impossible",
+            )
     return GateResult(
         "pending",
         f"CI {rollup.lower()} for `{branch}` @ `{short}` — no terminal result yet",
@@ -832,6 +850,95 @@ def _no_diff_research_gate(
         "pending",
         f"CI workflow dispatch run {found_id} completed but checks are {rollup.lower()} for `{branch}` @ `{short}`",
         attestation=receipt,
+    )
+
+
+# Workflow trigger analysis: the difference between "checks have not appeared yet" and "no workflow
+# can ever post them for this base".
+_WORKFLOW_DIR = Path(".github") / "workflows"
+_PR_EVENTS = ("pull_request", "pull_request_target")
+
+
+def _branch_pattern_matches(pattern: str, branch: str) -> bool:
+    """GitHub's branch filter glob, where `*` stops at a `/` and `**` does not."""
+    parts = re.split(r"(\*\*|\*|\?)", pattern)
+    expression = ""
+    for part in parts:
+        if part == "**":
+            expression += ".*"
+        elif part == "*":
+            expression += "[^/]*"
+        elif part == "?":
+            expression += "[^/]"
+        else:
+            expression += re.escape(part)
+    return re.fullmatch(expression, branch) is not None
+
+
+def _event_triggers_base(spec: object, base: str) -> bool:
+    """Would this `on: pull_request:` block fire for a pull request whose base is `base`?"""
+    if not isinstance(spec, dict):
+        # `pull_request:` with no filter at all fires for every base.
+        return True
+    include = spec.get("branches")
+    exclude = spec.get("branches-ignore")
+    if isinstance(exclude, list) and any(_branch_pattern_matches(str(item), base) for item in exclude):
+        return False
+    if isinstance(include, list):
+        return any(_branch_pattern_matches(str(item), base) for item in include)
+    return True
+
+
+def _workflow_triggers_base(document: object, base: str) -> bool:
+    """Does one parsed workflow declare a pull-request trigger that admits `base`?
+
+    YAML 1.1 reads a bare `on:` key as the boolean true, which is why both spellings are looked up.
+    """
+    if not isinstance(document, dict):
+        return False
+    triggers = document.get("on", document.get(True))
+    if isinstance(triggers, str):
+        return triggers in _PR_EVENTS
+    if isinstance(triggers, list):
+        return any(str(item) in _PR_EVENTS for item in triggers)
+    if isinstance(triggers, dict):
+        for event in _PR_EVENTS:
+            if event in triggers and _event_triggers_base(triggers[event], base):
+                return True
+    return False
+
+
+def _impossible_trigger_reason(workspace: str, base: str) -> str:
+    """Why no workflow of this candidate can post a check for a pull request into `base`, or "".
+
+    Read off the candidate checkout, which is what GitHub itself resolves a `pull_request` workflow
+    from. The answer is only ever "impossible" when this can be established positively: workflow
+    files exist, every one of them parses, and not one declares a pull-request trigger that admits
+    this base. A missing directory, a file that will not parse, or a single workflow that does admit
+    the base all leave the verdict where it was — ordinary pending — because a project may also be
+    checked by something that is not Actions at all.
+    """
+    root = Path(workspace) / _WORKFLOW_DIR
+    try:
+        files = sorted(path for path in root.iterdir() if path.suffix in (".yml", ".yaml") and path.is_file())
+    except OSError:
+        return ""
+    if not files:
+        return ""
+    names = []
+    for path in files:
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError):
+            return ""
+        if _workflow_triggers_base(document, base):
+            return ""
+        names.append(path.name)
+    listed = ", ".join(names[:6]) + (", …" if len(names) > 6 else "")
+    return (
+        f"no workflow in this candidate triggers on a pull request into `{base}` "
+        f"({len(names)} workflow file(s) read: {listed}), so GitHub will never create a check-run "
+        "for it: this rollup is empty because nothing can fill it, not because CI is still starting"
     )
 
 
@@ -1077,13 +1184,16 @@ def _ensure_pr(host, workspace: str, task: dict, record, branch: str, base: str)
 
     The PR exists so the project's `pull_request` CI runs — a bare feature-branch push fires
     nothing on the typical `on: [push:main, pull_request]` workflow — and its title lands in the
-    merge commit. Idempotent: an already-open PR is reused and refreshed in place. Only a PR this
-    call actually created is recorded as the gate's; anything else stays untouchable.
+    merge commit. Idempotent: an already-open PR is reused, retargeted at the integration base if
+    it points anywhere else, and refreshed in place. Only a PR this call actually created is
+    recorded as the gate's; anything else stays untouchable.
     """
     title = _pr_title(task, branch)
     body = _pr_body(task, branch, base)
-    number = _open_pr_number(host, workspace, branch)
-    if number is not None:
+    open_pr = _open_pr(host, workspace, branch)
+    if open_pr is not None:
+        number = int(open_pr["number"])
+        _retarget_pr(host, workspace, number, str(open_pr["base"]), base)
         _refresh_pr(host, workspace, record, number, title, body)
         return
     created = _backend_call(
@@ -1110,6 +1220,46 @@ def _ensure_pr(host, workspace: str, task: dict, record, branch: str, base: str)
     raise HostError(f"gate could not open a PR for {branch!r}: {_tail(text)}")
 
 
+def _retarget_pr(host, workspace: str, number: int, observed: str, base: str) -> None:
+    """Point an already-open pull request at this card's integration base, and make CI notice.
+
+    This is the repair the PO did by hand on `codegen-orchestrator-1236` (issue:2c82ba8f5d1c3bf5b8cc):
+    a successor seeded from its predecessor had its release PR opened into that predecessor's card
+    branch, where the project's `pull_request` workflow does not trigger, so GitHub created no
+    check-runs at all. Repairing it is topology, not code: the candidate is untouched, the card
+    stays where it is, and the worker is not run again.
+
+    The base edit alone is not enough. `pull_request` workflows subscribe to `opened`,
+    `synchronize` and `reopened` by default, and a base change is none of those, so the checks that
+    never appeared would go on never appearing. Closing and reopening the pull request produces
+    `reopened` on the same head commit, which is what makes the project's own CI run against the
+    exact candidate. Both halves are refusals when the backend rejects them: a pull request left
+    closed, or left on the wrong base, is a determinate gate failure and says so.
+
+    Deliberately not bounded by `_gate_owns_pr`, which one call later refuses to rewrite the prose of
+    a pull request the gate has no record of writing. That rule protects a person's words, which
+    cannot be read out of a body and so are left alone by default. This one protects the delivery
+    topology of `pipeline/<ref>` — a branch the dispatcher publishes into and nothing else writes to
+    — where a pull request is a release pull request for that card by construction, and a gate that
+    refused to repair the base because its record was lost to a restore would reproduce the very
+    incident this exists to prevent. Only the base is touched, only for that namespace, only when it
+    is wrong, and the pull request is left open. `docs/PROTOCOLS.md` carries the same argument.
+    """
+    if observed == base:
+        return
+    for args, label in (
+        (["gh", "pr", "edit", str(number), "--base", base], "gate pr retarget"),
+        (["gh", "pr", "close", str(number)], "gate pr close"),
+        (["gh", "pr", "reopen", str(number)], "gate pr reopen"),
+    ):
+        completed = _backend_call(host, args, label, cwd=Path(workspace))
+        if completed.returncode != 0:
+            raise HostError(
+                f"{label} failed for PR #{number} (base {observed!r} -> {base!r}): "
+                f"{_tail((completed.stderr or completed.stdout or '').strip())}"
+            )
+
+
 def _remember_created_pr(host, workspace: str, record, branch: str, title: str, body: str) -> None:
     """Record the pull request this gate just opened, by asking the backend which number it got.
 
@@ -1126,27 +1276,46 @@ def _remember_created_pr(host, workspace: str, record, branch: str, title: str, 
     _remember_pr(host, workspace, record, number, title, body)
 
 
-def _open_pr_number(host, workspace: str, branch: str) -> int | None:
-    """Number of the open PR whose head is `branch`, or None when the backend answered that none is
-    open. `gh pr list` exits 0 with empty output when nothing matches, so no-PR is not confused
-    with a gh failure.
+def _open_pr(host, workspace: str, branch: str) -> dict | None:
+    """The open PR whose head is `branch` as `{"number", "base"}`, or None when none is open.
+
+    Number and base come out of the one listing, because they are read together on every tick and
+    the base must be knowable without reading the pull request's prose: whether the gate may
+    *rewrite* that prose is a question about authorship, and asking it is not a licence to read a
+    person's pull request (secretary-1439). `gh pr list` exits 0 with `[]` when nothing matches, so
+    no-PR is not confused with a gh failure.
 
     "No PR is open" is a positive fact about the backend's state, so it may only be returned for an
     answer; a tool that never got through raises out of `_backend_call` instead.
     """
     completed = _backend_call(
         host,
-        ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number", "-q", ".[0].number"],
+        ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number,baseRefName"],
         "gate pr list",
         cwd=Path(workspace),
     )
     if completed.returncode != 0:
         raise HostError(f"gate pr list failed: {_tail((completed.stderr or completed.stdout or '').strip())}")
     text = (completed.stdout or "").strip()
-    try:
-        return int(text) if text else None
-    except ValueError:
+    if not text:
         return None
+    try:
+        rows = json.loads(text)
+    except ValueError:
+        raise HostError("gate pr list returned invalid JSON") from None
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return None
+    try:
+        number = int(rows[0].get("number"))
+    except (TypeError, ValueError):
+        return None
+    return {"number": number, "base": str(rows[0].get("baseRefName") or "")}
+
+
+def _open_pr_number(host, workspace: str, branch: str) -> int | None:
+    """Number of the open PR whose head is `branch`, or None when the backend answered none is."""
+    entry = _open_pr(host, workspace, branch)
+    return entry["number"] if entry else None
 
 
 def _poll_ci(

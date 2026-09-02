@@ -4,6 +4,10 @@ repo: /srv/projects/example-project
 enabled: false
 adapter: example-project
 default_branch: main
+# Optional: the other long-lived branches this project integrates into. A card's
+# workspace.base_branch may name one of these or default_branch, and nothing else — a per-card
+# `pipeline/*` branch is a seed (workspace.seed_ref), never an integration target.
+# integration_bases: [develop]
 plane: project
 policy:
   code_concurrency: 1

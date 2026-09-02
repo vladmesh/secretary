@@ -1153,7 +1153,7 @@ Where the class and the evidence are:
   class=infrastructure, cause=pane_never_ready, stage=claim, head=worker, attempt=ATTEMPT_ID]`
   followed by the sentence that the head never came up, so this is not a verdict about the card. The
   causes are `pane_never_ready`, `launch_aborted` and `host_unavailable` for the infrastructure
-  class, and `workspace_contract` for the task class;
+  class, and `workspace_contract` and `base_branch_contract` for the task class;
 - in the tick — the outcome carries `failure_class`, `failure_cause`, a `failure_reason` that is the
   same string as the card's, and a `bring_up` object with the stage, the head, the attempt id and
   the host's own detail. A card refused by the broad-check contract preflight carries its refusal
@@ -1171,7 +1171,9 @@ at all. It spends none of the sprint's restart budget, so it moves neither the s
 threshold and a bad night on the host cannot stop a sprint by itself. The task-class bring-up
 outcome is the opposite case and the one to look for in the clause: `cause=workspace_contract` means
 the checkout the card was requeued onto is gone or is not the worktree on the branch its claim
-recorded, which no relaunch repairs and which wants a person.
+recorded, and `cause=base_branch_contract` means the card names an integration base the project
+cannot integrate into (a predecessor's `pipeline/*` branch, most often) or a seed the remote does not
+carry — neither of which a relaunch repairs, and both of which want a person.
 
 What to do: read the cause and the detail, repair what they name — the pane, the head's resource,
 the project's adapter, the checkout — and then move the card out of Blocked with a reason, the
