@@ -242,6 +242,7 @@ from secretary.dispatcher_state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
     CLAIM_SKIP_RESOURCE_NOT_READY,
     DispatcherRecord,
+    OutcomeTerminalPath,
     now_rfc3339,
 )
 from secretary.dispatcher_state import (
@@ -1552,6 +1553,12 @@ class DispatcherRuntime:
             ),
         )
         if marker in {"report:done", "report:blocked"}:
+            # Persist the terminal path before looking up the source handoff.
+            # A failed lookup must not turn every later Validate, gate or
+            # reviewer effect into a path that claims no report was consumed.
+            record.outcome_terminal_path = OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT
+            records[ref] = record
+            self.save_records(payload, records)
             self._capture_outcome_source(
                 task, record, phase="report", kind="card.reported", marker=marker
             )
@@ -1671,7 +1678,6 @@ class DispatcherRuntime:
                     ),
                     terminal_state="blocked",
                     disposition="blocked",
-                    report_consumed=True,
                     blocked_reason="implementation",
                 )
                 records.pop(ref, None)
@@ -1994,7 +2000,6 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
-            report_consumed=True,
             blocked_reason="infrastructure",
         )
         records.pop(ref, None)
@@ -2041,7 +2046,6 @@ class DispatcherRuntime:
                 ),
                 terminal_state="blocked",
                 disposition="blocked",
-                report_consumed=True,
                 blocked_reason="implementation",
             )
             records.pop(ref, None)
@@ -3525,7 +3529,6 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
-            report_consumed=True,
             blocked_reason="operator",
         )
         records.pop(ref, None)
@@ -3582,7 +3585,6 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-blocked", ref),
                 terminal_state="blocked",
                 disposition="blocked",
-                report_consumed=True,
                 blocked_reason="gate",
             )
             records.pop(ref, None)
@@ -3692,7 +3694,6 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-receipt-blocked", ref),
             terminal_state="blocked",
             disposition="blocked",
-            report_consumed=True,
             blocked_reason="gate",
         )
         records.pop(ref, None)
@@ -3936,7 +3937,6 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
-            report_consumed=True,
             # The failed gate is the terminal cause.  Its original runner
             # outage explains the bounded reruns, not this Blocked effect.
             blocked_reason="gate",
@@ -3982,7 +3982,6 @@ class DispatcherRuntime:
             ),
             terminal_state="blocked",
             disposition="blocked",
-            report_consumed=True,
             # A rerun that cannot be requested leaves a gate obligation
             # unresolved; it is not a head bring-up infrastructure outcome.
             blocked_reason="gate",
@@ -5025,7 +5024,6 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{action}-stall", ref),
             terminal_state="blocked",
             disposition="blocked",
-            report_consumed=True,
             blocked_reason="gate",
         )
         records.pop(ref, None)
@@ -5770,6 +5768,7 @@ class DispatcherRuntime:
     def open_worker_round(self, record: DispatcherRecord, *, round_number: int = 0) -> None:
         """Start the card's next worker round: stamp its number and drop the previous round's heads."""
         record.attempt_round = round_number or (record.attempt_round + 1)
+        record.outcome_terminal_path = OutcomeTerminalPath.NO_ACCEPTED_REPORT
         record.worker_run = {}
         record.review_run = {}
 
@@ -5882,7 +5881,7 @@ class DispatcherRuntime:
         disposition: str,
         verdict: str = "missing",
         decision: str = "",
-        report_consumed: bool = False,
+        terminal_path: OutcomeTerminalPath,
         taxonomy: TerminalTaxonomy,
     ) -> dict[str, Any] | None:
         """Freeze the forward lineage before its lifecycle effect is issued.
@@ -5905,9 +5904,11 @@ class DispatcherRuntime:
         revision = context.get("report", {}).get("specification_revision", worker_context.get("specification_revision"))
         if revision is not None and not isinstance(revision, str):
             revision = None
+        # Select requiredness before source lookup. The dispatcher persists
+        # this typed path when it accepts the report; it never consults the
+        # handoff being validated, so a missing handoff remains incomplete.
         report_relevant = (
-            report_consumed
-            or bool(context.get("report"))
+            terminal_path is OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT
             or verdict in {"green", "red", "blocked"}
             or bool(decision)
         )
@@ -5929,13 +5930,10 @@ class DispatcherRuntime:
                 continue
             source[f"{role}_usage"] = usage.event_id
             completeness[role] = "collected" if usage.data.get("outcome") == "collected" else "degraded"
-        # Requiredness is selected from the path before source resolution.  A
+        # Requiredness is selected from the path before source resolution. A
         # null source is evidence of incomplete lineage, never permission to
-        # redefine the path as one that did not consume it.
-        # The terminal caller knows whether it is acting on a report handler,
-        # but never resolves that report here.  A missing durable source handoff
-        # is therefore an incomplete outcome, not a reason to make the source
-        # optional.  Verdict and decision paths are necessarily report-derived.
+        # redefine the path as one that did not consume it. Verdict and
+        # decision paths are necessarily report-derived.
         required = {
             "specification_revision": report_relevant,
             "report": report_relevant,
@@ -6281,7 +6279,6 @@ class DispatcherRuntime:
         verdict: str = "missing",
         blocked_reason: str | None = None,
         decision: str = "",
-        report_consumed: bool = False,
     ) -> dict[str, Any]:
         """The lifecycle-owned terminal effect and its non-blocking finisher."""
         taxonomy: TerminalTaxonomy | None = None
@@ -6299,7 +6296,7 @@ class DispatcherRuntime:
                 disposition=disposition,
                 verdict=verdict,
                 decision=decision,
-                report_consumed=report_consumed,
+                terminal_path=record.outcome_terminal_path,
                 taxonomy=taxonomy,
             )
             if taxonomy is not None

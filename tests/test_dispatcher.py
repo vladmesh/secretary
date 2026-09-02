@@ -22,7 +22,7 @@ from secretary import dispatcher as dispatcher_module
 from secretary import role_env
 from secretary._fsutil import try_file_lock
 from secretary.board.analytics import project_analytics_checkpoint
-from secretary.board.models import Actor, EntityKind, Event, EventKind
+from secretary.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
 from secretary.data import export_board as export_board_snapshot
@@ -3331,19 +3331,28 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             GateResult("green", "assessment", attestation=receipt("b")),
             GateResult("green", "release", attestation=receipt("c")),
         ]
-        self._run_worker_to_validate()
-        self.assertEqual(self.tick()["action"], "review-started")
-        self.writer.verdict(
-            role="reviewer",
-            actor="reviewer",
-            reference=CARD_REF,
-            kind="green",
-            body="independent green review",
-            request_id=self._review_verdict_request_id("green"),
+        collected = attempt_usage_module.UsageCollection(
+            outcome=AttemptUsageOutcome.COLLECTED,
+            source_kind="fixture_usage",
+            records=1,
+            tokens=attempt_usage_module.TokenTotals(input=3, output=2),
+            session_totals=attempt_usage_module.TokenTotals(input=3, output=2),
+            baseline=attempt_usage_module.TokenTotals(input=0, output=0),
         )
-        self.assertEqual(self.tick()["to"], "assessment")
-        self._decide("release", request_id="opaque-release-decision")
-        terminal = self.tick()
+        with mock.patch.object(dispatcher_module, "_collect_usage", return_value=collected):
+            self._run_worker_to_validate()
+            self.assertEqual(self.tick()["action"], "review-started")
+            self.writer.verdict(
+                role="reviewer",
+                actor="reviewer",
+                reference=CARD_REF,
+                kind="green",
+                body="independent green review",
+                request_id=self._review_verdict_request_id("green"),
+            )
+            self.assertEqual(self.tick()["to"], "assessment")
+            self._decide("release", request_id="opaque-release-decision")
+            terminal = self.tick()
 
         self.assertEqual(terminal["to"], "done")
         self.assertEqual(self.host.completed, [CARD_REF])
@@ -3383,7 +3392,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertIsNotNone(outcome.data["source_event_ids"]["worker_usage"])
         self.assertIsNotNone(outcome.data["source_event_ids"]["review_usage"])
-        self.assertEqual(outcome.data["usage_completeness"], {"worker": "degraded", "review": "degraded"})
+        self.assertEqual(outcome.data["usage_completeness"], {"worker": "collected", "review": "collected"})
 
         instance = self.data_dir / "sealed-instance"
         instance.mkdir()
@@ -3433,11 +3442,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         ):
             projection = project_analytics_checkpoint(copied)
 
-        self.assertTrue(projection.incomplete)
-        self.assertEqual(
-            projection.incomplete_reasons,
-            ("review_usage_degraded", "worker_usage_degraded"),
-        )
+        self.assertFalse(projection.incomplete)
+        self.assertEqual(projection.incomplete_reasons, ())
         self.assertEqual(len(projection.rows), 1)
         row = projection.rows[0]
         self.assertEqual(
@@ -3455,8 +3461,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(row["usage_completeness"], outcome.data["usage_completeness"])
         self.assertEqual(row["worker_usage"]["event_id"], outcome.data["source_event_ids"]["worker_usage"])
         self.assertEqual(row["review_usage"]["event_id"], outcome.data["source_event_ids"]["review_usage"])
-        self.assertEqual(row["worker_usage"]["outcome"], "source_unavailable")
-        self.assertEqual(row["review_usage"]["outcome"], "source_unavailable")
+        self.assertEqual(row["worker_usage"]["outcome"], "collected")
+        self.assertEqual(row["review_usage"]["outcome"], "collected")
 
     def test_no_observer_immediate_release_audits_its_fresh_gate_receipt(self) -> None:
         self.start_dispatcher()

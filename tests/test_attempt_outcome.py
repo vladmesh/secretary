@@ -9,6 +9,8 @@ from unittest import mock
 
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon
 from secretary.board.models import Actor, EntityKind, Event, EventKind
+from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
+from secretary.dispatcher_state import OutcomeTerminalPath
 from secretary.dispatcher_gate import GateResult
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
@@ -264,7 +266,6 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="verdictless-gate-terminal",
             terminal_state="blocked",
             disposition="blocked",
-            report_consumed=True,
             blocked_reason="gate",
         )
         outcome = self._outcomes()[0].event.data
@@ -520,6 +521,46 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertTrue(outcome["lineage_required"]["report"])
         effect = next(event for event in canon.events(ref=CARD_REF) if event.kind.value == "card.blocked")
         self.assertEqual(effect.data["attempt_outcome_owed"]["lineage_diagnostic"], "attempt_outcome_lineage_missing_report")
+
+    def test_missing_report_handoff_stays_required_for_reviewer_and_post_gate_terminals(self) -> None:
+        """One persisted path classification covers every later terminal caller."""
+        self._start_worker_round()
+        self._report_done("the report handoff will be unavailable")
+        with mock.patch.object(self.runtime, "_capture_outcome_source"):
+            self.assertEqual(self.tick()["to"], "validate")
+
+        payload = self.runtime.production_state.load()
+        record = self.runtime.production_state.records(payload)[CARD_REF]
+        self.assertIs(record.outcome_terminal_path, OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT)
+        for terminal in ("review-launch", "review-wait", "post-gate"):
+            with self.subTest(terminal=terminal):
+                obligation = self.runtime._attempt_outcome_obligation(
+                    self.reader.show(CARD_REF),
+                    record,
+                    terminal_state="blocked",
+                    disposition="blocked",
+                    taxonomy=normalize_terminal_taxonomy(disposition="blocked", blocked_reason="provider"),
+                    terminal_path=record.outcome_terminal_path,
+                )
+                assert obligation is not None
+                self.assertTrue(obligation["lineage_required"]["specification_revision"])
+                self.assertTrue(obligation["lineage_required"]["report"])
+                self.assertIsNone(obligation["source_event_ids"]["report"])
+                self.assertEqual(obligation["lineage_diagnostic"], "attempt_outcome_lineage_missing_report")
+
+        self.runtime.terminal_effect(
+            self.reader.show(CARD_REF),
+            record,
+            target="blocked",
+            reason="reviewer launch failed after an unavailable report handoff",
+            request_id="post-report-lineage-terminal",
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason="provider",
+        )
+        outcome = self._outcomes()[0].event.data
+        self.assertTrue(outcome["lineage_required"]["report"])
+        self.assertIsNone(outcome["source_event_ids"]["report"])
 
     def test_divergent_specification_boundary_is_an_incomplete_outcome_not_a_permanent_debt(self) -> None:
         self._start_worker_round()
