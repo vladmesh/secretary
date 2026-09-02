@@ -44,13 +44,26 @@ from secretary.broad_check import (
 from secretary.config import ConfigError, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.projects.contract import (
-    LEGACY_IMPORT_PACKAGE,
     ContractUnusable,
     ModuleContract,
     module_contract,
 )
 
 _GIT_TIMEOUT = 60
+
+# The import package this command falls back to for a checkout that matches NO registered project.
+# This is the CLI's own default, not a project contract, and it lives here rather than in
+# `projects.contract` for exactly that reason: `decide` now refuses a registered project that
+# declares no `broad_check` by name (`broad_check_not_declared`) instead of lending it Secretary's
+# default, and nothing in the registry may hand one project another project's contract again.
+#
+# An unregistered checkout is a different case and keeps working. There is no adapter there to have
+# declared anything and no card, no workspace and no round at stake — it is somebody running
+# `secretary check broad --module unittest` in a clone by hand, and refusing that would break
+# direct interactive use of a documented command to fix a problem it does not have. The response
+# still says so out loud: `module_contract.source` is `cli_default` with the reason
+# (`no_project_binding` / `project_binding_disabled`) that named the fallback before.
+CLI_DEFAULT_IMPORT_PACKAGE = "secretary"
 
 
 class ResolvedCheck:
@@ -178,20 +191,22 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
 
 
 def _module_contract(root: Path, instance: Path) -> ModuleContract:
-    """Return the registered project's usable module-check contract, or the legacy default.
+    """Return the registered project's contract, or the CLI default for an unregistered checkout.
 
     A worker's checkout is normally a git worktree, not the registered checkout itself. Comparing
     git common directories identifies the registered repository without guessing from its files;
-    an ordinary unregistered checkout keeps the long-standing Secretary default for direct use.
+    an ordinary unregistered checkout keeps `CLI_DEFAULT_IMPORT_PACKAGE` for direct use, which is
+    a deliberate choice and not a leftover — see the note on that constant.
 
     A registered project's contract is judged by `projects.contract`, the one implementation of
     those rules, and the dispatcher's preflight asks it the same question before a card is ever
     given to a worker (secretary-1458). This side maps its refusal onto the CLI error contract and
-    never re-decides what a usable contract is.
+    never re-decides what a usable contract is — including the refusal a registered project earns
+    by declaring no contract at all, which is `decide`'s to name and not this side's to paper over.
     """
     binding, fallback_reason = _binding_for_workspace(root, instance)
     if binding is None:
-        return ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, fallback_reason)
+        return ModuleContract(sys.executable, CLI_DEFAULT_IMPORT_PACKAGE, fallback_reason)
     try:
         return module_contract(binding, instance=instance, project_root=root)
     except ContractUnusable as exc:

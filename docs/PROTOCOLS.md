@@ -350,8 +350,9 @@ caller branches on them by name, with no default branch that lets an unrecognise
 permission:
 
 - `fit` — the contract is declared usably, and the card is issued as always;
-- `refused(shape)`, one of five enumerated shapes — `adapter_unavailable`, `adapter_invalid`,
-  `broad_check_incomplete`, `interpreter_unavailable`, `cannot_attest_project`. A refusal always
+- `refused(shape)`, one of six enumerated shapes — `adapter_unavailable`, `adapter_invalid`,
+  `broad_check_incomplete`, `broad_check_not_declared`, `interpreter_unavailable`,
+  `cannot_attest_project`. A refusal always
   wins, and always before the card is put in work: no workspace, no head, no round spent. The card
   is blocked through the bring-up vocabulary [below](#bring-up-outcomes), because an installation
   whose registry cannot supply a usable contract is a failure of the host and not a verdict about
@@ -374,10 +375,18 @@ The second boundary is that a declared contract is executed as declared, not che
 layout heuristic. The adapter states which interpreter runs the check and which package that run
 must import; the preflight asks only whether that statement is complete and whether the interpreter
 it names can be started. What such a run actually imported is caught afterwards, by the receipt's
-own import provenance. The one contract judged against a checkout's layout is the legacy default
-that an adapter declaring nothing falls back to: it names Secretary's own package for every
-registered project alike, so for a checkout that does not hold those sources it buys a check of an
-installed copy of somebody else's code, and that is the `cannot_attest_project` refusal.
+own import provenance. No contract is judged against a checkout's layout any more.
+
+Declaring `broad_check` is therefore mandatory for every project that gets cards. An adapter that
+declares none is refused as `broad_check_not_declared`, and its cards block at preflight until a
+person adds the block — silence no longer means "the same broad check as Secretary". It used to:
+an adapter that said nothing inherited Secretary's own default (this interpreter, importing
+`secretary`), which was a true contract for the Secretary project and for nobody else. That default
+gave a project one of two wrong answers — a checkout without a `secretary` package was refused as
+`cannot_attest_project`, whose wording blamed a substituted package rather than the real cause, and
+a checkout that happened to hold one was attested against a contract its owner never wrote.
+`cannot_attest_project` is now left to mean only what it says: a *declared* contract that cannot
+attest its own checkout.
 
 Observers consume the worker report, reviewer verdict and dispatcher-owned exact-SHA gate receipt
 before code/CI exploration. A valid executed dispatcher-owned exact-SHA gate receipt suppresses its

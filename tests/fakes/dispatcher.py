@@ -31,8 +31,6 @@ from secretary.dispatcher_watchdog import head_run_process_status as _head_run_p
 from secretary.dispatcher_watchdog import pid_file_path
 from secretary.dispatcher_worker_lifecycle import head_run_binding
 from secretary.projects.contract import (
-    LEGACY_IMPORT_PACKAGE,
-    LEGACY_REASON_MISSING_BROAD_CHECK,
     ContractVerdict,
     ModuleContract,
 )
@@ -557,11 +555,11 @@ class FakeCatalog:
     def broad_check_verdict(self, project: str) -> ContractVerdict:
         """The card's project can be broad-checked, as every card in this suite always could.
 
-        The pilot project here is Secretary itself, whose adapter declares no `broad_check` and
-        whose legacy default therefore does attest it — the live case secretary-1458 must keep
-        working, so `fit` is the default answer. A test that needs one of the other two named
-        states assigns it to `broad_check_state`; what produces each of them from a real adapter is
-        pinned against `InstanceCatalog` and the worker's own resolution, not here.
+        The pilot project here is Secretary itself, whose adapter declares its own `broad_check` —
+        the live case secretary-1458 must keep working, so `fit` is the default answer. A test that
+        needs one of the other two named states assigns it to `broad_check_state`; what produces
+        each of them from a real adapter is pinned against `InstanceCatalog` and the worker's own
+        resolution, not here.
 
         `broad_check_probe` is called first, so a test can see what the board looked like at the
         moment the question was asked — which is the whole point of asking it before the claim.
@@ -571,7 +569,7 @@ class FakeCatalog:
         if self.broad_check_state is not None:
             return self.broad_check_state
         return ContractVerdict.as_fit(
-            ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK),
+            ModuleContract(sys.executable, "secretary", module="tests.broad"),
             "secretary",
         )
 

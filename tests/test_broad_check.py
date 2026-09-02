@@ -1223,7 +1223,17 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         self.assertEqual(stdout.getvalue(), "")
         self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "interpreter_start_failed")
 
-    def test_legacy_fallback_reason_is_visible_in_the_cli_response(self) -> None:
+    def test_the_cli_default_for_an_unregistered_checkout_still_runs_and_says_so(self) -> None:
+        """The path this issue deliberately left working, pinned so it cannot fall out by accident.
+
+        A workspace that matches NO registered project has no adapter to have declared anything:
+        it is somebody running `secretary check broad --module ...` in a plain clone by hand, with
+        no card, no workspace and no round at stake. That keeps the CLI's own default
+        (`sys.executable` importing `secretary`), and the response names the fallback rather than
+        letting it pass for a project contract - `source: cli_default`, not `adapter`. The third
+        case this test used to carry, a REGISTERED project whose adapter declared no `broad_check`,
+        is no longer a fallback at all; it is the `broad_check_not_declared` refusal below.
+        """
         (self.root / "legacysuite.py").write_text("print('legacy')\n", encoding="utf-8")
         disabled = self._register(interpreter=".venv/bin/python", import_package="codegen_orchestrator")
         binding = disabled / "projects" / "example.yaml"
@@ -1247,7 +1257,6 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         cases = {
             "no_project_binding": Path(self.tmpdir.name) / "missing-instance",
             "project_binding_disabled": disabled,
-            "adapter_missing_broad_check": no_contract,
         }
         for reason, instance in cases.items():
             with self.subTest(reason=reason):
@@ -1266,25 +1275,24 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
                 self.assertEqual(
                     payload["module_contract"],
                     {
-                        "source": "legacy_default",
+                        "source": "cli_default",
                         "reason": reason,
                     },
                 )
 
-    def test_a_legacy_default_that_cannot_attest_this_project_is_refused_before_any_run(self) -> None:
-        """secretary-1458: the worker asks the same rules the dispatcher's preflight asked.
+    def test_a_registered_project_that_declares_no_contract_is_refused_before_any_run(self) -> None:
+        """The new shape on the CLI's own error path, which behaves like every other refusal.
 
-        A registered project whose adapter declares no `broad_check` inherits Secretary's own
-        default, which imports `secretary`. Where the checkout is not Secretary's sources, that
-        check attests an installed copy of another project and nothing about this one, so it is
-        refused here rather than run to a meaningless green.
+        This supersedes the test that asserted `cannot_attest_project` here. That refusal was
+        reached through Secretary's default lent to a project that never declared it, and its
+        message named the substituted package instead of the real cause. The refusal is now
+        `broad_check_not_declared`, read off the same enumeration the dispatcher's preflight reads,
+        and the CLI contract around it is unchanged: exit 2, the structured
+        `invalid_project_adapter` code on stderr, no receipt document and no run.
         """
-        shutil.rmtree(self.root / "secretary")
-        (self.root / "codegen_orchestrator").mkdir()
-        (self.root / "codegen_orchestrator" / "__init__.py").write_text("", encoding="utf-8")
         (self.root / "project_suite.py").write_text("print('suite')\n", encoding="utf-8")
         _git(self.root, "add", "-A")
-        _git(self.root, "commit", "-q", "-m", "a project that is not Secretary")
+        _git(self.root, "commit", "-q", "-m", "a suite to name")
         no_contract = Path(self.tmpdir.name) / "no-contract"
         (no_contract / "projects").mkdir(parents=True)
         (no_contract / "adapters").mkdir()
@@ -1317,8 +1325,8 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         self.assertEqual(stdout.getvalue(), "", "no receipt document: nothing ran")
         error = json.loads(stderr.getvalue())["error"]
         self.assertEqual(error["code"], "invalid_project_adapter")
-        self.assertIn("secretary", error["message"])
-        self.assertIn(str(self.root), error["message"])
+        self.assertIn("declares no broad-check contract", error["message"])
+        self.assertIn("example", error["message"], "the project and the adapter are both named")
         self.assertFalse(broad_check.receipt_dir(self.root).exists())
 
     def test_installed_copy_inside_configured_venv_is_not_candidate_provenance(self) -> None:
@@ -1486,7 +1494,10 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self.assertEqual(payload["receipt"]["check_set"]["args"], [])
 
     def test_a_project_that_declares_no_module_and_is_given_none_is_refused_by_name(self) -> None:
-        instance = self._register("")
+        # A declared contract that names no suite - the shape every adapter was written in before
+        # `module` existed. The fixture used to declare no `broad_check` at all, which is now a
+        # refusal of its own (`broad_check_not_declared`) and would never reach this branch.
+        instance = self._register("broad_check:\n  import_package: secretary\n")
 
         stderr = StringIO()
         with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
