@@ -367,7 +367,6 @@ def run_task_verdict(args: argparse.Namespace) -> int:
             reference=args.ref,
             kind=args.kind,
             body=body,
-            protocol_prerequisites=args.protocol_prerequisite,
             request_id=args.request_id,
         ),
     )
@@ -382,6 +381,7 @@ def run_task_decide(args: argparse.Namespace) -> int:
             reference=args.ref,
             kind=args.kind,
             body=body,
+            protocol_prerequisites=args.protocol_prerequisite,
             request_id=args.request_id,
         ),
     )

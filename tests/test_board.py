@@ -330,6 +330,41 @@ class BoardHostContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "deduplicated"):
             Event.from_record(record)
 
+    def test_legacy_decision_without_prerequisites_remains_readable(self) -> None:
+        event = Event(
+            "legacy-decision",
+            EventKind.CARD_DECIDED,
+            EntityKind.CARD,
+            "secretary-1419",
+            self.actor,
+            "keep the repair local",
+            datetime(2026, 9, 3, 22, 0, 0, tzinfo=UTC),
+            data={
+                "marker": "decision:rework",
+                "decision": "rework",
+                "body": "keep the repair local",
+                "body_sha256": "a" * 64,
+                "assessment_visit": "assessment-1",
+                "description_sha256": "b" * 64,
+                "specification_revision": "specification-1",
+                "protocol_prerequisites": [],
+            },
+        )
+        record = event.to_record("legacy-decision-request")
+        del record["data"]["protocol_prerequisites"]
+
+        restored = Event.from_record(record)
+
+        self.assertNotIn("protocol_prerequisites", restored.data)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit = TaskAudit(tmpdir)
+            audit.append("legacy-decision-request", record)
+            self.assertEqual(BoardEventCanon(tmpdir, audit=audit).events(ref="secretary-1419"), (restored,))
+        malformed = dict(record)
+        malformed["data"] = {**record["data"], "protocol_prerequisites": "not-a-list"}
+        with self.assertRaisesRegex(ValueError, "invalid protocol prerequisites"):
+            Event.from_record(malformed)
+
     def test_durable_fake_mutations_append_one_complete_protocol_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             host = FakeBoardHost(data_dir=tmpdir)

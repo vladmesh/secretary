@@ -3183,6 +3183,74 @@ class AssessmentStateTests(unittest.TestCase):
         )
         self.assertEqual(self.writer.audit.events("secretary-468", kind="card.decided")[0]["data"]["decision"], "rework")
 
+    def test_decide_cli_persists_declared_protocol_prerequisites(self) -> None:
+        self._park()
+        data_dir = Path(self.tmpdir.name) / "cli"
+        self.reserve_project(data_dir=str(data_dir))
+        reason = Path(self.tmpdir.name) / "decision.md"
+        reason.write_text("repair the local implementation\n", encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "task",
+                    "decide",
+                    "--ref",
+                    "secretary-468",
+                    "--role",
+                    "observer",
+                    "--kind",
+                    "rework",
+                    "--protocol-prerequisite",
+                    "worker_local_broad_check_receipt",
+                    "--reason-file",
+                    str(reason),
+                    "--data-dir",
+                    str(data_dir),
+                    "--request-id",
+                    "cli-structured-rework",
+                ]
+            )
+
+        self.assertEqual((code, errors.getvalue()), (0, ""))
+        event = TaskAudit(data_dir).events("secretary-468", kind="card.decided")[-1]
+        self.assertEqual(event["data"]["protocol_prerequisites"], ["worker_local_broad_check_receipt"])
+
+    def test_verdict_cli_uses_the_established_writer_path(self) -> None:
+        body = Path(self.tmpdir.name) / "verdict.md"
+        body.write_text("looks good\n", encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "task",
+                    "verdict",
+                    "--ref",
+                    "secretary-468",
+                    "--role",
+                    "reviewer",
+                    "--kind",
+                    "green",
+                    "--body-file",
+                    str(body),
+                    "--data-dir",
+                    str(Path(self.tmpdir.name) / "cli-verdict"),
+                    "--request-id",
+                    "cli-verdict",
+                ]
+            )
+
+        self.assertEqual((code, errors.getvalue()), (0, ""))
+        self.assertEqual(json.loads(output.getvalue())["action"], "verdict")
+
     def test_assessment_visit_accepts_one_canonical_decision_across_delivery_retries(self) -> None:
         self._park()
 

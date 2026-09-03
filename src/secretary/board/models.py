@@ -484,7 +484,9 @@ def _validate_control_marker_event(
     decision = data.get("decision")
     if decision not in {"release", "rework", "reslice"} or marker != f"decision:{decision}":
         raise ValueError("Card decision event has an unsupported marker payload")
-    prerequisites = data.get("protocol_prerequisites")
+    # The field was added after `card.decided` was released. Historical records declare no
+    # protocol prerequisite, while every newly written value remains shape-checked below.
+    prerequisites = data.get("protocol_prerequisites", [])
     if not isinstance(prerequisites, list) or any(not isinstance(value, str) or not value for value in prerequisites):
         raise ValueError("Card decision event has invalid protocol prerequisites")
     if len(set(prerequisites)) != len(prerequisites):

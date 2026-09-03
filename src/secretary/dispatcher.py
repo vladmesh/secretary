@@ -369,6 +369,7 @@ from secretary.routing_journal import (
 )
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.tasks import (
+    _event_payload,
     KanboardClient,
     TaskAudit,
     TaskError,
@@ -5878,12 +5879,16 @@ class DispatcherRuntime:
         """The current Assessment decision and its registry-validated prerequisite declaration."""
         events = self.audit.events(task["ref"])
         _visit, event = assessment_resolution(events)
-        data = event.get("data") if isinstance(event, dict) and isinstance(event.get("data"), dict) else {}
+        data = _event_payload(event) if isinstance(event, dict) else {}
         decision = str(data.get("decision") or "")
         body = data.get("body")
+        if not isinstance(body, str) or not body.strip():
+            body = _last_marker_body(task, f"decision:{decision}") or ""
         if decision not in {"release", "rework", "reslice"} or not isinstance(body, str) or not body.strip():
             return "", "", ()
-        declared = data.get("protocol_prerequisites")
+        # A missing field is the released empty declaration; a present malformed value is never
+        # allowed to turn into an authoritative worker instruction.
+        declared = data.get("protocol_prerequisites", [])
         if not isinstance(declared, list):
             return "", "", ()
         if decision != "rework":

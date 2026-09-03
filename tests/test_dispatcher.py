@@ -8418,6 +8418,33 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             ["worker_local_broad_check_receipt", "external_dependency"],
         )
 
+    def test_legacy_payload_decision_recovers_with_an_empty_structured_declaration(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()
+        self._review_red()
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._post_raw_comment("decision:rework", "repair the legacy path")
+        self.writer.audit.append(
+            "legacy-decision",
+            {
+                "event_id": "legacy-decision",
+                "kind": "decided",
+                "ref": "secretary-510-pilot",
+                "request_id": "legacy-decision",
+                "payload": {
+                    "marker": "decision:rework",
+                    "decision": "rework",
+                    "body_sha256": "a" * 64,
+                },
+            },
+        )
+
+        self.assertEqual(
+            self.runtime._recorded_decision(self.reader.show("secretary-510-pilot")),
+            ("rework", "repair the legacy path", ()),
+        )
+
     def test_the_continuation_prompt_names_the_decision_as_authoritative(self) -> None:
         """The retained conversation is told what outranks what before it re-reads the file: a
         pointer that only names a document leaves the ranking to the worker (secretary-1064).
