@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import subprocess
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +24,7 @@ from secretary.host import (
     LiveHostSource,
     build_doctor_expectations,
 )
+from secretary.dispatch.headless import headless_cards, headless_worker
 from secretary.host_apply import resolve_installed_packaged
 from secretary.secret_store import store_health
 from secretary.sprints import SprintReader, budget_thresholds
@@ -175,16 +175,10 @@ def _sprints(
             thresholds=budget_thresholds(instance),
         )
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
-        records = production.get("records")
-        headless = {
-            reference: detail
-            for reference, record in (records if isinstance(records, dict) else {}).items()
-            if isinstance(reference, str)
-            and isinstance(record, dict)
-            and (detail := headless_worker(record)) is not None
-        }
         return {
-            "items": reader.statuses(observers=observers, headless=headless, create=False),
+            "items": reader.statuses(
+                observers=observers, headless=headless_cards(production), create=False
+            ),
             "error": None,
         }
     except TaskError as exc:
@@ -259,33 +253,6 @@ def _attempts(production: dict[str, Any], *, probe_panels: bool) -> list[dict[st
             }
         )
     return attempts
-
-
-def headless_worker(record: dict[str, Any]) -> dict[str, Any] | None:
-    """Work a board column shows as in progress that no head on this record is doing.
-
-    None when the card owns a worker identity. Otherwise the whole degradation an operator needs
-    without opening a transcript: the record state, that there is no handle and no heartbeat, how
-    long it has been like that, and the retained checkout and candidate a recovery would bind.
-    """
-    episode = record.get("worker_headless")
-    if not isinstance(episode, dict) or not episode:
-        return None
-    since = _float(episode.get("since"))
-    return {
-        "state": _text(episode.get("record_state")) or None,
-        "handle_known": bool(episode.get("handle_known")),
-        "heartbeat": _text(episode.get("heartbeat")) or None,
-        "since": _epoch(since),
-        "waiting_seconds": max(0, int(time.time() - since)) if since else None,
-        "workspace": _text(episode.get("workspace")) or None,
-        "branch": _text(episode.get("branch")) or None,
-        "expected_branch": _text(episode.get("expected_branch")) or None,
-        "dirty": episode.get("dirty"),
-        "candidate_sha": _text(episode.get("candidate_sha")) or None,
-        "report_generation": int(_float(episode.get("report_generation"))),
-        "recovery_error": _text(episode.get("recovery_error")) or None,
-    }
 
 
 def _watchdog(record: dict[str, Any], reference: str, kind: str, probe_panels: bool) -> dict[str, Any]:

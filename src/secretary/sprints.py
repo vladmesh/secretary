@@ -668,9 +668,10 @@ class SprintReader:
             "resume_freshness": sprint["resume_freshness"],
             "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
             "observer": observer or {"state": "unknown"},
-            # Cards this sprint counts as in progress that no head is working on (secretary-1544).
-            # The column alone cannot say that, and a sprint whose only visible signal is "3 in
-            # progress" reads as moving while nothing is.
+            # This sprint's own cards that owe a worker no dispatcher record can name
+            # (secretary-1544). Any column of this sprint, not only In progress: the column is what
+            # cannot say it, and a sprint whose only visible signal is "3 in progress" reads as
+            # moving while nothing is.
             "degraded_cards": {
                 reference: detail
                 for reference, detail in sorted((headless or {}).items())

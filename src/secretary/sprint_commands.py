@@ -10,6 +10,7 @@ from pathlib import Path
 
 from secretary.config import ConfigError, load_config
 from secretary.dispatcher_observer import observer_snapshot
+from secretary.dispatch.headless import headless_cards
 from secretary.sprint_observer import observer_choice
 from secretary.sprints import BUDGET_RECORDED_EVENT_TYPES, SprintReader, SprintWriter
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
@@ -170,9 +171,13 @@ def run_status(args: argparse.Namespace) -> int:
     except (OSError, ValueError, UnicodeError):
         raw = {}
     observer = next((row for row in observer_snapshot(raw) if row.get("sprint") == args.ref), None)
+    # The same production state the observer row comes from also says which of this sprint's cards
+    # stand in an active column with no worker. Without it this command answers `degraded_cards: {}`
+    # for every sprint -- an affirmative claim of health, in the command the observer skill opens
+    # with, read by the actor who creates that state (secretary-1544 round 5).
     return _read(
         args,
-        lambda reader: reader.status(args.ref, observer=observer),
+        lambda reader: reader.status(args.ref, observer=observer, headless=headless_cards(raw)),
         data_dir=data_dir,
         thresholds=_thresholds(args),
     )

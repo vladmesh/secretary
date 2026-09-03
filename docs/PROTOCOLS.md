@@ -572,6 +572,16 @@ A live heartbeat at this card's worker pid path that cannot be bound to it is ne
 reported `orphan-worker-heartbeat-unbound` and nothing is launched beside it and nothing is
 signalled, the same refusal the claim path makes.
 
+Every episode gets its own answer. A card with no dispatcher record is ticked under the constant
+`production_adopt_attempt_id(ref)` — one string per card, forever — so an attempt-scoped request id
+would make the second return of the same card replay the first refusal's committed event: no board
+move, no comment, and a tick still reporting a transition. The refusal and the relaunch comment are
+therefore keyed on the episode as well, by the stamp written when the episode was first observed
+plus the card's comment count at that moment. Within one episode that stamp does not move, so a tick
+that died between the board move and its own bookkeeping replays onto the same id and moves nothing
+twice; across episodes it always does, so returning the same card a second time gets a second
+refusal on the card.
+
 While such a card is unresolved, `secretary status` shows it as degraded rather than active. The
 attempt row carries `headless` — record state, that no handle and no heartbeat are known, how long
 it has been so, the retained workspace, branch, dirty flag and candidate SHA — and the sprint

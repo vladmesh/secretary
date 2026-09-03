@@ -1566,10 +1566,14 @@ same tick instead of waiting for a report nobody will file. What you see in the 
   and cannot be bound to it. Nothing is launched beside it and nothing is signalled. Find out whose
   process it is before touching the card.
 
+Returning the same card a second time gets a second answer: the refusal is keyed on the episode, not
+only on the card, so it moves the board and comments every time it is needed.
+
 While such a card is unresolved, `secretary status` marks its attempt row `degraded` and fills in
 `headless` (record state, missing handle and heartbeat, how long it has been waiting, the retained
 workspace, branch, dirty flag and candidate SHA); the sprint summary repeats the refs under
-`degraded_cards`. A card sitting in In progress is not on its own evidence that anything is running.
+`degraded_cards` — `secretary sprint status --ref <sprint>` reports the same map, from the same
+production state. A card sitting in In progress is not on its own evidence that anything is running.
 
 A confirmed pid says the process is running; it does not say the head is doing anything. A head that finished its
 turn and went back to its prompt holds the same live pid as one that is thinking, which is how a card could sit in

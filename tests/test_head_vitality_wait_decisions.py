@@ -773,13 +773,16 @@ def _reduce_vitality_under_test():
 class ProviderLessStatusShapesTests(DispatcherRuntimeFixture, unittest.TestCase):
     """The two live-heartbeat status shapes that carry no provider channel at all.
 
-    `command_terminal_status` answers with a `pid_status` and *no* `provider_progress` key in two
-    real situations: an exact live heartbeat whose pane is not in the worktree inventory any more
-    ("Missing inventory does not beat an exact live heartbeat; never respawn beside it"), and a
-    pane that matched but is not connected. A head that has outlived its pane binding is precisely
-    the head the vitality ladder must not kill, so the shapes are pinned here as the production
-    function actually produces them -- not as a fixture wishes them -- and then driven through the
-    reduction and the guard.
+    Only the connected-pane branch of `command_terminal_status` probes the provider, so every other
+    answer carries a `pid_status` and *no* `provider_progress` key. Two of them report a head that
+    is alive, and those are the two pinned here: an exact live heartbeat whose pane is not in the
+    worktree inventory any more ("Missing inventory does not beat an exact live heartbeat; never
+    respawn beside it"), and a pane that matched but is not connected. (The other two,
+    `missing-terminal` and `process-exited`, report a head that is not live and are not this
+    class's subject.) A head that has outlived its pane binding is precisely the head the vitality
+    ladder must not kill, so the shapes are pinned here as the production function actually
+    produces them -- not as a fixture wishes them -- and then driven through the reduction and the
+    guard.
 
     Before secretary-1543's round 2 an absent provider channel left `unavailable_since` empty
     while the cursor from the tick that did answer stayed on file, so the episode read as
