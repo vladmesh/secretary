@@ -47,6 +47,7 @@ from secretary.dispatch.head_vitality import (
     VitalitySnapshot,
     snapshots_from_status,
 )
+from secretary.dispatch.head_vitality_episode import recovery_outlook
 from secretary.dispatcher_review import (
     command_terminal_status,
     orca_workspace_inventory,
@@ -325,16 +326,7 @@ def _head_row(
             for source, snapshot in by_source.items()
             if snapshot.availability is SourceAvailability.UNAVAILABLE
         ),
-        episode=(
-            {
-                "run_id": bound_episode.run_id,
-                "verdict": bound_episode.verdict.value,
-                "basis": list(bound_episode.basis),
-                "updated_at": bound_episode.updated_at,
-            }
-            if bound_episode is not None
-            else None
-        ),
+        episode=_episode_row(bound_episode, record, kind=kind, observed_at=observed_at),
         reason=refusal,
     )
     if episode is not None and bound_episode is None:
@@ -343,6 +335,60 @@ def _head_row(
         row["episode_note"] = "the persisted vitality episode names another run and was not used"
     row["summary"] = _summary(row)
     return row
+
+
+def _episode_row(
+    episode: Any,
+    record: DispatcherRecord,
+    *,
+    kind: str,
+    observed_at: float,
+) -> dict[str, Any] | None:
+    """The persisted conclusion, plus what an operator needs when a head goes quiet.
+
+    A head frozen behind a dark progress source used to be readable only as
+    ``healthy_quiet`` plus a basis token, which is precisely the state
+    ``issue:7bff833fef6d9d9b404d`` sat in for 65 minutes. So the row answers the four questions
+    that state raises: which progress source is missing or dark and since when, how long the head
+    has been quiet, what the last meaningful progress was (the episode's own advancement, and the
+    card's pane-output stamp beside it), and when the next recovery rung falls due.
+
+    Derived, never re-observed: every number comes from the persisted episode and the record this
+    command already read, through the reducer's own arithmetic (``recovery_outlook``).
+    """
+    if episode is None:
+        return None
+    outlook = recovery_outlook(episode, observed_at)
+    return {
+        "run_id": episode.run_id,
+        "verdict": episode.verdict.value,
+        "basis": list(episode.basis),
+        "updated_at": episode.updated_at,
+        "reason": episode.reason,
+        "quiet_seconds": outlook["quiet_seconds"],
+        # Both halves of "which source is missing": one that answered and stopped is dark with a
+        # stamp, one this observation never carried is simply absent from the map.
+        "dark_progress_sources": outlook["dark_sources"],
+        "missing_progress_sources": [
+            source.value
+            for source in _REPORTED_SOURCES
+            if source is SnapshotSource.PROVIDER_CURSOR
+            and source.value not in episode.evidence_cursors
+            and source.value not in episode.unavailable_since
+        ],
+        "last_progress": {
+            "at": episode.last_progress_at,
+            "source": episode.last_progress_source or "",
+            # The workspace half: the card's own pane-output stamp, which is not vitality
+            # evidence and is reported beside the episode rather than folded into it.
+            "pane_output_at": float(getattr(record, f"{kind}_progress_at", 0.0) or 0.0),
+            "waiting_since": float(getattr(record, f"{kind}_waiting_since", 0.0) or 0.0),
+        },
+        "next_recovery_deadline": outlook["next_deadline"],
+        "deadline_note": outlook["note"],
+        "answer_owed_since": (float(record.worker_answer_owed_since or 0.0) if kind == "worker" else 0.0),
+        "turn_ended_at": episode.turn_ended_at,
+    }
 
 
 _REPORTED_SOURCES = (
@@ -558,7 +604,34 @@ def _summary(row: dict[str, Any]) -> str:
             f"{who} is UNPROVEN: no source proved it either way (unavailable: {dark}). "
             "This is a statement about the observation, not about the head."
         )
-    return f"{verdict} {_pane_sentence(row)}"
+    return f"{verdict} {_episode_sentence(row)}{_pane_sentence(row)}"
+
+
+def _episode_sentence(row: dict[str, Any]) -> str:
+    """The quiet half, said only when there is something an operator has to act on.
+
+    A live head whose progress channel is dark reads as ``alive`` on the head axis and as an
+    ordinary pane on the pane axis, and until secretary-1543 that is all the summary said -- the
+    one line an operator reads named neither the missing channel nor the deadline. It does now,
+    and only then: a head with no dark source and no pending rung adds no words.
+    """
+    episode = row.get("episode") or {}
+    dark = episode.get("dark_progress_sources") or []
+    deadline = episode.get("next_recovery_deadline") or {}
+    if not dark and not deadline:
+        return ""
+    parts = []
+    if dark:
+        parts.append(
+            "; ".join(f"{entry['source']} has been dark for {int(entry['dark_seconds'])}s" for entry in dark)
+        )
+    if deadline:
+        parts.append(
+            f"it becomes {deadline['verdict']} in {int(deadline['in_seconds'])}s unless something advances"
+        )
+    elif episode.get("deadline_note"):
+        parts.append(str(episode["deadline_note"]))
+    return f"Vitality {episode.get('verdict', 'unknown')}: " + ", and ".join(parts) + ". "
 
 
 def _normalised(path: str) -> str:

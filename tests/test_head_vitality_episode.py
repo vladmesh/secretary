@@ -314,7 +314,17 @@ class ProgressTests(unittest.TestCase):
 class UnavailableTests(unittest.TestCase):
     """Invariant (d): a dark source freezes evidence; all-strong-dark is Unverifiable."""
 
-    def test_an_unavailable_source_does_not_advance_stall_timers(self) -> None:
+    def test_an_unavailable_source_does_not_advance_stall_timers_inside_the_ceiling(self) -> None:
+        """Inside ``dark_ceiling`` a dark channel still freezes: unavailable is not no-progress.
+
+        Before secretary-1543 this test ran the second tick at now=2000 and asserted
+        ``HealthyQuiet`` there -- i.e. that the freeze was unbounded. That is the defect
+        ``issue:7bff833fef6d9d9b404d`` froze on, so the window is now bounded and the
+        unbounded half of the old assertion moved to
+        ``test_a_dark_progress_source_stops_freezing_past_the_ceiling`` below. What the freeze
+        is FOR is unchanged and still asserted here: a broken channel never ages a head on its
+        own, and the dark stamp is kept so the ceiling can be measured from it.
+        """
         previous = episode(last_progress_at=0.0)
         first = reduce_vitality(
             previous,
@@ -322,19 +332,20 @@ class UnavailableTests(unittest.TestCase):
             now=100.0,
             thresholds=THRESHOLDS,
         )
-        # The provider stays dark for a long time.
+        # The provider stays dark, and the quiet is already past `suspect_after`.
         second = reduce_vitality(
             first,
-            [heartbeat(1000.0), provider(2000.0, available=False)],
-            now=2000.0,
+            [heartbeat(400.0), provider(400.0, available=False)],
+            now=400.0,
             thresholds=THRESHOLDS,
         )
 
         # The pid heartbeat answers "alive, no progress source" -- which is not quiet evidence,
-        # so the verdict never ages toward a stall while the only progress channel is dark.
+        # so inside the ceiling the verdict does not age toward a stall.
         self.assertEqual(second.verdict, VitalityVerdict.HEALTHY_QUIET)
         self.assertIn(SnapshotSource.PROVIDER_CURSOR.value, second.unavailable_since)
         self.assertEqual(second.unavailable_since[SnapshotSource.PROVIDER_CURSOR.value], 100.0)
+        self.assertIn("dark:300s@provider_cursor", second.basis)
 
     def test_a_returning_source_leaves_the_unavailable_map(self) -> None:
         first = reduce_vitality(
@@ -488,18 +499,36 @@ class UnavailableTests(unittest.TestCase):
         self.assertEqual(dark.confirmed_since, 0.0)
         self.assertIn("preserved-suspicion:provider-dark-pid-alive", dark.basis)
 
-        # Much later ticks change nothing: freezing never advances the ladder either --
-        # confirmation must be EARNED on strong quiet evidence, not inherited from a
-        # channel outage.
+        # Inside the freeze window the phase neither advances nor rewinds.
+        held = reduce_vitality(
+            dark,
+            [heartbeat(1_000.0), provider(1_000.0, available=False)],
+            now=1_000.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(held.verdict, VitalityVerdict.SUSPECTED_STALL)
+        self.assertEqual(held.suspected_since, 300.0)
+        self.assertEqual(held.confirmed_since, 0.0)
+
+        # Past `dark_ceiling` (dark since 500, ceiling 600) the freeze ends and the episode ages
+        # on the pid's own sustained answer, exactly as a run whose provider never spoke does.
+        # Until secretary-1543 this assertion read "later ticks change nothing", on the reasoning
+        # that confirmation must never be inherited from a channel outage. It is not inherited
+        # from one: it is earned on the same pid-only evidence `issue:06dcf6cb` already ages, and
+        # the alternative -- an unbounded suspicion nothing can end -- is the state that left
+        # secretary-1517 claimed for 65 minutes. Nothing destructive follows from it here either:
+        # the guard still holds a confirmation earned with no answering progress source behind
+        # the role's outer ceiling.
         later = reduce_vitality(
             dark,
             [heartbeat(900_000.0), provider(900_000.0, available=False)],
             now=900_000.0,
             thresholds=THRESHOLDS,
         )
-        self.assertEqual(later.verdict, VitalityVerdict.SUSPECTED_STALL)
+        self.assertEqual(later.verdict, VitalityVerdict.CONFIRMED_STALL)
         self.assertEqual(later.suspected_since, 300.0)
-        self.assertEqual(later.confirmed_since, 0.0)
+        self.assertEqual(later.confirmed_since, 900.0)
+        self.assertIn("provider_cursor has been dark for", later.reason)
 
         # And only the four authorised endings still move it: real progress first.
         resumed = reduce_vitality(
@@ -510,6 +539,287 @@ class UnavailableTests(unittest.TestCase):
         )
         self.assertEqual(resumed.verdict, VitalityVerdict.HEALTHY_ACTIVE)
         self.assertEqual(resumed.suspected_since, 0.0)
+        self.assertEqual(resumed.confirmed_since, 0.0)
+
+
+class DarkCeilingTests(unittest.TestCase):
+    """secretary-1543: a witnessed-but-dark progress source freezes for a BOUNDED window."""
+
+    def test_a_dark_progress_source_stops_freezing_past_the_ceiling(self) -> None:
+        """The window the old unbounded freeze had no end to.
+
+        The provider answers once (so the episode has witnessed it), then goes dark while the
+        pid keeps saying Running. Inside ``dark_ceiling`` the episode is frozen healthy; past it
+        the ladder climbs on the pid's own sustained answer.
+        """
+        first = reduce_vitality(
+            episode(last_progress_at=0.0),
+            [heartbeat(10.0), provider(10.0)],
+            now=10.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(first.verdict, VitalityVerdict.HEALTHY_QUIET)
+        dark_at = 20.0
+        frozen = reduce_vitality(
+            first,
+            [heartbeat(dark_at), provider(dark_at, available=False)],
+            now=dark_at,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(frozen.unavailable_since[SnapshotSource.PROVIDER_CURSOR.value], dark_at)
+
+        # Quiet is well past both thresholds, but the source has been dark for only 590s.
+        held = reduce_vitality(
+            frozen,
+            [heartbeat(610.0), provider(610.0, available=False)],
+            now=610.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(held.verdict, VitalityVerdict.HEALTHY_QUIET)
+
+        # One second past the ceiling the freeze ends and the ladder resumes where the quiet
+        # actually is: 621s of it, past `suspect_after` and below `suspect+confirm`.
+        aged = reduce_vitality(
+            held,
+            [heartbeat(621.0), provider(621.0, available=False)],
+            now=621.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(aged.verdict, VitalityVerdict.SUSPECTED_STALL)
+        self.assertIn("provider_cursor has been dark for 601s", aged.reason)
+        confirmed = reduce_vitality(
+            aged,
+            [heartbeat(950.0), provider(950.0, available=False)],
+            now=950.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(confirmed.verdict, VitalityVerdict.CONFIRMED_STALL)
+
+    def test_the_ceiling_lets_the_ladder_climb_one_rung_at_a_time(self) -> None:
+        """Past the ceiling the head is suspected first, and only later confirmed."""
+        dark = reduce_vitality(
+            episode(last_progress_at=0.0),
+            [heartbeat(0.0), provider(0.0, available=False)],
+            now=0.0,
+            thresholds=THRESHOLDS,
+        )
+        # 600s: the ceiling has elapsed exactly, quiet is 600s -- past suspect, below confirm.
+        suspected = reduce_vitality(
+            dark,
+            [heartbeat(600.0), provider(600.0, available=False)],
+            now=600.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(suspected.verdict, VitalityVerdict.SUSPECTED_STALL)
+        self.assertEqual(suspected.suspected_since, 300.0)
+        confirmed = reduce_vitality(
+            suspected,
+            [heartbeat(900.0), provider(900.0, available=False)],
+            now=900.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(confirmed.verdict, VitalityVerdict.CONFIRMED_STALL)
+        self.assertEqual(confirmed.confirmed_since, 900.0)
+
+    def test_a_returning_source_ends_the_dark_window_and_the_next_one_starts_fresh(self) -> None:
+        """The ceiling measures THIS outage, not the sum of every outage in the episode."""
+        dark = reduce_vitality(
+            episode(last_progress_at=0.0),
+            [heartbeat(0.0), provider(0.0, available=False)],
+            now=0.0,
+            thresholds=THRESHOLDS,
+        )
+        back = reduce_vitality(
+            dark,
+            [heartbeat(100.0), provider(100.0)],
+            now=100.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertNotIn(SnapshotSource.PROVIDER_CURSOR.value, back.unavailable_since)
+        dark_again = reduce_vitality(
+            back,
+            [heartbeat(200.0), provider(200.0, available=False)],
+            now=200.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(dark_again.unavailable_since[SnapshotSource.PROVIDER_CURSOR.value], 200.0)
+        # 500s into the SECOND outage: still frozen, though the episode's quiet is 700s old and
+        # the first outage plus this one add up to well past the ceiling.
+        still_frozen = reduce_vitality(
+            dark_again,
+            [heartbeat(700.0), provider(700.0, available=False)],
+            now=700.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(still_frozen.verdict, VitalityVerdict.HEALTHY_QUIET)
+
+    def test_a_retained_head_is_exempt_from_the_ceiling(self) -> None:
+        """A deliberately parked worker is not woken by this card's aging (secretary-1539)."""
+        parked = episode(last_progress_at=0.0)
+        for tick in (0.0, 600.0, 5_000.0, 90_000.0):
+            parked = reduce_vitality(
+                parked,
+                [
+                    heartbeat(tick, process=ProcessState.SUSPENDED),
+                    provider(tick, available=False),
+                ],
+                now=tick,
+                thresholds=THRESHOLDS,
+                retained=True,
+            )
+            self.assertEqual(parked.verdict, VitalityVerdict.RETAINED, tick)
+            self.assertEqual(parked.suspected_since, 0.0)
+            self.assertEqual(parked.confirmed_since, 0.0)
+
+
+class AnswerOwedTests(unittest.TestCase):
+    """secretary-1543: a rejected report plus an ended turn is an explicit signal."""
+
+    def test_a_rejected_report_then_an_ended_turn_suspects_at_once(self) -> None:
+        working = reduce_vitality(
+            episode(last_progress_at=0.0),
+            [heartbeat(100.0), provider(100.0), pane(100.0, idle=False)],
+            now=100.0,
+            thresholds=THRESHOLDS,
+            answer_owed_since=50.0,
+        )
+        # The turn is still in flight: nothing is concluded from the rejection alone.
+        self.assertEqual(working.verdict, VitalityVerdict.HEALTHY_QUIET)
+        self.assertEqual(working.last_turn, "active")
+
+        ended = reduce_vitality(
+            working,
+            [heartbeat(120.0), provider(120.0), pane(120.0, idle=True)],
+            now=120.0,
+            thresholds=THRESHOLDS,
+            answer_owed_since=50.0,
+        )
+        # 70s after the rejection -- far below `suspect_after` -- and already suspected.
+        self.assertEqual(ended.verdict, VitalityVerdict.SUSPECTED_STALL)
+        self.assertEqual(ended.turn_ended_at, 120.0)
+        self.assertIn("answer-owed:turn-ended", ended.basis)
+        self.assertIn("rejected report", ended.reason)
+
+    def test_the_same_ended_turn_with_no_owed_answer_concludes_nothing(self) -> None:
+        """The advisory reading is exactly as weightless as it always was."""
+        working = reduce_vitality(
+            episode(last_progress_at=0.0),
+            [heartbeat(100.0), provider(100.0), pane(100.0, idle=False)],
+            now=100.0,
+            thresholds=THRESHOLDS,
+        )
+        ended = reduce_vitality(
+            working,
+            [heartbeat(120.0), provider(120.0), pane(120.0, idle=True)],
+            now=120.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(ended.verdict, VitalityVerdict.HEALTHY_QUIET)
+
+    def test_a_head_that_never_took_a_turn_is_not_suspected_by_a_starting_pane(self) -> None:
+        """secretary-1542 measured a starting Codex head answering idle throughout."""
+        starting = episode(last_progress_at=0.0)
+        for tick in (10.0, 40.0, 90.0):
+            starting = reduce_vitality(
+                starting,
+                [heartbeat(tick), provider(tick, available=False), pane(tick, idle=True)],
+                now=tick,
+                thresholds=THRESHOLDS,
+                answer_owed_since=5.0,
+            )
+            self.assertEqual(starting.verdict, VitalityVerdict.HEALTHY_QUIET, tick)
+            self.assertEqual(starting.turn_ended_at, 0.0)
+
+    def test_progress_after_the_rejection_answers_it(self) -> None:
+        ended = reduce_vitality(
+            episode(last_progress_at=0.0, last_turn="active"),
+            [
+                heartbeat(200.0),
+                provider(200.0, progress=ProgressState.ADVANCING, cursor="13:def"),
+                pane(200.0, idle=True),
+            ],
+            now=200.0,
+            thresholds=THRESHOLDS,
+            answer_owed_since=50.0,
+        )
+        self.assertEqual(ended.verdict, VitalityVerdict.HEALTHY_ACTIVE)
+        quiet_again = reduce_vitality(
+            ended,
+            [heartbeat(260.0), provider(260.0, cursor="13:def"), pane(260.0, idle=True)],
+            now=260.0,
+            thresholds=THRESHOLDS,
+            answer_owed_since=50.0,
+        )
+        # The head advanced after the rejection, so the owed answer no longer convicts it.
+        self.assertEqual(quiet_again.verdict, VitalityVerdict.HEALTHY_QUIET)
+
+    def test_the_owed_answer_never_lowers_a_verdict_and_is_validated(self) -> None:
+        confirmed = episode(
+            verdict=VitalityVerdict.CONFIRMED_STALL,
+            last_progress_at=0.0,
+            confirmed_since=900.0,
+            last_turn="active",
+        )
+        still = reduce_vitality(
+            confirmed,
+            [heartbeat(2_000.0), provider(2_000.0), pane(2_000.0, idle=True)],
+            now=2_000.0,
+            thresholds=THRESHOLDS,
+            answer_owed_since=1_000.0,
+        )
+        self.assertEqual(still.verdict, VitalityVerdict.CONFIRMED_STALL)
+        for bad in (-1.0, float("nan"), float("inf"), True, "now"):
+            with self.subTest(answer_owed_since=bad), self.assertRaises(HeadVitalityError):
+                reduce_vitality(
+                    None,
+                    [heartbeat(10.0)],
+                    now=10.0,
+                    thresholds=THRESHOLDS,
+                    answer_owed_since=bad,
+                )
+
+
+class Secretary1517Tests(unittest.TestCase):
+    """The exact incident shape: live Codex PID, idle pane, provider cursor never admitted."""
+
+    def _tick(self, previous, at: float):
+        return reduce_vitality(
+            previous,
+            [
+                heartbeat(at),
+                # `provider_progress_for_run` answers unavailable for a Codex head with no bound
+                # v1 baseline; the pane answers idle throughout, which proves nothing.
+                provider(at, available=False),
+                pane(at, idle=True),
+            ],
+            now=at,
+            thresholds=THRESHOLDS,
+        )
+
+    def test_the_frozen_head_is_suspected_and_then_confirmed_within_the_hour(self) -> None:
+        state = None
+        seen: dict[str, float] = {}
+        # One tick a minute for 65 minutes, the span the card actually sat claimed.
+        for minute in range(0, 66):
+            at = float(minute * 60)
+            state = self._tick(state, at)
+            seen.setdefault(state.verdict.value, at)
+        self.assertEqual(seen["healthy_quiet"], 0.0)
+        # The freeze ends at `dark_ceiling` (600s), and quiet is already past `suspect_after`.
+        self.assertEqual(seen["suspected_stall"], 600.0)
+        self.assertEqual(seen["confirmed_stall"], 900.0)
+        self.assertNotIn("dead", seen)
+        self.assertEqual(state.verdict, VitalityVerdict.CONFIRMED_STALL)
+        # The operator-facing reason names the dark source and how long it has been dark.
+        self.assertIn("provider_cursor not answering for", state.reason)
+        # And the pane's idle answer stayed corroboration, never evidence.
+        self.assertIn("advisory:idle@pane_advisory", state.basis)
+
+    def test_the_incident_shape_is_frozen_healthy_before_the_ceiling(self) -> None:
+        state = None
+        for minute in range(0, 10):
+            state = self._tick(state, float(minute * 60))
+        self.assertEqual(state.verdict, VitalityVerdict.HEALTHY_QUIET)
 
 
 class AdvisoryTests(unittest.TestCase):

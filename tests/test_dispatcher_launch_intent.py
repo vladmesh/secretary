@@ -2017,7 +2017,11 @@ class LaunchIntentTests(unittest.TestCase):
             "attempts": 3,
             "turn_confirmed": False,
             "payload_left_in_composer": True,
-            "pre_delivery_before": "starting",
+            # The shape the boundary actually emits since secretary-1542: nothing before the write
+            # names a startup-held pane, so `pre_delivery_before` is empty and the state is the
+            # POST-write observation of the composer holding the payload.
+            "pre_delivery_before": "",
+            "pre_delivery_after": "starting",
             "reason": "payload-left-in-composer",
         }
         self.host.fail_prepare_error = HeadLaunchAborted(

@@ -1720,6 +1720,8 @@ class DispatcherRuntime:
             # cannot reopen this exception forever: the next unchanged done report must still
             # reach _reject_stale_done's human-escalation bound.
             record.rejected_done_reports = 1 if retry_stale_no_diff_gate else 0
+            # The report is accepted: whatever the head owed, it has answered.
+            record.worker_answer_owed_since = 0.0
             # The report is accepted from here on. Account the worker phase it closes while the
             # head that wrote it is still on the record with its bound provider session.
             self.record_attempt_usage(ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
@@ -2073,6 +2075,10 @@ class DispatcherRuntime:
             return unconfirmed
         # Counted only once the bounce happens; a tick stopped at the refusal rejected nothing.
         record.rejected_done_reports = rejected
+        # The head now owes the dispatcher an answer. Stamped here so the vitality reduction can
+        # read the pair "rejected report, then a turn that ended" as an explicit stall signal
+        # rather than leaving it to the outer report ceiling (secretary-1543).
+        record.worker_answer_owed_since = time.time()
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,
@@ -3108,16 +3114,21 @@ class DispatcherRuntime:
             record.attempt_id or attempt_id,
             f"{kind}-vitality-guard-refused",
             task["ref"],
-            _wait_cycle_token(record),
+            # The refusal CLASS rides the key beside the cycle token, because the body below is a
+            # function of exactly what the key names (secretary-1477). Two refusals of different
+            # classes inside one wait cycle are two different claims and get two ids; two of the
+            # same class are one claim and replay idempotently.
+            f"{_wait_cycle_token(record)}-{decision.refusal.value}",
         )
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,
             reference=task["ref"],
             body=(
-                f"Dispatcher wait watchdog refused ({decision.refusal.value}): "
-                f"{decision.reason}. Nothing was stopped or replaced; the card keeps "
-                "waiting."
+                f"Dispatcher wait watchdog refused a destructive step ({decision.refusal.value}). "
+                "Nothing was stopped or replaced; the card keeps waiting. The refusal's live "
+                "measurement -- the quiet, the dark sources and the next deadline -- stays on the "
+                "durable vitality episode; read it with `secretary head-status`."
             ),
             request_id=request_id,
         )
@@ -3208,9 +3219,18 @@ class DispatcherRuntime:
         # (secretary-1539). The review head has no retention of its own, so it always passes
         # False and its ladder is untouched.
         retained = kind == "worker" and bool(record.worker_continuation.retained)
+        # The other declared input (secretary-1543): a done report this dispatcher bounced back to
+        # rework and the head has not answered. Only the worker owes reports, so the review head
+        # always passes 0.0 and its ladder is untouched.
+        answer_owed_since = float(record.worker_answer_owed_since or 0.0) if kind == "worker" else 0.0
         try:
             episode = _reduce_vitality(
-                previous, snapshots, now, _DEFAULT_VITALITY_THRESHOLDS, retained=retained
+                previous,
+                snapshots,
+                now,
+                _DEFAULT_VITALITY_THRESHOLDS,
+                retained=retained,
+                answer_owed_since=answer_owed_since,
             )
         except Exception as exc:  # noqa: BLE001 - shadow mode must never break the hosting tick
             # Shadow mode may never break the tick that hosts it. A reduction failure is recorded
@@ -3484,6 +3504,8 @@ class DispatcherRuntime:
                 assert failed is not None
                 return failed
             record.state = "claimed"
+            # The replacement head never saw the bounced report, so it owes no answer for it.
+            record.worker_answer_owed_since = 0.0
             # A respawn is a real bring-up: a repinned profile lands a different configuration.
             self.record_worker_routing(task, record, launched.run)
             _clear_launch_intent(record)

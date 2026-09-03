@@ -31,8 +31,11 @@ ceiling (the ``WORKER_REPORT_STALL_DEFAULT`` class, passed in by the caller) has
 elapsed since the episode began accumulating evidence. A confirmed pid-only stall is
 therefore acted on strictly later than the old clock-only machinery would have acted,
 never earlier. Episodes that earned confirmation on witnessed strong quiet (a provider
-cursor that answered, then stayed silent past both thresholds) are not held back: that
-is the two-channel evidence the whole sprint exists to listen for.
+cursor that answered and is still answering) are not held back: that is the two-channel
+evidence the whole sprint exists to listen for. A source that answered and has since gone
+dark is held like a pid-only one (secretary-1543): the reducer now ages such an episode
+past ``dark_ceiling`` instead of freezing it, so the confirmation behind the destructive
+step again rests on one channel.
 
 Like the rest of ``secretary.dispatch.head_vitality*`` this module is pure: it reads no
 clock, no file and no host, performs no I/O, and raises nothing. The caller owns ``now``,
@@ -126,8 +129,8 @@ class GuardDecision:
         }
 
 
-def _progress_source_witnessed(episode: VitalityEpisode) -> bool:
-    """Whether any progress source ever ANSWERED for this episode.
+def _progress_source_answering(episode: VitalityEpisode) -> bool:
+    """Whether a progress source both ANSWERED for this episode and is still answering.
 
     Witnessing is an answered channel, not a tracked one: a cursor on file means the
     provider spoke and its later silence is a frozen outage. Merely being recorded dark
@@ -136,8 +139,17 @@ def _progress_source_witnessed(episode: VitalityEpisode) -> bool:
     sustained silence about progress is allowed to age, which is exactly how such
     episodes can reach ``ConfirmedStall`` and why the outer-ceiling rule below exists
     for them.
+
+    Since secretary-1543 a source that answered and has since gone dark is treated the
+    same way here. The reducer no longer freezes such an episode indefinitely -- past
+    ``dark_ceiling`` it ages on the pid alone, which is the fix -- so at the moment of a
+    destructive step the evidence behind that confirmation is again one channel, and it
+    earns the same outer-ceiling hold. Two-channel evidence means a progress source that
+    is answering NOW, not one that answered once.
     """
-    return bool(set(episode.evidence_cursors) & _PROGRESS_SOURCE_NAMES) or episode.last_progress_at > 0.0
+    witnessed = bool(set(episode.evidence_cursors) & _PROGRESS_SOURCE_NAMES) or episode.last_progress_at > 0.0
+    dark = bool(set(episode.unavailable_since) & _PROGRESS_SOURCE_NAMES)
+    return witnessed and not dark
 
 
 def _refused(
@@ -224,15 +236,21 @@ def assert_destructive_allowed(
         )
     if (
         episode.verdict is VitalityVerdict.CONFIRMED_STALL
-        and not _progress_source_witnessed(episode)
+        and not _progress_source_answering(episode)
         and pid_only_outer_ceiling_seconds > 0
     ):
         elapsed = max(0.0, now - episode.started_at)
         if elapsed < pid_only_outer_ceiling_seconds:
+            dark = sorted(set(episode.unavailable_since) & _PROGRESS_SOURCE_NAMES)
+            earned_on = (
+                f"with {', '.join(dark)} dark (secretary-1543 arm)"
+                if dark
+                else "on the pid alone (issue 656 arm)"
+            )
             return _refused(
                 action,
                 GuardRefusal.PID_ONLY_CEILING_UNELAPSED,
-                "confirmation was earned on the pid alone (issue 656 arm), so the "
+                f"confirmation was earned {earned_on}, so the "
                 f"outer ceiling of {int(pid_only_outer_ceiling_seconds)}s must also "
                 f"have elapsed ({int(elapsed)}s have)",
                 episode,

@@ -147,6 +147,13 @@ class DispatcherRecord:
     rejected_failure_class: str = "substantive"
     rejected_failure_reason: str = ""
     rejected_done_reports: int = 0
+    # When the dispatcher last put a question to the worker head that the head has not answered:
+    # the instant a done report was bounced back to rework (secretary-1543). It is a fact about
+    # the board conversation, not an observation of the head, and the vitality reducer takes it as
+    # a declared input -- with an ended turn and no progress since, it is an explicit stall signal
+    # instead of something the outer ceiling notices hours later. Cleared when a report is
+    # accepted, and when a replacement head that never saw the rejection takes over.
+    worker_answer_owed_since: float = 0.0
     # Reviewer leaf is stable across handle aliases; its commit fences verdicts to its checkout.
     review_handle: str = ""
     review_leaf: str = ""
@@ -331,6 +338,7 @@ class DispatcherRecord:
             "review_started_at": self.review_started_at,
             "review_waiting_since": self.review_waiting_since,
             "rejected_done_reports": self.rejected_done_reports,
+            "worker_answer_owed_since": self.worker_answer_owed_since,
             "rejected_failure_class": self.rejected_failure_class,
             "rejected_failure_reason": self.rejected_failure_reason,
             "rejected_sha": self.rejected_sha,
@@ -438,6 +446,7 @@ class DispatcherRecord:
             rejected_failure_class=str(payload.get("rejected_failure_class") or "substantive"),
             rejected_failure_reason=str(payload.get("rejected_failure_reason") or ""),
             rejected_done_reports=int(payload.get("rejected_done_reports") or 0),
+            worker_answer_owed_since=float(payload.get("worker_answer_owed_since") or 0.0),
             review_handle=str(payload.get("review_handle") or ""),
             review_leaf=str(payload.get("review_leaf") or ""),
             review_commit=str(payload.get("review_commit") or ""),

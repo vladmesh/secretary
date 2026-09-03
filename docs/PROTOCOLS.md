@@ -1896,6 +1896,18 @@ names and a pane channel that refused are four different facts about the window,
 evidence that a head is absent. `secretary head-status` is where an operator reads the two halves
 apart; see [Head status in a live workspace](OPERATIONS.md#head-status-in-a-live-workspace).
 
+A live PID is not indefinite evidence of liveness either. A head whose progress source has gone
+dark — or never answered — is held healthy only while that outage is under a bounded window; past
+it the head ages to `suspected_stall` and takes the existing rungs, starting with the one
+conversational report nudge, and the recorded reason names which source is dark and for how long.
+A head the dispatcher is deliberately retaining is exempt from every rung, and nothing destructive
+follows from a conclusion no progress source is answering for until the role's whole outer ceiling
+has also elapsed. Separately, a done report the dispatcher rejected and the head has not answered,
+followed by a turn that ended, is an explicit watchdog signal rather than something a ceiling
+eventually notices. The sequence therefore always ends in a wake, a rebind, a respawn or a typed
+outcome — never in a card that stays claimed with nothing running. See
+[Head vitality](HEAD_VITALITY.md).
+
 ### Worker retention through validation and review
 
 After a worker reports `done`, the dispatcher suspends its live, addressable worker session before

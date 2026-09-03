@@ -500,12 +500,22 @@ def _spawn_delivery_failure(
 
 
 def _pre_delivery_state(evidence: Any) -> str:
-    """Which pre-delivery state a delivery refusal observed, if it observed one."""
+    """Which pre-delivery state a delivery refusal observed, before or after the write.
+
+    Both halves, because since secretary-1542 the boundary's pre-write probe no longer names a
+    startup-held pane: a Codex head bringing its MCP servers up paints nothing before the write
+    that the classifier can read, so `pre_delivery_before` is empty and the state is observed
+    afterwards -- the composer painting `tab to queue message` over the payload -- and recorded in
+    `pre_delivery_after`. Reading only the first field left the `HeadPaneBusy` /
+    `CAUSE_PANE_NEVER_READY` classification unreachable on the text-prompt spawn path, where such
+    a launch fell to a generic host-unavailable cause instead. This is telemetry: which cause an
+    operator reads, not what adoption does.
+    """
     if hasattr(evidence, "to_json"):
         evidence = evidence.to_json()
     if not isinstance(evidence, dict):
         return ""
-    return str(evidence.get("pre_delivery_before") or "")
+    return str(evidence.get("pre_delivery_before") or evidence.get("pre_delivery_after") or "")
 
 
 def _deliver(
