@@ -54,6 +54,9 @@ class EventKind(StrEnum):
     CARD_REPORTED = "card.reported"
     CARD_VERDICTED = "card.verdict"
     CARD_DECIDED = "card.decided"
+    # A refused rework is a durable Card fact: it names the registry boundary that prevented an
+    # observer instruction becoming authoritative, without inventing a worker outcome.
+    CARD_DECISION_REFUSED = "card.decision_refused"
     # What one completed worker or review phase cost, read from the provider's own structured
     # records at the moment the phase ended.  It is a Card fact with no backend mutation: the
     # journal is the only place a finished phase's token counts are durable at all.
@@ -419,6 +422,31 @@ def _validate_control_marker_event(
     data: dict[str, Any],
 ) -> None:
     """Keep the three declared marker kinds complete at the typed boundary."""
+    if kind is EventKind.CARD_DECISION_REFUSED:
+        if entity_kind is not EntityKind.CARD:
+            raise ValueError("Card decision refusal requires a Card subject")
+        required = {
+            "decision",
+            "code",
+            "artifact",
+            "artifact_owner",
+            "requested_role",
+            "required_action",
+            "specification_revision",
+            "instruction_sha256",
+        }
+        if set(data) != required:
+            raise ValueError("Card decision refusal has an unsupported payload")
+        if data.get("decision") != "rework" or data.get("code") != "artifact_ownership_violation":
+            raise ValueError("Card decision refusal has an unsupported reason")
+        for field in ("artifact", "artifact_owner", "requested_role", "required_action", "instruction_sha256"):
+            value = data.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"Card decision refusal needs {field}")
+        revision = data.get("specification_revision")
+        if revision is not None and (not isinstance(revision, str) or not revision):
+            raise ValueError("Card decision refusal needs a specification revision or null")
+        return
     marker_kinds = {
         EventKind.CARD_REPORTED,
         EventKind.CARD_VERDICTED,
