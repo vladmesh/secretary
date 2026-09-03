@@ -606,6 +606,7 @@ class SprintReader:
         self,
         *,
         observers: dict[str, dict[str, Any]] | None = None,
+        headless: dict[str, dict[str, Any]] | None = None,
         create: bool = False,
     ) -> list[dict[str, Any]]:
         """Every sprint's status, reading each part of the board once for the whole call.
@@ -631,7 +632,7 @@ class SprintReader:
                 sprint.get("resume"),
                 audit=audit,
             )
-            result.append(self._status(sprint, observers.get(sprint["ref"])))
+            result.append(self._status(sprint, observers.get(sprint["ref"]), headless or {}))
         return result
 
     def status(
@@ -639,11 +640,17 @@ class SprintReader:
         reference: str,
         *,
         observer: dict[str, Any] | None = None,
+        headless: dict[str, dict[str, Any]] | None = None,
         audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
-        return self._status(self.show(reference, audit=audit), observer)
+        return self._status(self.show(reference, audit=audit), observer, headless or {})
 
-    def _status(self, sprint: dict[str, Any], observer: dict[str, Any] | None) -> dict[str, Any]:
+    def _status(
+        self,
+        sprint: dict[str, Any],
+        observer: dict[str, Any] | None,
+        headless: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """One sprint's status view over a sprint that has already been read."""
         cards = sprint.get("cards") or []
         states: dict[str, list[str]] = {}
@@ -661,6 +668,14 @@ class SprintReader:
             "resume_freshness": sprint["resume_freshness"],
             "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
             "observer": observer or {"state": "unknown"},
+            # Cards this sprint counts as in progress that no head is working on (secretary-1544).
+            # The column alone cannot say that, and a sprint whose only visible signal is "3 in
+            # progress" reads as moving while nothing is.
+            "degraded_cards": {
+                reference: detail
+                for reference, detail in sorted((headless or {}).items())
+                if any(reference in refs for refs in states.values())
+            },
         }
 
     def _resume_freshness(

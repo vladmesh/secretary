@@ -1088,3 +1088,88 @@ class SecretStoreObservabilityTests(unittest.TestCase):
         self.assertEqual(json_code, 1, payload)
         self.assertTrue(any(f["code"] == "secret_store" for f in payload["findings"]))
         self.assertEqual(status_code, 0, status_output.getvalue())
+
+
+class HeadlessWorkStatusTests(unittest.TestCase):
+    """An In progress column is not evidence of active work (secretary-1544).
+
+    A card whose worker the dispatcher cannot name reads as degraded in both projections an
+    operator has: the per-card attempt row, and the sprint summary that counts it.
+    """
+
+    EPISODE = {
+        "since": 1_700_000_000.0,
+        "record_state": "adopted",
+        "handle_known": False,
+        "heartbeat": "absent",
+        "workspace": "/work/secretary-1232",
+        "branch": "pipeline/codegen-orchestrator-1232",
+        "expected_branch": "pipeline/codegen-orchestrator-1232",
+        "dirty": False,
+        "candidate_sha": "6cc7ca0c8cdf0719629e1e01bb5c72614983d7ef",
+        "report_generation": 1,
+        "recovery_error": "round_already_answered",
+    }
+
+    def test_the_attempt_row_says_headless_with_the_evidence_a_recovery_holds(self) -> None:
+        from secretary.status import _attempts
+
+        rows = _attempts(
+            {"records": {"codegen-orchestrator-1232": {"state": "adopted", "worker_headless": self.EPISODE}}},
+            probe_panels=False,
+        )
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertTrue(row["degraded"])
+        headless = row["headless"]
+        self.assertEqual(headless["state"], "adopted")
+        self.assertFalse(headless["handle_known"])
+        self.assertEqual(headless["heartbeat"], "absent")
+        self.assertEqual(headless["workspace"], "/work/secretary-1232")
+        self.assertEqual(headless["branch"], "pipeline/codegen-orchestrator-1232")
+        self.assertEqual(headless["candidate_sha"], "6cc7ca0c8cdf0719629e1e01bb5c72614983d7ef")
+        self.assertFalse(headless["dirty"])
+        self.assertEqual(headless["recovery_error"], "round_already_answered")
+        self.assertGreater(headless["waiting_seconds"], 0)
+
+    def test_a_card_with_a_worker_is_not_degraded(self) -> None:
+        from secretary.status import _attempts
+
+        rows = _attempts(
+            {"records": {"secretary-1": {"state": "claimed", "handle": "term:1"}}}, probe_panels=False
+        )
+
+        self.assertIsNone(rows[0]["headless"])
+        self.assertFalse(rows[0]["degraded"])
+
+    def test_the_sprint_summary_names_only_its_own_degraded_cards(self) -> None:
+        from secretary.sprints import SprintReader
+
+        sprint = {
+            "ref": "sprint:1416",
+            "goal": "g",
+            "status": "open",
+            "current_task": None,
+            "budget": {},
+            "resume_freshness": {},
+            "cards": [
+                {"ref": "codegen-orchestrator-1232", "state": "in_progress"},
+                {"ref": "codegen-orchestrator-1233", "state": "in_progress"},
+            ],
+        }
+        headless = {
+            "codegen-orchestrator-1232": dict(self.EPISODE),
+            # A headless card belonging to some other sprint is not this sprint's degradation.
+            "secretary-9999": dict(self.EPISODE),
+        }
+
+        summary = SprintReader._status(  # type: ignore[misc]
+            SprintReader.__new__(SprintReader), sprint, None, headless
+        )
+
+        self.assertEqual(list(summary["degraded_cards"]), ["codegen-orchestrator-1232"])
+        self.assertEqual(
+            summary["degraded_cards"]["codegen-orchestrator-1232"]["candidate_sha"],
+            "6cc7ca0c8cdf0719629e1e01bb5c72614983d7ef",
+        )
