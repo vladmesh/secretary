@@ -1,0 +1,42 @@
+{
+  "note": "One `orca terminal read --limit 24` of a real Orca pane in a genuine Codex startup window, captured on this host on 2026-09-03. The window is held open by running the same interactive Codex (v0.152.1) against a throwaway CODEX_HOME whose only difference is one MCP server whose command is `sleep`, so the startup frame stays up for about 24s instead of one. The composer is empty and the pane is NOT sendable. What the capture is here to pin: Orca answered `tui-idle` satisfied with no blockedReason on this probe and on all sixteen taken across the window, its output cursor did not advance (20 on every read for the whole window), and the startup status is painted as a character-by-character redraw that spells no phrase contiguously. This is issue:2fdac531's initial condition, and it is why the boundary cannot establish sendability before it writes.",
+  "wait": {
+    "handle": "term_7325e9e0-38f6-4fae-b16a-795664e2171a",
+    "condition": "tui-idle",
+    "satisfied": true,
+    "status": "running",
+    "exitCode": null
+  },
+  "terminal": {
+    "status": "running",
+    "truncated": false,
+    "limited": false,
+    "oldestCursor": "0",
+    "nextCursor": "20",
+    "latestCursor": "20",
+    "returnedLineCount": 21,
+    "tail": [
+      "dev@5uoc:~/orca/workspaces/secretary/secretary-1542-codex-pre-delivery-state$CODEX_HOME=/tmp/claude-1000/-home-dev-orca-workspaces-secretary-secretary-1542-codex-pre-delivery-state/7a750f3c-b6b8-427c-91ed-a315d39cb298/scratchpad/slowhome codex",
+      "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"/tmp/claude-1000/-home-dev-orca-workspaces-secretary-secretary-1542-codex-pre-delivery-state/7a750f3c-b6b8-427c-91ed-a315d39cb298/scratchpad/slowhome\"))",
+      "╭───────────────────────────────────────╮│ >_ OpenAI Codex (v0.152.1)            ││                                       ││ model:     loading   /model to change ││ directory: loading                    │╰───────────────────────────────────────╯  › Ask Codex to do anything   ? for shortcuts╭╭╭╭╭╭╭─────────────────╮                 │                 │                 │~/…/secretary-1542-codex-pre-delivery-state │─────────────────╯╭╭╭╭╭╭╭╭╭╭╭╭╭╭gpt-5.6-sol default · ~/orca/workspaces/secretary/secretary-1542-codex-pre-de…╭",
+      "⚠ Codex could not find bubblewrap on PATH. Install bubblewrap with your OS",
+      "  package manager. See the sandbox prerequisites:",
+      "  https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex",
+      "  will use the bundled bubblewrap in the meantime.╭╭",
+      "",
+      "⚠ Heads up, you have less than 5% of your weekly limit left. Run /status for a",
+      "  breakdown.",
+      "",
+      "╭────────────────────────────────────────────────────────╮",
+      "│ >_ OpenAI Codex (v0.152.1)                             │",
+      "│                                                        │",
+      "│ model:     gpt-5.6-sol medium   /model to change       │",
+      "│ directory: ~/…/secretary-1542-codex-pre-delivery-state │",
+      "╰────────────────────────────────────────────────────────╯",
+      "",
+      "  Tip: New Use /fast to enable our fastest inference with increased plan usage.",
+      "",
+      "• You have 1 usage limit reset available. Run /usage to use one. • Starting MCP servers (0/2): codex_apps, slowmcp (0s • esc to interrupt)  › Ask Codex to do anything   gpt-5.6-sol medium · ~/orca/workspaces/secretary/secretary-1542-codex-pre-del…     Star Starting MCP  •ting MP serv1slowmcp (1s • esc to interrupt) • MCP erver •CP severs   servers ( •serves (1/ •rvers (1/2): s • (1/2):slowmcp : slowcp owmcp2 wmcp mcp cp p         S St Sta Star Start Starti Startin Starting Starting  Starting M •tarting MC arting MCP rting MCP 3 • ting MCP s ing MCP se •ng MCP ser g MCP serv • MCP serve MCP server CP servers •P servers   servers ( servers (1 •ervers (1/ rvers (1/2 vers (1/2) • ers (1/2): rs (1/2):  •s (1/2): s  (1/2): sl (1/2): slo •1/2): slow /2): slowm •2): slowmc ): slowmcp : slowmcp  slowmcp slowmcp  lowmcp owmcp4 wmcp mcp cppSStStaStarStartStartiStartinStartingStartingStarting M•tarting MCarting MCP5•rting MCPting MCP sing MCP se•ng MCP serg MCP serv MCP serve•MCP serverCP serversP servers• servers (•servers (1ervers (1/rvers (1/2•vers (1/2)ers (1/2):rs (1/2):•s (1/2): s (1/2): sl(1/2): slo•1/2): slow/2): slowm•2): slowmc): slowmcp: slowmcp slowmcpslowmpowmcp6wmcpmcpcppSStStaStarStartStartiStartinStartingStartingStarting M•tarting MCarting MCP7•rting MCPting MCP sing MCP se•ng MCP serg MCP serv MCP serve•MCP serverCP serversP servers• servers (•servers (1ervers (1/rvers (1/2•vers (1/2)ers (1/2):rs (1/2):•s (1/2): s (1/2): sl(1/2): slo•1/2): slow/2): slowm2): slowmc•): slowmcp: slowmcp slowmcpslowmcplowmcpowmcp8wmcpmcpcppSStStaStarStartStartiStartinStartingStartingStarting M•tarting MCarting MCPrting MCP 9•ting MCP sing MCP se•ng MCP serg MCP serv MCP serve•MCP serverCP servers•P servers servers (servers (1•ervers (1/rvers (1/2•vers (1/2)ers (1/2):rs (1/2):•s (1/2): s (1/2): sl(1/2): slo•1/2): slow/2): slowm•2): slowmc): slowmcp: slowmcp slowmcpslowmcplowmcpowmcp10s • esc to interupt)wmcpmcpcppSStStaStarStartStartiStartinStartingStarting•Starting Mtarting MCarting MCP1•rting MCPting MCP sing MCP se•ng MCP serg MCP serv MCP serve•MCP serverCP servers•P servers servers (servers (1•ervers (1/rvers (1/2•vers (1/2)ers (1/2):rs (1/2):•s (1/2): s (1/2): sl(1/2): slo•1/2): slow/2): slowm•2): slowmc): slowmcp: slowmcp slowmcpslowmcplowmcpowmcp2wmcpmcpcpp"
+    ]
+  }
+}

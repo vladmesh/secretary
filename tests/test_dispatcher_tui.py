@@ -23,6 +23,8 @@ from secretary.dispatcher_tui import (
     READINESS_STALE_HANDLE,
     READINESS_UNAVAILABLE,
     READINESS_UNKNOWN,
+    SENDABILITY_DIALOG_REFUSED,
+    SENDABILITY_UNESTABLISHED,
     TuiDeliveryError,
     bind_claude_provider_progress_source,
     claude_project_dir_name,
@@ -1145,7 +1147,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
     turn began and ended between two probes (sprint:1402).
     """
 
-    def deliver(self, pane: ScriptedPane, **kwargs):
+    def deliver(self, pane: ScriptedPane, *, prompt: str = "wake the observer", **kwargs):
         clock = [0.0]
 
         def advance_clock(seconds: float) -> None:
@@ -1161,7 +1163,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
             mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0),
         ):
             return deliver_interactive_prompt(
-                "term-observer", "wake the observer", run_json=pane.run_json, **kwargs
+                "term-observer", prompt, run_json=pane.run_json, **kwargs
             )
 
     def test_a_confirmed_delivery_does_not_keep_the_previous_probes_refusal(self) -> None:
@@ -1601,14 +1603,6 @@ UPDATE_MODAL_SCREEN = [
     "Press enter to continue",
 ]
 
-# issue:2fdac531, sprint:1419: Codex still starting, and Orca reporting `tui-idle/ready` for it.
-# The TASK pointer went into that composer and three Enters in 12 seconds each came back
-# `accepted` with one byte written, while the cursor never moved.
-STARTING_SCREEN = [
-    "  Starting MCP servers",
-    "› ",
-    "  ⏎ send   tab to queue message   ctrl+c quit",
-]
 
 # The same two states as Orca actually retains them, captured on this host on 2026-09-03 by
 # creating an Orca terminal, running the interactive Codex the heads run
@@ -1632,6 +1626,23 @@ STARTED_IDLE_TAIL = retained_tail("codex-started-idle")
 # The same pane shape after a dialog has been settled: the update modal's six lines from
 # issue:e4d6f307 sit in the tail above a live, idle composer.
 SETTLED_UPDATE_MODAL_TAIL = retained_tail("codex-settled-update-modal")
+# issue:2fdac531's own initial condition, reproduced: a genuine ~24s Codex startup window, empty
+# composer, Orca answering `tui-idle` satisfied, output cursor frozen. This replaces the
+# hand-written three-line `STARTING_SCREEN` that used to stand for it. That fixture asserted a
+# shape — `Starting MCP servers` above the marker and `tab to queue message` under it, with an
+# empty composer — which the backend does not produce, and a suite written against it passed while
+# the boundary could not read a starting pane at all.
+MID_STARTUP_TAIL = retained_tail("codex-mid-startup")
+# The same window one write later: the pointer is in the composer and Codex now paints
+# `tab to queue message` there, so the startup state becomes observable exactly when the receipt
+# does. `MID_STARTUP_POINTER` is the payload that capture was taken with.
+MID_STARTUP_HOLDING_TAIL = retained_tail("codex-mid-startup-holding-pointer")
+MID_STARTUP_POINTER = json.loads(
+    (PANE_FIXTURES / "codex-mid-startup-holding-pointer.json").read_text(encoding="utf-8")
+)["payload"]
+MID_STARTUP_ORCA_WAIT = json.loads((PANE_FIXTURES / "codex-mid-startup.json").read_text(encoding="utf-8"))[
+    "wait"
+]
 
 
 class PreDeliveryStateTests(unittest.TestCase):
@@ -1646,8 +1657,31 @@ class PreDeliveryStateTests(unittest.TestCase):
     def test_the_update_modal_from_the_incident_is_a_typed_pre_delivery_state(self) -> None:
         self.assertEqual(classify_pre_delivery("\n".join(UPDATE_MODAL_SCREEN)), PRE_DELIVERY_UPDATE_MODAL)
 
-    def test_the_startup_screen_from_the_incident_is_a_typed_pre_delivery_state(self) -> None:
-        self.assertEqual(classify_pre_delivery("\n".join(STARTING_SCREEN)), PRE_DELIVERY_STARTING)
+    def test_a_real_starting_pane_shows_the_code_nothing_before_the_write(self) -> None:
+        """issue:2fdac531's initial condition, held open and read from the real backend.
+
+        Every source of a pre-write answer says the same thing on this tail: Orca answered
+        `tui-idle` satisfied with no `blockedReason`, its output cursor was frozen at the value it
+        held for the whole window, no dialog is up, and the startup status is a redraw whose
+        fragments spell no phrase. So the boundary cannot establish that this composer is live and
+        idle, and it does not pretend to — see the delivery test that writes into this very tail.
+        """
+        tail = "\n".join(MID_STARTUP_TAIL)
+        self.assertTrue(MID_STARTUP_ORCA_WAIT["satisfied"])
+        self.assertIsNone(MID_STARTUP_ORCA_WAIT.get("blockedReason"))
+        self.assertEqual(classify_pre_delivery(tail), "")
+        self.assertFalse(dialog_is_live(tail))
+
+    def test_the_startup_state_is_observed_once_the_pointer_is_in_the_composer(self) -> None:
+        """The same window one write later, and the reason the state stays named.
+
+        Codex paints `tab to queue message` in the composer only once the composer holds text, so
+        `starting` is a post-write observation on this backend. It arrives at the same moment the
+        receipt does, which is the half that actually refuses the claim.
+        """
+        tail = "\n".join(MID_STARTUP_HOLDING_TAIL)
+        self.assertEqual(classify_pre_delivery(tail), PRE_DELIVERY_STARTING)
+        self.assertTrue(composer_holds_payload(tail, MID_STARTUP_POINTER))
 
     def test_an_unrecognised_dialog_is_named_and_never_guessed_at(self) -> None:
         """Codex's own modal footer under a screen none of the known patterns match."""
@@ -1804,47 +1838,47 @@ class PreDeliveryDeliveryTests(TuiDeliveryStageTests):
         self.assertTrue(waits)
         self.assertTrue(after_skip, "readiness is re-proved between the modal answer and the write")
 
-    def test_a_startup_pane_orca_calls_ready_is_refused_and_never_written_to(self) -> None:
-        """issue:2fdac531, at the boundary that should have stopped it.
+    def test_a_real_starting_pane_is_written_into_and_then_refused_by_its_receipt(self) -> None:
+        """issue:2fdac531 driven end to end on the two tails the backend actually produced.
 
-        Orca answers `tui-idle` satisfied for this pane. The screen says the head is still starting
-        its MCP servers and its composer queues rather than submits, so nothing is written into it
-        and the failure names the state that was observed.
+        This is where the guarantee lives now. The pane is mid-startup and nothing pre-write says
+        so, so the boundary writes and records `sendability=unestablished` rather than claiming a
+        readiness it did not observe. One write later the composer is positively holding the
+        pointer, and that is a determinate refusal: `payload-left-in-composer`, receipt `refused`,
+        which is what `_adopt_launch_intent` reads when it declines to turn this live head into a
+        claim. The startup state is named in `pre_delivery_after`, where it can be seen.
         """
-        pane = ScriptedPane({0: STARTING_SCREEN})
+        pane = ScriptedPane({0: MID_STARTUP_TAIL, 1: MID_STARTUP_HOLDING_TAIL}, cursors={0: "20", 1: "20"})
 
-        with mock.patch("triggered_agents.runtime.tui_delivery.TUI_PRE_DELIVERY_TIMEOUT_S", 0):
-            with self.assertRaises(TuiDeliveryError) as raised:
-                self.deliver(pane, ack_out_of_band=True)
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, prompt=MID_STARTUP_POINTER, ack_out_of_band=True)
 
         evidence = raised.exception.evidence
-        self.assertEqual(evidence.pre_delivery_before, PRE_DELIVERY_STARTING)
-        self.assertEqual(evidence.reason, f"pre-delivery-{PRE_DELIVERY_STARTING}")
-        self.assertEqual(evidence.readiness_before, READINESS_READY)
-        self.assertEqual(evidence.stage, "none")
-        self.assertEqual(pane.sends, [], "nothing is typed into a pane that cannot take a prompt")
+        self.assertEqual(evidence.pre_delivery_before, "")
+        self.assertEqual(evidence.sendability, SENDABILITY_UNESTABLISHED)
+        self.assertEqual(evidence.pre_delivery_after, PRE_DELIVERY_STARTING)
+        self.assertTrue(evidence.payload_left_in_composer)
+        self.assertEqual(evidence.reason, "payload-left-in-composer")
         self.assertEqual(evidence.to_json()["delivery_receipt"], DELIVERY_RECEIPT_REFUSED)
+        # The body is written once and re-entered; nothing is typed at the screen itself.
+        self.assertEqual(pane.sends.count(MID_STARTUP_POINTER), 1)
+        self.assertNotIn("3", pane.sends)
 
-    def test_a_startup_pane_that_finishes_starting_is_then_delivered_to(self) -> None:
-        """The state clears on its own, which is what makes it a phase and not a dialog."""
-        pane = ScriptedPane({0: STARTING_SCREEN})
-        reads = [0]
+    def test_a_dialog_that_never_clears_is_still_a_bounded_refusal(self) -> None:
+        """The bounded window survives, and it is now about dialogs, which is all it ever bounded.
 
-        def reading(args: list[str]) -> dict:
-            if args[1:3] == ["terminal", "read"]:
-                reads[0] += 1
-                if reads[0] == 1:
-                    return {"terminal": {"tail": STARTING_SCREEN, "nextCursor": "10"}}
-                return {"terminal": {"tail": ["ready", "›"], "nextCursor": str(10 + reads[0])}}
-            return pane.run_json(args)
+        A head a dialog will not let go of ends in a typed refusal with zero bytes written, so the
+        caller replaces it rather than letting the card report progress against it.
+        """
+        pane = ScriptedPane({0: ["Trust this workspace?", "  1. Yes", "  2. No", "Press enter to continue"]})
 
-        with mock.patch("triggered_agents.runtime.tui_delivery.TUI_PRE_DELIVERY_POLL_S", 0):
-            outcome = self.deliver(ScriptedPaneProxy(pane, reading), ack_out_of_band=True)
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
 
-        self.assertEqual(outcome, DELIVERY_ACCEPTED)
-        self.assertEqual(outcome.evidence.pre_delivery_before, PRE_DELIVERY_STARTING)
-        self.assertEqual(outcome.evidence.modal_resolution, "not-present")
-        self.assertEqual(pane.sends, ["wake the observer", ""])
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.sendability, SENDABILITY_DIALOG_REFUSED)
+        self.assertEqual(evidence.stage, "none")
+        self.assertEqual(pane.sends, [])
 
     def test_a_started_head_is_delivered_to_though_its_tail_names_the_startup(self) -> None:
         """The whole boundary, driven at the tail a real started Codex pane actually returns.
@@ -1953,13 +1987,3 @@ class PreDeliveryDeliveryTests(TuiDeliveryStageTests):
         self.assertFalse(record["provider_bound"], "the caller's own criterion never fired")
         self.assertTrue(record["turn_confirmed"], "the pane's own evidence did")
 
-
-class ScriptedPaneProxy:
-    """A `ScriptedPane` whose reads are answered by a supplied function."""
-
-    def __init__(self, pane: ScriptedPane, run_json) -> None:
-        self._pane = pane
-        self.run_json = run_json
-
-    def __getattr__(self, name: str):
-        return getattr(self._pane, name)

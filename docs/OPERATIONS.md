@@ -1121,12 +1121,20 @@ that takes the bounded bring-up deferral above and then the operator-visible inf
 All of that is decided from the pane's **live screen**, not from everything `orca terminal read` returns. Orca
 retains raw output and a TUI redraws in place, so a started, idle Codex pane still carries `Starting MCP servers`
 in its tail and a settled update modal still carries its own six lines: the live screen is what follows the last
-prompt marker, or the end of the tail when nothing is painting a composer. Two consequences an operator sees.
-A head reported un-sendable with `pre-delivery-starting` and zero bytes written is a real state and not stale
-text — a pane whose composer is painting the startup status. And a keystroke is authorised only while the dialog
-is that live screen: a delivery that recognises the update modal's words in history refuses with
+prompt marker, or the end of the tail when nothing is painting a composer. A keystroke is authorised only while
+the dialog is that live screen: a delivery that recognises the update modal's words in history refuses with
 `modal-not-on-screen`, having typed nothing, rather than submitting a bare `3` to the provider ahead of the card's
 own pointer.
+
+What an operator should **not** expect is a pre-write refusal for a head that is merely still starting. On this
+backend nothing before the write says a composer is live and idle: across a real Codex startup window held open
+on purpose, Orca answered `tui-idle` satisfied with no `blockedReason` every time, the pane's output cursor never
+advanced, and the startup status arrived as a redraw whose fragments spell no phrase. So the delivery writes,
+records `sendability=unestablished` on its evidence, and is caught by the receipt instead: the pointer is found
+still in the composer, the failure is `payload-left-in-composer` with `pre-delivery-starting` recorded as the
+state observed *after* the write, and adoption refuses the claim without spending the launch intent. A report of
+`pre-delivery-starting` therefore comes with bytes written, not with zero, and that is the working path rather
+than a defect.
 
 Reviewer launch prefers a split from the worker pane. Orca can return
 `terminal_split_source_not_found` before or after it attempts to create the child, so the dispatcher
@@ -1601,8 +1609,8 @@ been restarted, without waiting for the final Blocked.
   ready for its launch prompt before the card is blocked over that pane, default 5 attempts.
 - `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` — how many ticks a live head may hold its card while its pointer is
   still unaccepted before it is stopped and launched again, default 5 attempts.
-- `SECRETARY_TUI_PRE_DELIVERY_TIMEOUT_S` — how long a pane that is not yet sendable is given to become sendable
-  inside one delivery, default 45 seconds.
+- `SECRETARY_TUI_PRE_DELIVERY_TIMEOUT_S` — how long a pane held in a dialog is given to leave it inside one
+  delivery, default 45 seconds.
 - `SECRETARY_TUI_MODAL_ANSWER_ATTEMPTS` — how many times the one known update modal is answered on screen before
   the delivery is refused, default 2.
 

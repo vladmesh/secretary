@@ -1,0 +1,36 @@
+{
+  "note": "The same real startup window, captured the same way on 2026-09-03, after a pointer was written into the pane and before any Enter. This is the post-write half the guarantee now rests on: the composer is positively holding the payload (`composer_holds_payload` true) and Codex now paints `tab to queue message` in the composer region, so `classify_pre_delivery` answers `starting` here where it answered nothing at all one write earlier.",
+  "payload": "TASK pointer for secretary-1542: read the document at docs/PROTOCOLS.md and start",
+  "terminal": {
+    "status": "running",
+    "truncated": false,
+    "limited": false,
+    "oldestCursor": "0",
+    "nextCursor": "20",
+    "latestCursor": "20",
+    "returnedLineCount": 21,
+    "tail": [
+      "dev@5uoc:~/orca/workspaces/secretary/secretary-1542-codex-pre-delivery-state$CODEX_HOME=/tmp/claude-1000/-home-dev-orca-workspaces-secretary-secretary-1542-codex-pre-delivery-state/7a750f3c-b6b8-427c-91ed-a315d39cb298/scratchpad/slowhome codex",
+      "WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp\" (codex_home: AbsolutePathBuf(\"/tmp/claude-1000/-home-dev-orca-workspaces-secretary-secretary-1542-codex-pre-delivery-state/7a750f3c-b6b8-427c-91ed-a315d39cb298/scratchpad/slowhome\"))",
+      "╭───────────────────────────────────────╮│ >_ OpenAI Codex (v0.152.1)            ││                                       ││ model:     loading   /model to change ││ directory: loading                    │╰───────────────────────────────────────╯  › Ask Codex to do anything   ? for shortcuts╭╭╭╭╭╭╭─────────────────╮                 │                 │                 │~/…/secretary-1542-codex-pre-delivery-state │─────────────────╯╭╭╭╭╭╭╭╭╭╭╭╭╭╭gpt-5.6-sol default · ~/orca/workspaces/secretary/secretary-1542-codex-pre-de…╭",
+      "⚠ Codex could not find bubblewrap on PATH. Install bubblewrap with your OS",
+      "  package manager. See the sandbox prerequisites:",
+      "  https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex",
+      "  will use the bundled bubblewrap in the meantime.╭╭",
+      "",
+      "╭────────────────────────────────────────────────────────╮",
+      "│ >_ OpenAI Codex (v0.152.1)                             │",
+      "│                                                        │",
+      "│ model:     gpt-5.6-sol medium   /model to change       │",
+      "│ directory: ~/…/secretary-1542-codex-pre-delivery-state │",
+      "╰────────────────────────────────────────────────────────╯",
+      "",
+      "  Tip: New Use /fast to enable our fastest inference with increased plan usage. • Starting MCP servers (0/2): codex_apps, slowmcp (0s • esc to interrupt)  › Ask Codex to do anything   gpt-5.6-sol medium · ~/orca/workspaces/secretary/secretary-1542-codex-pre-del…",
+      "",
+      "• You have 1 usage limit reset available. Run /usage to use one.",
+      "",
+      "⚠ Heads up, you have less than 5% of your weekly limit left. Run /status for a",
+      "  breakdown.  Startin Stating  Starting MCP rting MCP  •ting MCP s ing MP ser ting MCP ser1slowmcp (0s • esc to interrupt) •ting MCP s ing MCP se •ng MCP ser g MCPserve •MCP servers (11 •ervers (1/2) •ers (/2):  •s (1/2): s  (1/2): sl •(1/2) slow /2): slowm •2): slowmc ): slwmcp slowmcp slowmcplowmcpowmcpmcpcpp2SStStaStarStartStartiStartinStartingStartingStarting M•tarting MCarting MCP•rting MCPting MCP sing MCP se•ng MCP serg MCP serv• MCP serveMCP serverCP servers•P servers servers (3servers (1•ervers (1/rvers (1/2vers (1/2)•ers (1/2):rs (1/2):•s (1/2): s (1/2): sl(1/2): slo•1/2): slow/2): slowm•2): slowmc): slowmcp: slowmcp slowmcpslowmcplowmcpowmcpwmcpmcpcpp4SStStaStarStartStartiStartinStating • Starting MCP servers (1/2): slowmcp (4s • esc to interrupt)  › TASK pointer for secretary-1542: read the document at docs/PROTOCOLS.md and  start   tab to queue message                                       100% context lefttarting MCarting MCP•rting MCPting MCP sing MCP se•ng MCP serg MCP serv MCP serve•MCP serverCP servers•P servers servers (5•servers (1ervers (1/rvers (1/2•vers (1/2)ers (1/2):rs (1/2):•s (1/2): s (1/2): sl(1/2): slo•1/2): slow/2): slowm•2): slowmc): slowmcp: slowmcp slowmcpslowmcplowmcpowmcpwmcpmcpcpp6SStStaStarStartStartiStartinStartingStartingStarting M•tarting MCarting MCP•rting MCPting MCP sing MCP se•ng MCP serg MCP serv• MCP erver"
+    ]
+  }
+}

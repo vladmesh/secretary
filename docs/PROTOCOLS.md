@@ -451,8 +451,20 @@ Orca answers `tui-idle` from the pane's agent status and, failing that, from a q
 A TUI holding its own update dialog, or still starting its MCP servers, is perfectly quiescent: it
 answers `tui-idle` satisfied, `terminal send` answers `accepted` with a byte count, and nothing
 reaches a provider. So readiness and sendability are two questions, and the delivery boundary asks
-both. Before a single byte is written it classifies the screen into a **pre-delivery state**, typed
-and named, distinct from `busy` and from `blocked`.
+both. It classifies the screen into a **pre-delivery state**, typed and named, distinct from `busy`
+and from `blocked`.
+
+What that classification can answer *before* a byte is written is bounded by what the backend
+paints, and the honest answer is narrower than it looks. Measured against real Codex and real Orca
+on this host across a startup window held open on purpose: Orca answers `tui-idle` satisfied with
+no `blockedReason` throughout, its output cursor does not advance at all, and the startup status is
+painted as a character-by-character redraw whose fragments spell no phrase. So **nothing this
+backend offers before a write asserts that a composer is live and idle.** The pre-write step is
+therefore about dialogs and only dialogs; everything else is recorded as
+`sendability=unestablished`, which is a statement about the boundary's knowledge and never a proof
+of readiness. `starting` is real and stays named, but it is observed *after* the write, when the
+pointer is in the composer and Codex paints `tab to queue message` there. The guarantee rests on
+the receipt, not on a pre-write wait.
 
 That classification is asked of the **live screen** and never of the whole answer `terminal read`
 returns. Orca retains a pane's raw output rather than a rendered screen, and a TUI redraws in
@@ -478,7 +490,9 @@ false delivery instead refuses every real one.
     history is a refusal with nothing typed, because a `3` at a live composer is not a dismissal
     but a bare prompt submitted to the provider;
   * `starting` — `Starting MCP servers`, and the composer that queues rather than submits (`tab to
-    queue message`). It clears on its own and is waited out inside a bounded window;
+    queue message`). A **post-write** observation: it is recorded in `pre_delivery_after` and names
+    what was holding a pointer the composer did not accept. It is deliberately not a pre-write
+    gate, because the pane paints nothing before the write that the code can read;
   * `unknown-dialog` — anything else that is dialog-shaped: Orca naming a `blockedReason`, or
     Codex's `Press enter to continue` footer under a screen none of the known patterns match. It
     **fails closed**. No keystroke is sent at a screen the code does not recognise; the refusal is
@@ -489,8 +503,9 @@ The evidence records which state was observed, and it keeps three facts apart th
 "delivered" bit: **modal resolution** (`modal_resolution`, `modal_answers`, `pre_delivery_*`),
 **delivery receipt** (`delivery_receipt`, from `payload_left_in_composer` and `turn_confirmed`) and
 **provider binding** (`provider_bound`, the caller's own criterion — what the provider wrote down
-about the turn). A head that cannot be made sendable inside the window is a typed refusal, never a
-pane that keeps being typed at.
+about the turn), with `sendability` beside them saying what could be established before the write.
+A head a dialog will not release inside the bounded window is a typed refusal, never a pane that
+keeps being typed at.
 
 ### A live head is not a delivered pointer
 

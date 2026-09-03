@@ -148,11 +148,40 @@ PRE_DELIVERY_UPDATE_MODAL = "update-modal"
 # `Starting MCP servers`, and the footer that goes with it: while a Codex head is starting, the
 # composer queues what it is given instead of submitting it (`tab to queue message`). Orca called
 # that pane `tui-idle/ready` and the TASK pointer sat in it for 80 minutes on issue:2fdac531.
+#
+# This is a *post-write* observation and nothing else. Measured against the real backend on this
+# host, the pane paints nothing before the write that names it: see `SENDABILITY_UNESTABLISHED`.
+# Once the pointer is in the composer Codex paints `tab to queue message` there and this state is
+# observed — `tests/fixtures/panes/codex-mid-startup-holding-pointer.json` is that read — which is
+# why it stays named, recorded in `pre_delivery_after`, and never claimed before a byte is written.
 PRE_DELIVERY_STARTING = "starting"
 # A screen shaped like a dialog that this code does not recognise. Nothing is typed at it.
 PRE_DELIVERY_UNKNOWN_DIALOG = "unknown-dialog"
 # The pre-delivery states that are a dialog holding the pane, as opposed to a phase it leaves.
+# Only these gate the write: they are the ones the pane paints where the code can see them.
 PRE_DELIVERY_DIALOGS = (PRE_DELIVERY_UPDATE_MODAL, PRE_DELIVERY_UNKNOWN_DIALOG)
+
+# What the boundary could establish about sendability before writing the first byte.
+#
+# There is no `established` value here, and its absence is the finding rather than an omission. On
+# Orca plus Codex nothing the backend asserts before a write says "this composer is live and idle".
+# Measured on this host on 2026-09-03 across a real ~24s startup window, held open by a throwaway
+# `CODEX_HOME` whose only difference is one MCP server whose command is `sleep`:
+#
+#       * Orca answered `tui-idle` satisfied with no `blockedReason` on all sixteen probes taken
+#         across the window — the card exists because that answer is about a different question;
+#       * its output cursor did not advance at all (`nextCursor` 20 on every read for the whole
+#         window), so a quiescence test cannot tell a starting pane from a settled one;
+#       * the startup status is painted as a character-by-character redraw whose fragments spell no
+#         phrase contiguously, so no pattern names it either — thirteen reads over that window with
+#         an empty composer classified as nothing at all.
+#
+# So a pre-write answer is either a dialog this code recognised, or this: not established. Saying
+# that is the honest boundary; inferring readiness from a regex that did not match is not. What
+# protects the pipeline is the post-write receipt, which was verified in the same session — the
+# pointer written into that starting composer was positively found still sitting in it.
+SENDABILITY_UNESTABLISHED = "unestablished"
+SENDABILITY_DIALOG_REFUSED = "dialog-refused"
 
 # How the known modal was settled, kept apart from whether the prompt was then received.
 MODAL_NOT_PRESENT = "not-present"
@@ -336,6 +365,11 @@ class DeliveryEvidence:
     # These three are the modal-resolution half of the telemetry and say nothing about receipt.
     pre_delivery_before: str = PRE_DELIVERY_NONE
     pre_delivery_after: str = PRE_DELIVERY_NONE
+    # What the boundary could establish about sendability before it wrote the first byte. Never
+    # "established": on this backend nothing asserts a live idle composer pre-write, so this says
+    # either that a dialog refused the write or that sendability was not established and the
+    # receipt is what the delivery rests on. A reader must not mistake the second for a proof.
+    sendability: str = ""
     modal_resolution: str = ""
     modal_answers: int = 0
     # The provider-binding half: the caller's own criterion — what the provider wrote down about
@@ -385,6 +419,7 @@ class DeliveryEvidence:
             "modal_after": self.modal_after,
             "pre_delivery_before": self.pre_delivery_before,
             "pre_delivery_after": self.pre_delivery_after,
+            "sendability": self.sendability,
             "modal_resolution": self.modal_resolution,
             "modal_answers": self.modal_answers,
             "provider_bound": self.provider_bound,
@@ -501,12 +536,15 @@ class PaneProbe:
 
     @property
     def sendable(self) -> bool:
-        """Whether a prompt written into this pane would reach the provider.
+        """Whether anything the backend showed forbids writing into this pane.
 
-        Orca answering `tui-idle/ready` is not this, which is the whole point of the field beside
-        it: a pane on a modal and a pane still starting are both quiescent and neither is sendable.
+        Read the name carefully: this is not "the composer is live and idle", because nothing on
+        this backend answers that before a write. It is the weaker, honest question — is a dialog
+        holding the pane — and the delivery records `SENDABILITY_UNESTABLISHED` when the answer is
+        no, rather than claiming a readiness it did not observe. A pane still starting its MCP
+        servers passes this test on Orca plus Codex, and the receipt is what catches it.
         """
-        return self.readiness != READINESS_BLOCKED and self.pre_delivery == PRE_DELIVERY_NONE
+        return self.readiness != READINESS_BLOCKED and self.pre_delivery not in PRE_DELIVERY_DIALOGS
 
 
 def _digest(text: str) -> str:
@@ -923,12 +961,10 @@ def _settle_pre_delivery(
     payload: str,
     evidence: DeliveryEvidence,
 ) -> PaneProbe:
-    """Make the pane sendable, or refuse the delivery. Returns the probe the send is made against.
+    """Answer what can be answered before the first byte, or refuse. Returns the probe sent against.
 
-    Three answers, and only one of them types anything at a screen:
+    This step exists for dialogs, and it says so rather than pretending to more:
 
-          * a state that clears on its own — a head still starting its MCP servers — is waited out
-            inside a bounded window, because that is what it is;
           * the one known modal is answered with its own documented "Skip until next version"
             choice, a bounded number of times, and readiness is proved again afterwards. Two
             conditions have to hold and they are asked separately: the screen is the modal this
@@ -937,10 +973,19 @@ def _settle_pre_delivery(
             here;
           * anything else that is dialog-shaped is a typed refusal with no keystrokes at all. A
             screen this code does not recognise is a screen it cannot answer, and guessing at one
-            is how a head ends up agreeing to something nobody asked it.
+            is how a head ends up agreeing to something nobody asked it. A window that expires is
+            the same refusal: the caller's answer to a pane a dialog will not let go of is to
+            replace the head, not to keep waiting while the card reports progress;
+          * everything else is recorded as `SENDABILITY_UNESTABLISHED` and written into. That is
+            not a claim that the composer is live and idle — nothing this backend offers before a
+            write says that, and the constant carries the measurement — it is the honest statement
+            that no dialog was seen and the delivery now rests on its receipt.
 
-    A window that expires is also a refusal: the caller's answer to a head that cannot be made
-    sendable is to replace it, not to keep waiting while the card reports progress.
+    What used to be here and is deliberately gone: a bounded wait-out of `starting`. A head still
+    bringing its MCP servers up paints nothing before the write that the code can read, so waiting
+    for that state to clear was waiting on a signal that never arrives, and treating its absence as
+    readiness was inferring a fact from a regex that did not match. `pre_delivery_before` still
+    records whatever *was* seen; it is evidence, not a gate.
     """
     deadline = time.monotonic() + max(TUI_PRE_DELIVERY_TIMEOUT_S, 0)
     probe = probe_pane(handle, run_json=run_json, host=host, payload=payload)
@@ -949,7 +994,9 @@ def _settle_pre_delivery(
     while True:
         if probe.sendable:
             evidence.modal_resolution = MODAL_ANSWERED_SKIP if evidence.modal_answers else MODAL_NOT_PRESENT
+            evidence.sendability = SENDABILITY_UNESTABLISHED
             return probe
+        evidence.sendability = SENDABILITY_DIALOG_REFUSED
         if probe.pre_delivery == PRE_DELIVERY_UNKNOWN_DIALOG or probe.readiness == READINESS_BLOCKED:
             evidence.modal_resolution = MODAL_REFUSED_UNKNOWN
             evidence.reason = "unknown-dialog"
@@ -992,7 +1039,7 @@ def _settle_pre_delivery(
             evidence.modal_resolution = evidence.modal_resolution or MODAL_UNRESOLVED
             evidence.reason = f"pre-delivery-{probe.pre_delivery or READINESS_BLOCKED}"
             raise TuiDeliveryError(
-                f"the pane never became sendable within {TUI_PRE_DELIVERY_TIMEOUT_S:.1f}s "
+                f"the pane never left its dialog within {TUI_PRE_DELIVERY_TIMEOUT_S:.1f}s "
                 f"(state={probe.pre_delivery or probe.readiness})",
                 evidence=evidence,
             )
