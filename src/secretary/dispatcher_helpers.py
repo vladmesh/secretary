@@ -78,6 +78,18 @@ def _decision_record_line(generation: int, decision: str) -> str:
     return f"<!-- observer-decision generation={int(generation)} body={encoded} -->"
 
 
+_PROTOCOL_PREREQUISITES_RECORD_RE = re.compile(
+    r"^<!-- protocol-prerequisites generation=(\d+) names=([A-Za-z0-9+/]*={0,2}) -->$", re.MULTILINE
+)
+
+
+def _protocol_prerequisites_record_line(generation: int, prerequisites: Iterable[str]) -> str:
+    """The structured prerequisite names the dispatcher, not decision prose, gave the worker."""
+    payload = "\n".join(prerequisites)
+    encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    return f"<!-- protocol-prerequisites generation={int(generation)} names={encoded} -->"
+
+
 # The round's own identity, recorded the same way and for the same reason as the decision above:
 # the report commands are rendered as prose in the same document as the card description, and a
 # description is arbitrary Markdown. Reading the ids back by scanning every `--request-id` token in
@@ -298,6 +310,25 @@ def _task_doc_decision(workspace: str) -> str:
         return decoded.decode("utf-8").strip()
     except (ValueError, UnicodeError):
         return ""
+
+
+def _task_doc_protocol_prerequisites(workspace: str) -> tuple[str, ...]:
+    """Read the dispatcher-written structured prerequisite record from a worker document."""
+    if not workspace:
+        return ()
+    try:
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ()
+    records = _PROTOCOL_PREREQUISITES_RECORD_RE.findall(document)
+    if not records:
+        return ()
+    try:
+        decoded = base64.b64decode(records[-1][1].encode("ascii"), validate=True).decode("utf-8")
+    except (ValueError, UnicodeError):
+        return ()
+    names = tuple(filter(None, decoded.splitlines()))
+    return names if len(set(names)) == len(names) else ()
 
 
 def _spent_report_generations(task: dict[str, Any]) -> int:

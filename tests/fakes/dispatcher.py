@@ -878,6 +878,7 @@ class FakeHost:
         self.crash_after_task_doc: BaseException | None = None
 
     _select_revision_bound_worker_feedback = CommandHostRuntime._select_revision_bound_worker_feedback
+    _validated_worker_prerequisites = CommandHostRuntime._validated_worker_prerequisites
     _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)
 
     def _broad_check_invocation(self, project: str) -> tuple[str, str]:
@@ -891,7 +892,13 @@ class FakeHost:
         return CommandHostRuntime._broad_check_invocation(self, project)  # type: ignore[arg-type]
 
     def _write_task_doc(
-        self, task: dict, workspace: Path, attempt_id: str, generation: int, decision: str = ""
+        self,
+        task: dict,
+        workspace: Path,
+        attempt_id: str,
+        generation: int,
+        decision: str = "",
+        protocol_prerequisites: tuple[str, ...] = (),
     ) -> None:
         """Write the TASK.md this bring-up would hand the worker, from the real builder.
 
@@ -909,6 +916,7 @@ class FakeHost:
             attempt_id,
             generation,
             decision,
+            protocol_prerequisites,
         )
         (workspace / "TASK.md").write_text(document, encoding="utf-8")
         if self.crash_after_task_doc is not None:
@@ -1340,6 +1348,7 @@ class FakeHost:
             record.attempt_id,
             record.report_generation,
             record.report_decision,
+            record.report_protocol_prerequisites,
         )
         self.prepared.append(task["ref"])
         launched = self._launched(
@@ -1686,6 +1695,7 @@ class FakeHost:
             record.attempt_id,
             record.report_generation,
             record.report_decision,
+            record.report_protocol_prerequisites,
         )
         self.resumed_continuations.append(
             head_ops.NudgePointer.at_document(

@@ -183,7 +183,12 @@ class DispatcherRuntimeFixture:
         return (Path(self._pilot_record()["workspace"]) / "TASK.md").read_text(encoding="utf-8")
 
     def _decide(
-        self, kind: str, reason: str = "the observer looked and decided", *, request_id: str = ""
+        self,
+        kind: str,
+        reason: str = "the observer looked and decided",
+        *,
+        protocol_prerequisites: tuple[str, ...] = (),
+        request_id: str = "",
     ) -> None:
         """The observer's decision on a parked card, the only thing that releases it."""
         self.writer.decide(
@@ -192,6 +197,7 @@ class DispatcherRuntimeFixture:
             reference="secretary-510-pilot",
             kind=kind,
             body=reason,
+            protocol_prerequisites=protocol_prerequisites,
             request_id=request_id or f"decision-{kind}",
         )
 
@@ -217,12 +223,13 @@ class DispatcherRuntimeFixture:
         *,
         request_id: str = "",
         reason: str = "the observer looked and decided",
+        protocol_prerequisites: tuple[str, ...] = (),
     ) -> dict:
         """Tick the parked verdict through the seam and hand back the tick that acted on it."""
         parked = self.tick()
         self.assertEqual(parked["to"], "assessment")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
-        self._decide(kind, reason, request_id=request_id)
+        self._decide(kind, reason, protocol_prerequisites=protocol_prerequisites, request_id=request_id)
         return self.tick()
 
     def _report_done(self, body: str = "done") -> None:

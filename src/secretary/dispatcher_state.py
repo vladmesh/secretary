@@ -100,6 +100,9 @@ class DispatcherRecord:
     # generation, whenever a red transition opens a round, so a gate-red round carries no stale
     # decision from the review round before it.
     report_decision: str = ""
+    # The revision-bound protocol prerequisite names that opened this worker round. The dispatcher
+    # writes them only after resolving the observer declaration through the ownership registry.
+    report_protocol_prerequisites: tuple[str, ...] = ()
     # Mechanical validation gate (secretary-633): "" until the gate is green for the current code
     # state, then "green". Reset to "" on every fresh entry to validate so a reworked card re-runs
     # the gate instead of coasting on a stale pass, except for an observer-directed report-only
@@ -328,6 +331,7 @@ class DispatcherRecord:
             "paused_worker_at": self.paused_worker_at,
             "report_generation": self.report_generation,
             "report_decision": self.report_decision,
+            "report_protocol_prerequisites": list(self.report_protocol_prerequisites),
             "outcome_terminal_path": self.outcome_terminal_path.value,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
@@ -431,6 +435,11 @@ class DispatcherRecord:
             # previous one issued for the round still running.
             report_generation=int(payload.get("report_generation") or payload.get("review_baseline") or 0),
             report_decision=str(payload.get("report_decision") or ""),
+            report_protocol_prerequisites=tuple(
+                item
+                for item in payload.get("report_protocol_prerequisites", ())
+                if isinstance(item, str) and item
+            ),
             outcome_terminal_path=outcome_terminal_path(payload.get("outcome_terminal_path"), state=state),
             state=state,
             claimed_at=float(payload.get("claimed_at") or time.time()),

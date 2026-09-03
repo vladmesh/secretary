@@ -36,6 +36,7 @@ from secretary.routing_journal import (
 )
 from secretary.sprints import refresh_active_sprint_projects
 from secretary.tasks import (
+    ArtifactOwnershipTaskError,
     _STATE_BY_COLUMN,
     KanboardClient,
     TaskAudit,
@@ -3092,6 +3093,164 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(event["kind"], "card.decided")
         self.assertEqual(event["data"]["decision"], "reslice")
         self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
+
+    def test_rework_refuses_a_worker_requirement_for_a_dispatcher_gate_receipt(self) -> None:
+        """issue:7360d39d4956435c9cc6: the gate receipt is not worker evidence."""
+        self._park()
+        self.reserve_project()
+        body = "Repair the local implementation and report the focused regression coverage."
+        request_id = "dispatcher-receipt-rework"
+
+        with mock.patch("secretary.tasks.specification_revision", return_value="specification-revision-1"):
+            with self.assertRaises(ArtifactOwnershipTaskError) as raised:
+                self.writer.decide(
+                    role="observer",
+                    actor="observer",
+                    reference="secretary-468",
+                    kind="rework",
+                    body=body,
+                    protocol_prerequisites=("dispatcher_executed_exact_sha_gate_receipt",),
+                    request_id=request_id,
+                )
+
+            # Retrying the same denied request neither creates a second audit fact nor changes the
+            # card into a worker-blocked/external-fact outcome.
+            with self.assertRaises(ArtifactOwnershipTaskError) as retried:
+                self.writer.decide(
+                    role="observer",
+                    actor="observer",
+                    reference="secretary-468",
+                    kind="rework",
+                    body=body,
+                    protocol_prerequisites=("dispatcher_executed_exact_sha_gate_receipt",),
+                    request_id=request_id,
+                )
+
+        self.assertEqual(raised.exception.code, "artifact_ownership_violation")
+        self.assertEqual(retried.exception.code, "artifact_ownership_violation")
+        self.assertIn("owned by dispatcher", raised.exception.message)
+        self.assertIn("specification-revision-1", raised.exception.message)
+        self.assertEqual(self.writer.reader.show("secretary-468")["state"], "assessment")
+        self.assertFalse(
+            any(comment.get("marker") == "decision:rework" for comment in self.client.comments[12])
+        )
+        refusals = self.writer.audit.events("secretary-468", kind="card.decision_refused")
+        self.assertEqual(len(refusals), 1)
+        refusal = refusals[0]["data"]
+        self.assertEqual(refusal["code"], "artifact_ownership_violation")
+        self.assertEqual(refusal["artifact_owner"], "dispatcher")
+        self.assertEqual(refusal["requested_role"], "worker")
+        self.assertEqual(refusal["protocol_prerequisites"], ["dispatcher_executed_exact_sha_gate_receipt"])
+        self.assertEqual(refusal["specification_revision"], "specification-revision-1")
+        self.assertNotIn("external_fact", str(refusal))
+
+        # A corrected instruction uses the normal decision path on this same Assessment visit and
+        # candidate. The refusal did not consume the decision's retry identity.
+        corrected = self.writer.decide(
+            role="observer",
+            actor="observer",
+            reference="secretary-468",
+            kind="rework",
+            body="Repair the local implementation and report the focused regression coverage.",
+            protocol_prerequisites=("worker_local_broad_check_receipt",),
+            request_id=request_id,
+        )
+        self.assertFalse(corrected["replayed"])
+        self.assertEqual(corrected["task"]["state"], "assessment")
+        decisions = self.writer.audit.events("secretary-468", kind="card.decided")
+        self.assertEqual(len(decisions), 1)
+        self.assertTrue(decisions[0]["data"]["assessment_visit"])
+        self.assertEqual(decisions[0]["data"]["protocol_prerequisites"], ["worker_local_broad_check_receipt"])
+
+    def test_normal_rework_with_reviewer_verdict_context_is_recordable(self) -> None:
+        self._park()
+        self.reserve_project()
+
+        decided = self.writer.decide(
+            role="observer",
+            actor="observer",
+            reference="secretary-468",
+            kind="rework",
+            body="Do not obtain an executed exact-SHA gate receipt. Address each reviewer finding.",
+            protocol_prerequisites=(),
+            request_id="normal-reviewer-context-rework",
+        )
+
+        self.assertFalse(decided["replayed"])
+        self.assertEqual(decided["task"]["state"], "assessment")
+        self.assertEqual(
+            self.writer.audit.events("secretary-468", kind="card.decision_refused"), []
+        )
+        self.assertEqual(self.writer.audit.events("secretary-468", kind="card.decided")[0]["data"]["decision"], "rework")
+
+    def test_decide_cli_persists_declared_protocol_prerequisites(self) -> None:
+        self._park()
+        data_dir = Path(self.tmpdir.name) / "cli"
+        self.reserve_project(data_dir=str(data_dir))
+        reason = Path(self.tmpdir.name) / "decision.md"
+        reason.write_text("repair the local implementation\n", encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "task",
+                    "decide",
+                    "--ref",
+                    "secretary-468",
+                    "--role",
+                    "observer",
+                    "--kind",
+                    "rework",
+                    "--protocol-prerequisite",
+                    "worker_local_broad_check_receipt",
+                    "--reason-file",
+                    str(reason),
+                    "--data-dir",
+                    str(data_dir),
+                    "--request-id",
+                    "cli-structured-rework",
+                ]
+            )
+
+        self.assertEqual((code, errors.getvalue()), (0, ""))
+        event = TaskAudit(data_dir).events("secretary-468", kind="card.decided")[-1]
+        self.assertEqual(event["data"]["body"], "repair the local implementation\n")
+        self.assertEqual(event["data"]["protocol_prerequisites"], ["worker_local_broad_check_receipt"])
+
+    def test_verdict_cli_uses_the_established_writer_path(self) -> None:
+        body = Path(self.tmpdir.name) / "verdict.md"
+        body.write_text("looks good\n", encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "task",
+                    "verdict",
+                    "--ref",
+                    "secretary-468",
+                    "--role",
+                    "reviewer",
+                    "--kind",
+                    "green",
+                    "--body-file",
+                    str(body),
+                    "--data-dir",
+                    str(Path(self.tmpdir.name) / "cli-verdict"),
+                    "--request-id",
+                    "cli-verdict",
+                ]
+            )
+
+        self.assertEqual((code, errors.getvalue()), (0, ""))
+        self.assertEqual(json.loads(output.getvalue())["action"], "verdict")
 
     def test_assessment_visit_accepts_one_canonical_decision_across_delivery_retries(self) -> None:
         self._park()

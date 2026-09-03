@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -16,6 +17,9 @@ from secretary.board import (
     Card,
     CardState,
     Create,
+    EntityKind,
+    Event,
+    EventKind,
     FakeBoardHost,
 )
 from secretary.board_transport import ensure as ensure_board_transport
@@ -26,6 +30,7 @@ from secretary.checkpoint import (
     CheckpointPusher,
     CheckpointWriter,
     _validate_board,
+    _validate_board_events,
     _write_analytics_manifest,
     checkpoint_snapshot,
     render_checkpoint_lines,
@@ -1306,6 +1311,35 @@ class CheckpointSnapshotTests(unittest.TestCase):
 
         self.assertEqual(snapshot["blocked_reason"], "")
         self.assertEqual(snapshot["push_status"], "pending")
+
+
+class BoardEventCheckpointCompatibilityTests(unittest.TestCase):
+    def test_legacy_decision_event_is_accepted_by_checkpoint_validation(self) -> None:
+        event = Event(
+            "legacy-decision",
+            EventKind.CARD_DECIDED,
+            EntityKind.CARD,
+            "secretary-1546",
+            Actor("observer", "observer"),
+            "rework it",
+            datetime(2026, 9, 3, 22, 0, tzinfo=UTC),
+            data={
+                "marker": "decision:rework",
+                "decision": "rework",
+                "body": "rework it",
+                "body_sha256": "a" * 64,
+                "assessment_visit": "assessment-1",
+                "description_sha256": "b" * 64,
+                "specification_revision": "specification-1",
+                "protocol_prerequisites": [],
+            },
+        )
+        record = event.to_record("legacy-decision-request")
+        del record["data"]["protocol_prerequisites"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            _validate_board_events(path)
 
 
 if __name__ == "__main__":

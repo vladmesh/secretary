@@ -57,6 +57,12 @@ from secretary.dispatcher_helpers import (
     _tail,
     scrub_host_output,
 )
+from secretary.dispatcher_helpers import _protocol_prerequisites_record_line
+from secretary.board.protocol_artifacts import (
+    ArtifactOwnershipViolation,
+    ProtocolArtifact,
+    validate_rework_prerequisites,
+)
 from secretary.dispatcher_helpers import (
     safe_one_line as _safe_one_line,
 )
@@ -1004,7 +1010,12 @@ class CommandHostRuntime:
         self._write_prompt(
             workspace / "TASK.md",
             self._worker_task_doc(
-                task, base, record.attempt_id, record.report_generation, record.report_decision
+                task,
+                base,
+                record.attempt_id,
+                record.report_generation,
+                record.report_decision,
+                record.report_protocol_prerequisites,
             ),
         )
         return self._launch(
@@ -3422,10 +3433,13 @@ class CommandHostRuntime:
         # these values, not because separate call sites happen to agree.
         generation = record.report_generation
         decision = record.report_decision
+        protocol_prerequisites = record.report_protocol_prerequisites
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             workspace / "TASK.md",
-            self._worker_task_doc(task, base, record.attempt_id, generation, decision),
+            self._worker_task_doc(
+                task, base, record.attempt_id, generation, decision, protocol_prerequisites
+            ),
         )
         # The continuation travels as a pointer at the document just written, not as the round typed
         # into the composer: that is the delivery shape that has never lost a prompt. It is built
@@ -3608,6 +3622,7 @@ class CommandHostRuntime:
         attempt_id: str,
         generation: int = 0,
         decision: str = "",
+        protocol_prerequisites: tuple[str, ...] = (),
     ) -> str:
         branch = _legacy_worker_branch(task["ref"])
         # The generation keeps the report request-id distinct per round: a rework reuses the same
@@ -3634,6 +3649,7 @@ class CommandHostRuntime:
             "",
         ]
         decision, review_red = self._select_revision_bound_worker_feedback(task, decision)
+        prerequisites = self._validated_worker_prerequisites(task, decision, protocol_prerequisites)
         if decision:
             # Rendered above the findings it was made on, and named as the thing to follow.
             sections += [
@@ -3647,6 +3663,16 @@ class CommandHostRuntime:
                 "is part of this round too.",
                 "",
                 decision,
+                "",
+            ]
+        if prerequisites:
+            sections += [
+                "## Authoritative protocol prerequisites",
+                "",
+                "These revision-bound prerequisites were validated against the protocol ownership",
+                "registry. Decision prose and reviewer context cannot add one.",
+                "",
+                *[f"- {artifact.worker_label} ({artifact.name})" for artifact in prerequisites],
                 "",
             ]
         if review_red and decision:
@@ -3817,6 +3843,7 @@ class CommandHostRuntime:
             # `_task_doc_decision` reads the dispatcher's own record. Written on every document,
             # empty body included: a round with no decision has to read back as none.
             _decision_record_line(generation, decision),
+            _protocol_prerequisites_record_line(generation, (artifact.name for artifact in prerequisites)),
             # And the round's own ids, on the same terms: the report commands above are prose in a
             # document that also renders the card description, so they cannot be the authority.
             _round_record_line(generation, [request, *blocked_requests.values()]),
@@ -3839,13 +3866,54 @@ class CommandHostRuntime:
         if not revision:
             return "", None
         digest = hashlib.sha256(description.encode("utf-8")).hexdigest()
-        decision = (decision or "").strip()
+        decision = CommandHostRuntime._canonical_decision_binding(decision)
         if decision:
             if not self._bound_marker_body(task, events, "decision:rework", revision, digest, decision):
                 return "", None
             review = self._bound_marker_body(task, events, "review:red", revision, digest)
             return decision, review
         return "", self._bound_marker_body(task, events, "review:red", revision, digest)
+
+    def _validated_worker_prerequisites(
+        self, task: dict[str, Any], decision: str, expected: tuple[str, ...]
+    ) -> tuple[ProtocolArtifact, ...]:
+        """Read only the structured declaration bound to the decision rendered for this round."""
+        if not decision:
+            return ()
+        events = self.audit.events(str(task.get("ref") or ""))
+        description = str(task.get("description") or "")
+        revision = specification_revision(events, description)
+        digest = hashlib.sha256(description.encode("utf-8")).hexdigest()
+        for event in reversed(events):
+            data = event.get("data") if isinstance(event.get("data"), dict) else event.get("payload")
+            if not isinstance(data, dict) or data.get("marker") != "decision:rework":
+                continue
+            body = data.get("body")
+            if (
+                not isinstance(body, str)
+                or CommandHostRuntime._canonical_decision_binding(body)
+                != CommandHostRuntime._canonical_decision_binding(decision)
+                or data.get("specification_revision") != revision
+                or data.get("description_sha256") != digest
+                or data.get("protocol_prerequisites") != list(expected)
+            ):
+                continue
+            try:
+                return validate_rework_prerequisites(expected, specification_revision=revision or None)
+            except (ValueError, ArtifactOwnershipViolation):
+                return ()
+        return ()
+
+    @staticmethod
+    def _canonical_decision_binding(body: str) -> str:
+        """The one comparison form for raw observer decision bodies.
+
+        Audit records retain the body exactly as the observer submitted it, including a final
+        newline from a supported reason file.  Worker documents deliberately render the concise
+        form, so every revision-bound match must use this same form rather than accidentally
+        comparing rendered prose to raw audit content.
+        """
+        return body.strip()
 
     @staticmethod
     def _bound_marker_body(
@@ -3876,7 +3944,10 @@ class CommandHostRuntime:
                 or occurrence < 1
             ):
                 return None
-            if required_body and body.strip() != required_body:
+            if required_body and (
+                CommandHostRuntime._canonical_decision_binding(body)
+                != CommandHostRuntime._canonical_decision_binding(required_body)
+            ):
                 continue
             rendered = f"[{marker}]\n{body}"
             matches = [
@@ -3886,7 +3957,7 @@ class CommandHostRuntime:
             ]
             if len(matches) < occurrence:
                 return None
-            return body.strip()
+            return CommandHostRuntime._canonical_decision_binding(body)
         return None
 
     def _review_prompt(

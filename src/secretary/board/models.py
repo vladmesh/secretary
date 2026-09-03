@@ -54,6 +54,9 @@ class EventKind(StrEnum):
     CARD_REPORTED = "card.reported"
     CARD_VERDICTED = "card.verdict"
     CARD_DECIDED = "card.decided"
+    # A refused rework is a durable Card fact: it names the registry boundary that prevented an
+    # observer instruction becoming authoritative, without inventing a worker outcome.
+    CARD_DECISION_REFUSED = "card.decision_refused"
     # What one completed worker or review phase cost, read from the provider's own structured
     # records at the moment the phase ended.  It is a Card fact with no backend mutation: the
     # journal is the only place a finished phase's token counts are durable at all.
@@ -419,6 +422,35 @@ def _validate_control_marker_event(
     data: dict[str, Any],
 ) -> None:
     """Keep the three declared marker kinds complete at the typed boundary."""
+    if kind is EventKind.CARD_DECISION_REFUSED:
+        if entity_kind is not EntityKind.CARD:
+            raise ValueError("Card decision refusal requires a Card subject")
+        required = {
+            "decision",
+            "code",
+            "artifact",
+            "artifact_owner",
+            "requested_role",
+            "specification_revision",
+            "protocol_prerequisites",
+        }
+        if set(data) != required:
+            raise ValueError("Card decision refusal has an unsupported payload")
+        if data.get("decision") != "rework" or data.get("code") != "artifact_ownership_violation":
+            raise ValueError("Card decision refusal has an unsupported reason")
+        for field in ("artifact", "artifact_owner", "requested_role"):
+            value = data.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"Card decision refusal needs {field}")
+        revision = data.get("specification_revision")
+        if revision is not None and (not isinstance(revision, str) or not revision):
+            raise ValueError("Card decision refusal needs a specification revision or null")
+        prerequisites = data.get("protocol_prerequisites")
+        if not isinstance(prerequisites, list) or not prerequisites or any(
+            not isinstance(value, str) or not value for value in prerequisites
+        ):
+            raise ValueError("Card decision refusal needs declared protocol prerequisites")
+        return
     marker_kinds = {
         EventKind.CARD_REPORTED,
         EventKind.CARD_VERDICTED,
@@ -452,6 +484,13 @@ def _validate_control_marker_event(
     decision = data.get("decision")
     if decision not in {"release", "rework", "reslice"} or marker != f"decision:{decision}":
         raise ValueError("Card decision event has an unsupported marker payload")
+    # The field was added after `card.decided` was released. Historical records declare no
+    # protocol prerequisite, while every newly written value remains shape-checked below.
+    prerequisites = data.get("protocol_prerequisites", [])
+    if not isinstance(prerequisites, list) or any(not isinstance(value, str) or not value for value in prerequisites):
+        raise ValueError("Card decision event has invalid protocol prerequisites")
+    if len(set(prerequisites)) != len(prerequisites):
+        raise ValueError("Card decision event has duplicate protocol prerequisites")
 
 
 def _validate_attempt_usage_event(

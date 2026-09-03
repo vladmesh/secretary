@@ -30,6 +30,10 @@ from secretary.board.models import (
     EventKind,
     RelatedRefs,
 )
+from secretary.board.protocol_artifacts import (
+    ArtifactOwnershipViolation,
+    validate_rework_prerequisites,
+)
 from secretary.board.transitions import BoardProtocolError
 from secretary.board_transport import (
     BoardTransport,
@@ -61,6 +65,14 @@ class TaskError(Exception):
         self.message = message
         self.exit_code = exit_code
         super().__init__(message)
+
+
+class ArtifactOwnershipTaskError(TaskError):
+    """The task-protocol form of a registry-backed ownership violation."""
+
+    def __init__(self, violation: ArtifactOwnershipViolation) -> None:
+        self.violation = violation
+        super().__init__("artifact_ownership_violation", violation.message, 3)
 
 
 class _CommittedWriteError(Exception):
@@ -109,6 +121,11 @@ def _sprint_guard_denial_request_id(request_id: str) -> str:
 def _sprint_guard_override_request_id(request_id: str) -> str:
     """Keep a granted override from consuming the operation's retry key."""
     return "sprint-guard-override-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+
+
+def _artifact_ownership_refusal_request_id(request_id: str) -> str:
+    """Keep a refused instruction visible without consuming its decision retry key."""
+    return "artifact-ownership-refusal-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
 
 
 def _done_retention_request_id(task_id: int, date_moved: int) -> str:
@@ -2135,7 +2152,15 @@ class TaskWriter:
         )
 
     def decide(
-        self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        kind: str,
+        body: str,
+        protocol_prerequisites: Iterable[str] = (),
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Record what to do with a parked card, apart from the move that does it.
 
@@ -2154,6 +2179,7 @@ class TaskWriter:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
         if not body.strip():
             raise TaskError("validation", "a decision requires a non-empty reason", 2)
+        declared_prerequisites = tuple(protocol_prerequisites)
         request_id = request_id or str(uuid.uuid4())
         with assessment_decision_lock(self.data_dir, reference):
             # Resolve immutable request ownership before mutable decision state.
@@ -2168,13 +2194,15 @@ class TaskWriter:
                 # A retry must carry the immutable binding which the first decision committed.
                 # Do not re-derive it from mutable board state or drop it from the marker identity.
                 owned_data = owned.data if isinstance(owned.data, dict) else {}
+                if tuple(owned_data.get("protocol_prerequisites") or ()) != declared_prerequisites:
+                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
                 replay_data = {
                     "marker": f"decision:{kind}",
                     "decision": kind,
                     "body": body,
                     "body_sha256": _digest(body),
                 }
-                for field_name in ("description_sha256", "specification_revision"):
+                for field_name in ("description_sha256", "specification_revision", "protocol_prerequisites"):
                     if field_name in owned_data:
                         replay_data[field_name] = owned_data[field_name]
                 return self._marker_write(
@@ -2219,6 +2247,7 @@ class TaskWriter:
                 "description_sha256": _digest(current["description"]),
                 "specification_revision": specification_revision(committed_events, current["description"])
                 or None,
+                "protocol_prerequisites": list(declared_prerequisites),
             }
             if current["state"] != "assessment":
                 raise TaskError(
@@ -2246,6 +2275,25 @@ class TaskWriter:
                     "event_id": str(existing.get("event_id") or existing.get("request_id") or ""),
                     "replayed": True,
                 }
+            if kind == "rework":
+                try:
+                    validate_rework_prerequisites(
+                        declared_prerequisites,
+                        specification_revision=marker_data["specification_revision"],
+                    )
+                except ValueError as exc:
+                    raise TaskError("validation", str(exc), 2) from None
+                except ArtifactOwnershipViolation as violation:
+                    self._deny_rework_artifact_ownership(
+                        violation=violation,
+                        role=role,
+                        actor=actor,
+                        reference=reference,
+                        request_id=request_id,
+                        protocol_prerequisites=declared_prerequisites,
+                    )
+            elif declared_prerequisites:
+                raise TaskError("validation", "protocol prerequisites are only supported for rework", 2)
             return self._marker_write(
                 action="decided",
                 event_kind=EventKind.CARD_DECIDED,
@@ -3388,6 +3436,59 @@ class TaskWriter:
                 ) from None
         payload = event.get("payload") if isinstance(event, dict) else {}
         raise TaskError(str(payload.get("code") or code), str(payload.get("message") or message), exit_code)
+
+    def _deny_rework_artifact_ownership(
+        self,
+        *,
+        violation: ArtifactOwnershipViolation,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str,
+        protocol_prerequisites: tuple[str, ...],
+    ) -> None:
+        """Persist the denied rework without mutating its parked card.
+
+        The derived audit key lets the observer correct the instruction and reuse the decision
+        request identity: a refusal is evidence, not an authoritative decision or worker outcome.
+        """
+        refusal_request_id = _artifact_ownership_refusal_request_id(request_id)
+        data = {
+            "decision": "rework",
+            "code": "artifact_ownership_violation",
+            "artifact": violation.artifact.name,
+            "artifact_owner": violation.artifact.owner.value,
+            "requested_role": violation.requested_role.value,
+            "specification_revision": violation.specification_revision,
+            "protocol_prerequisites": list(protocol_prerequisites),
+        }
+        existing = self.board_host.canon.event(refusal_request_id)
+        if existing is None:
+            event = Event(
+                "evt_artifact_ownership_" + hashlib.sha256(refusal_request_id.encode("utf-8")).hexdigest(),
+                EventKind.CARD_DECISION_REFUSED,
+                EntityKind.CARD,
+                reference,
+                Actor(role, actor),
+                violation.message,
+                datetime.now(UTC),
+                data=data,
+            )
+        else:
+            if (
+                existing.kind is not EventKind.CARD_DECISION_REFUSED
+                or existing.ref != reference
+                or existing.data != data
+            ):
+                raise TaskError("validation", "request id belongs to another operation or payload", 2)
+            event = existing
+        try:
+            self.board_host.canon.commit(refusal_request_id, event)
+        except (OSError, ValueError) as exc:
+            raise TaskError(
+                "audit_pending", "artifact ownership refusal requires audit repair", 4
+            ) from exc
+        raise ArtifactOwnershipTaskError(violation)
 
     def archive(
         self, *, role: str, actor: str, reference: str, reason: str, request_id: str | None = None
