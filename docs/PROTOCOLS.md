@@ -530,11 +530,63 @@ will not confirm keeps the intent instead.
 
 This is about delivery and adoption only. It does not change the vitality watchdog's rungs or the
 `healthy_quiet` ceiling for an idle Codex shell, and the headless Blocked→In-progress adopt with no
-worker identity keeps its own missing-identity relaunch. The two share the word and not the code:
-the delivery-evidence refusal above lives in `_adopt_launch_intent`, which has a launch intent and
-therefore a receipt to read, while the missing-identity path is `_adopt`, which rebuilds a record
-from the board and has no delivery evidence to consult at all. A relaunch there would need its own
-answer to "was this head ever delivered to".
+worker identity is settled by the recovery in the next section. The two share the word and not the
+code, and they compose by **ordering**: the delivery-evidence refusal above runs first inside
+`_adopt_launch_intent` and returns before any identity question is asked, because a head that never
+took its pointer is not this card's head however completely it can be identified. The
+missing-identity path is `_adopt`, which rebuilds a record from the board and has no launch intent
+and no delivery evidence to consult at all — so it cannot ask "was this head ever delivered to",
+and it does not pretend to.
+
+### A card in an active state with no worker
+
+A card can arrive in an active execution column with nothing running: a raw board move out of
+Blocked back into In progress, or a bring-up whose tick died before it bound anything. `_adopt`
+rebuilds a record from the board, and unless the worker's own pid heartbeat is there to bind, that
+record names no head — no HeadRun, no pane, no heartbeat path, no launch intent. Such a record used
+to settle `adopted` with an empty handle and the tick answered `waiting-worker-report`: a wait for a
+report from a worker that had been stopped, while the board showed work in progress.
+
+The tick now settles it before any wait. Exactly one of three things is durably established:
+
+* **a verified live worker identity** — `_adopt` binds the worker's own heartbeat only after its
+  self-described run, role and card binding are promoted into a HeadRun and re-checked;
+* **a replacement launch** — the launch intent is written to disk first, bound to the retained
+  checkout and its exact candidate, and the head is brought up under it. The checkout is bound and
+  described before anything is launched into it: path, branch, clean/dirty tree and exact SHA.
+  Nothing is recreated from base, re-seeded or reset, and no other workspace is substituted;
+* **a refusal** — the card goes back to Blocked with a named recovery error on the card itself:
+  `workspace_missing`, `workspace_unbindable`, `workspace_unreadable`, `candidate_unknown` or
+  `round_already_answered`.
+
+`round_already_answered` is the field case (`issue:59ac13b5cafdf93f61b6`, card
+codegen-orchestrator-1232): the retained checkout holds the document of a round the board has
+already consumed a worker report for. There is then no worker work left to do, and the right
+continuation is a dispatcher-owned exact-SHA validation of the unchanged candidate
+(`issue:3a0b263fd519d7d0f62e`), which is a different path. This one refuses and names the situation
+rather than inventing a worker round for it. The evidence is the card's own consumed report markers
+and the checkout's TASK.md round record — an adopted record has no launch intent and no delivery
+receipt, so no receipt is invented for it either.
+
+A live heartbeat at this card's worker pid path that cannot be bound to it is neither: it is
+reported `orphan-worker-heartbeat-unbound` and nothing is launched beside it and nothing is
+signalled, the same refusal the claim path makes.
+
+Every episode gets its own answer. A card with no dispatcher record is ticked under the constant
+`production_adopt_attempt_id(ref)` — one string per card, forever — so an attempt-scoped request id
+would make the second return of the same card replay the first refusal's committed event: no board
+move, no comment, and a tick still reporting a transition. The refusal and the relaunch comment are
+therefore keyed on the episode as well, by the stamp written when the episode was first observed
+plus the card's comment count at that moment. Within one episode that stamp does not move, so a tick
+that died between the board move and its own bookkeeping replays onto the same id and moves nothing
+twice; across episodes it always does, so returning the same card a second time gets a second
+refusal on the card.
+
+While such a card is unresolved, `secretary status` shows it as degraded rather than active. The
+attempt row carries `headless` — record state, that no handle and no heartbeat are known, how long
+it has been so, the retained workspace, branch, dirty flag and candidate SHA — and the sprint
+summary lists the same cards under `degraded_cards`. An In progress column on its own is not
+evidence of active work.
 
 ### Broad-check handling
 

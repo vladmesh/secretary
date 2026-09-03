@@ -391,6 +391,82 @@ from triggered_agents.runtime.launch_prefix import pythonpath_prefix
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
 
+#: Why a card standing in an active execution state without a live worker was refused a
+#: replacement launch (secretary-1544). The key is the durable recovery error: it goes on the
+#: record, into the tick outcome and into the card's own comment, so "In progress" is never the
+#: only description of a card nobody is working on.
+HEADLESS_RECOVERY_REASONS: dict[str, str] = {
+    "workspace_missing": "the retained worker checkout is gone, so no candidate can be bound",
+    "workspace_unbindable": (
+        "the retained checkout is not this card's registered worktree on its own branch"
+    ),
+    "workspace_unreadable": "the retained checkout could not be read",
+    "candidate_unknown": "the retained checkout names no candidate commit",
+    "round_already_answered": (
+        "the retained candidate's round already has an accepted worker report, so an active "
+        "execution state owes no worker work; the continuation is a dispatcher-owned exact-SHA "
+        "validation, which this path does not perform"
+    ),
+}
+#: The blocked-reason taxonomy each recovery error is charged to.
+_HEADLESS_RECOVERY_BLOCKED_REASON: dict[str, str] = {
+    "round_already_answered": "operator",
+}
+
+
+def _tree_state_label(dirty: Any) -> str:
+    """Say `unknown` for a tree nothing read, rather than calling it clean."""
+    if dirty is None:
+        return "unknown"
+    return "dirty" if dirty else "clean"
+
+
+def _headless_episode_token(record: DispatcherRecord) -> str:
+    """The id discriminator that separates one headless episode of a card from the next.
+
+    A card with no dispatcher record does not get a minted attempt id: production ticks it under the
+    constant `production_adopt_attempt_id(ref)`, the same string for that card forever
+    (`dispatcher_production.py`). So an attempt-scoped request id is a *card*-scoped one here, and a
+    second episode would replay the first episode's committed event instead of moving the board —
+    the tick reporting a transition that did not happen (secretary-1544 round 5).
+
+    The stamp this returns is dispatcher-owned and episode-scoped in both directions. It is written
+    once, when the episode is first observed, and it survives every tick of that episode, so a tick
+    that died between the board move and its own bookkeeping replays onto the same id and moves
+    nothing twice. It does not survive the episode, because the refusal drops the record with it, so
+    the next return of the same card mints a new one and gets its own move.
+
+    Two parts, because neither alone is enough. The wall clock is what a replay must not disturb,
+    but it has a resolution and two episodes of a fast-moving card could land inside it. The card's
+    comment count cannot: a refusal writes its own move and reason onto the card, so the next
+    episode is stamped strictly higher whatever the clock says.
+    """
+    episode = record.worker_headless or {}
+    since = float(episode.get("since") or 0.0)
+    comments = int(episode.get("comment_baseline") or 0)
+    return f"episode-{since:.6f}-c{comments}" if since else "episode-unstamped"
+
+
+def _headless_worker(record: DispatcherRecord) -> bool:
+    """Whether this card owes a worker that nothing on the record can name or reach.
+
+    Not an absence of health: an absence of *identity*. A record here has no pane, no leaf, no
+    heartbeat path and no launch intent, so there is nothing for a watchdog to observe, nudge or
+    replace, and nothing that could ever answer the report the tick would otherwise wait for.
+    """
+    continuation = record.worker_continuation
+    return not (
+        # `owns_head` is the project's own question — does anything here still have to be settled
+        # before a replacement opens — and it is the right one: a HeadRun left on the record by a
+        # stop that already forgot the pane and the heartbeat names a head nobody can reach.
+        record.owns_head(WORKER_ROLE)
+        or record.launch_intent
+        or record.paused_worker_at
+        or continuation.delivery_pending
+        or continuation.delivery_confirmed
+        or continuation.red_transition_pending
+    )
+
 
 def default_data_dir(instance_path: Path) -> Path:
     try:
@@ -1807,6 +1883,11 @@ class DispatcherRuntime:
                 "attempt_id": attempt_id,
                 "to": "blocked",
             }
+        # Before any wait: a card cannot wait for a report from a worker no record can name. The
+        # watchdog below observes a head; this decides whether there is one to observe at all.
+        headless = self._resolve_headless_worker(task, record, records, payload, attempt_id)
+        if headless is not None:
+            return headless
         watchdog = self._wait_watchdog(task, record, records, payload, attempt_id, kind="worker")
         if watchdog is not None:
             return watchdog
@@ -1816,6 +1897,257 @@ class DispatcherRuntime:
             "pilot_ref": ref,
             "attempt_id": attempt_id,
             "action": "waiting-worker-report",
+        }
+
+    def _resolve_headless_worker(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """Settle a card standing in an active execution state with no worker at all.
+
+        The situation this closes (secretary-1544, field evidence codegen-orchestrator-1232): a card
+        is returned from Blocked straight into In progress. `_adopt` rebuilds a record from the
+        board, finds no heartbeat to bind, and — because the board claim is the old one — the audit
+        holds no claim event for the freshly synthesised attempt either, so the record settled
+        ``adopted`` with an empty handle and the tick waited for a report from a worker that was
+        stopped hours ago. Returns None when this card is not in that situation.
+
+        Exactly one of three things is durably established before the card is left active:
+
+        * a verified live worker identity — bound by `_adopt` from the worker's own heartbeat, in
+          which case this is never reached;
+        * a replacement launch intent bound to the retained workspace and its exact candidate,
+          written to disk before the host is called and adopted by the next tick if this one dies;
+        * a refusal that puts the card back in Blocked with a named recovery error.
+
+        This path has no launch intent and no delivery receipt to consult — an adopted record is
+        rebuilt from the board, and there is no evidence of what any head was ever handed. What it
+        rests on instead is the board's own consumed report markers and the retained checkout's
+        TASK.md round record: a checkout whose document belongs to a round the board has already
+        consumed a report for owes no worker work, and relaunching over it would either redo an
+        answered round or invent a document for one nobody opened.
+        """
+        ref = task["ref"]
+        if not _headless_worker(record):
+            if record.worker_headless:
+                record.worker_headless = {}
+                records[ref] = record
+                self.save_records(payload, records)
+            return None
+        # A living heartbeat this record cannot prove is its own is ambiguity, not permission: the
+        # same refusal `_launch_worker_after_claim` makes over an unbound orphan. Never relaunch
+        # beside it and never signal it.
+        live = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
+        state = self.host.retained_workspace_state(task, record)
+        record.worker_headless = {
+            "since": float(record.worker_headless.get("since") or 0.0) or time.time(),
+            # Where the card stood when this episode opened. Read once and carried, so it is the
+            # episode's own discriminator rather than whatever the board says on a later tick.
+            "comment_baseline": int(
+                record.worker_headless.get("comment_baseline") or len(task.get("comments") or [])
+            ),
+            "record_state": record.state,
+            "handle_known": False,
+            "heartbeat": str(live.get("state") or "") or "absent",
+            "workspace": state.get("workspace") or "",
+            "branch": state.get("branch") or "",
+            "expected_branch": state.get("expected_branch") or "",
+            "dirty": state.get("dirty"),
+            "candidate_sha": state.get("sha") or "",
+            "report_generation": record.report_generation,
+            "recovery_error": "",
+        }
+        if live.get("known") and live.get("alive"):
+            record.worker_headless["recovery_error"] = "orphan_heartbeat_unbound"
+            records[ref] = record
+            self.save_records(payload, records)
+            return {
+                "status": "degraded",
+                "step": "advance",
+                "pilot_ref": ref,
+                "attempt_id": record.attempt_id or attempt_id,
+                "action": "orphan-worker-heartbeat-unbound",
+                "recovery_error": "orphan_heartbeat_unbound",
+                "reason": "a live worker heartbeat has no durable HeadRun binding for this card",
+            }
+        refusal = self._headless_recovery_refusal(task, record, state)
+        record.worker_headless["recovery_error"] = refusal
+        records[ref] = record
+        self.save_records(payload, records)
+        if refusal:
+            return self._refuse_headless_worker(task, record, records, payload, attempt_id, refusal)
+        return self._relaunch_headless_worker(task, record, records, payload, attempt_id, state)
+
+    def _headless_recovery_refusal(
+        self, task: dict[str, Any], record: DispatcherRecord, state: dict[str, Any]
+    ) -> str:
+        """The recovery error that forbids a replacement launch here, or "" when one is owed."""
+        if not state.get("bound"):
+            return str(state.get("reason") or "workspace_unbindable")
+        if record.state != "adopted":
+            # A record that lived through its own launch knows the round it is in; only a record
+            # rebuilt from the board has to read the round off the checkout and the markers.
+            return ""
+        document_generation = _task_doc_report_generation(str(state.get("workspace") or ""))
+        if document_generation and document_generation <= _spent_report_generations(task):
+            # The checkout holds the document of a round whose report the board has already
+            # consumed. Out of this card's scope: the continuation for an unchanged candidate with
+            # no worker work left is dispatcher-owned exact-SHA validation (issue:3a0b263f), and
+            # inventing a worker round here would be the same fiction from the other side.
+            return "round_already_answered"
+        return ""
+
+    def _relaunch_headless_worker(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Put a replacement worker on the retained checkout, on its branch and its exact SHA."""
+        ref = task["ref"]
+        episode_token = _headless_episode_token(record)
+        # The intent is bound to the checkout that was verified above, not to a fresh one: the
+        # workspace is passed through rather than re-derived, so a replacement can never land in a
+        # different worktree than the candidate it was decided on.
+        record.workspace = str(state.get("workspace") or record.workspace)
+        failure = self._worker_relaunch_intent(
+            payload, records, ref, record, action="headless-worker-recovery"
+        )
+        if failure is not None:
+            return _launch_intent_unwritable(
+                step="advance",
+                ref=ref,
+                attempt_id=record.attempt_id or attempt_id,
+                role=WORKER_ROLE,
+                reason=failure,
+            )
+        launched, failed = self._bring_up_worker_head(
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            step="advance",
+            stage=STAGE_RESPAWN,
+            blocked_reason="headless worker recovery bring-up failed",
+            blocked_action="headless-worker-recovery-blocked",
+        )
+        if launched is None:
+            assert failed is not None
+            return failed
+        now = time.time()
+        record.state = "claimed"
+        # The replacement never saw whatever the stopped head was asked for, so it owes no answer.
+        record.worker_answer_owed_since = 0.0
+        record.worker_started_at = record.worker_progress_at = now
+        _reset_wait(record, "worker")
+        _reset_idle(record, "worker")
+        self.record_worker_routing(task, record, launched.run)
+        _clear_launch_intent(record)
+        headless = dict(record.worker_headless)
+        record.worker_headless = {}
+        records[ref] = record
+        self.save_records(payload, records)
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Dispatcher headless recovery: {ref} stood in an active state with no worker "
+                f"identity. Relaunched on the retained checkout {record.workspace} "
+                f"(branch {state.get('branch') or '(unknown)'}, candidate "
+                f"{state.get('sha') or '(unknown)'}, "
+                f"tree {_tree_state_label(state.get('dirty'))}) for report generation "
+                f"{record.report_generation}. Nothing was recreated, reset or re-seeded."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id,
+                "headless-worker-recovery",
+                ref,
+                # The episode, not the generation: an adopted record's attempt id is a constant and
+                # two episodes can share a generation, which would suppress the second comment.
+                f"{record.report_generation}-{episode_token}",
+            ),
+        )
+        return {
+            "status": "ok",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id or attempt_id,
+            "action": "headless-worker-replacement-launched",
+            "workspace": record.workspace,
+            "branch": state.get("branch") or "",
+            "candidate_sha": state.get("sha") or "",
+            "dirty": state.get("dirty"),
+            "headless_since": headless.get("since"),
+        }
+
+    def _refuse_headless_worker(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        recovery_error: str,
+    ) -> dict[str, Any]:
+        """Refuse the active-state transition and put the card back in Blocked, saying why."""
+        ref = task["ref"]
+        headless = dict(record.worker_headless)
+        explanation = HEADLESS_RECOVERY_REASONS.get(recovery_error, recovery_error)
+        unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
+        if unconfirmed is not None:
+            records[ref] = record
+            self.save_records(payload, records)
+            return unconfirmed
+        detail = ""
+        if headless.get("workspace"):
+            detail = (
+                f" Retained checkout {headless['workspace']}"
+                f" (branch {headless.get('branch') or '(unbound)'},"
+                f" candidate {headless.get('candidate_sha') or '(unreadable)'})."
+            )
+        self.terminal_effect(
+            task,
+            record,
+            target="blocked",
+            reason=(
+                f"headless worker recovery refused ({recovery_error}): {explanation}.{detail}"
+                " The card is returned to Blocked rather than left in an active state with no"
+                " worker."
+            ),
+            # Episode-scoped, or a card returned twice would replay the first refusal's committed
+            # event: no board move, no comment, and a tick still reporting `blocked`.
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id,
+                f"headless-recovery-{recovery_error}",
+                ref,
+                _headless_episode_token(record),
+            ),
+            terminal_state="blocked",
+            disposition="blocked",
+            blocked_reason=_HEADLESS_RECOVERY_BLOCKED_REASON.get(recovery_error, "infrastructure"),
+        )
+        records.pop(ref, None)
+        self.save_records(payload, records)
+        return {
+            "status": "blocked",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id or attempt_id,
+            "action": "headless-worker-recovery-refused",
+            "recovery_error": recovery_error,
+            "reason": explanation,
+            "workspace": headless.get("workspace") or "",
+            "candidate_sha": headless.get("candidate_sha") or "",
+            "to": "blocked",
         }
 
     def _can_reuse_report_only_rework_gate(

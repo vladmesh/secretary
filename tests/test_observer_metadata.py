@@ -455,7 +455,10 @@ class ObserverFenceTests(ObserverFenceFixture):
         )
         self.assertEqual(
             [action["action"] for action in actions if action["step"] == "advance"],
-            ["waiting-worker-report"],
+            # An unfenced card in an active column with no worker of its own is recovered rather
+            # than waited on (secretary-1544); before that it sat here as `waiting-worker-report`.
+            # What this asserts either way is that the fence let this card's advance happen.
+            ["headless-worker-replacement-launched"],
         )
 
     def test_a_missing_declaration_is_corruption(self) -> None:
@@ -670,7 +673,10 @@ class ObserverFenceTests(ObserverFenceFixture):
         actions = self._tick_twice_with_an_active_card(encode_observer(head_choice("claude-observer")))
         self.assertEqual(
             [action["action"] for action in actions if action["step"] == "advance"],
-            ["waiting-worker-report"],
+            # An unfenced card in an active column with no worker of its own is recovered rather
+            # than waited on (secretary-1544); before that it sat here as `waiting-worker-report`.
+            # What this asserts either way is that the fence let this card's advance happen.
+            ["headless-worker-replacement-launched"],
         )
         record = load_observers(self.runtime.production_state.load())["sprint:1"]
         Path(record.pid_file).unlink()
@@ -751,7 +757,10 @@ class ObserverFenceTests(ObserverFenceFixture):
         actions = self._tick_twice_with_an_active_card(encode_observer(head_choice("claude-observer")))
         self.assertEqual(
             [action["action"] for action in actions if action["step"] == "advance"],
-            ["waiting-worker-report"],
+            # An unfenced card in an active column with no worker of its own is recovered rather
+            # than waited on (secretary-1544); before that it sat here as `waiting-worker-report`.
+            # What this asserts either way is that the fence let this card's advance happen.
+            ["headless-worker-replacement-launched"],
         )
 
         with mock.patch.object(

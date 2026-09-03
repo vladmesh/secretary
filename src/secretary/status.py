@@ -24,6 +24,7 @@ from secretary.host import (
     LiveHostSource,
     build_doctor_expectations,
 )
+from secretary.dispatch.headless import headless_cards, headless_worker
 from secretary.host_apply import resolve_installed_packaged
 from secretary.secret_store import store_health
 from secretary.sprints import SprintReader, budget_thresholds
@@ -174,7 +175,12 @@ def _sprints(
             thresholds=budget_thresholds(instance),
         )
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
-        return {"items": reader.statuses(observers=observers, create=False), "error": None}
+        return {
+            "items": reader.statuses(
+                observers=observers, headless=headless_cards(production), create=False
+            ),
+            "error": None,
+        }
     except TaskError as exc:
         return {"items": [], "error": {"code": exc.code, "message": exc.message}}
 
@@ -224,6 +230,7 @@ def _attempts(production: dict[str, Any], *, probe_panels: bool) -> list[dict[st
             continue
         worker = _watchdog(record, reference, "worker", probe_panels)
         reviewer = _watchdog(record, reference, "review", probe_panels)
+        headless = headless_worker(record)
         attempts.append(
             {
                 "reference": reference,
@@ -234,6 +241,11 @@ def _attempts(production: dict[str, Any], *, probe_panels: bool) -> list[dict[st
                 "review_head": _text(record.get("review_head")) or None,
                 "workspace": _text(record.get("workspace")) or None,
                 "watchdogs": {"worker": worker, "reviewer": reviewer},
+                # An In progress column is not evidence of active work: a card whose worker the
+                # dispatcher cannot name reads as degraded here, with what the recovery is holding
+                # (secretary-1544).
+                "headless": headless,
+                "degraded": headless is not None,
                 "paused": {
                     "worker": _float(record.get("paused_worker_at")) > 0,
                     "reviewer": _float(record.get("paused_reviewer_at")) > 0,

@@ -280,6 +280,11 @@ class DispatcherRecord:
     worker_delivery_evidence: dict[str, Any] = field(default_factory=dict)
     # Launch intent is persisted before host creation and cleared after its answer.
     launch_intent: dict[str, Any] = field(default_factory=dict)
+    # A card standing in an active execution state with no worker identity and no launch debt
+    # (secretary-1544).  Written before the recovery decides, so a tick that cannot finish the
+    # decision still leaves the degradation on the record instead of an empty handle that reads
+    # as work in progress.  Cleared by the replacement launch that ends the episode.
+    worker_headless: dict[str, Any] = field(default_factory=dict)
 
     def owns_head(self, role: str | None = None) -> bool:
         """Whether this record still carries an identity that must be settled before replacement."""
@@ -374,6 +379,7 @@ class DispatcherRecord:
             "review_delivery_evidence": dict(self.review_delivery_evidence),
             "worker_delivery_failures": self.worker_delivery_failures,
             "worker_delivery_evidence": dict(self.worker_delivery_evidence),
+            "worker_headless": dict(self.worker_headless),
             "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
@@ -471,6 +477,9 @@ class DispatcherRecord:
                 dict(payload["worker_delivery_evidence"])
                 if isinstance(payload.get("worker_delivery_evidence"), dict)
                 else {}
+            ),
+            worker_headless=(
+                dict(payload["worker_headless"]) if isinstance(payload.get("worker_headless"), dict) else {}
             ),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),

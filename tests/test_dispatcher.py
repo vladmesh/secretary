@@ -20,7 +20,7 @@ from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
 from secretary import role_env
-from secretary._fsutil import try_file_lock
+from secretary._fsutil import file_lock, try_file_lock
 from secretary.board.analytics import project_analytics_checkpoint
 from secretary.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
@@ -80,7 +80,7 @@ from secretary.dispatcher_launcher import (
     ensure_codex_workspace_trusted,
 )
 from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
-from secretary.dispatcher_production import _budget_event_type
+from secretary.dispatcher_production import _budget_event_type, production_adopt_attempt_id
 from secretary.dispatcher_review import (
     start_review as start_reviewer,
 )
@@ -8615,15 +8615,17 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         # The launch intent was durable before the document was written, so the recovery first
         # settles whether that launch left a head running. It never wrote a heartbeat, so it counts
-        # as one that left nothing only once its grace window has run out, and the round is then a
-        # card in progress with no head, which the worker stall replaces.
+        # as one that left nothing only once its grace window has run out. What is left then is a
+        # card in an active state owing a worker nothing on the record can name, and the headless
+        # recovery relaunches it on the retained checkout in that same tick (secretary-1544).
+        # Before this card the same round burned the whole worker stall ceiling first and was
+        # replaced by the wait watchdog, which is the wait this card removes: there was never a
+        # head there to wait for.
         self.assertEqual(self.tick()["action"], "worker-launch-pending")
         self._age_launch_intent(initial_output_stall_seconds() + 60)
-        self.assertEqual(self.tick()["action"], "waiting-worker-report")
-        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
         recovered = self.tick()
 
-        self.assertEqual(recovered["action"], "worker-respawned")
+        self.assertEqual(recovered["action"], "headless-worker-replacement-launched")
         self.assertEqual(self._pilot_record()["handle"], "rework:secretary-510-pilot")
         self.assertEqual(self._pilot_record()["report_decision"], "add a live check")
         self.assertEqual(self._document_decision(), "add a live check")
@@ -15280,3 +15282,292 @@ class DispatcherGateTests(unittest.TestCase):
         # a legacy commit status still counts
         self.assertEqual(_rollup([{"state": "success"}])[0], "SUCCESS")
         self.assertEqual(_rollup([{"state": "failure"}])[0], "FAILURE")
+
+
+class HeadlessActiveCardTests(DispatcherRuntimeFixture, unittest.TestCase):
+    """A card returned from Blocked into an active execution state with no worker left.
+
+    The exact production sequence (issue:59ac13b5cafdf93f61b6, sprint:1416, card
+    codegen-orchestrator-1232, 2026-08-30): the worker filed `report:blocked`, the dispatcher
+    stopped it, moved the card to Blocked and dropped its runtime record; two minutes later the
+    observer moved the same card straight back to In progress. `_adopt` then rebuilt a record from
+    the board, found no heartbeat to bind and no claim event for the attempt it had just
+    synthesised, and settled `adopted` with an empty handle while the tick waited for a report from
+    a worker that had been stopped. The board said In progress and nothing was running.
+
+    What must happen instead is one of exactly three durable things, and these tests pin the two
+    that this path can reach: a replacement launch bound to the retained checkout and its exact
+    candidate, or a typed refusal that puts the card back in Blocked. The third -- a verified live
+    worker identity -- is `_adopt`'s heartbeat binding, which is covered by the adoption tests.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.start_dispatcher()
+
+    def _blocked_by_its_worker(self) -> None:
+        """Claim, let the worker file report:blocked, and let the dispatcher act on it."""
+        self.tick()
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference=CARD_REF,
+            kind="blocked",
+            classification="external_fact",
+            body="the upstream dependency is broken",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+        blocked = self.tick()
+        self.assertEqual(blocked["to"], "blocked")
+        self.assertNotIn(CARD_REF, self.runtime.production_state.load()["records"])
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+
+    def _returned_to_in_progress(self) -> None:
+        """The observer's raw board move back into an active column, with no worker anywhere.
+
+        The terminal that put the card in Blocked closed its attempt, so the next tick synthesises
+        a new one -- which is exactly why the audit holds no claim event for it and the card keeps
+        the board claim of the attempt that is over. That combination is the whole defect.
+        """
+        self.board.tasks[0]["column_id"] = 3
+        payload = self.runtime.production_state.load()
+        payload["attempt_id"] = ""
+        self.runtime.production_state.save(payload)
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+
+    def test_the_1232_sequence_refuses_instead_of_waiting_for_a_stopped_worker(self) -> None:
+        """The field case itself. The retained candidate's round already has an accepted report,
+        so no worker work is owed and the transition is refused by name -- the card goes back to
+        Blocked instead of standing In progress with an empty handle.
+
+        The refusal is deliberately not the other recovery: an unchanged candidate whose round is
+        answered belongs to dispatcher-owned exact-SHA validation (issue:3a0b263fd519d7d0f62e),
+        which is out of this card's scope. What this path owes is to name the situation and refuse,
+        not to invent a worker round for it.
+        """
+        self._blocked_by_its_worker()
+        self._returned_to_in_progress()
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "headless-worker-recovery-refused")
+        self.assertEqual(recovered["recovery_error"], "round_already_answered")
+        self.assertEqual(recovered["status"], "blocked")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertNotIn(CARD_REF, self.runtime.production_state.load()["records"])
+        self.assertEqual(self.host.calls.count("restart_worker"), 0, "no head was launched")
+        # The reason is on the card, not only in the tick's telemetry.
+        self.assertIn(
+            "round_already_answered",
+            "\n".join(comment["body"] for comment in self.reader.show(CARD_REF)["comments"]),
+        )
+
+    def test_a_returned_card_whose_round_was_never_answered_gets_a_replacement_launch(self) -> None:
+        """The other outcome, from the same shape: the checkout holds a round the board has
+        consumed no report for, so the work really is unfinished and a replacement is owed. It
+        lands on the retained checkout, on its branch and its exact candidate."""
+        self.tick()
+        # The worker is stopped and the record dropped without any report: a dispatcher restart
+        # over a card an operator had parked, which is the shape that owes a worker round.
+        self.host.stop_head(self._record(), "worker", "test")
+        self._drop_records_and_restart_attempt()
+        self.host.commit = "1232cafe0000000000000000000000000000beef"
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "headless-worker-replacement-launched")
+        self.assertEqual(recovered["candidate_sha"], "1232cafe0000000000000000000000000000beef")
+        self.assertEqual(recovered["branch"], f"pipeline/{CARD_REF}")
+        self.assertEqual(recovered["workspace"], self._pilot_record()["workspace"])
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        record = self._pilot_record()
+        self.assertEqual(record["state"], "claimed")
+        self.assertTrue(record["handle"], "the replacement is a head the record can name")
+        self.assertEqual(record["worker_headless"], {}, "the episode is over")
+
+    def test_an_unbindable_retained_checkout_is_refused_and_never_recreated(self) -> None:
+        """A checkout that is not this card's registered worktree on its own branch buys nothing:
+        recreating from base or resetting the branch would silently discard the candidate."""
+        self.tick()
+        self.host.stop_head(self._record(), "worker", "test")
+        self._drop_records_and_restart_attempt()
+        self.host.retained_workspace_reason = "workspace_missing"
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "headless-worker-recovery-refused")
+        self.assertEqual(recovered["recovery_error"], "workspace_missing")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(self.host.prepared, [CARD_REF], "only the original claim ever prepared one")
+
+    def test_a_live_heartbeat_this_record_cannot_bind_is_never_relaunched_beside(self) -> None:
+        """Ambiguity is not permission. An orphan heartbeat leaves the card exactly as it is, with
+        a named recovery error, rather than a second writer in the same checkout."""
+        self.tick()
+        record = self._record()
+        self._drop_records_and_restart_attempt()
+        # A readable heartbeat at this card's worker pid path that describes another card's run:
+        # `_adopt` refuses to promote it into this card's HeadRun, and it is a living process.
+        write_heartbeat(
+            Path(dispatcher_module._launch_pid_file("worker", CARD_REF)),
+            os.getpid(),
+            identity=run_heartbeat_identity(
+                {"run_id": "somebody-elses-run", "leaf": record.worker_leaf},
+                role="worker",
+                task="card:secretary-000-other",
+            ),
+        )
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "orphan-worker-heartbeat-unbound")
+        self.assertEqual(recovered["status"], "degraded")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+
+    def test_the_refusal_moves_the_card_every_time_it_is_needed(self) -> None:
+        """A human returning the same card twice is the field motivation for this card.
+
+        With no dispatcher record production ticks under `production_adopt_attempt_id(ref)` — one
+        constant string per card, forever. A refusal keyed only on that attempt id produces the same
+        request id on the second return, the audit hands back the event that already owns it, no
+        board move happens, and the tick still answers `blocked` while the card sits In progress
+        with no record at all: nothing on the card, nothing in `headless`, nothing in
+        `degraded_cards`, and the only signal saying the opposite of what happened.
+        """
+        self._blocked_by_its_worker()
+        self._returned_to_in_progress()
+
+        first = self._production_tick()
+
+        self.assertEqual(first["action"], "headless-worker-recovery-refused")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertEqual(len(self._refusal_comments()), 1)
+
+        # The observer returns the very same card again, exactly as one did by hand on
+        # secretary-1542. The record is gone, so this second episode is ticked under the identical
+        # attempt id -- and it must still reach the board.
+        self.board.tasks[0]["column_id"] = 3
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+
+        second = self._production_tick()
+
+        self.assertEqual(second["action"], "headless-worker-recovery-refused")
+        self.assertEqual(second["recovery_error"], "round_already_answered")
+        self.assertEqual(
+            self.reader.show(CARD_REF)["state"],
+            "blocked",
+            "the second refusal moved the board, it did not replay the first one's event",
+        )
+        self.assertEqual(len(self._refusal_comments()), 2, "and said so on the card again")
+
+    def test_two_episodes_in_the_same_instant_each_reach_the_board(self) -> None:
+        """The wall clock has a resolution; the card's own comment count does not need one.
+
+        The stamp that separates episodes has to be stable across the ticks of one episode, which is
+        why it is a clock reading. A card returned twice inside that resolution would then collide
+        and replay the first refusal's event, so the stamp also carries where the card stood when
+        the episode opened -- and a refusal writes its own move and reason onto the card, so the
+        next episode is strictly higher whatever the clock says.
+        """
+        self._blocked_by_its_worker()
+        self._returned_to_in_progress()
+
+        with mock.patch.object(time, "time", return_value=1_700_000_000.0):
+            first = self._production_tick()
+            self.board.tasks[0]["column_id"] = 3
+            second = self._production_tick()
+
+        self.assertEqual(first["action"], "headless-worker-recovery-refused")
+        self.assertEqual(second["action"], "headless-worker-recovery-refused")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertEqual(len(self._refusal_comments()), 2)
+
+    def test_one_episode_refuses_once_however_often_its_tick_is_replayed(self) -> None:
+        """The other half of the same id: episode-scoped, not tick-scoped.
+
+        A tick that died between the board move and its own bookkeeping is replayed with the record
+        still in place. The stamp that separates episodes is written once when the episode is first
+        observed and survives every tick of it, so the replay lands on the committed event and moves
+        nothing twice.
+        """
+        self._blocked_by_its_worker()
+        self._returned_to_in_progress()
+        # The episode stamp as the refusing tick persisted it, before it popped the record.
+        stamped: list[dict] = []
+        original = type(self.runtime)._refuse_headless_worker
+
+        def capture(runtime, task, record, records, payload, attempt_id, recovery_error):
+            stamped.append(dict(record.worker_headless))
+            return original(runtime, task, record, records, payload, attempt_id, recovery_error)
+
+        with mock.patch.object(type(self.runtime), "_refuse_headless_worker", capture):
+            first = self._production_tick()
+
+        # The record a tick dying between the board move and its own bookkeeping leaves behind:
+        # same episode, same stamp. The board move already committed.
+        attempt = production_adopt_attempt_id(CARD_REF)
+        self.board.tasks[0]["column_id"] = 3
+        payload = self.runtime.production_state.load()
+        records = self.runtime.production_state.records(payload)
+        record = self.runtime._adopt(self.reader.show(CARD_REF), attempt)
+        record.worker_headless = dict(stamped[0])
+        records[CARD_REF] = record
+        self.runtime.production_state.put_records(payload, records)
+        self.runtime.production_state.save(payload)
+
+        replay = self._production_tick()
+
+        self.assertEqual(first["action"], "headless-worker-recovery-refused")
+        self.assertEqual(replay["action"], "headless-worker-recovery-refused")
+        self.assertEqual(len(self._refusal_comments()), 1, "one episode, one refusal on the card")
+
+    def test_the_adopted_record_never_settles_into_a_wait_for_a_report(self) -> None:
+        """The negative this card is named for, asserted over every outcome the path can reach."""
+        self._blocked_by_its_worker()
+        self._returned_to_in_progress()
+
+        outcome = self.tick()
+
+        self.assertNotEqual(outcome.get("action"), "waiting-worker-report")
+
+    def _record(self):
+        return self.runtime.production_state.records(self.runtime.production_state.load())[CARD_REF]
+
+    def _drop_records_and_restart_attempt(self) -> None:
+        """A dispatcher that came back without its records, under a fresh attempt id."""
+        payload = self.runtime.production_state.load()
+        self.runtime.production_state.put_records(payload, {})
+        payload["attempt_id"] = "attempt-after-restart"
+        self.runtime.production_state.save(payload)
+
+    def _production_tick(self) -> dict:
+        """Tick this card with the attempt id production actually passes.
+
+        The shared fixture `tick` mints a payload-scoped attempt id through `ensure_attempt`. A card
+        with no dispatcher record never gets one in production: `_production_tick_task` passes the
+        constant `production_adopt_attempt_id(ref)`, the same string for that card forever. Every
+        request id derived from it is therefore card-scoped rather than episode-scoped, which is the
+        whole of the repeat defect, so the repeat tests drive this instead.
+        """
+        with file_lock(self.runtime.production_state.tick_lock):
+            payload = self.runtime.production_state.load()
+            records = self.runtime.production_state.records(payload)
+            record = records.get(CARD_REF)
+            attempt_id = (
+                record.attempt_id
+                if record is not None and record.attempt_id
+                else production_adopt_attempt_id(CARD_REF)
+            )
+            outcome = self.runtime._tick_task(self.reader.show(CARD_REF), records, payload, attempt_id)
+            self.runtime.production_state.put_records(payload, records)
+            self.runtime.production_state.save(payload)
+        return outcome
+
+    def _refusal_comments(self) -> list[str]:
+        return [
+            comment["body"]
+            for comment in self.reader.show(CARD_REF)["comments"]
+            if "headless worker recovery refused" in comment["body"]
+        ]

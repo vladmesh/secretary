@@ -3276,6 +3276,88 @@ class SprintTests(SprintFixture):
         self.assertEqual(freshness["last_event_at"], baseline["last_event_at"])
 
 
+class SprintStatusHeadlessCommandTests(SprintFixture):
+    """`secretary sprint status` must not answer healthy for a card nobody is working on.
+
+    This is the command the observer skill opens with and the one the runbooks name, read by the
+    actor who creates this state. Round 5 shipped `degraded_cards` on the projection and never
+    passed the map into it from here, so this command answered `{}` for every sprint — an
+    affirmative claim of health. The earlier test called `SprintReader._status` directly, which is
+    exactly why it did not catch that; this one goes through the CLI.
+    """
+
+    def _headless_card(self, sprint: str) -> str:
+        """One Pipeline card of this sprint, with a production record that names no worker."""
+        card = TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+            role="observer",
+            actor="observer",
+            project="secretary",
+            task_type="code",
+            title="a card whose worker is gone",
+            sprint=sprint,
+        )["task"]["ref"]
+        dispatcher = Path(self.tmp.name) / "dispatcher"
+        dispatcher.mkdir(parents=True, exist_ok=True)
+        (dispatcher / "production-state.json").write_text(
+            json.dumps(
+                {
+                    "records": {
+                        card: {
+                            "state": "adopted",
+                            "worker_headless": {
+                                "since": 1_700_000_000.0,
+                                "record_state": "adopted",
+                                "handle_known": False,
+                                "heartbeat": "absent",
+                                "workspace": "/work/card",
+                                "branch": f"pipeline/{card}",
+                                "expected_branch": f"pipeline/{card}",
+                                "dirty": False,
+                                "candidate_sha": "6cc7ca0c8cdf0719629e1e01bb5c72614983d7ef",
+                                "report_generation": 1,
+                                "recovery_error": "round_already_answered",
+                            },
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return card
+
+    def _status_json(self, ref: str) -> dict:
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("secretary.sprint_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                ["sprint", "status", "--ref", ref, "--data-dir", self.tmp.name, "--instance", str(self.instance)]
+            )
+        self.assertEqual(code, 0, errors.getvalue())
+        return json.loads(output.getvalue())
+
+    def test_the_command_names_the_sprints_headless_cards(self) -> None:
+        ref = self._create(goal="a sprint with a headless card")["sprint"]["ref"]
+        card = self._headless_card(ref)
+
+        summary = self._status_json(ref)
+
+        self.assertIn(card, summary["degraded_cards"], "the command must not answer healthy")
+        degraded = summary["degraded_cards"][card]
+        self.assertEqual(degraded["state"], "adopted")
+        self.assertFalse(degraded["handle_known"])
+        self.assertEqual(degraded["candidate_sha"], "6cc7ca0c8cdf0719629e1e01bb5c72614983d7ef")
+        self.assertEqual(degraded["recovery_error"], "round_already_answered")
+
+    def test_the_command_says_nothing_when_every_card_owns_its_worker(self) -> None:
+        """The control: `degraded_cards` empty must mean observed-healthy, not never-asked."""
+        ref = self._create(goal="a sprint whose cards are worked")["sprint"]["ref"]
+
+        self.assertEqual(self._status_json(ref)["degraded_cards"], {})
+
+
 class SprintAuditTraversalTests(SprintFixture):
     """A mass sprint summary costs one audit traversal, not one per sprint."""
 

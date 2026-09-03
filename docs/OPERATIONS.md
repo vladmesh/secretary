@@ -1545,6 +1545,36 @@ compromise for the alternate screen: it inspects file metadata only and never re
 is one respawn of the same head in the same workspace; the second moves the card to Blocked with a signal to the
 operator.
 
+### A card in an active column with no worker at all
+
+Before any of the wait handling below, the tick asks whether there is a head to wait for. A card that
+arrived in an active column with nothing running — most often a raw board move out of Blocked back
+into In progress, but also a bring-up whose tick died before it bound anything — is settled in that
+same tick instead of waiting for a report nobody will file. What you see in the outcome:
+
+- `headless-worker-replacement-launched` (ok) — a replacement was launched on the retained checkout.
+  The outcome names the workspace, the branch, the candidate SHA and whether the tree was dirty, and
+  the same line goes on the card. Nothing was recreated from base, re-seeded or reset.
+- `headless-worker-recovery-refused` (blocked) — the card went back to Blocked with a
+  `recovery_error` on it: `workspace_missing`, `workspace_unbindable`, `workspace_unreadable`,
+  `candidate_unknown` or `round_already_answered`. The first four say the retained checkout could not
+  be bound to this card, and the repair is on disk, not in the dispatcher. `round_already_answered`
+  says the checkout's round already has an accepted report, so there is no worker work to hand out:
+  returning that card to an active column was the wrong move, and validating the unchanged candidate
+  is a different path.
+- `orphan-worker-heartbeat-unbound` (degraded) — a live heartbeat sits at this card's worker pid path
+  and cannot be bound to it. Nothing is launched beside it and nothing is signalled. Find out whose
+  process it is before touching the card.
+
+Returning the same card a second time gets a second answer: the refusal is keyed on the episode, not
+only on the card, so it moves the board and comments every time it is needed.
+
+While such a card is unresolved, `secretary status` marks its attempt row `degraded` and fills in
+`headless` (record state, missing handle and heartbeat, how long it has been waiting, the retained
+workspace, branch, dirty flag and candidate SHA); the sprint summary repeats the refs under
+`degraded_cards` — `secretary sprint status --ref <sprint>` reports the same map, from the same
+production state. A card sitting in In progress is not on its own evidence that anything is running.
+
 A confirmed pid says the process is running; it does not say the head is doing anything. A head that finished its
 turn and went back to its prompt holds the same live pid as one that is thinking, which is how a card could sit in
 `waiting-worker-report` forever with the work already done: the report call was never made, or it was made with the
