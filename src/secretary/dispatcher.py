@@ -643,11 +643,12 @@ class DispatcherRuntime:
                     f"{evidence.get('state') or 'unknown'}; {evidence.get('reason') or 'provider event observed'}"
                 ),
                 request_id=_attempt_request_id(
-                    record.attempt_id, "codex-provider-event-blocked", reference, role, run.run_id
+                    record.attempt_id, "codex-provider-event-blocked", reference, f"{role}-{run.run_id}"
                 ),
                 terminal_state="blocked",
                 disposition="blocked",
                 blocked_reason="provider",
+                policy_evidence=evidence,
             )
 
         self.host.configure_codex_provider_ingress(run, persist=persist, stop=stop, block=block)
@@ -1221,6 +1222,11 @@ class DispatcherRuntime:
                     terminal_state="blocked",
                     disposition="blocked",
                     blocked_reason="provider",
+                    policy_evidence={
+                        "kind": "codex_capability_preflight",
+                        "state": "refused",
+                        "reason": failure,
+                    },
                 )
                 records.pop(ref, None)
                 self.save_records(payload, records)
@@ -6375,6 +6381,7 @@ class DispatcherRuntime:
         decision: str = "",
         terminal_path: OutcomeTerminalPath,
         taxonomy: TerminalTaxonomy,
+        policy_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Freeze the forward lineage before its lifecycle effect is issued.
 
@@ -6435,8 +6442,11 @@ class DispatcherRuntime:
             "worker_usage": completeness["worker"] in {"collected", "degraded"},
             "review_usage": completeness["review"] in {"collected", "degraded"},
         }
+        if policy_evidence is not None:
+            source["policy_evidence"] = None
+            required["policy_evidence"] = True
         return {
-            "version": 2,
+            "version": 3 if policy_evidence is not None else 2,
             "attempt_id": attempt_id,
             "attempt": attempt,
             "report_generation": generation,
@@ -6729,6 +6739,8 @@ class DispatcherRuntime:
             required = obligation.get("lineage_required")
             if not isinstance(required, dict):
                 raise ValueError("attempt_outcome_lineage_requiredness_missing")
+            if required.get("policy_evidence") is True:
+                source["policy_evidence"] = effect_event_id
             data = {
                 **{
                     key: value
@@ -6771,6 +6783,7 @@ class DispatcherRuntime:
         verdict: str = "missing",
         blocked_reason: str | None = None,
         decision: str = "",
+        policy_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The lifecycle-owned terminal effect and its non-blocking finisher."""
         taxonomy: TerminalTaxonomy | None = None
@@ -6790,6 +6803,7 @@ class DispatcherRuntime:
                 decision=decision,
                 terminal_path=record.outcome_terminal_path,
                 taxonomy=taxonomy,
+                policy_evidence=policy_evidence,
             )
             if taxonomy is not None
             else None
@@ -6806,6 +6820,7 @@ class DispatcherRuntime:
             request_id=request_id,
             outcome_owed=obligation,
             terminal_taxonomy=taxonomy.to_record() if taxonomy is not None else None,
+            policy_evidence=policy_evidence,
         )
         effect_obligation = effect.get("outcome_owed") if isinstance(effect, dict) else None
         if isinstance(effect_obligation, dict):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from secretary.dispatcher import CommandHostRuntime
@@ -69,15 +70,26 @@ class CodexFanoutPolicyTests(unittest.TestCase):
 
     def _schema(self, run: HeadRun) -> dict:
         tools: list[dict] = []
+        now = datetime.now(UTC)
         return {
             "version": codex_preflight.FANOUT_ATTESTATION_VERSION,
+            "kind": codex_preflight.CAPABILITY_ATTESTATION_KIND,
+            "run_id": run.run_id,
             "role": run.role,
             "model": run.spec.model,
+            "binary_path": str(self.binary.resolve()),
             "binary_digest": codex_preflight._file_digest(self.binary),
             "cli_version": "codex 9.9.9",
             "tools": tools,
             "tool_schema_digest": codex_preflight._json_digest(tools),
             "provider_schema_verdict": codex_preflight.FANOUT_SCHEMA_ALLOWED,
+            "attested_at": now.isoformat(),
+            "expires_at": (now + timedelta(hours=1)).isoformat(),
+            "strict_configuration": {
+                "status": "accepted",
+                "configured": dict(codex_preflight.STRICT_LAUNCH_CONFIGURATION),
+                "effective": dict(codex_preflight.STRICT_LAUNCH_CONFIGURATION),
+            },
         }
 
     def _allowed_run(self) -> HeadRun:
@@ -106,18 +118,18 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertEqual(attested.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
         self.assertFalse(attested.fanout_clean)
 
-    def test_schema_absent_preflight_launches_with_telemetry_and_trust(self) -> None:
+    def test_schema_absent_preflight_refuses_before_trust_or_pane(self) -> None:
         config = self.root / "codex.toml"
 
-        prepared = codex_preflight.preflight_codex_launch(
-            {}, str(self.workspace), self._run(), binary_path=str(self.binary), config=config
-        )
+        with self.assertRaises(codex_preflight.CodexFanoutPolicyError) as raised:
+            codex_preflight.preflight_codex_launch(
+                {}, str(self.workspace), self._run(), binary_path=str(self.binary), config=config
+            )
 
-        self.assertEqual(prepared.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
-        self.assertEqual(prepared.fanout_policy["provider_source"]["state"], "unbound")
-        self.assertIn('trust_level = "trusted"', config.read_text(encoding="utf-8"))
+        self.assertEqual(raised.exception.run.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
+        self.assertFalse(config.exists())
 
-    def test_schema_attestation_enriches_telemetry_without_changing_trust_preflight(self) -> None:
+    def test_schema_attestation_admits_only_a_current_capability_capture(self) -> None:
         run = self._run()
         config = self.root / "codex.toml"
 
@@ -135,6 +147,43 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertEqual(allowed.fanout_policy["provider_source"]["kind"], "codex_session_event_jsonl")
         trusted = config.read_text(encoding="utf-8")
         self.assertIn('trust_level = "trusted"', trusted)
+
+    def test_stale_configuration_drift_and_callable_spawn_surface_refuse(self) -> None:
+        run = self._run()
+        cases = {
+            "stale": {"expires_at": "2000-01-01T00:00:00+00:00"},
+            "drift": {
+                "strict_configuration": {
+                    "status": "accepted",
+                    "configured": {"multi_agent_v2": False, "wait_agent_enabled": False},
+                    "effective": dict(codex_preflight.STRICT_LAUNCH_CONFIGURATION),
+                }
+            },
+            "ignored": {
+                "strict_configuration": {
+                    "status": "accepted",
+                    "configured": dict(codex_preflight.STRICT_LAUNCH_CONFIGURATION),
+                    "effective": {"multi_agent_v2": True, "wait_agent_enabled": True},
+                }
+            },
+            "rejected": {"strict_configuration": {"status": "rejected"}},
+        }
+        for name, patch in cases.items():
+            with self.subTest(name=name):
+                schema = self._schema(run) | patch
+                with self.assertRaises(codex_preflight.CodexFanoutPolicyError):
+                    codex_preflight.preflight_codex_launch(
+                        {}, str(self.workspace), run, schema_attestation=schema,
+                        binary_path=str(self.binary), config=self.root / f"{name}.toml"
+                    )
+        schema = self._schema(run)
+        schema["tools"] = [{"name": "collaboration.spawn_agent"}]
+        schema["tool_schema_digest"] = codex_preflight._json_digest(schema["tools"])
+        with self.assertRaises(codex_preflight.CodexFanoutPolicyError):
+            codex_preflight.preflight_codex_launch(
+                {}, str(self.workspace), run, schema_attestation=schema,
+                binary_path=str(self.binary), config=self.root / "spawn.toml"
+            )
 
     def test_a_non_spawning_model_response_is_not_schema_evidence(self) -> None:
         written: list[HeadRun] = []
@@ -181,7 +230,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
                 self.assertEqual(outcome.event["type"], expected)
                 self.assertEqual(written[-1].fanout_policy["events"][-1], outcome.event)
 
-    def test_spawn_and_unknown_edges_remain_typed_advisory_telemetry(self) -> None:
+    def test_spawn_and_unknown_edges_are_typed_terminal_evidence(self) -> None:
         recorder = codex_preflight.CodexProviderEventRecorder(
             self._allowed_run(), lambda _run: None, expected_parent_thread_id="parent"
         )
@@ -200,7 +249,25 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertEqual(spawned.terminal_state, codex_preflight.FANOUT_TERMINAL_VIOLATION)
         self.assertEqual(unknown.terminal_state, codex_preflight.FANOUT_TERMINAL_UNKNOWN)
 
-    def test_recorder_failure_is_non_fatal_telemetry_loss(self) -> None:
+    def test_spawn_agent_self_review_stops_and_blocks_after_durable_record(self) -> None:
+        order: list[str] = []
+        evidence: list[dict] = []
+        recorder = codex_preflight.CodexProviderEventRecorder(
+            self._allowed_run(), lambda _run: order.append("persist"), expected_parent_thread_id="parent"
+        )
+        outcome = codex_preflight.enforce_provider_event(
+            recorder,
+            {"type": "collaboration_call", "parent_thread_id": "parent", "tool": "spawn_agent"},
+            source_sequence=5,
+            source_location="session.jsonl:5",
+            stop=lambda _run, _reason: order.append("stop"),
+            block=lambda value: (order.append("block"), evidence.append(value)),
+        )
+        self.assertEqual(order, ["persist", "stop", "block"])
+        self.assertEqual(outcome.event["type"], codex_preflight.EVENT_COLLABORATION_CALL)
+        self.assertEqual(evidence[0]["state"], codex_preflight.FANOUT_TERMINAL_VIOLATION)
+
+    def test_recorder_failure_stops_and_blocks_with_typed_evidence(self) -> None:
         order: list[str] = []
 
         def persist(_run: HeadRun) -> None:
@@ -210,16 +277,18 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         recorder = codex_preflight.CodexProviderEventRecorder(
             self._allowed_run(), persist, expected_parent_thread_id="parent"
         )
-        outcome = codex_preflight.enforce_provider_event(
-            recorder,
-            {"type": "collaboration_call", "parent_thread_id": "parent", "tool": "spawn_agent"},
-            source_sequence=5,
-            source_location="stream:5",
-            stop=lambda _run, _reason: order.append("stop"),
-            block=lambda _evidence: order.append("block"),
-        )
-        self.assertEqual(order, ["persist"])
-        self.assertEqual(outcome.run.fanout_policy["events"], [])
+        evidence: list[dict] = []
+        with self.assertRaises(codex_preflight.CodexFanoutRecordingError):
+            codex_preflight.enforce_provider_event(
+                recorder,
+                {"type": "collaboration_call", "parent_thread_id": "parent", "tool": "spawn_agent"},
+                source_sequence=5,
+                source_location="stream:5",
+                stop=lambda _run, _reason: order.append("stop"),
+                block=lambda value: (order.append("block"), evidence.append(value)),
+            )
+        self.assertEqual(order, ["persist", "stop", "block"])
+        self.assertTrue(evidence[0]["recorder_failure"])
 
     def test_head_run_round_trip_and_historical_record_remain_non_clean(self) -> None:
         allowed = self._allowed_run()
@@ -292,32 +361,32 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertEqual(missing.fanout_policy_state, "unknown")
         self.assertEqual(missing.fanout_policy["provider_source"], {})
 
-    def test_worker_reviewer_and_observer_preflight_allow_without_schema(self) -> None:
+    def test_worker_reviewer_and_observer_preflight_refuse_without_schema_before_pane(self) -> None:
         for role in ("worker", "reviewer", "observer"):
             with self.subTest(role=role):
                 host = _Host()
                 run = self._run(role)
-                launched = spawn(
-                    run.spec,
-                    run.workspace,
-                    run.task_ref,
-                    host=host,
-                    command="codex",
-                    title=f"{role} head",
-                    run=run,
-                    role=role,
-                    preflight=lambda candidate, role=role: codex_preflight.preflight_codex_launch(
-                        {},
-                        candidate.workspace,
-                        candidate,
-                        binary_path=str(self.binary),
-                        config=self.root / f"{role}.toml",
-                    ),
-                )
-                self.assertEqual(host.opened, 1)
-                self.assertEqual(launched.run.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
+                with self.assertRaises(codex_preflight.CodexFanoutPolicyError):
+                    spawn(
+                        run.spec,
+                        run.workspace,
+                        run.task_ref,
+                        host=host,
+                        command="codex",
+                        title=f"{role} head",
+                        run=run,
+                        role=role,
+                        preflight=lambda candidate, role=role: codex_preflight.preflight_codex_launch(
+                            {},
+                            candidate.workspace,
+                            candidate,
+                            binary_path=str(self.binary),
+                            config=self.root / f"{role}.toml",
+                        ),
+                    )
+                self.assertEqual(host.opened, 0)
 
-    def test_dispatcher_worker_reviewer_and_observer_allow_without_schema(self) -> None:
+    def test_dispatcher_worker_reviewer_and_observer_refuse_without_schema(self) -> None:
         class Catalog:
             profile = {
                 "adapter": "codex",
@@ -340,18 +409,18 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         task = {"ref": "secretary-1428", "project": "secretary"}
         for role in ("worker", "reviewer"):
             with self.subTest(role=role):
-                launched = runtime._launch(
-                    str(self.workspace),
-                    f"{role} title",
-                    "codex-extra",
-                    "TASK.md",
-                    role=role,
-                    env_name="SECRETARY_UNSET_COMMAND",
-                    task=task,
-                )
-                self.assertEqual(launched.head_run["fanout_policy"]["state"], "schema_absent")
-        observer = runtime.prepare_observer({"ref": "sprint:1428"}, "codex-extra", prompt="# Sprint")
-        self.assertEqual(observer["head_run"]["fanout_policy"]["state"], "schema_absent")
+                with self.assertRaisesRegex(Exception, "capability preflight refused"):
+                    runtime._launch(
+                        str(self.workspace),
+                        f"{role} title",
+                        "codex-extra",
+                        "TASK.md",
+                        role=role,
+                        env_name="SECRETARY_UNSET_COMMAND",
+                        task=task,
+                    )
+        with self.assertRaisesRegex(Exception, "capability preflight refused"):
+            runtime.prepare_observer({"ref": "sprint:1428"}, "codex-extra", prompt="# Sprint")
 
 
 if __name__ == "__main__":

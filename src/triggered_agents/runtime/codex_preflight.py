@@ -57,6 +57,11 @@ FANOUT_SCHEMA_ALLOWED = "no_callable_child_spawn_surface"
 FANOUT_TERMINAL_CLEAN = "clean"
 FANOUT_TERMINAL_UNKNOWN = "unknown"
 FANOUT_TERMINAL_VIOLATION = "violation"
+CAPABILITY_ATTESTATION_KIND = "provider_capability_surface"
+STRICT_LAUNCH_CONFIGURATION = {
+    "multi_agent_v2": True,
+    "wait_agent_enabled": False,
+}
 
 EVENT_COLLABORATION_CALL = "collaboration_call"
 EVENT_CHILD_THREAD_EDGE = "child_thread_edge"
@@ -263,11 +268,11 @@ def preflight_codex_launch(
     binary_path: str | None = None,
     config: Path | None = None,
 ) -> HeadRun:
-    """Prepare one exact Codex ``HeadRun`` and attach advisory fan-out telemetry.
+    """Prepare one exact Codex ``HeadRun`` before a pane exists.
 
-    Provider-schema evidence stays attached when available but is not a launch requirement; workspace
-    trust is the sole hard pre-pane requirement. The source descriptor is written whenever its
-    baseline can be enumerated, because it fences later provider progress to this exact HeadRun.
+    A Codex pane is admitted only by a current, independently captured capability surface.  Launch
+    flags express the desired low-fan-out configuration but are not that proof; their observed
+    acceptance is a separate required part of the same capture.
     """
     attested = attest_codex_fanout(
         profile,
@@ -275,20 +280,23 @@ def preflight_codex_launch(
         schema_attestation=schema_attestation,
         binary_path=binary_path,
     )
+    if not attested.fanout_clean:
+        raise CodexFanoutPolicyError(
+            f"Codex capability preflight refused launch: {attested.fanout_policy.get('reason') or 'unknown evidence'}",
+            run=attested,
+        )
     # Persist the pre-pane baseline; shared-workspace journals are not run identity.
     try:
         attested = _with_unbound_provider_source(profile, attested)
     except OSError as exc:
-        # Telemetry availability never controls launch or delivery.
-        attested = _unknown_run(attested, f"cannot establish Codex provider event source baseline: {exc}")
+        refused = _unknown_run(attested, f"cannot establish Codex provider event source baseline: {exc}")
+        raise CodexFanoutPolicyError(str(refused.fanout_policy["reason"]), run=refused) from None
     try:
         ensure_codex_workspace_trusted(profile, workspace, config)
     except CodexPreflightError as exc:
         refused = _unknown_run(attested, f"workspace trust preflight failed: {exc}")
         raise CodexFanoutPolicyError(str(exc), run=refused) from None
-    # The update modal is prevented here for the same reason trust is, and it is not a launch
-    # requirement for the same reason telemetry is not: a runtime home this could not settle still
-    # produces a head, and the delivery boundary answers the modal on screen if one appears.
+    # The update modal remains a delivery defence in depth, not capability evidence.
     try:
         ensure_codex_update_modal_dismissed(profile)
     except CodexPreflightError:
@@ -324,6 +332,10 @@ def attest_codex_fanout(
     schema = dict(raw)
     if schema.get("version") != FANOUT_ATTESTATION_VERSION:
         return _unknown_run(run, "provider-schema attestation has an unsupported version")
+    if schema.get("kind") != CAPABILITY_ATTESTATION_KIND:
+        return _unknown_run(run, "provider-schema attestation is not an independent capability-surface capture")
+    if str(schema.get("run_id") or "") != run.run_id:
+        return _unknown_run(run, "provider-schema attestation is not bound to this HeadRun")
     if not str(run.role).strip():
         return _unknown_run(run, "HeadRun has no role to bind provider evidence to")
     if str(schema.get("role") or "") != run.role:
@@ -335,7 +347,8 @@ def attest_codex_fanout(
     if not isinstance(tools, list) or not all(isinstance(tool, Mapping) for tool in tools):
         return _unknown_run(run, "provider-schema attestation has no canonical tool schema")
     try:
-        tool_digest = _json_digest(tools)
+        canonical_tools = _canonical_tools(tools)
+        tool_digest = _json_digest(canonical_tools)
     except ValueError as exc:
         return _unknown_run(run, str(exc))
     if not _same_digest(schema.get("tool_schema_digest"), tool_digest):
@@ -344,10 +357,18 @@ def attest_codex_fanout(
         observed_path, observed_digest, observed_version = _codex_cli_identity(binary_path)
     except OSError as exc:
         return _unknown_run(run, f"cannot attest Codex binary identity: {exc}")
+    if str(schema.get("binary_path") or "") != observed_path:
+        return _unknown_run(run, "provider-schema binary path does not match launched Codex")
     if not _same_digest(schema.get("binary_digest"), observed_digest):
         return _unknown_run(run, "provider-schema binary digest does not match launched Codex")
     if str(schema.get("cli_version") or "") != observed_version:
         return _unknown_run(run, "provider-schema CLI version does not match launched Codex")
+    freshness_error = _attestation_freshness_error(schema)
+    if freshness_error:
+        return _unknown_run(run, freshness_error)
+    config_error = _strict_configuration_error(schema)
+    if config_error:
+        return _unknown_run(run, config_error)
     tool_names = {
         str(tool.get("name") or "").strip().lower() for tool in tools if str(tool.get("name") or "").strip()
     }
@@ -363,6 +384,10 @@ def attest_codex_fanout(
             cli_version=observed_version,
             tool_schema_digest=tool_digest,
             provider_schema_verdict=verdict,
+            tool_schema=canonical_tools,
+            capability_attested_at=str(schema.get("attested_at")),
+            capability_expires_at=str(schema.get("expires_at")),
+            strict_configuration=dict(schema.get("strict_configuration") or {}),
         )
     if _has_child_spawn_surface(tool_names):
         return _policy_run(
@@ -375,6 +400,10 @@ def attest_codex_fanout(
             cli_version=observed_version,
             tool_schema_digest=tool_digest,
             provider_schema_verdict=verdict,
+            tool_schema=canonical_tools,
+            capability_attested_at=str(schema.get("attested_at")),
+            capability_expires_at=str(schema.get("expires_at")),
+            strict_configuration=dict(schema.get("strict_configuration") or {}),
         )
     return _policy_run(
         run,
@@ -386,6 +415,10 @@ def attest_codex_fanout(
         cli_version=observed_version,
         tool_schema_digest=tool_digest,
         provider_schema_verdict=verdict,
+        tool_schema=canonical_tools,
+        capability_attested_at=str(schema.get("attested_at")),
+        capability_expires_at=str(schema.get("expires_at")),
+        strict_configuration=dict(schema.get("strict_configuration") or {}),
     )
 
 
@@ -459,11 +492,7 @@ def enforce_provider_event(
     block: Callable[[dict[str, Any]], None],
     captured_at: str | None = None,
 ) -> ProviderEventOutcome:
-    """Record provider-edge telemetry without changing the run or board lifecycle.
-
-    ``stop`` and ``block`` remain part of the installed callback shape, but fan-out is advisory.
-    """
-    del stop, block
+    """Record a provider edge before stopping and blocking its exact launched run."""
     prior_run = recorder.run
     try:
         outcome = recorder.record(
@@ -472,9 +501,27 @@ def enforce_provider_event(
             source_location=source_location,
             captured_at=captured_at,
         )
-    except CodexFanoutRecordingError:
-        # Keep prior durable state authoritative when telemetry cannot be written.
-        return ProviderEventOutcome(run=prior_run, event={})
+    except CodexFanoutRecordingError as exc:
+        evidence = {
+            "kind": "codex_provider_fanout",
+            "state": FANOUT_TERMINAL_UNKNOWN,
+            "reason": str(exc),
+            "event": dict(exc.event),
+            "recorder_failure": True,
+        }
+        stop(exc.run, str(exc))
+        block(evidence)
+        raise
+    if outcome.blocked:
+        evidence = {
+            "kind": "codex_provider_fanout",
+            "state": outcome.terminal_state,
+            "reason": str(outcome.run.fanout_policy.get("reason") or "provider event observed"),
+            "event": dict(outcome.event),
+            "recorder_failure": False,
+        }
+        stop(outcome.run, evidence["reason"])
+        block(evidence)
     return outcome
 
 
@@ -621,6 +668,10 @@ def _policy_run(
     cli_version: str = "",
     tool_schema_digest: str = "",
     provider_schema_verdict: str = "",
+    tool_schema: list[dict[str, Any]] | None = None,
+    capability_attested_at: str = "",
+    capability_expires_at: str = "",
+    strict_configuration: dict[str, Any] | None = None,
 ) -> HeadRun:
     return run.with_fanout_policy(
         {
@@ -636,9 +687,64 @@ def _policy_run(
             "cli_version": cli_version,
             "tool_schema_digest": tool_schema_digest,
             "provider_schema_verdict": provider_schema_verdict,
+            "tool_schema": list(tool_schema or []),
+            "capability_attested_at": capability_attested_at,
+            "capability_expires_at": capability_expires_at,
+            "strict_configuration": dict(strict_configuration or {}),
             "events": [],
         }
     )
+
+
+def _canonical_tools(tools: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Canonicalize the provider's complete callable surface before it is digested and retained."""
+    rendered: list[tuple[str, dict[str, Any]]] = []
+    for tool in tools:
+        value = dict(tool)
+        try:
+            encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"provider-schema tool is not canonical JSON: {exc}") from None
+        rendered.append((encoded, value))
+    return [value for _encoded, value in sorted(rendered)]
+
+
+def _attestation_freshness_error(schema: Mapping[str, Any]) -> str:
+    """Require a bounded, unexpired capture rather than a timeless capability claim."""
+    values: dict[str, datetime] = {}
+    for name in ("attested_at", "expires_at"):
+        raw = schema.get(name)
+        if not isinstance(raw, str) or not raw.strip():
+            return f"provider-schema attestation has no {name}"
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return f"provider-schema attestation has malformed {name}"
+        if parsed.tzinfo is None:
+            return f"provider-schema attestation has timezone-less {name}"
+        values[name] = parsed.astimezone(UTC)
+    if values["expires_at"] <= values["attested_at"]:
+        return "provider-schema attestation expiry does not follow its capture"
+    if values["expires_at"] <= datetime.now(UTC):
+        return "provider-schema attestation is stale"
+    return ""
+
+
+def _strict_configuration_error(schema: Mapping[str, Any]) -> str:
+    """Check the observed strict configuration without mistaking it for capability proof."""
+    raw = schema.get("strict_configuration")
+    if not isinstance(raw, Mapping):
+        return "provider-schema attestation has no observed strict launch configuration"
+    configured = raw.get("configured")
+    effective = raw.get("effective")
+    status = raw.get("status")
+    if status != "accepted":
+        return "Codex rejected strict launch configuration"
+    if configured != STRICT_LAUNCH_CONFIGURATION:
+        return "Codex strict launch configuration drifted from the required input"
+    if effective != STRICT_LAUNCH_CONFIGURATION:
+        return "Codex silently ignored strict launch configuration"
+    return ""
 
 
 def _with_unbound_provider_source(profile: Mapping[str, Any], run: HeadRun) -> HeadRun:

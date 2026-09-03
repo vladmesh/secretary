@@ -79,20 +79,24 @@ ignored-role state as typed evidence, so neither a rejected candidate nor a sile
 can pass as isolation. Consequently the product describes its launch policy as practical
 suppression, never as capability isolation.
 
-`triggered_agents.runtime.codex_preflight` remains the one pre-pane preparation boundary. Its v1
-record preserves `schema_absent`, `schema_unknown`, `allowed`, `unknown` and `violation` as honest
-diagnostics, but none of those fan-out states permits or refuses a pane. Workspace trust is the hard
-pre-pane requirement. Current 0.147.0 launches proceed with `schema_absent`, an unbound structured
-journal source where available, and the explicit low-fan-out launch configuration.
+`triggered_agents.runtime.codex_preflight` is the one pre-pane admission boundary. Every new Codex
+worker, reviewer and observer launch requires an independently captured, run-bound provider capability
+surface: canonical tools and digest, exact binary path/digest/version, role, model, bounded capture
+window, and an explicit no-callable-child-spawn verdict. It also records strict low-fan-out configuration
+as an expected input and requires provider-observed acceptance of that exact input. Missing, malformed,
+stale, mismatched, collaboration-bearing, rejected, drifted or silently ignored evidence refuses before
+pane creation or prompt delivery. Configuration and prompts are defence in depth, never capability proof.
 
 Provider-edge collection is bound to that same run. It appends one
 of `collaboration_call`, `child_thread_edge`, `unknown_thread_edge` or
 `unparseable_provider_event`, with parent and child thread identities when present, tool name when
 known, SHA-256 raw-event digest, source sequence/location and capture time. A collaboration call or
 non-empty child edge is a violation. An unknown tool or relation, missing expected parent,
-malformed event or failed event write is unknown. These states are telemetry only: they never stop
-or replace the HeadRun, block a card or sprint, refuse prompt delivery, or affect continuation
-liveness. Telemetry loss is also non-fatal.
+malformed event or failed event write is unknown. These states are typed attempt-bound violations. The
+recorder persists the event before stopping the exact run and applying its card or observer audit effect.
+Recorder failure is itself an `unknown` violation. A card effect is classified `provider`, charged as
+`blocked`, and its sealed `attempt.outcome` references the effect evidence. No provider-edge evidence may
+be used as worker output, independent review, a mechanical gate, or release/rework authorization.
 
 The live canary measures practical suppression. The configured run should normally produce no child
 edge, but an observed edge is recorded and the run continues.

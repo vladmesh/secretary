@@ -88,8 +88,8 @@ class AttemptOutcomeTests(unittest.TestCase):
     def test_unknown_version_and_missingness_are_rejected_by_event_reader(self) -> None:
         event = outcome()
         record = event.to_record("outcome-1")
-        # v2 adds forward lineage; v3 remains unknown at the typed boundary.
-        record["data"] = dict(record["data"], version=3)
+        # v2 adds forward lineage; v3 adds policy evidence; v4 remains unknown.
+        record["data"] = dict(record["data"], version=4)
         with self.assertRaisesRegex(ValueError, "unsupported attempt outcome version"):
             Event.from_record(record)
         record = event.to_record("outcome-1")

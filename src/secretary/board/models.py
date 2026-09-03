@@ -311,6 +311,7 @@ class Event:
         _validate_attempt_usage_event(self.kind, self.entity_kind, self.data)
         _validate_attempt_outcome_event(self.kind, self.entity_kind, self.data)
         _validate_terminal_taxonomy_event(self.entity_kind, self.target_state, self.data)
+        _validate_policy_evidence_event(self.entity_kind, self.target_state, self.data)
         # The journal spelling is UTC.  Keep the value canonical too, so an
         # event read back from its own record compares equal to the value that
         # was written, even when its caller supplied another aware timezone.
@@ -625,6 +626,8 @@ def _validate_attempt_outcome_event(
         expected = required
     elif version == 2:
         expected = required | {"lineage_required"}
+    elif version == 3:
+        expected = required | {"lineage_required"}
     else:
         raise ValueError("unsupported attempt outcome version")
     if set(data) != expected:
@@ -653,14 +656,17 @@ def _validate_attempt_outcome_event(
     if (data["disposition"] == "blocked") != (blocked_reason is not None):
         raise ValueError("attempt outcome blocked reason is present exactly for blocked disposition")
     refs = data["source_event_ids"]
-    if not isinstance(refs, dict) or set(refs) != {
+    expected_refs = {
         "report",
         "verdict",
         "decision",
         "effect",
         "worker_usage",
         "review_usage",
-    }:
+    }
+    if version == 3:
+        expected_refs.add("policy_evidence")
+    if not isinstance(refs, dict) or set(refs) != expected_refs:
         raise ValueError("attempt outcome source_event_ids are incomplete")
     for name, value in refs.items():
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -677,7 +683,7 @@ def _validate_attempt_outcome_event(
             raise ValueError(f"attempt outcome {role} completeness requires its usage event ref")
         if state in {"missing", "legacy"} and usage_ref is not None:
             raise ValueError(f"attempt outcome {role} missingness carries no usage event ref")
-    if version != 2:
+    if version == 1:
         return
     required_lineage = data["lineage_required"]
     expected_lineage = {
@@ -689,6 +695,8 @@ def _validate_attempt_outcome_event(
         "worker_usage",
         "review_usage",
     }
+    if version == 3:
+        expected_lineage.add("policy_evidence")
     if not isinstance(required_lineage, dict) or set(required_lineage) != expected_lineage:
         raise ValueError("attempt outcome lineage requiredness is incomplete")
     if not all(isinstance(value, bool) for value in required_lineage.values()):
@@ -707,6 +715,29 @@ def _validate_terminal_taxonomy_event(
     if not isinstance(raw, dict):
         raise ValueError("terminal taxonomy must be an object")
     read_terminal_taxonomy({"terminal_taxonomy": raw}, disposition=str(raw.get("disposition") or ""))
+
+
+def _validate_policy_evidence_event(
+    entity_kind: EntityKind, target_state: str | None, data: dict[str, Any]
+) -> None:
+    """Keep a provider-bound refusal or edge as typed Card audit data."""
+    if "policy_evidence" not in data:
+        return
+    if entity_kind is not EntityKind.CARD or target_state != CardState.BLOCKED.value:
+        raise ValueError("policy evidence requires a blocked Card transition")
+    raw = data["policy_evidence"]
+    if not isinstance(raw, dict):
+        raise ValueError("policy evidence must be an object")
+    kind = raw.get("kind")
+    state = raw.get("state")
+    if kind not in {"codex_capability_preflight", "codex_provider_fanout"} or state not in {
+        "refused",
+        "unknown",
+        "violation",
+    }:
+        raise ValueError("policy evidence has an unsupported kind or state")
+    if not isinstance(raw.get("reason"), str) or not raw["reason"].strip():
+        raise ValueError("policy evidence requires a reason")
 
 
 def _format_time(value: datetime) -> str:

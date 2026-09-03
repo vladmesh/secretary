@@ -940,6 +940,11 @@ def start_review(
                 terminal_state="blocked",
                 disposition="blocked",
                 blocked_reason="provider",
+                policy_evidence={
+                    "kind": "codex_capability_preflight",
+                    "state": "refused",
+                    "reason": failure,
+                },
             )
             records.pop(ref, None)
             runtime.save_records(payload, records)

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -87,13 +88,23 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         tools: list[dict] = []
         attestation = {
             "version": codex_preflight.FANOUT_ATTESTATION_VERSION,
+            "kind": codex_preflight.CAPABILITY_ATTESTATION_KIND,
+            "run_id": run.run_id,
             "role": run.role,
             "model": run.spec.model,
+            "binary_path": str(self.binary.resolve()),
             "binary_digest": codex_preflight._file_digest(self.binary),
             "cli_version": "codex 9.9.9",
             "tools": tools,
             "tool_schema_digest": codex_preflight._json_digest(tools),
             "provider_schema_verdict": codex_preflight.FANOUT_SCHEMA_ALLOWED,
+            "attested_at": datetime.now(UTC).isoformat(),
+            "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            "strict_configuration": {
+                "status": "accepted",
+                "configured": dict(codex_preflight.STRICT_LAUNCH_CONFIGURATION),
+                "effective": dict(codex_preflight.STRICT_LAUNCH_CONFIGURATION),
+            },
         }
         allowed = codex_preflight.attest_codex_fanout(
             {}, run, schema_attestation=attestation, binary_path=str(self.binary)
@@ -528,7 +539,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(record.handle, "term-observer")
         self.assertEqual(observers["sprint:1"].head_run, record.head_run)
 
-    def test_collaboration_call_is_persisted_as_advisory_telemetry(self) -> None:
+    def test_collaboration_call_is_persisted_then_stops_and_blocks(self) -> None:
         self._write_source()
         ingress = self._ingress()
         ingress.bind_before_delivery()
@@ -547,8 +558,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         raw_line = self.source.read_text(encoding="utf-8").splitlines()[-1]
         self.assertEqual(event["raw_event_digest"], hashlib.sha256(raw_line.encode("utf-8")).hexdigest())
         self.assertEqual(recorded.fanout_policy["terminal_state"], "violation")
-        self.assertEqual(self.stops, [])
-        self.assertEqual(self.blocks, [])
+        self.assertEqual(len(self.stops), 1)
+        self.assertEqual(self.blocks[-1]["state"], "violation")
 
     def test_retained_tui_tool_only_envelope_reaches_the_same_recorder(self) -> None:
         self._write_source()
@@ -615,8 +626,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
 
                 self.assertEqual(self.written[-1].fanout_policy["events"][-1]["type"], expected_type)
                 self.assertEqual(self.written[-1].fanout_policy["terminal_state"], expected_state)
-                self.assertEqual(self.stops, [])
-                self.assertEqual(self.blocks, [])
+                self.assertTrue(self.stops)
+                self.assertTrue(self.blocks)
 
     def test_recovery_cursor_mismatch_is_non_fatal_diagnostic(self) -> None:
         self._write_source()
@@ -636,8 +647,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
 
         ingress.poll()
 
-        self.assertEqual(self.stops, [])
-        self.assertEqual(self.blocks, [])
+        self.assertTrue(self.stops)
+        self.assertTrue(self.blocks)
         self.assertEqual(ingress.run.fanout_policy["terminal_state"], "unknown")
 
     def test_clean_ordinary_prebind_lines_are_durably_advanced_before_delivery(self) -> None:
@@ -652,8 +663,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         source = self.written[-1].fanout_policy["provider_source"]
         self.assertEqual(source["cursor"]["line"], 4)
         self.assertEqual(self.written[-1].fanout_policy["events"], [])
-        self.assertEqual(self.stops, [])
-        self.assertEqual(self.blocks, [])
+        self.assertTrue(self.stops)
+        self.assertTrue(self.blocks)
 
     def test_malformed_post_root_prebind_line_is_advisory_telemetry(self) -> None:
         self._write_source("{not-json")
@@ -665,8 +676,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "unparseable_provider_event")
         self.assertEqual(event["source_sequence"], 3)
-        self.assertEqual(self.stops, [])
-        self.assertEqual(self.blocks, [])
+        self.assertTrue(self.stops)
+        self.assertTrue(self.blocks)
 
     def test_tui_policy_event_in_post_root_prebind_tail_is_advisory(self) -> None:
         self._write_source(
@@ -692,8 +703,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "child_thread_edge")
         self.assertEqual(event["child_thread_id"], "child-1")
-        self.assertEqual(self.stops, [])
-        self.assertEqual(self.blocks, [])
+        self.assertTrue(self.stops)
+        self.assertTrue(self.blocks)
 
     def test_unrecognised_collaboration_shape_is_unknown_not_a_clean_cursor_advance(self) -> None:
         self._write_source(
@@ -731,8 +742,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "unparseable_provider_event")
         self.assertEqual(event["source_sequence"], 2)
-        self.assertEqual(self.stops, [])
-        self.assertEqual(self.blocks, [])
+        self.assertTrue(self.stops)
+        self.assertTrue(self.blocks)
 
     def test_clean_recognised_pre_root_records_cross_the_root_in_one_scanner(self) -> None:
         self._write_records(
@@ -750,8 +761,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             [0, 1, 2, 3, 4],
         )
         self.assertEqual(self.written[-1].fanout_policy["events"], [])
-        self.assertEqual(self.stops, [])
-        self.assertEqual(self.blocks, [])
+        self.assertTrue(self.stops)
+        self.assertTrue(self.blocks)
 
     def test_policy_pre_root_record_is_telemetry_after_source_selection(self) -> None:
         self._write_records(
@@ -780,8 +791,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(event["type"], "child_thread_edge")
         self.assertEqual(event["source_sequence"], 2)
         self.assertEqual(event["child_thread_id"], "child-1")
-        self.assertEqual(self.stops, [])
-        self.assertEqual(self.blocks, [])
+        self.assertTrue(self.stops)
+        self.assertTrue(self.blocks)
 
     def test_recovery_reuses_the_persisted_full_range_before_later_events(self) -> None:
         self._write_records(
@@ -854,7 +865,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(self.stops, [])
         self.assertEqual(self.blocks, [])
 
-    def test_failed_durable_event_write_is_non_fatal(self) -> None:
+    def test_failed_durable_event_write_stops_and_blocks(self) -> None:
         self._write_source()
         ingress = self._ingress()
         ingress.bind_before_delivery()
@@ -869,11 +880,11 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             raise OSError("disk full")
 
         ingress.persist = fail
-        ingress.poll()
+        with self.assertRaises(codex_preflight.CodexFanoutRecordingError):
+            ingress.poll()
 
-        self.assertEqual(self.stops, [])
-        self.assertEqual(self.blocks, [])
-        self.assertEqual(ingress.run.fanout_policy["events"], [])
+        self.assertEqual(len(self.stops), 1)
+        self.assertTrue(self.blocks[-1]["recorder_failure"])
 
 
 class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
@@ -912,7 +923,26 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         self.sessions = self.root / "sessions" / "2026" / "08" / "15"
         self.sessions.mkdir(parents=True)
         self.host = CommandHostRuntime(self.Catalog(self.root), self.root / "data", mode="noop")  # type: ignore[arg-type]
+        self.host.preflight_codex_run = self._attested_preflight  # type: ignore[method-assign]
         self.persisted: list[HeadRun] = []
+
+    def _attested_preflight(self, head: str, *, role: str, workspace: str, task_ref: TaskRef, pid_file: str, run_id: str) -> HeadRun:
+        run = HeadRun(
+            run_id=run_id,
+            spec=HeadSpec(profile_id=head, adapter="codex", model="gpt-5.6-terra"),
+            workspace=workspace,
+            task_ref=task_ref,
+            role=role,
+            pid_file=pid_file,
+        ).with_fanout_policy(
+            {
+                "version": 1, "state": "allowed", "terminal_state": "clean", "run_id": run_id,
+                "role": role, "model": "gpt-5.6-terra", "binary_path": "/test/codex",
+                "binary_digest": "0" * 64, "cli_version": "test", "tool_schema_digest": "0" * 64,
+                "provider_schema_verdict": "no_callable_child_spawn_surface", "events": [],
+            }
+        )
+        return codex_preflight._with_unbound_provider_source({"codex_home": str(self.root)}, run)
 
     @property
     def _launch_identity(self) -> dict[str, object]:
@@ -1355,12 +1385,22 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             role=role,
             pid_file=pid_file,
         )
-        # The production path has no independently captured provider schema.  Advisory fan-out
-        # telemetry must therefore carry ``schema_absent`` through all three real launch routes.
+        tools: list[dict] = []
+        now = datetime.now(UTC)
         return codex_preflight.preflight_codex_launch(
             {"codex_home": str(self.root)},
             workspace,
             run,
+            schema_attestation={
+                "version": 1, "kind": codex_preflight.CAPABILITY_ATTESTATION_KIND,
+                "run_id": run_id, "role": role, "model": "gpt-5.6-terra",
+                "binary_path": str(self.binary.resolve()), "binary_digest": codex_preflight._file_digest(self.binary),
+                "cli_version": "codex 9.9.9", "tools": tools,
+                "tool_schema_digest": codex_preflight._json_digest(tools),
+                "provider_schema_verdict": codex_preflight.FANOUT_SCHEMA_ALLOWED,
+                "attested_at": now.isoformat(), "expires_at": (now + timedelta(hours=1)).isoformat(),
+                "strict_configuration": {"status": "accepted", "configured": dict(codex_preflight.STRICT_LAUNCH_CONFIGURATION), "effective": dict(codex_preflight.STRICT_LAUNCH_CONFIGURATION)},
+            },
             binary_path=str(self.binary),
             config=self.root / "config.toml",
         )
@@ -1454,7 +1494,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         )
 
     def _assert_bound(self, run: dict, *, role: str) -> None:
-        self.assertEqual(run["fanout_policy"]["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
+        self.assertEqual(run["fanout_policy"]["state"], "allowed")
         source = run["fanout_policy"]["provider_source"]
         self.assertEqual(source["state"], "bound")
         self.assertEqual(source["session_id"], "session-1")
