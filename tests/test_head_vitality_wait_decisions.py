@@ -769,9 +769,6 @@ def _reduce_vitality_under_test():
     return reduce_vitality
 
 
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()
-
 
 class ProviderLessStatusShapesTests(DispatcherRuntimeFixture, unittest.TestCase):
     """The two live-heartbeat status shapes that carry no provider channel at all.
@@ -1003,3 +1000,7 @@ class ProviderLessStatusShapesTests(DispatcherRuntimeFixture, unittest.TestCase)
 
         self.assertEqual(outcome["action"], "worker-respawned")
         self.assertEqual(self._pilot_record()["worker_respawns"], 1)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

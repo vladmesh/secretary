@@ -47,9 +47,10 @@ from tests.fakes.board import BatchedCalls
 from tests.head_registry import write_installed_pair
 from triggered_agents.runtime.head import operations as head_ops
 
-#: The `command_terminal_status` answers that report a LIVE head with a pid heartbeat and no
-#: provider channel at all, because no readable pane was matched to probe one from.
-_PROVIDER_LESS_STATUS_REASONS = frozenset({"pid", "disconnected"})
+#: The `command_terminal_status` answers that carry a pid heartbeat and no provider channel at
+#: all, because no readable connected pane was matched to probe one from: the two live shapes
+#: (`pid`, `disconnected`) and the two not-live ones (`missing-terminal`, `process-exited`).
+_PROVIDER_LESS_STATUS_REASONS = frozenset({"pid", "disconnected", "missing-terminal", "process-exited"})
 
 
 def _legacy_unbound_v1_run(run_json: dict[str, Any], *, root: Path) -> dict[str, Any]:
@@ -805,6 +806,12 @@ class FakeHost:
         self.review_stop_initiators: list[str] = []
         self.commit = "c0ffee1234567890"
         self.instance_publish_recoveries: set[tuple[str, str]] = set()
+        # The retained checkout a headless recovery binds (secretary-1544): bound and clean on the
+        # card's own branch by default; a test that models a lost or foreign checkout sets the
+        # refusal reason, and one that models a worker stopped mid-edit sets `dirty`.
+        self.retained_workspace_reason = ""
+        self.retained_workspace_branch = ""
+        self.retained_workspace_dirty = False
         # Observer heads (secretary-793): which sprints got one, which handles were stopped, and
         # the pid the fake heartbeat writes. os.getpid() is a live process, so the default launch
         # reads as alive; point it at a free pid to model a head that died.
@@ -1070,25 +1077,25 @@ class FakeHost:
                     "match": False,
                     "state": "not-yet-written",
                 }
+        if result.get("live") is False:
+            # A scripted not-live answer models a terminal the inventory lost. The
+            # classification is settled before the provider channel is decided, because it is
+            # what decides it.
+            result.setdefault("reason", "missing-terminal")
         # Only the live-pane branch of the real `command_terminal_status` probes the provider at
-        # all, so the two shapes that report a LIVE head with a heartbeat and no pane to read --
-        # `pid` (an exact live heartbeat the worktree inventory has no pane for) and
-        # `disconnected` -- carry a `pid_status` and NO provider channel. The fake used to attach
-        # one to every scripted shape, so no in-repo fixture could express the provider-less
-        # status the reduction really sees, which is why the absent-channel defect went unseen
-        # (secretary-1543). Withheld for exactly those two here; the not-live classifications
-        # (`missing-terminal`, `process-exited`) carry no provider channel in production either,
-        # but a fixture depends on the fake's one and repairing it is another card's business --
-        # see the report for this round.
+        # all, so every other shape carries a `pid_status` and NO provider channel: the two live
+        # ones -- `pid` (an exact live heartbeat the worktree inventory has no pane for) and
+        # `disconnected` -- and the two not-live ones, `missing-terminal` and `process-exited`,
+        # which never reach the probe either. The fake used to attach a provider cursor to every
+        # scripted shape, so no in-repo fixture could express the provider-less status the
+        # reduction really sees, which is why the absent-channel defect went unseen
+        # (secretary-1543) and why a wait test could assert a recovery production would not
+        # produce (secretary-1544).
         if (
             "provider_progress" not in result
             and str(result.get("reason") or "") not in _PROVIDER_LESS_STATUS_REASONS
         ):
             result["provider_progress"] = dict(self.provider_progress(task, record, kind))
-        if result.get("live") is False:
-            # A scripted not-live answer models a terminal the inventory lost. The
-            # classification above is what the reduction gets to see.
-            result.setdefault("reason", "missing-terminal")
         return result
 
     def observer_provider_progress(self, record) -> dict[str, str]:
@@ -1441,17 +1448,23 @@ class FakeHost:
                 "state": "not-yet-written",
             }
         )
-        return {
+        reason = (
+            "live"
+            if pid_status.get("alive")
+            else ("process-exited" if pid_status.get("state") == "dead" else "live")
+        )
+        answer = {
             "known": True,
             "live": bool(pid_status.get("alive")) if pid_status.get("known") else True,
-            "reason": "live"
-            if pid_status.get("alive")
-            else ("process-exited" if pid_status.get("state") == "dead" else "live"),
+            "reason": reason,
             "pid_confirmed": bool(pid_status.get("match") and pid_status.get("alive")),
             "last_activity": time.time(),
             "pid_status": pid_status,
-            "provider_progress": dict(self.provider_progress(task, record, "worker")),
         }
+        if reason not in _PROVIDER_LESS_STATUS_REASONS:
+            # Same rule as the scripted shapes: only a live connected pane is ever probed.
+            answer["provider_progress"] = dict(self.provider_progress(task, record, "worker"))
+        return answer
 
     def review_status(self, task: dict, record) -> dict:
         self.calls.append("review_status")
@@ -1522,6 +1535,37 @@ class FakeHost:
     def restore_workspace(self, task: dict, worker: str) -> str:
         self.calls.append("restore_workspace")
         return str(self.root / worker)
+
+    def retained_workspace_state(self, task: dict, record) -> dict:
+        """The four facts the headless recovery is allowed to rest on, scriptable per test.
+
+        Shaped exactly like the production answer: a checkout that cannot be bound comes back
+        unbound with a typed reason and no candidate, never repaired.
+        """
+        self.calls.append("retained_workspace_state")
+        workspace = record.workspace or self.restore_workspace(task, record.worker)
+        expected_branch = f"pipeline/{task['ref']}"
+        if self.retained_workspace_reason:
+            return {
+                "workspace": workspace,
+                "expected_branch": expected_branch,
+                "branch": self.retained_workspace_branch,
+                "dirty": None,
+                "sha": "",
+                "bound": False,
+                "reason": self.retained_workspace_reason,
+                "detail": "",
+            }
+        return {
+            "workspace": workspace,
+            "expected_branch": expected_branch,
+            "branch": self.retained_workspace_branch or expected_branch,
+            "dirty": self.retained_workspace_dirty,
+            "sha": self.commit,
+            "bound": True,
+            "reason": "",
+            "detail": "",
+        }
 
     def complete_green(self, task: dict, record) -> None:
         self.calls.append("complete_green")

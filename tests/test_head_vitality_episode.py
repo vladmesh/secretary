@@ -579,8 +579,9 @@ class AbsentProgressChannelTests(unittest.TestCase):
         """The window, not a shortcut: 15 minutes of heartbeat alone used to confirm at once."""
         absent = reduce_vitality(self._witnessed(), [heartbeat(20.0)], now=20.0, thresholds=THRESHOLDS)
 
-        # Quiet is past both thresholds at t=900, but the source has been dark for 880s < 600s?
-        # No: it has been dark for 880s, which IS past the ceiling, so the ladder resumes.
+        # The source went dark at t=20.0, so darkness is measured from there. At t=400.0 it has
+        # been dark for 380s, inside the 600s ceiling, and the episode stays quiet. At t=700.0 it
+        # has been dark for 680s, past that ceiling, and the ladder resumes.
         held = reduce_vitality(absent, [heartbeat(400.0)], now=400.0, thresholds=THRESHOLDS)
         self.assertEqual(held.verdict, VitalityVerdict.HEALTHY_QUIET, "inside the dark ceiling")
 
