@@ -43,6 +43,7 @@ its intent, and the tick returns `*-stop-unconfirmed` instead.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -52,7 +53,18 @@ from typing import Any
 from secretary.dispatcher_heartbeat import intent_heartbeat_identity
 from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_tui import READINESS_BLOCKED, READINESS_BUSY
+from secretary.dispatcher_tui import (
+    DELIVERY_RECEIPT_ACCEPTED,
+    DELIVERY_RECEIPT_REFUSED,
+    DELIVERY_RECEIPT_UNOBSERVED,
+    PRE_DELIVERY_STARTING,
+    PRE_DELIVERY_UNKNOWN_DIALOG,
+    PRE_DELIVERY_UPDATE_MODAL,
+    READINESS_BLOCKED,
+    READINESS_BUSY,
+    delivery_readiness_state,
+    delivery_receipt_state,
+)
 from secretary.dispatcher_types import (
     STOPPED_BY_LAUNCH_RECOVERY,
     HeadLaunchAborted,
@@ -70,11 +82,25 @@ from triggered_agents.runtime.head import operations as head_ops
 
 WORKER_ROLE = "worker"
 REVIEW_ROLE = "review"
-PANE_STATE_LABELS = {READINESS_BUSY: "busy", READINESS_BLOCKED: "held in a dialog"}
+PANE_STATE_LABELS = {
+    READINESS_BUSY: "busy",
+    READINESS_BLOCKED: "held in a dialog",
+    PRE_DELIVERY_UPDATE_MODAL: "holding its own update modal",
+    PRE_DELIVERY_STARTING: "still starting",
+    PRE_DELIVERY_UNKNOWN_DIALOG: "holding a dialog nothing here recognises",
+    DELIVERY_RECEIPT_REFUSED: "not accepting the pointer",
+}
 
 # A busy review nudge retries through its exact existing run on a bounded schedule.
 REVIEW_BUSY_RETRY_INITIAL_SECONDS = 30
 REVIEW_BUSY_RETRY_MAX_SECONDS = 5 * 60
+
+# The delivery state of a launch whose pointer the composer took.
+LAUNCH_DELIVERY_CONFIRMED = "confirmed"
+# How many ticks a launch may hold its card while its pointer is still unaccepted. Past this the
+# head is stopped and relaunched: a head that cannot be made sendable is replaced, and it never
+# sits indefinitely while the card reports progress.
+LAUNCH_DELIVERY_MAX_ATTEMPTS = int(os.environ.get("SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS", "5") or 5)
 
 # Catch only storage failures: other errors must not masquerade as unwritable state.
 STORAGE_ERRORS = (OSError, ValueError, TypeError, UnicodeError)
@@ -90,14 +116,103 @@ def launch_intent(record: DispatcherRecord) -> dict[str, Any]:
     return intent if isinstance(intent, dict) and intent.get("role") else {}
 
 
+def launch_delivery(intent: dict[str, Any]) -> dict[str, Any]:
+    """The delivery record this intent carries, whatever it says."""
+    delivery = intent.get("delivery") if isinstance(intent, dict) else None
+    return dict(delivery) if isinstance(delivery, dict) else {}
+
+
 def busy_launch_delivery(intent: dict[str, Any]) -> dict[str, Any]:
     """Return a durable, still-undelivered busy launch nudge, if this intent has one."""
-    delivery = intent.get("delivery") if isinstance(intent, dict) else None
-    if not isinstance(delivery, dict):
-        return {}
+    delivery = launch_delivery(intent)
     if delivery.get("state") != READINESS_BUSY:
         return {}
-    return dict(delivery)
+    return delivery
+
+
+def launch_delivery_state(evidence: Any) -> str:
+    """Name what one delivery boundary receipt says, in the words an intent keeps.
+
+    A pane the boundary found busy or held in a dialog keeps that state, because the retry schedule
+    reads it; anything else the composer did not accept is simply `refused`.
+    """
+    receipt = delivery_receipt_state(evidence)
+    if receipt == DELIVERY_RECEIPT_ACCEPTED:
+        return LAUNCH_DELIVERY_CONFIRMED
+    readiness = delivery_readiness_state(evidence)
+    if readiness in {READINESS_BUSY, READINESS_BLOCKED}:
+        return readiness
+    return receipt
+
+
+def launch_delivery_receipt(evidence: Any) -> dict[str, Any] | None:
+    """The durable delivery record for an intent, or None when no delivery was observed.
+
+    None is not "delivered": it is a bring-up that failed before a prompt existed, or a head whose
+    launch command carried its own prompt. Only a record the delivery boundary produced can either
+    authorise or refuse a claim, so only that one is written.
+    """
+    if delivery_receipt_state(evidence) == DELIVERY_RECEIPT_UNOBSERVED:
+        return None
+    return {
+        "state": launch_delivery_state(evidence),
+        "receipt": delivery_receipt_state(evidence),
+        "evidence": dict(evidence),
+    }
+
+
+def undelivered_launch_delivery(intent: dict[str, Any]) -> dict[str, Any]:
+    """The evidence that this launch's pointer was never accepted, or `{}`.
+
+    This is the one predicate adoption, recovery and the reviewer retry all ask, so that a live
+    pid, a writable pane and Orca's own `accepted`/`bytesWritten` cannot authorise on one path what
+    they are refused on another. `issue:6afc6644` is exactly the disagreement: the delivery
+    boundary got it right — blocked, unconfirmed, zero bytes written — and the next tick adopted
+    the retained launch as `reviewing` anyway because the pid was alive.
+    """
+    delivery = launch_delivery(intent)
+    if not delivery:
+        return {}
+    if str(delivery.get("state") or "") == LAUNCH_DELIVERY_CONFIRMED:
+        return {}
+    if delivery_receipt_state(delivery.get("evidence")) == DELIVERY_RECEIPT_ACCEPTED:
+        return {}
+    return delivery
+
+
+def remember_launch_delivery(intent: dict[str, Any], evidence: Any) -> None:
+    """Put a delivery boundary receipt onto an intent, keeping any retry schedule already on it."""
+    receipt = launch_delivery_receipt(evidence)
+    if receipt is None:
+        return
+    intent["delivery"] = {**launch_delivery(intent), **receipt}
+
+
+def defer_launch_delivery(
+    record: DispatcherRecord,
+    evidence: dict[str, Any],
+    *,
+    state: str = READINESS_BUSY,
+    now: float | None = None,
+) -> int:
+    """Persist the next capped retry for a launch whose pointer the composer has not accepted."""
+    intent = dict(launch_intent(record))
+    if not intent:
+        return 0
+    previous = launch_delivery(intent)
+    attempts = int(previous.get("attempts") or 0) + 1
+    delay = min(
+        REVIEW_BUSY_RETRY_INITIAL_SECONDS * (2 ** min(attempts - 1, 4)),
+        REVIEW_BUSY_RETRY_MAX_SECONDS,
+    )
+    intent["delivery"] = {
+        "state": state,
+        "attempts": attempts,
+        "next_at": (time.time() if now is None else now) + delay,
+        "evidence": dict(evidence),
+    }
+    record.launch_intent = intent
+    return delay
 
 
 def defer_busy_launch_delivery(
@@ -107,23 +222,7 @@ def defer_busy_launch_delivery(
     now: float | None = None,
 ) -> int:
     """Persist the next capped retry for a pre-send reviewer document nudge."""
-    intent = dict(launch_intent(record))
-    if not intent:
-        return 0
-    previous = busy_launch_delivery(intent)
-    attempts = int(previous.get("attempts") or 0) + 1
-    delay = min(
-        REVIEW_BUSY_RETRY_INITIAL_SECONDS * (2 ** min(attempts - 1, 4)),
-        REVIEW_BUSY_RETRY_MAX_SECONDS,
-    )
-    intent["delivery"] = {
-        "state": READINESS_BUSY,
-        "attempts": attempts,
-        "next_at": (time.time() if now is None else now) + delay,
-        "evidence": dict(evidence),
-    }
-    record.launch_intent = intent
-    return delay
+    return defer_launch_delivery(record, evidence, state=READINESS_BUSY, now=now)
 
 
 def write_launch_intent(
@@ -466,10 +565,16 @@ def mark_launch_aborted(
     whatever identity the failure carried; the next tick adopts the head or stops what is left of it.
     A reviewer whose pre-send document nudge recorded busy retries that exact nudge first. A persist
     that refuses is not a problem: the pre-launch intent already names the same pid file.
+
+    What the delivery boundary saw travels with the intent too. A bring-up that aborted *after* its
+    prompt was refused leaves a live head that never received it, and the next tick has nothing but
+    this record to tell that apart from a head that is working: the pane is writable and the pid is
+    alive in both cases.
     """
     intent = dict(launch_intent(record))
     if not intent:
         return
+    remember_launch_delivery(intent, getattr(exc, "evidence", None))
     if exc.handle:
         intent["handle"] = exc.handle
     if exc.leaf:
@@ -851,7 +956,7 @@ def resolve_launch_intent(
                 reason=failure,
             )
         return None
-    if role == REVIEW_ROLE and busy_launch_delivery(intent):
+    if role == REVIEW_ROLE and undelivered_launch_delivery(intent):
         # Delayed import avoids the dispatcher_review launch-intent cycle.
         from secretary.dispatcher_review import retry_busy_reviewer_launch_delivery
 
@@ -974,6 +1079,11 @@ def _adopt_launch_intent(
     only where that head is currently reachable. Nothing after this reconstructs a run over it.
     """
     ref = task["ref"]
+    undelivered = undelivered_launch_delivery(intent)
+    if undelivered:
+        return refuse_undelivered_launch(
+            runtime, payload, records, ref, record, intent, role, step, undelivered
+        )
     launched_at = float(intent.get("at") or 0.0) or time.time()
     record.workspace = record.workspace or str(intent.get("workspace") or "")
     handle = str(intent.get("handle") or "")
@@ -1052,6 +1162,100 @@ def _adopt_launch_intent(
         "action": f"{role}-launch-adopted",
         "head": str(intent.get("head") or ""),
         "reason": "a launch intent was left by a tick that did not finish; its head is alive",
+    }
+
+
+def refuse_undelivered_launch(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    ref: str,
+    record: DispatcherRecord,
+    intent: dict[str, Any],
+    role: str,
+    step: str,
+    undelivered: dict[str, Any],
+) -> dict[str, Any]:
+    """A launch whose pointer the composer never accepted is not a claim, however alive it is.
+
+    Nothing of adoption happens here: no routing event, no `claimed`, no `review_starting`, no
+    `reviewing`, no worker freeze, and above all the intent is not spent. Clearing it is what turned
+    an undelivered reviewer into `waiting-review-verdict` for over an hour on `issue:6afc6644`, and
+    an undelivered worker into a successfully claimed head on `issue:2fdac531`.
+
+    The refusal is bounded, because a card that never moves is its own failure: past
+    `LAUNCH_DELIVERY_MAX_ATTEMPTS` the head is stopped through its own intent and the ordinary path
+    relaunches on a later tick. Stopping first is what keeps this from opening a second head beside
+    the first, and an unconfirmed stop keeps the intent rather than pretending the head is gone.
+    """
+    attempts = int(undelivered.get("attempts") or 0)
+    state = str(undelivered.get("state") or "")
+    head = str(intent.get("head") or "")
+    now = time.time()
+    if attempts >= LAUNCH_DELIVERY_MAX_ATTEMPTS:
+        failure = stop_launch_intent(runtime, record, intent, role)
+        if failure is None:
+            keep_reserved_round(runtime, record, intent)
+        records[ref] = record
+        _persist_quietly(runtime, payload, records)
+        if failure is not None:
+            return head_stop_unconfirmed(
+                step=step, ref=ref, attempt_id=record.attempt_id, role=role, reason=failure
+            )
+        return {
+            "status": "degraded",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id,
+            "action": f"{role}-launch-undeliverable",
+            "head": head,
+            "readiness": state,
+            "attempts": attempts,
+            "reason": (
+                f"the {role_label(role)} head never accepted its pointer in {attempts} attempts "
+                f"({pane_state_label(state)}); it has been stopped and the launch is made again"
+            ),
+        }
+    next_at = float(undelivered.get("next_at") or 0.0)
+    if next_at and now < next_at:
+        return {
+            "status": "degraded",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id,
+            "action": f"{role}-launch-undelivered",
+            "head": head,
+            "readiness": state,
+            "attempts": attempts,
+            "reason": (
+                f"the {role_label(role)} launch is alive but its pointer was never accepted "
+                f"({pane_state_label(state)}); the next attempt is due in "
+                f"{max(0, int(next_at - now))}s"
+            ),
+        }
+    evidence = undelivered.get("evidence")
+    delay = defer_launch_delivery(
+        record,
+        dict(evidence) if isinstance(evidence, dict) else {},
+        state=state or READINESS_BLOCKED,
+        now=now,
+    )
+    records[ref] = record
+    _persist_quietly(runtime, payload, records)
+    return {
+        "status": "degraded",
+        "step": step,
+        "pilot_ref": ref,
+        "attempt_id": record.attempt_id,
+        "action": f"{role}-launch-undelivered",
+        "head": head,
+        "readiness": state,
+        "attempts": attempts + 1,
+        "reason": (
+            f"a live {role_label(role)} head is not a delivered pointer: the composer never "
+            f"accepted it ({pane_state_label(state)}), so the launch is not adopted as a claim; "
+            f"attempt {attempts + 1} of {LAUNCH_DELIVERY_MAX_ATTEMPTS} waits {delay}s"
+        ),
     }
 
 

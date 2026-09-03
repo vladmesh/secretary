@@ -483,14 +483,29 @@ def _spawn_delivery_failure(
     failure = _cleanup(host, run, transport, str(exc), evidence=evidence)
     if isinstance(failure, HeadSpawnAborted):
         return failure
-    if readiness in (READINESS_BUSY, READINESS_BLOCKED):
+    # A pre-delivery state is the same kind of answer as a busy pane and is treated as one: nothing
+    # was written, the pane has been closed, and the bring-up is worth making again on the next
+    # tick under the caller's own bounded deferral. It is named rather than folded into `blocked`,
+    # so the reason an operator eventually reads says which screen held the head.
+    state = _pre_delivery_state(evidence)
+    if readiness in (READINESS_BUSY, READINESS_BLOCKED) or state:
+        held = readiness if readiness in (READINESS_BUSY, READINESS_BLOCKED) else state
         return HeadPaneBusy(
-            f"the head pane was {readiness} and never took its launch prompt: {exc}",
-            readiness=readiness,
+            f"the head pane was {held} and never took its launch prompt: {exc}",
+            readiness=held,
             pane=run.handle,
             evidence=evidence,
         )
     return failure
+
+
+def _pre_delivery_state(evidence: Any) -> str:
+    """Which pre-delivery state a delivery refusal observed, if it observed one."""
+    if hasattr(evidence, "to_json"):
+        evidence = evidence.to_json()
+    if not isinstance(evidence, dict):
+        return ""
+    return str(evidence.get("pre_delivery_before") or "")
 
 
 def _deliver(

@@ -33,7 +33,7 @@ from secretary.dispatcher import (
 )
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
-from secretary.dispatcher_launch import launch_intent_liveness
+from secretary.dispatcher_launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
 from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.projects.contract import (
@@ -1912,6 +1912,251 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(record.handle, "term:leftover")
         self.assertEqual(record.worker_leaf, "leaf:leftover")
 
+    # a live head that never received its pointer ---------------------------
+
+    def test_a_blocked_reviewer_launch_is_not_adopted_because_its_pid_is_alive(self) -> None:
+        """`issue:6afc6644`, incident secretary-1527, reproduced end to end.
+
+        The delivery boundary got this right the first time: `readiness_state=blocked`,
+        `turn_confirmed=false`, `send_accepted=false`, zero bytes written. The next tick then found
+        the retained launch's pid alive and adopted it as `reviewing` anyway, and the system
+        reported `waiting-review-verdict` for over an hour against a reviewer that had never
+        received the document.
+
+        A live pid, a writable pane and Orca's own `accepted` are not a delivered pointer. So the
+        adoption refuses: no worker freeze, no `reviewing`, no routing event, and above all the
+        intent is not spent — the reviewer stays recoverable and its pointer stays owed.
+        """
+        self.run_to_validate()
+        self.host.calls.clear()
+        evidence = {
+            "subject": "reviewer-launch",
+            "handle": f"review:{REF}",
+            "stage": "none",
+            "readiness_before": "blocked",
+            "readiness_state": "blocked",
+            "reason": "readiness-blocked",
+            "turn_confirmed": False,
+            "send_accepted": False,
+            "bytes_written": 0,
+        }
+
+        def blocked_before_send(task: dict, record: DispatcherRecord) -> ReviewLaunch:
+            self.host.calls.append("start_review")
+            self.host.reviews.append(task["ref"])
+            launched = self.host._launched(
+                f"review:{task['ref']}",
+                record.review_head,
+                task,
+                "reviewer",
+                record.workspace,
+                run_id=str(record.launch_intent["run_id"]),
+            )
+            self.host._write_head_pid("review", task["ref"], head_run=launched.head_run, leaf=launched.leaf)
+            raise HeadLaunchAborted(
+                "the reviewer pane was held in a dialog and never took the document nudge",
+                handle=launched.handle,
+                leaf=launched.leaf,
+                workspace=record.workspace,
+                pid_file=pid_file_path("review", task["ref"]),
+                evidence=evidence,
+                head_run=dict(launched.head_run),
+            )
+
+        with mock.patch.object(self.host, "start_review", side_effect=blocked_before_send):
+            self.tick()
+
+        # The refusal travels on the intent, which is the only thing the next tick can read.
+        intent = self.stored_intent()
+        self.assertEqual(intent["delivery"]["state"], "blocked")
+        self.assertEqual(intent["delivery"]["receipt"], "refused")
+
+        # The next tick: the retained launch is alive, and that is exactly what must not authorise
+        # a claim. The reviewer delivery retry is the only thing this may turn into.
+        still_blocked = HostError("the reviewer pane is still held in a dialog")
+        still_blocked.evidence = {**evidence, "reason": "readiness-blocked"}
+        self.host.fail_review_delivery_retry_error = still_blocked
+        held = self.tick()
+
+        # The pointer is retried over the exact retained reviewer; what it is never turned into is
+        # a claim on the strength of the live pid.
+        self.assertEqual(held["action"], "review-launch-delivery-unavailable")
+        self.assertEqual(held["readiness"], "blocked")
+        record = self.record()
+        assert record is not None
+        self.assertNotEqual(record.state, "reviewing")
+        self.assertNotIn("freeze_worker", self.host.calls)
+        self.assertEqual(
+            sum(1 for attempt in self.routing_history() if attempt.reviewer is not None),
+            0,
+            "no routing event attributes a round to a reviewer that never got the document",
+        )
+        self.assertTrue(self.stored_intent(), "the undelivered launch is never spent")
+        self.assertEqual(self.host.reviews, [REF], "and no second reviewer was opened beside it")
+
+        # And the card does not report progress: the tick that follows says the same thing.
+        following = self.tick()
+        self.assertEqual(following["action"], "review-launch-undelivered")
+        self.assertEqual(following["readiness"], "blocked")
+
+    def test_a_worker_whose_pointer_stayed_in_the_composer_is_not_a_successful_claim(self) -> None:
+        """`issue:2fdac531`, through the launch path and then through the adoption path.
+
+        Secretary wrote the TASK pointer into the composer and sent Enter three times in 12
+        seconds; Orca answered `accepted` with one byte written each time, the cursor never moved,
+        and the prompt stayed in the composer. Recovery then adopted the live HeadRun as
+        successfully claimed and cleared the launch intent — 80 minutes to a manual Enter.
+        """
+        left_in_composer = {
+            "subject": "worker-launch",
+            "handle": "term:leftover",
+            "stage": "payload_written",
+            "readiness_after": "ready",
+            "send_accepted": True,
+            "bytes_written": 1,
+            "attempts": 3,
+            "turn_confirmed": False,
+            "payload_left_in_composer": True,
+            "pre_delivery_before": "starting",
+            "reason": "payload-left-in-composer",
+        }
+        self.host.fail_prepare_error = HeadLaunchAborted(
+            "the launch nudge was not confirmed delivered, and the pane may have taken it anyway",
+            handle="term:leftover",
+            leaf="leaf:leftover",
+            workspace=str(self.data_dir / "workspaces" / f"{REF}-pilot"),
+            pid_file=pid_file_path("worker", REF),
+            evidence=left_in_composer,
+        )
+
+        # The launch path: positive evidence that the pointer is still in the composer is a
+        # determinate failure, and it is recorded on the intent rather than lost with the tick.
+        self.assertEqual(self.tick()["action"], "worker-launch-aborted")
+        intent = self.stored_intent()
+        self.assertEqual(intent["delivery"]["receipt"], "refused")
+        self.assertEqual(intent["delivery"]["evidence"]["payload_left_in_composer"], True)
+
+        # The adoption path: the head is alive and the pane is writable, and neither is delivery.
+        self.host.fail_prepare_error = None
+        refused = self.tick()
+
+        self.assertEqual(refused["action"], "worker-launch-undelivered")
+        self.assertEqual(refused["status"], "degraded")
+        record = self.record()
+        assert record is not None
+        self.assertNotEqual(record.state, "claimed")
+        self.assertEqual(
+            sum(1 for attempt in self.routing_history() if attempt.worker is not None),
+            0,
+            "an undelivered head earns no routing record",
+        )
+        self.assertTrue(self.stored_intent(), "and the intent is not spent")
+        self.assertEqual(self.host.calls.count("prepare_worker"), 1, "no second head beside it")
+
+    def test_a_head_that_never_accepts_its_pointer_is_replaced_within_a_bounded_window(self) -> None:
+        """It never sits indefinitely while the card reports progress.
+
+        The refusal is bounded on purpose: past the ceiling the head is stopped through its own
+        intent — stopped first, so nothing is ever opened beside it — and the ordinary path makes
+        the launch again.
+        """
+        self.host.fail_prepare_error = HeadLaunchAborted(
+            "the launch nudge was not confirmed delivered",
+            handle="term:leftover",
+            leaf="leaf:leftover",
+            workspace=str(self.data_dir / "workspaces" / f"{REF}-pilot"),
+            pid_file=pid_file_path("worker", REF),
+            evidence={
+                "subject": "worker-launch",
+                "stage": "none",
+                "readiness_state": "blocked",
+                "reason": "unknown-dialog",
+                "pre_delivery_before": "unknown-dialog",
+            },
+        )
+        self.tick()
+        self.host.fail_prepare_error = None
+
+        actions: list[str] = []
+        for _ in range(LAUNCH_DELIVERY_MAX_ATTEMPTS + 1):
+            payload = self.runtime.production_state.load()
+            delivery = payload["records"][REF].get("launch_intent", {}).get("delivery")
+            if delivery:
+                delivery["next_at"] = 0.0
+                self.runtime.production_state.save(payload)
+            actions.append(self.tick()["action"])
+
+        self.assertIn("worker-launch-undelivered", actions)
+        self.assertIn("worker-launch-undeliverable", actions)
+        self.assertLess(
+            actions.index("worker-launch-undelivered"), actions.index("worker-launch-undeliverable")
+        )
+        stopped = [call for call in self.host.calls if call.startswith(("stop_head", "stop_workspace"))]
+        self.assertTrue(stopped, "the head that would not take its pointer was stopped")
+
+    def test_a_crash_between_the_modal_and_the_write_resumes_the_same_delivery(self) -> None:
+        """The `issue:6afc6644` crash window, pinned: one transaction, one pointer, one head.
+
+        The tick that answered the modal and then died left a live head with its pointer still
+        owed. Recovery re-delivers the *same* immutable pointer, at the same path, over the exact
+        run the launch recorded — never a rebuilt one, never a second head — and only that
+        confirmed receipt spends the intent.
+        """
+        self.run_to_validate()
+        self.host.calls.clear()
+        evidence = {
+            "subject": "reviewer-launch",
+            "handle": f"review:{REF}",
+            "stage": "none",
+            "readiness_state": "blocked",
+            "reason": "pre-delivery-update-modal",
+            "modal_resolution": "answered-skip",
+            "modal_answers": 1,
+            "pre_delivery_before": "update-modal",
+        }
+
+        def modal_before_send(task: dict, record: DispatcherRecord) -> ReviewLaunch:
+            self.host.calls.append("start_review")
+            self.host.reviews.append(task["ref"])
+            launched = self.host._launched(
+                f"review:{task['ref']}",
+                record.review_head,
+                task,
+                "reviewer",
+                record.workspace,
+                run_id=str(record.launch_intent["run_id"]),
+            )
+            self.host._write_head_pid("review", task["ref"], head_run=launched.head_run, leaf=launched.leaf)
+            raise HeadLaunchAborted(
+                "the tick did not survive the update modal it answered",
+                handle=launched.handle,
+                leaf=launched.leaf,
+                workspace=record.workspace,
+                pid_file=pid_file_path("review", task["ref"]),
+                evidence=evidence,
+                head_run=dict(launched.head_run),
+            )
+
+        with mock.patch.object(self.host, "start_review", side_effect=modal_before_send):
+            self.tick()
+
+        launched_run = self.stored_intent()["head_run"]
+        payload = self.runtime.production_state.load()
+        payload["records"][REF]["launch_intent"]["delivery"]["next_at"] = 0.0
+        self.runtime.production_state.save(payload)
+
+        resumed = self.tick()
+
+        self.assertEqual(resumed["action"], "review-launch-adopted")
+        self.assertEqual(self.host.calls.count("start_review"), 1, "no second reviewer")
+        self.assertEqual(self.host.calls.count("nudge_review_delivery"), 1, "and no double prompt")
+        self.assertEqual(self.host.review_delivery_retries, [REF])
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.review_head_run["run_id"], launched_run["run_id"])
+        self.assertTrue(record.review_delivery_evidence["turn_confirmed"])
+        self.assertEqual(self.stored_intent(), {}, "only a confirmed receipt spends the intent")
+
     def test_a_reviewer_whose_worker_will_not_freeze_keeps_its_intent(self) -> None:
         """The reviewer pane is up and the worker would not go: neither head may be forgotten."""
         self.run_to_validate()
@@ -2137,11 +2382,13 @@ class LaunchIntentTests(unittest.TestCase):
 
         held = self.tick()
 
-        self.assertEqual(held["action"], "review-launch-busy")
+        # The pointer was looked for and found in the composer, so the retained delivery is named
+        # for what it is rather than for a pane that was busy: this is a determinate refusal.
+        self.assertEqual(held["action"], "review-launch-undelivered")
         record = self.record()
         assert record is not None
         self.assertEqual(record.state, "review_starting")
-        self.assertEqual(record.launch_intent["delivery"]["state"], "busy")
+        self.assertEqual(record.launch_intent["delivery"]["state"], "refused")
         self.assertTrue(record.review_delivery_evidence["payload_left_in_composer"])
         self.assertNotIn("freeze_worker", self.host.calls)
         self.assertTrue(self.stored_intent(), "the exact reviewer launch stays recoverable")

@@ -14,23 +14,28 @@ from secretary.dispatcher_launch import (
     bring_up_blocked_action,
     bring_up_blocked_reason,
     bring_up_terminal_reason,
+    LAUNCH_DELIVERY_MAX_ATTEMPTS,
     busy_launch_delivery,
     classify_bring_up_failure,
     clear_launch_intent,
     confirm_launch_intent,
     defer_busy_launch_delivery,
+    defer_launch_delivery,
     forget_role_head,
     launch_aborted,
     launch_deferred,
     launch_intent_unwritable,
     launch_left_a_head,
     mark_launch_aborted,
+    pane_state_label,
     reset_launch_attempts,
+    undelivered_launch_delivery,
     write_launch_intent,
 )
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_state import attempt_request_id as _attempt_request_id
 from secretary.dispatcher_tui import (
+    DELIVERY_RECEIPT_REFUSED,
     READINESS_BLOCKED,
     READINESS_BUSY,
     READINESS_READY,
@@ -650,30 +655,45 @@ def retry_busy_reviewer_launch_delivery(
     intent: dict[str, Any],
     step: str,
 ) -> dict[str, Any] | None:
-    """Retry a pre-send busy reviewer nudge before its live launch can be adopted.
+    """Retry an unaccepted reviewer nudge, over its exact live launch, before it can be adopted.
+
+    "Unaccepted" is wider than "busy": a pane that was held in a dialog, one still starting its MCP
+    servers and one that left the pointer sitting in its composer are the same fact here — the
+    reviewer has not received the document — and they retry the *same* immutable pointer, at the
+    same path, over the same run, rather than a rebuilt or duplicated one.
 
     A launch heartbeat only proves that the pane exists. Until the document nudge is confirmed it
     does not permit the adoption side effects: freezing the worker, recording routing, clearing the
     intent or setting the review lifecycle. The intent is also the retry's durable cursor.
     """
-    delivery = busy_launch_delivery(intent)
+    delivery = undelivered_launch_delivery(intent)
     if not delivery:
+        return None
+    if int(delivery.get("attempts") or 0) >= LAUNCH_DELIVERY_MAX_ATTEMPTS:
+        # The retry is bounded like everything else here. Past the ceiling the launch-recovery path
+        # owns the head: it refuses the adoption and replaces the reviewer rather than nudging a
+        # pane that has not taken a pointer in five attempts.
         return None
     ref = task["ref"]
     now = time.time()
     next_at = float(delivery.get("next_at") or 0.0)
     if next_at and now < next_at:
+        state = str(delivery.get("state") or "")
         return {
             "status": "degraded",
             "step": step,
             "pilot_ref": ref,
             "attempt_id": record.attempt_id,
-            "action": "review-launch-busy",
+            # The outcome says which state is holding the pointer. A pane that was working and a
+            # pane that never accepted the document are both deferred here and are not the same
+            # fact, so they are not reported under the same word.
+            "action": ("review-launch-busy" if state == READINESS_BUSY else "review-launch-undelivered"),
             "head": str(intent.get("head") or record.review_head),
+            "readiness": state,
             "attempts": int(delivery.get("attempts") or 0),
             "reason": (
-                "the reviewer document nudge is still deferred while its exact pane is busy; "
-                f"retry is due in {max(0, int(next_at - now))}s"
+                "the reviewer document nudge is still deferred while its exact pane is "
+                f"{pane_state_label(state)}; retry is due in {max(0, int(next_at - now))}s"
             ),
         }
     bind_ingress = getattr(runtime, "bind_codex_provider_ingress", None)
@@ -709,15 +729,10 @@ def retry_busy_reviewer_launch_delivery(
             }
         # Do not silently convert an unavailable, malformed or stale probe into busy.  The intent
         # stays on disk with the typed evidence; on the following tick the existing live-launch
-        # recovery path owns its conservative stop/adoption decision.
-        updated = dict(intent)
-        updated["delivery"] = {
-            **delivery,
-            "state": state,
-            "next_at": 0.0,
-            "evidence": dict(evidence),
-        }
-        record.launch_intent = updated
+        # recovery path owns its conservative stop/adoption decision.  The attempt is counted and
+        # backed off under the same schedule, so an unreachable pane is bounded rather than retried
+        # every tick until somebody notices.
+        defer_launch_delivery(record, evidence, state=state or READINESS_BLOCKED, now=now)
         records[ref] = record
         runtime.save_records(payload, records)
         return {
@@ -735,23 +750,25 @@ def retry_busy_reviewer_launch_delivery(
         raise HostError("reviewer delivery retry returned no durable result")
     evidence = retried.get("delivery_evidence")
     head_run = retried.get("head_run")
-    # A started turn with document still in composer is not a reviewer receipt.
+    # A started turn with the document still in the composer is not a reviewer receipt, and it is
+    # not an ambiguity either: the pointer was looked for and found sitting there. It is recorded
+    # as the determinate refusal it is rather than as a pane that was busy.
     if (
         isinstance(evidence, dict)
         and bool(evidence.get("turn_confirmed"))
         and bool(evidence.get("payload_left_in_composer"))
     ):
         record.review_delivery_evidence = dict(evidence)
-        delay = defer_busy_launch_delivery(record, evidence, now=now)
+        delay = defer_launch_delivery(record, evidence, state=DELIVERY_RECEIPT_REFUSED, now=now)
         records[ref] = record
         runtime.save_records(payload, records)
-        attempts = int(busy_launch_delivery(record.launch_intent).get("attempts") or 0)
+        attempts = int(undelivered_launch_delivery(record.launch_intent).get("attempts") or 0)
         return {
             "status": "degraded",
             "step": step,
             "pilot_ref": ref,
             "attempt_id": record.attempt_id,
-            "action": "review-launch-busy",
+            "action": "review-launch-undelivered",
             "head": str(intent.get("head") or record.review_head),
             "attempts": attempts,
             "reason": (

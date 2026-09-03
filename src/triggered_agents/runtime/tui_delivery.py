@@ -61,6 +61,22 @@ TUI_DELIVERY_RESEND_GRACE_S = float(
         "SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")
     )
 )
+# How long a pane that is not yet able to take a prompt is given to become able to. A Codex head
+# that is still starting its MCP servers is the ordinary case and it clears on its own; a head that
+# does not clear inside this window is a head the caller has to replace, not one to keep typing at.
+TUI_PRE_DELIVERY_TIMEOUT_S = float(
+    os.environ.get(
+        "SECRETARY_TUI_PRE_DELIVERY_TIMEOUT_S", os.environ.get("TA_TUI_PRE_DELIVERY_TIMEOUT_S", "45")
+    )
+)
+TUI_PRE_DELIVERY_POLL_S = float(
+    os.environ.get("SECRETARY_TUI_PRE_DELIVERY_POLL_S", os.environ.get("TA_TUI_PRE_DELIVERY_POLL_S", "1"))
+)
+# How many times the one known modal is answered before the head is given up on. Two, because the
+# answer either takes or the screen is not the modal this code recognises.
+TUI_MODAL_ANSWER_ATTEMPTS = int(
+    os.environ.get("SECRETARY_TUI_MODAL_ANSWER_ATTEMPTS", os.environ.get("TA_TUI_MODAL_ANSWER_ATTEMPTS", "2"))
+)
 # Screen evidence is bounded before digesting and never retained as content.
 TUI_FINGERPRINT_LIMIT = 4000
 # Limit composer reads to the screen bottom; unbounded history can contain stale markers.
@@ -120,6 +136,177 @@ READINESS_UNKNOWN = "unknown"
 READINESS_UNAVAILABLE = "unavailable"
 READINESS_STALE_HANDLE = "stale_handle"
 
+# What a pane is doing *before* it can take a prompt at all, read from the screen rather than from
+# Orca. Orca answers readiness from the pane's agent status and a quiescence window, and a TUI
+# sitting on its own update dialog or still starting its MCP servers is quiescent: `tui-idle`
+# satisfied, nothing working, and every keystroke swallowed. So "ready" is Orca's answer to a
+# different question than "sendable", and these are the states that make the two disagree.
+PRE_DELIVERY_NONE = ""
+# `✨ Update available! 0.152.0 -> 0.152.1 … 1. Update now 2. Skip 3. Skip until next version.`
+# It ate 51 minutes of a reviewer's round on issue:e4d6f307.
+PRE_DELIVERY_UPDATE_MODAL = "update-modal"
+# `Starting MCP servers`, and the footer that goes with it: while a Codex head is starting, the
+# composer queues what it is given instead of submitting it (`tab to queue message`). Orca called
+# that pane `tui-idle/ready` and the TASK pointer sat in it for 80 minutes on issue:2fdac531.
+#
+# This is a *post-write* observation and nothing else. Measured against the real backend on this
+# host, the pane paints nothing before the write that names it: see `SENDABILITY_UNESTABLISHED`.
+# Once the pointer is in the composer Codex paints `tab to queue message` there and this state is
+# observed — `tests/fixtures/panes/codex-mid-startup-holding-pointer.json` is that read — which is
+# why it stays named, recorded in `pre_delivery_after`, and never claimed before a byte is written.
+PRE_DELIVERY_STARTING = "starting"
+# A screen shaped like a dialog that this code does not recognise. Nothing is typed at it.
+PRE_DELIVERY_UNKNOWN_DIALOG = "unknown-dialog"
+# The pre-delivery states that are a dialog holding the pane, as opposed to a phase it leaves.
+# Only these gate the write: they are the ones the pane paints where the code can see them.
+PRE_DELIVERY_DIALOGS = (PRE_DELIVERY_UPDATE_MODAL, PRE_DELIVERY_UNKNOWN_DIALOG)
+
+# What the boundary could establish about sendability before writing the first byte.
+#
+# There is no `established` value here, and its absence is the finding rather than an omission. On
+# Orca plus Codex nothing the backend asserts before a write says "this composer is live and idle".
+# Measured on this host on 2026-09-03 across a real ~24s startup window, held open by a throwaway
+# `CODEX_HOME` whose only difference is one MCP server whose command is `sleep`:
+#
+#       * Orca answered `tui-idle` satisfied with no `blockedReason` on all sixteen probes taken
+#         across the window — the card exists because that answer is about a different question;
+#       * its output cursor did not advance at all (`nextCursor` 20 on every read for the whole
+#         window), so a quiescence test cannot tell a starting pane from a settled one;
+#       * the startup status is painted as a character-by-character redraw whose fragments spell no
+#         phrase contiguously, so no pattern names it either — thirteen reads over that window with
+#         an empty composer classified as nothing at all.
+#
+# So a pre-write answer is either a dialog this code recognised, or this: not established. Saying
+# that is the honest boundary; inferring readiness from a regex that did not match is not. What
+# protects the pipeline is the post-write receipt, which was verified in the same session — the
+# pointer written into that starting composer was positively found still sitting in it.
+SENDABILITY_UNESTABLISHED = "unestablished"
+SENDABILITY_DIALOG_REFUSED = "dialog-refused"
+
+# How the known modal was settled, kept apart from whether the prompt was then received.
+MODAL_NOT_PRESENT = "not-present"
+MODAL_ANSWERED_SKIP = "answered-skip"
+MODAL_REFUSED_UNKNOWN = "refused-unknown"
+# A screen that matched the known modal's words without being the frame the pane is painting. No
+# keystroke is authorised by a pattern alone, so this is a refusal and not an answer.
+MODAL_REFUSED_NOT_ON_SCREEN = "refused-not-on-screen"
+MODAL_UNRESOLVED = "unresolved"
+
+# Whether the composer accepted this pointer. `unobserved` is a carrier that never reached the
+# delivery boundary at all — a bring-up that failed before a prompt was sent — and it is neither
+# a receipt nor a refusal.
+DELIVERY_RECEIPT_ACCEPTED = "accepted"
+DELIVERY_RECEIPT_REFUSED = "refused"
+DELIVERY_RECEIPT_UNOBSERVED = "unobserved"
+
+# The one keystroke this product ever sends at a dialog: Codex's own third choice, "Skip until
+# next version". Upgrading is a separate, explicit action and never something a delivery performs
+# to get past a screen, so choices 1 and 2 are not reachable from here.
+CODEX_UPDATE_MODAL_SKIP_CHOICE = "3"
+
+_UPDATE_MODAL_RE = re.compile(r"update available", re.IGNORECASE)
+_UPDATE_MODAL_CHOICE_RE = re.compile(r"skip until next version|update now", re.IGNORECASE)
+_STARTING_RE = re.compile(r"starting mcp servers|tab to queue message", re.IGNORECASE)
+# Codex's own modal footer. A screen carrying it is holding a choice, whatever the choice is.
+_DIALOG_FOOTER_RE = re.compile(r"press enter to continue", re.IGNORECASE)
+
+
+def live_screen(screen: str) -> str:
+    """What the pane is painting now, as against everything it printed earlier and kept.
+
+    Orca's `terminal read` answers with a pane's retained raw output, not a rendered screen, and a
+    TUI redraws in place: every frame it ever painted is still in that text, so a status line
+    outlives by minutes the state it announced. Measured against the real backend on this host, a
+    started, idle Codex pane — model resolved, both MCP servers up, composer painting its own hint —
+    still carries its `Starting MCP servers` line in the tail, with the output cursor no longer
+    moving. Classifying that text as a screen makes a ready head permanently
+    un-sendable, which is `tests/fixtures/panes/codex-started-idle.json`.
+
+    The one thing in that text that says where the newest frame begins is the prompt marker the TUI
+    paints once per frame, so the live screen is what follows the last one. A screen carrying no
+    marker at all is one where nothing is painting a composer — a dialog owning the terminal — and
+    the bounded end of the tail is then the best answer available.
+    """
+    text = strip_ansi(screen or "")
+    if not text:
+        return ""
+    held = composer_region(text)
+    if held is not None:
+        return held
+    return " ".join(text[-TUI_FINGERPRINT_LIMIT:].split())
+
+
+def classify_pre_delivery(screen: str, *, readiness: str = READINESS_READY) -> str:
+    """Which pre-delivery state this screen is in, or `PRE_DELIVERY_NONE` for a sendable pane.
+
+    Asked of `live_screen` and never of the whole retained tail, because this is a question about
+    what is showing now and the tail is a record of everything that ever showed. The known states
+    are named positively and everything else that is dialog-shaped — Orca naming a `blockedReason`,
+    or Codex's own `Press enter to continue` footer under a screen none of the known patterns match
+    — is `PRE_DELIVERY_UNKNOWN_DIALOG`, which is a refusal and never a guess.
+
+    A screen that could not be read is not a dialog: it costs the delivery this evidence and leaves
+    it on readiness alone, exactly as it was before this classification existed. Orca's own
+    `blockedReason` is the one exception, because that is an answer rather than a missing one.
+
+    Naming a state is not authority to type at it. Whether a recognised dialog is still the frame
+    the pane is painting is `dialog_is_live`, deliberately a separate question.
+    """
+    text = live_screen(screen)
+    if not text:
+        return PRE_DELIVERY_UNKNOWN_DIALOG if readiness == READINESS_BLOCKED else PRE_DELIVERY_NONE
+    if _UPDATE_MODAL_RE.search(text) and _UPDATE_MODAL_CHOICE_RE.search(text):
+        return PRE_DELIVERY_UPDATE_MODAL
+    if _STARTING_RE.search(text):
+        return PRE_DELIVERY_STARTING
+    if readiness == READINESS_BLOCKED or _DIALOG_FOOTER_RE.search(text):
+        return PRE_DELIVERY_UNKNOWN_DIALOG
+    return PRE_DELIVERY_NONE
+
+
+def dialog_is_live(screen: str, *, readiness: str = READINESS_READY) -> bool:
+    """Whether a dialog is the frame this pane is painting, which is what authorises a keystroke.
+
+    Kept apart from the pattern match on purpose. `classify_pre_delivery` answers *which* screen
+    this is; this answers *whether it is still showing*, and only the second may authorise a key.
+    A pattern added later therefore cannot inherit the authorisation by matching text that has
+    scrolled into history — the hazard being that a settled update modal's words stay in the tail
+    (`tests/fixtures/panes/codex-settled-update-modal.json`), and a `3` typed at that pane is not
+    a dismissal but a bare prompt submitted to the provider, immediately before its task pointer.
+
+    Orca naming a `blockedReason` is an answer about now, so it counts on its own. Otherwise the
+    dialog is live when its own footer — the last thing a dialog paints — is in the live screen.
+    Anything less is not proof, and the fail-closed answer to no proof is no keystroke.
+    """
+    if readiness == READINESS_BLOCKED:
+        return True
+    region = live_screen(screen)
+    return bool(region) and _DIALOG_FOOTER_RE.search(region) is not None
+
+
+def delivery_receipt_state(carrier: Any) -> str:
+    """Whether the composer accepted the pointer this evidence was taken for.
+
+    The one question the rest of the product asks of a delivery record, asked in one place so that
+    a launch, a recovery and an adoption cannot answer it differently. A live pid, a writable pane
+    and Orca's own `accepted`/`bytesWritten` are deliberately not consulted: they are what used to
+    be mistaken for delivery.
+
+    `unobserved` is a carrier the delivery boundary never produced — a bring-up that failed before
+    a prompt existed — and only evidence carrying a `stage` is the boundary's own.
+    """
+    evidence = getattr(carrier, "evidence", carrier)
+    if hasattr(evidence, "to_json"):
+        evidence = evidence.to_json()
+    if not isinstance(evidence, dict) or "stage" not in evidence:
+        return DELIVERY_RECEIPT_UNOBSERVED
+    if bool(evidence.get("payload_left_in_composer")):
+        # Positive, prompt-specific proof that this pointer is still unsent. Determinate.
+        return DELIVERY_RECEIPT_REFUSED
+    if bool(evidence.get("turn_confirmed")):
+        return DELIVERY_RECEIPT_ACCEPTED
+    return DELIVERY_RECEIPT_REFUSED
+
 
 @dataclass
 class DeliveryEvidence:
@@ -174,6 +361,21 @@ class DeliveryEvidence:
     payload_left_in_composer: bool = False
     modal_before: bool = False
     modal_after: bool = False
+    # Which pre-delivery state the pane was found in, if any, and how the known modal was settled.
+    # These three are the modal-resolution half of the telemetry and say nothing about receipt.
+    pre_delivery_before: str = PRE_DELIVERY_NONE
+    pre_delivery_after: str = PRE_DELIVERY_NONE
+    # What the boundary could establish about sendability before it wrote the first byte. Never
+    # "established": on this backend nothing asserts a live idle composer pre-write, so this says
+    # either that a dialog refused the write or that sendability was not established and the
+    # receipt is what the delivery rests on. A reader must not mistake the second for a proof.
+    sendability: str = ""
+    modal_resolution: str = ""
+    modal_answers: int = 0
+    # The provider-binding half: the caller's own criterion — what the provider wrote down about
+    # the turn — answered yes. `turn_confirmed` beside it is what the pane showed. Neither implies
+    # the other, and "delivered" is not one bit.
+    provider_bound: bool = False
     cursor_before: str = ""
     cursor_after: str = ""
     cursor_moved: bool = False
@@ -215,6 +417,15 @@ class DeliveryEvidence:
             "payload_left_in_composer": self.payload_left_in_composer,
             "modal_before": self.modal_before,
             "modal_after": self.modal_after,
+            "pre_delivery_before": self.pre_delivery_before,
+            "pre_delivery_after": self.pre_delivery_after,
+            "sendability": self.sendability,
+            "modal_resolution": self.modal_resolution,
+            "modal_answers": self.modal_answers,
+            "provider_bound": self.provider_bound,
+            # Derived, and kept in the record so a reader of a persisted receipt does not have to
+            # re-derive it: modal resolution, delivery receipt and provider binding, side by side.
+            "delivery_receipt": self.receipt,
             "cursor_before": self.cursor_before,
             "cursor_after": self.cursor_after,
             "cursor_moved": self.cursor_moved,
@@ -222,13 +433,31 @@ class DeliveryEvidence:
             "reason": self.reason,
         }
 
+    @property
+    def receipt(self) -> str:
+        """Whether the composer accepted the pointer, as `delivery_receipt_state` answers it.
+
+        The three stored fields are handed over rather than `self`, because `to_json` publishes
+        this derivation and asking it for the whole record here would be a cycle.
+        """
+        return delivery_receipt_state(
+            {
+                "stage": self.stage,
+                "payload_left_in_composer": self.payload_left_in_composer,
+                "turn_confirmed": self.turn_confirmed,
+            }
+        )
+
     @classmethod
     def from_json(cls, payload: Any) -> DeliveryEvidence:
         if not isinstance(payload, dict):
             return cls()
         fields = cls()
         for name, value in payload.items():
-            if not hasattr(fields, name):
+            # Only the stored fields are restored. `to_json` also publishes derived keys, and a
+            # record that ever carried one under the property's own name must be inert here rather
+            # than an AttributeError raised on a read-only property.
+            if name not in cls.__dataclass_fields__:
                 continue
             current = getattr(fields, name)
             if isinstance(current, bool):
@@ -292,10 +521,30 @@ class PaneProbe:
     # Whether this probe found the delivery's own payload sitting in the composer. A probe taken
     # without a payload to look for answers false, which is what it can honestly say.
     holds_payload: bool = False
+    # Which pre-delivery state the screen showed, if any. Not asked of a pane Orca found busy: a
+    # working head is the busy path's answer, and its own footer says `tab to queue message` while
+    # it works.
+    pre_delivery: str = PRE_DELIVERY_NONE
+    # Whether a dialog is the frame the pane is painting. Separate from `pre_delivery` because it
+    # is the only thing that authorises a keystroke, and a classification is not that.
+    dialog_live: bool = False
 
     @property
     def modal(self) -> bool:
-        return self.readiness == READINESS_BLOCKED
+        """Whether this pane is held in a dialog, by either of the two things that can say so."""
+        return self.readiness == READINESS_BLOCKED or self.pre_delivery in PRE_DELIVERY_DIALOGS
+
+    @property
+    def sendable(self) -> bool:
+        """Whether anything the backend showed forbids writing into this pane.
+
+        Read the name carefully: this is not "the composer is live and idle", because nothing on
+        this backend answers that before a write. It is the weaker, honest question — is a dialog
+        holding the pane — and the delivery records `SENDABILITY_UNESTABLISHED` when the answer is
+        no, rather than claiming a readiness it did not observe. A pane still starting its MCP
+        servers passes this test on Orca plus Codex, and the receipt is what catches it.
+        """
+        return self.readiness != READINESS_BLOCKED and self.pre_delivery not in PRE_DELIVERY_DIALOGS
 
 
 def _digest(text: str) -> str:
@@ -446,10 +695,13 @@ def probe_pane(
 ) -> PaneProbe:
     """Readiness, composer and output cursor in one look, for the evidence of one attempt.
 
-    The screen is read from the bottom: this look is about what the pane is showing now, and the
-    unbounded read answers with history in which a prompt marker means nothing. `payload` is the
-    prompt this delivery is carrying, and it is only ever compared against the screen — the probe
-    keeps a classification and a digest of it, never its text.
+    The read is bounded to the pane's last rows, and what comes back is still retained output
+    rather than a rendered screen: Orca keeps raw bytes and a TUI redraws in place, so old frames
+    sit in that text beside the newest one. Every question here that is about *now* — the composer,
+    the pre-delivery state, whether a dialog is live — therefore goes through the live-screen
+    region rather than the whole answer. `payload` is the prompt this delivery is carrying, and it
+    is only ever compared against the screen: the probe keeps a classification and a digest of it,
+    never its text.
     """
     readiness = terminal_readiness(handle, run_json=run_json, host=host)
     read = read_pane(handle, run_json=run_json, host=host, limit=TUI_COMPOSER_READ_LINES)
@@ -461,6 +713,12 @@ def probe_pane(
         cursor_from_backend=from_backend,
         screen_read=bool(read.text),
         holds_payload=composer_holds_payload(read.text, payload),
+        pre_delivery=(
+            PRE_DELIVERY_NONE
+            if readiness == READINESS_BUSY
+            else classify_pre_delivery(read.text, readiness=readiness)
+        ),
+        dialog_live=(readiness != READINESS_BUSY and dialog_is_live(read.text, readiness=readiness)),
     )
 
 
@@ -669,7 +927,11 @@ def deliver_interactive_prompt(
         # recovery; once ready, activation remains immediately before the existing send path.
         with _transport_evidence(evidence, "activate-head"):
             before_send()
-    before = probe_pane(handle, run_json=run_json, host=host, payload=prepared.text)
+    # Nothing is written into a pane that is not yet able to take a prompt. This is the step that
+    # separates "Orca says ready" from "sendable", and it runs before the first byte.
+    before = _settle_pre_delivery(
+        handle, run_json=run_json, host=host, payload=prepared.text, evidence=evidence
+    )
     evidence.readiness_before = before.readiness
     evidence.composer_before = before.composer
     evidence.modal_before = before.modal
@@ -689,6 +951,104 @@ def deliver_interactive_prompt(
         ack_out_of_band=ack_out_of_band,
         evidence=evidence,
     )
+
+
+def _settle_pre_delivery(
+    handle: str,
+    *,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
+    payload: str,
+    evidence: DeliveryEvidence,
+) -> PaneProbe:
+    """Answer what can be answered before the first byte, or refuse. Returns the probe sent against.
+
+    This step exists for dialogs, and it says so rather than pretending to more:
+
+          * the one known modal is answered with its own documented "Skip until next version"
+            choice, a bounded number of times, and readiness is proved again afterwards. Two
+            conditions have to hold and they are asked separately: the screen is the modal this
+            code knows, and that modal is the frame the pane is painting. Upgrading is not
+            something a delivery does to get past a dialog, so the other two choices do not exist
+            here;
+          * anything else that is dialog-shaped is a typed refusal with no keystrokes at all. A
+            screen this code does not recognise is a screen it cannot answer, and guessing at one
+            is how a head ends up agreeing to something nobody asked it. A window that expires is
+            the same refusal: the caller's answer to a pane a dialog will not let go of is to
+            replace the head, not to keep waiting while the card reports progress;
+          * everything else is recorded as `SENDABILITY_UNESTABLISHED` and written into. That is
+            not a claim that the composer is live and idle — nothing this backend offers before a
+            write says that, and the constant carries the measurement — it is the honest statement
+            that no dialog was seen and the delivery now rests on its receipt.
+
+    What used to be here and is deliberately gone: a bounded wait-out of `starting`. A head still
+    bringing its MCP servers up paints nothing before the write that the code can read, so waiting
+    for that state to clear was waiting on a signal that never arrives, and treating its absence as
+    readiness was inferring a fact from a regex that did not match. `pre_delivery_before` still
+    records whatever *was* seen; it is evidence, not a gate.
+    """
+    deadline = time.monotonic() + max(TUI_PRE_DELIVERY_TIMEOUT_S, 0)
+    probe = probe_pane(handle, run_json=run_json, host=host, payload=payload)
+    evidence.pre_delivery_before = probe.pre_delivery
+    evidence.readiness_before = probe.readiness
+    while True:
+        if probe.sendable:
+            evidence.modal_resolution = MODAL_ANSWERED_SKIP if evidence.modal_answers else MODAL_NOT_PRESENT
+            evidence.sendability = SENDABILITY_UNESTABLISHED
+            return probe
+        evidence.sendability = SENDABILITY_DIALOG_REFUSED
+        if probe.pre_delivery == PRE_DELIVERY_UNKNOWN_DIALOG or probe.readiness == READINESS_BLOCKED:
+            evidence.modal_resolution = MODAL_REFUSED_UNKNOWN
+            evidence.reason = "unknown-dialog"
+            raise TuiDeliveryError(
+                "the pane is holding a dialog this code does not recognise; nothing was typed at it "
+                f"(readiness={probe.readiness})",
+                evidence=evidence,
+            )
+        if probe.pre_delivery == PRE_DELIVERY_UPDATE_MODAL:
+            if not probe.dialog_live:
+                # The words are there and the dialog is not. Whatever matched has scrolled into
+                # history, so there is nothing on this screen a keystroke could answer and typing
+                # one would submit a bare `3` to the provider instead. This condition is asked of
+                # the probe rather than of the pattern precisely so that no pattern can ever be
+                # the whole authorisation for a key.
+                evidence.modal_resolution = MODAL_REFUSED_NOT_ON_SCREEN
+                evidence.reason = "modal-not-on-screen"
+                raise TuiDeliveryError(
+                    "the known update modal matched text the pane is no longer painting; "
+                    "nothing was typed at it",
+                    evidence=evidence,
+                )
+            if evidence.modal_answers >= max(TUI_MODAL_ANSWER_ATTEMPTS, 0):
+                evidence.modal_resolution = MODAL_UNRESOLVED
+                evidence.reason = f"pre-delivery-{PRE_DELIVERY_UPDATE_MODAL}"
+                raise TuiDeliveryError(
+                    "the known update modal did not clear after "
+                    f"{evidence.modal_answers} documented Skip answers",
+                    evidence=evidence,
+                )
+            with _transport_evidence(evidence, "answer-update-modal"):
+                resolve_pane_host(run_json, host=host).send(
+                    handle, CODEX_UPDATE_MODAL_SKIP_CHOICE, enter=True
+                )
+            evidence.modal_answers += 1
+            # Readiness is proved again before the prompt is written, exactly as it is on the way in.
+            with _transport_evidence(evidence, "wait-for-readiness"):
+                wait_for_tui_idle(handle, run_json=run_json, host=host)
+        if time.monotonic() >= deadline:
+            evidence.modal_resolution = evidence.modal_resolution or MODAL_UNRESOLVED
+            evidence.reason = f"pre-delivery-{probe.pre_delivery or READINESS_BLOCKED}"
+            raise TuiDeliveryError(
+                f"the pane never left its dialog within {TUI_PRE_DELIVERY_TIMEOUT_S:.1f}s "
+                f"(state={probe.pre_delivery or probe.readiness})",
+                evidence=evidence,
+            )
+        time.sleep(max(TUI_PRE_DELIVERY_POLL_S, 0.01))
+        probe = probe_pane(handle, run_json=run_json, host=host, payload=payload)
+        evidence.readiness_before = probe.readiness
+        if probe.pre_delivery != PRE_DELIVERY_NONE:
+            # The state the refusal will name is the one still holding the pane.
+            evidence.pre_delivery_before = probe.pre_delivery
 
 
 @contextmanager
@@ -786,9 +1146,22 @@ def _confirm_interactive_turn(
         # it expressly lets pane evidence accept a delivery, so first reject the one direct,
         # prompt-specific proof that this payload is still unsent.
         if not ack_out_of_band and confirm is not None and confirm(sent_at):
+            # The criterion is answered before this iteration takes its own look, so the composer
+            # evidence in hand is the previous iteration's. Take one more before the receipt is
+            # derived from it: on the ordinary submit-only resend path the pointer sat in the
+            # composer until a bare Enter sent it, and keeping that probe's positive
+            # `payload_left_in_composer` would make `delivery_receipt_state` read a delivery that
+            # succeeded as a determinate refusal — a wrongly refused adoption and an unnecessary
+            # head replacement in exactly the crash window this boundary is here for.
+            _record_probe(
+                evidence,
+                before,
+                probe_pane(handle, run_json=run_json, host=host, payload=prompt.text),
+            )
             _advance(evidence, STAGE_TURN_OBSERVED)
             _advance(evidence, STAGE_ACKNOWLEDGED)
             evidence.turn_confirmed = True
+            evidence.provider_bound = True
             evidence.reason = ""
             return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
         probe = probe_pane(handle, run_json=run_json, host=host, payload=prompt.text)
@@ -807,6 +1180,7 @@ def _confirm_interactive_turn(
             _advance(evidence, STAGE_TURN_OBSERVED)
             _advance(evidence, STAGE_ACKNOWLEDGED)
             evidence.turn_confirmed = True
+            evidence.provider_bound = True
             evidence.reason = ""
             return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
         if probe.readiness == READINESS_BUSY or (
@@ -864,6 +1238,7 @@ def _record_probe(evidence: DeliveryEvidence, before: PaneProbe, probe: PaneProb
     evidence.readiness_after = probe.readiness
     evidence.composer_after = probe.composer
     evidence.modal_after = probe.modal
+    evidence.pre_delivery_after = probe.pre_delivery
     evidence.cursor_after = probe.cursor
     evidence.payload_left_in_composer = probe.holds_payload
     if (
@@ -889,7 +1264,14 @@ def _failure_reason(evidence: DeliveryEvidence) -> str:
     if evidence.payload_left_in_composer:
         return "payload-left-in-composer"
     if evidence.stage == STAGE_TURN_OBSERVED:
+        # A pane that went to work is not a pane held before delivery, whatever its screen also
+        # showed. Naming the pre-delivery state ahead of this reported a genuine unconfirmed turn
+        # as `pre-delivery-starting`, which is the telemetry an operator acts on.
         return "turn-observed-but-unconfirmed"
     if evidence.stage == STAGE_ENTER_ACCEPTED:
         return "enter-accepted-without-turn"
+    if evidence.pre_delivery_after:
+        # Nothing accounts for the prompt and the pane is in a state that cannot take one: name
+        # the state, because that is what is holding the delivery.
+        return f"pre-delivery-{evidence.pre_delivery_after}"
     return f"pane-stayed-{evidence.readiness_after or READINESS_UNKNOWN}"

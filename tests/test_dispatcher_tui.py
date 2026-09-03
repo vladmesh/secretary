@@ -11,18 +11,30 @@ from secretary.dispatcher import CommandHostRuntime, HostError
 from secretary.dispatcher_tui import (
     DELIVERY_ACCEPTED,
     DELIVERY_CONFIRMED,
+    DELIVERY_RECEIPT_ACCEPTED,
+    DELIVERY_RECEIPT_REFUSED,
+    DELIVERY_RECEIPT_UNOBSERVED,
+    PRE_DELIVERY_STARTING,
+    PRE_DELIVERY_UNKNOWN_DIALOG,
+    PRE_DELIVERY_UPDATE_MODAL,
     READINESS_BLOCKED,
     READINESS_BUSY,
     READINESS_READY,
     READINESS_STALE_HANDLE,
     READINESS_UNAVAILABLE,
     READINESS_UNKNOWN,
+    SENDABILITY_DIALOG_REFUSED,
+    SENDABILITY_UNESTABLISHED,
     TuiDeliveryError,
     bind_claude_provider_progress_source,
     claude_project_dir_name,
+    classify_pre_delivery,
     deliver_interactive_prompt,
+    dialog_is_live,
     delivery_readiness_state,
+    delivery_receipt_state,
     latest_claude_user_turn_for,
+    live_screen,
     latest_user_turn_for,
     prepare_claude_provider_progress_source,
     provider_progress_for_run,
@@ -40,7 +52,7 @@ from tests.fakes.observer import (
 from tests.fanout_fixtures import accepted_transport_run
 from triggered_agents.runtime.codex_preflight import codex_provider_source_descriptor
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
-from triggered_agents.runtime.tui_delivery import composer_holds_payload
+from triggered_agents.runtime.tui_delivery import DeliveryEvidence, composer_holds_payload
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -1135,7 +1147,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
     turn began and ended between two probes (sprint:1402).
     """
 
-    def deliver(self, pane: ScriptedPane, **kwargs):
+    def deliver(self, pane: ScriptedPane, *, prompt: str = "wake the observer", **kwargs):
         clock = [0.0]
 
         def advance_clock(seconds: float) -> None:
@@ -1151,8 +1163,50 @@ class TuiDeliveryStageTests(unittest.TestCase):
             mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0),
         ):
             return deliver_interactive_prompt(
-                "term-observer", "wake the observer", run_json=pane.run_json, **kwargs
+                "term-observer", prompt, run_json=pane.run_json, **kwargs
             )
+
+    def test_a_confirmed_delivery_does_not_keep_the_previous_probes_refusal(self) -> None:
+        """The receipt is derived from the last look taken, not from the one before it.
+
+        This is the ordinary submit-only resend: the pointer sat in the composer, a bare Enter sent
+        it, and the caller's criterion answered at the top of the next iteration — before that
+        iteration had looked at the pane. Keeping the earlier probe's `payload_left_in_composer`
+        recorded a delivery that succeeded as a determinate refusal, which the crash window this
+        boundary pins would turn into a refused adoption and a head replaced for nothing.
+        """
+        pane = ScriptedPane({0: ["›"], 1: ["› [Pasted Content 1315 chars]"], 2: ["› ", "· recorded resume"]})
+
+        outcome = self.deliver(pane, confirm=lambda _since: pane.submits >= 2)
+
+        evidence = outcome.evidence
+        self.assertEqual(outcome, DELIVERY_CONFIRMED)
+        self.assertEqual(evidence.resends, 1)
+        self.assertFalse(evidence.payload_left_in_composer)
+        self.assertEqual(evidence.to_json()["delivery_receipt"], DELIVERY_RECEIPT_ACCEPTED)
+
+    def test_an_unconfirmed_turn_is_named_as_one_whatever_else_is_on_the_screen(self) -> None:
+        """A pane that went to work is not a pane held before delivery.
+
+        Naming the pre-delivery state ahead of the stage reported a genuine
+        `turn-observed-but-unconfirmed` as `pre-delivery-starting`, and that reason is what an
+        operator acts on.
+        """
+        pane = ScriptedPane(
+            {
+                0: ["›"],
+                1: ["· output", "› ", "  ⏎ send   tab to queue message   ctrl+c quit"],
+            },
+            cursors={0: "1", 1: "2"},
+        )
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, confirm=lambda _since: False)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.pre_delivery_after, PRE_DELIVERY_STARTING)
+        self.assertEqual(evidence.stage, "turn_observed")
+        self.assertEqual(evidence.reason, "turn-observed-but-unconfirmed")
 
     def test_a_payload_left_in_the_composer_is_not_a_delivered_prompt(self) -> None:
         pane = ScriptedPane({0: ["›"], 1: ["› [Pasted Content 1315 chars]"]})
@@ -1248,8 +1302,8 @@ class TuiDeliveryStageTests(unittest.TestCase):
         composer forever. The delivery reads a bounded window from the bottom instead.
         """
         history = ["› wake the observer and let it work"] + [f"· step {index}" for index in range(40)]
-        live_screen = history + ["› Improve documentation in @filename gpt-5.6-terra"]
-        pane = ScriptedPane({0: live_screen, 1: live_screen + ["· recorded resume"]})
+        painted = history + ["› Improve documentation in @filename gpt-5.6-terra"]
+        pane = ScriptedPane({0: painted, 1: painted + ["· recorded resume"]})
 
         outcome = self.deliver(pane, ack_out_of_band=True)
 
@@ -1261,7 +1315,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
             self.assertIn("--limit", read)
         # And the same screen read whole is exactly the trap: the payload does follow the last
         # marker of the unbounded window, which is why the bound is the fix and not a tidy-up.
-        self.assertTrue(composer_holds_payload("\n".join(live_screen[:1] + history[1:]), "wake the observer"))
+        self.assertTrue(composer_holds_payload("\n".join(painted[:1] + history[1:]), "wake the observer"))
 
     def test_a_composer_showing_the_payload_is_still_a_delivery_that_did_not_land(self) -> None:
         """The failure this boundary exists for, without a paste placeholder over it.
@@ -1533,3 +1587,403 @@ class TuiDeliveryStageTests(unittest.TestCase):
                 self.assertEqual(evidence.reason, reason)
                 self.assertEqual(delivery_readiness_state(evidence), state)
                 self.assertEqual(evidence.stage, "none")
+
+
+# The screens two incidents left behind, transcribed rather than paraphrased. A test that invents
+# its own wording proves the regex it was written against and nothing about the pane.
+
+# issue:e4d6f307, 2026-09-02 00:55: a `codex-high` reviewer sat 51 minutes on this, composer empty,
+# provider source unbound, codex at zero CPU, and Orca answering `tui-idle` satisfied throughout.
+UPDATE_MODAL_SCREEN = [
+    "✨ Update available! 0.152.0 -> 0.152.1",
+    "Release notes: https://github.com/openai/codex/releases/latest",
+    "  1. Update now (runs `npm install -g @openai/codex@latest`)",
+    "  2. Skip",
+    "  3. Skip until next version",
+    "Press enter to continue",
+]
+
+
+# The same two states as Orca actually retains them, captured on this host on 2026-09-03 by
+# creating an Orca terminal, running the interactive Codex the heads run
+# (`CODEX_HOME=$HOME/.config/orca/codex-runtime-home/home codex`, v0.152.1) in it and reading the
+# pane back. `terminal read` answers with retained raw output, not a rendered screen, so a screen
+# above is a moment and a tail below is that moment plus everything after it. A classifier that
+# cannot tell the two apart passes every test written against the screens and delivers to no head.
+PANE_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "panes"
+
+
+def retained_tail(name: str) -> list[str]:
+    """One captured `orca terminal read`, as the pane's tail lines."""
+    payload = json.loads((PANE_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    return [str(line) for line in payload["terminal"]["tail"]]
+
+
+# A started, idle, sendable Codex pane: model resolved, both MCP servers up, composer painting its
+# own hint, and the output cursor no longer moving. Its tail still carries
+# `Starting MCP servers`, because that is what retention means.
+STARTED_IDLE_TAIL = retained_tail("codex-started-idle")
+# The same pane shape after a dialog has been settled: the update modal's six lines from
+# issue:e4d6f307 sit in the tail above a live, idle composer.
+SETTLED_UPDATE_MODAL_TAIL = retained_tail("codex-settled-update-modal")
+# issue:2fdac531's own initial condition, reproduced: a genuine ~24s Codex startup window, empty
+# composer, Orca answering `tui-idle` satisfied, output cursor frozen. This replaces the
+# hand-written three-line `STARTING_SCREEN` that used to stand for it. That fixture asserted a
+# shape — `Starting MCP servers` above the marker and `tab to queue message` under it, with an
+# empty composer — which the backend does not produce, and a suite written against it passed while
+# the boundary could not read a starting pane at all.
+MID_STARTUP_TAIL = retained_tail("codex-mid-startup")
+# The same window one write later: the pointer is in the composer and Codex now paints
+# `tab to queue message` there, so the startup state becomes observable exactly when the receipt
+# does. `MID_STARTUP_POINTER` is the payload that capture was taken with.
+MID_STARTUP_HOLDING_TAIL = retained_tail("codex-mid-startup-holding-pointer")
+MID_STARTUP_POINTER = json.loads(
+    (PANE_FIXTURES / "codex-mid-startup-holding-pointer.json").read_text(encoding="utf-8")
+)["payload"]
+MID_STARTUP_ORCA_WAIT = json.loads((PANE_FIXTURES / "codex-mid-startup.json").read_text(encoding="utf-8"))[
+    "wait"
+]
+
+
+class PreDeliveryStateTests(unittest.TestCase):
+    """A pane that Orca calls ready is not therefore a pane that can take a prompt.
+
+    Orca decides `tui-idle` from the pane's agent status and a quiescence window, and a TUI holding
+    its own update dialog or still starting its MCP servers is perfectly quiescent. Both incidents
+    below are that disagreement: `accepted: true`, bytes written, `tui-idle` satisfied, and the
+    pointer never reached a provider.
+    """
+
+    def test_the_update_modal_from_the_incident_is_a_typed_pre_delivery_state(self) -> None:
+        self.assertEqual(classify_pre_delivery("\n".join(UPDATE_MODAL_SCREEN)), PRE_DELIVERY_UPDATE_MODAL)
+
+    def test_a_real_starting_pane_shows_the_code_nothing_before_the_write(self) -> None:
+        """issue:2fdac531's initial condition, held open and read from the real backend.
+
+        Every source of a pre-write answer says the same thing on this tail: Orca answered
+        `tui-idle` satisfied with no `blockedReason`, its output cursor was frozen at the value it
+        held for the whole window, no dialog is up, and the startup status is a redraw whose
+        fragments spell no phrase. So the boundary cannot establish that this composer is live and
+        idle, and it does not pretend to — see the delivery test that writes into this very tail.
+        """
+        tail = "\n".join(MID_STARTUP_TAIL)
+        self.assertTrue(MID_STARTUP_ORCA_WAIT["satisfied"])
+        self.assertIsNone(MID_STARTUP_ORCA_WAIT.get("blockedReason"))
+        self.assertEqual(classify_pre_delivery(tail), "")
+        self.assertFalse(dialog_is_live(tail))
+
+    def test_the_startup_state_is_observed_once_the_pointer_is_in_the_composer(self) -> None:
+        """The same window one write later, and the reason the state stays named.
+
+        Codex paints `tab to queue message` in the composer only once the composer holds text, so
+        `starting` is a post-write observation on this backend. It arrives at the same moment the
+        receipt does, which is the half that actually refuses the claim.
+        """
+        tail = "\n".join(MID_STARTUP_HOLDING_TAIL)
+        self.assertEqual(classify_pre_delivery(tail), PRE_DELIVERY_STARTING)
+        self.assertTrue(composer_holds_payload(tail, MID_STARTUP_POINTER))
+
+    def test_an_unrecognised_dialog_is_named_and_never_guessed_at(self) -> None:
+        """Codex's own modal footer under a screen none of the known patterns match."""
+        screen = "Select a base branch\n  1. main\n  2. release\nPress enter to continue"
+        self.assertEqual(classify_pre_delivery(screen), PRE_DELIVERY_UNKNOWN_DIALOG)
+
+    def test_orca_naming_a_blocked_reason_is_a_dialog_even_with_no_readable_screen(self) -> None:
+        self.assertEqual(classify_pre_delivery("", readiness=READINESS_BLOCKED), PRE_DELIVERY_UNKNOWN_DIALOG)
+
+    def test_an_ordinary_codex_pane_is_in_no_pre_delivery_state(self) -> None:
+        """The classification must not fire on the furniture every Codex pane paints.
+
+        A hint, the model footer and a working counter all sit in the same region, and a screen
+        that is merely quiet is the normal case this boundary delivers into thousands of times.
+        """
+        for screen in (
+            "› ",
+            "> read the previous card\n› Improve documentation in @filename gpt-5.6-terra xhigh",
+            "· recorded resume\n› Working (7s)",
+            "",
+        ):
+            with self.subTest(screen=screen):
+                self.assertEqual(classify_pre_delivery(screen), "")
+
+    def test_a_started_pane_is_sendable_though_its_tail_still_names_the_startup(self) -> None:
+        """The retained tail of a pane that is ready throughout, from the real backend.
+
+        This is the first delivery every Codex head receives. Orca keeps the pane's raw output and
+        Codex redraws in place, so `Starting MCP servers` is still in
+        the tail long after both servers are up — measured here with the output cursor unchanged
+        across reads 20s apart. Reading that as the screen makes every Codex head permanently
+        un-sendable, which is a total false negative in the boundary built to stop a false positive.
+        """
+        tail = "\n".join(STARTED_IDLE_TAIL)
+        self.assertIn("Starting MCP servers (1/2): po_memory", tail)
+        self.assertEqual(classify_pre_delivery(tail), "")
+        self.assertEqual(classify_pre_delivery(tail, readiness=READINESS_READY), "")
+        # And the live screen is the composer's own hint, which is what the pane is painting.
+        self.assertIn("Ask Codex to do anything", live_screen(tail))
+
+    def test_a_settled_update_modal_in_the_tail_is_not_a_dialog_and_authorises_no_key(self) -> None:
+        """The second consequence of reading history as a screen, and it needs its own guard.
+
+        Whatever settles the modal — the preflight `dismissed_version` write, a person, or this
+        code's own Skip — leaves its words in the tail with a live composer painted under them.
+        Typing `3` at that pane does not dismiss anything: it submits a bare `3` to the provider,
+        burning a turn immediately before the task pointer arrives.
+        """
+        tail = "\n".join(SETTLED_UPDATE_MODAL_TAIL)
+        self.assertIn("Update available! 0.152.0 -> 0.152.1", tail)
+        self.assertIn("Press enter to continue", tail)
+        self.assertEqual(classify_pre_delivery(tail), "")
+        self.assertFalse(dialog_is_live(tail))
+
+    def test_whether_a_dialog_is_live_is_asked_apart_from_which_dialog_it_is(self) -> None:
+        """The keystroke condition is separate so a later pattern cannot inherit the hazard."""
+        live = "\n".join(UPDATE_MODAL_SCREEN)
+        self.assertEqual(classify_pre_delivery(live), PRE_DELIVERY_UPDATE_MODAL)
+        self.assertTrue(dialog_is_live(live))
+        # A pane Orca itself reports held in a dialog is showing one now, whatever the tail says.
+        self.assertTrue(dialog_is_live("", readiness=READINESS_BLOCKED))
+        # A screen matching the known modal's words with no footer under them is not proof that a
+        # dialog is up, and the fail-closed answer to no proof is no key.
+        partial = "✨ Update available! 0.152.0 -> 0.152.1   3. Skip until next version"
+        self.assertEqual(classify_pre_delivery(partial), PRE_DELIVERY_UPDATE_MODAL)
+        self.assertFalse(dialog_is_live(partial))
+
+    def test_a_record_that_carried_the_derived_receipt_is_read_back_inertly(self) -> None:
+        """`to_json` publishes a derivation; `from_json` restores only what is stored.
+
+        The derived key travels as `delivery_receipt`, but a persisted payload that ever carried it
+        under the property's own name must be ignored rather than raise on a read-only property.
+        """
+        record = DeliveryEvidence(stage="acknowledged", turn_confirmed=True).to_json()
+        self.assertEqual(record["delivery_receipt"], DELIVERY_RECEIPT_ACCEPTED)
+        restored = DeliveryEvidence.from_json({**record, "receipt": "refused"})
+        self.assertEqual(restored.stage, "acknowledged")
+        self.assertTrue(restored.turn_confirmed)
+        self.assertEqual(restored.receipt, DELIVERY_RECEIPT_ACCEPTED)
+
+    def test_the_receipt_is_asked_of_the_evidence_and_of_nothing_else(self) -> None:
+        """`accepted`/`bytesWritten` and a stage are not a receipt; the composer's answer is."""
+        written = {"stage": "payload_written", "send_accepted": True, "bytes_written": 1315}
+        self.assertEqual(delivery_receipt_state(written), DELIVERY_RECEIPT_REFUSED)
+        self.assertEqual(
+            delivery_receipt_state({**written, "payload_left_in_composer": True}),
+            DELIVERY_RECEIPT_REFUSED,
+        )
+        self.assertEqual(
+            delivery_receipt_state({"stage": "acknowledged", "turn_confirmed": True}),
+            DELIVERY_RECEIPT_ACCEPTED,
+        )
+        # A turn the provider recorded does not survive proof that the pointer is still sitting
+        # in the composer: the direct, prompt-specific negative evidence wins.
+        self.assertEqual(
+            delivery_receipt_state(
+                {"stage": "acknowledged", "turn_confirmed": True, "payload_left_in_composer": True}
+            ),
+            DELIVERY_RECEIPT_REFUSED,
+        )
+        # A bring-up that failed before a prompt existed observed no receipt either way.
+        self.assertEqual(
+            delivery_receipt_state({"subject": "worker-launch", "reason": "split refused"}),
+            DELIVERY_RECEIPT_UNOBSERVED,
+        )
+        self.assertEqual(delivery_receipt_state(None), DELIVERY_RECEIPT_UNOBSERVED)
+
+
+class PreDeliveryDeliveryTests(TuiDeliveryStageTests):
+    """The same delivery boundary, driven at the two screens that produced the incidents."""
+
+    def test_the_known_update_modal_is_answered_with_its_documented_skip_choice(self) -> None:
+        """The modal is settled deterministically and the same pointer is then delivered once.
+
+        The keystroke is Codex's own third choice, "Skip until next version". Upgrading is a
+        separate, explicit action, so no delivery may reach for choice 1 to get past a screen. The
+        modal is answered before the payload is written, so the body is written exactly once and
+        the pointer that goes in is the one the caller handed over.
+        """
+        # The modal answer counts as a submit in this fake, so the screens key on it: after the
+        # skip the pane is an ordinary composer, and after the pointer's Enter it has printed.
+        pane = ScriptedPane(
+            {
+                0: UPDATE_MODAL_SCREEN,
+                1: ["ready", "›"],
+                2: ["ready", "· recorded resume", "›"],
+            }
+        )
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        evidence = outcome.evidence
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        self.assertEqual(evidence.pre_delivery_before, PRE_DELIVERY_UPDATE_MODAL)
+        self.assertEqual(evidence.modal_resolution, "answered-skip")
+        self.assertEqual(evidence.modal_answers, 1)
+        # One "3", then the pointer, then its Enter. Nothing else was typed at the screen.
+        self.assertEqual(pane.sends, ["3", "wake the observer", ""])
+        self.assertEqual(pane.sends.count("wake the observer"), 1)
+        self.assertEqual(evidence.body_write_count, 1)
+        self.assertEqual(evidence.to_json()["delivery_receipt"], DELIVERY_RECEIPT_ACCEPTED)
+
+    def test_readiness_is_proved_again_after_the_modal_is_answered(self) -> None:
+        """The pointer is never written on the strength of the readiness proved before the dialog."""
+        pane = ScriptedPane(
+            {0: UPDATE_MODAL_SCREEN, 1: ["ready", "›"], 2: ["ready", "· recorded resume", "›"]}
+        )
+
+        self.deliver(pane, ack_out_of_band=True)
+
+        waits = [call for call in pane.calls if call[1:3] == ["terminal", "wait"]]
+        skip = next(index for index, call in enumerate(pane.calls) if call[1:3] == ["terminal", "send"])
+        after_skip = [call for call in pane.calls[skip + 1 :] if call[1:3] == ["terminal", "wait"]]
+        self.assertTrue(waits)
+        self.assertTrue(after_skip, "readiness is re-proved between the modal answer and the write")
+
+    def test_a_real_starting_pane_is_written_into_and_then_refused_by_its_receipt(self) -> None:
+        """issue:2fdac531 driven end to end on the two tails the backend actually produced.
+
+        This is where the guarantee lives now. The pane is mid-startup and nothing pre-write says
+        so, so the boundary writes and records `sendability=unestablished` rather than claiming a
+        readiness it did not observe. One write later the composer is positively holding the
+        pointer, and that is a determinate refusal: `payload-left-in-composer`, receipt `refused`,
+        which is what `_adopt_launch_intent` reads when it declines to turn this live head into a
+        claim. The startup state is named in `pre_delivery_after`, where it can be seen.
+        """
+        pane = ScriptedPane({0: MID_STARTUP_TAIL, 1: MID_STARTUP_HOLDING_TAIL}, cursors={0: "20", 1: "20"})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, prompt=MID_STARTUP_POINTER, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.pre_delivery_before, "")
+        self.assertEqual(evidence.sendability, SENDABILITY_UNESTABLISHED)
+        self.assertEqual(evidence.pre_delivery_after, PRE_DELIVERY_STARTING)
+        self.assertTrue(evidence.payload_left_in_composer)
+        self.assertEqual(evidence.reason, "payload-left-in-composer")
+        self.assertEqual(evidence.to_json()["delivery_receipt"], DELIVERY_RECEIPT_REFUSED)
+        # The body is written once and re-entered; nothing is typed at the screen itself.
+        self.assertEqual(pane.sends.count(MID_STARTUP_POINTER), 1)
+        self.assertNotIn("3", pane.sends)
+
+    def test_a_dialog_that_never_clears_is_still_a_bounded_refusal(self) -> None:
+        """The bounded window survives, and it is now about dialogs, which is all it ever bounded.
+
+        A head a dialog will not let go of ends in a typed refusal with zero bytes written, so the
+        caller replaces it rather than letting the card report progress against it.
+        """
+        pane = ScriptedPane({0: ["Trust this workspace?", "  1. Yes", "  2. No", "Press enter to continue"]})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.sendability, SENDABILITY_DIALOG_REFUSED)
+        self.assertEqual(evidence.stage, "none")
+        self.assertEqual(pane.sends, [])
+
+    def test_a_started_head_is_delivered_to_though_its_tail_names_the_startup(self) -> None:
+        """The whole boundary, driven at the tail a real started Codex pane actually returns.
+
+        With the classification reading that tail as a screen, this delivery spun out
+        `TUI_PRE_DELIVERY_TIMEOUT_S` on a state that was over, wrote zero bytes and became a
+        `HeadPaneBusy` deferral — for the first prompt every Codex head is ever given.
+        """
+        pane = ScriptedPane(
+            {0: STARTED_IDLE_TAIL, 1: STARTED_IDLE_TAIL + ["· recorded resume"]},
+            cursors={0: "16", 1: "17"},
+        )
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        evidence = outcome.evidence
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        self.assertEqual(evidence.pre_delivery_before, "")
+        self.assertEqual(evidence.modal_resolution, "not-present")
+        self.assertEqual(pane.sends, ["wake the observer", ""])
+        self.assertEqual(evidence.to_json()["delivery_receipt"], DELIVERY_RECEIPT_ACCEPTED)
+
+    def test_a_settled_modal_in_the_tail_gets_no_keystroke_and_the_pointer_instead(self) -> None:
+        """The same pane once something has settled the update modal above the composer.
+
+        Read as a screen, this tail made the delivery type `3` with Enter into an ordinary
+        composer — a bare `3` submitted to the provider immediately before its task pointer, twice,
+        and then a refusal because history cannot be cleared.
+        """
+        pane = ScriptedPane(
+            {0: SETTLED_UPDATE_MODAL_TAIL, 1: SETTLED_UPDATE_MODAL_TAIL + ["· recorded resume"]},
+            cursors={0: "24", 1: "25"},
+        )
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        evidence = outcome.evidence
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        self.assertEqual(evidence.modal_answers, 0)
+        self.assertEqual(evidence.modal_resolution, "not-present")
+        self.assertNotIn("3", pane.sends)
+        self.assertEqual(pane.sends, ["wake the observer", ""])
+
+    def test_the_known_modal_is_answered_only_while_it_is_the_live_screen(self) -> None:
+        """A pattern is never the whole authorisation for a keystroke.
+
+        The screen below carries the modal's own words and no footer under them, so the code
+        recognises the modal and still cannot prove it is up. That is a typed refusal with nothing
+        typed at the pane, exactly as an unknown dialog is.
+        """
+        pane = ScriptedPane({0: ["✨ Update available! 0.152.0 -> 0.152.1   3. Skip until next version"]})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.pre_delivery_before, PRE_DELIVERY_UPDATE_MODAL)
+        self.assertEqual(evidence.modal_resolution, "refused-not-on-screen")
+        self.assertEqual(evidence.reason, "modal-not-on-screen")
+        self.assertEqual(evidence.modal_answers, 0)
+        self.assertEqual(pane.sends, [])
+
+    def test_an_unknown_dialog_fails_closed_with_no_keystrokes_at_all(self) -> None:
+        """A screen this code does not recognise is one it cannot answer.
+
+        The refusal is typed so the caller can bound its retry and escalate; what it must never be
+        is an arbitrary keystroke sent at a dialog nobody read.
+        """
+        pane = ScriptedPane({0: ["Trust this workspace?", "  1. Yes", "  2. No", "Press enter to continue"]})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.pre_delivery_before, PRE_DELIVERY_UNKNOWN_DIALOG)
+        self.assertEqual(evidence.reason, "unknown-dialog")
+        self.assertEqual(evidence.modal_resolution, "refused-unknown")
+        self.assertEqual(evidence.modal_answers, 0)
+        self.assertEqual(pane.sends, [])
+
+    def test_a_modal_that_does_not_clear_is_a_bounded_refusal(self) -> None:
+        """Answering forever is the failure mode this bound exists to prevent."""
+        pane = ScriptedPane({0: UPDATE_MODAL_SCREEN})
+
+        with mock.patch("triggered_agents.runtime.tui_delivery.TUI_PRE_DELIVERY_POLL_S", 0):
+            with self.assertRaises(TuiDeliveryError) as raised:
+                self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.modal_resolution, "unresolved")
+        self.assertEqual(evidence.modal_answers, 2)
+        self.assertEqual(pane.sends, ["3", "3"], "only the documented choice, and only twice")
+        self.assertEqual(evidence.to_json()["delivery_receipt"], DELIVERY_RECEIPT_REFUSED)
+
+    def test_the_three_facts_are_recorded_apart(self) -> None:
+        """Modal resolution, delivery receipt and provider binding are not one "delivered" bit."""
+        pane = ScriptedPane(
+            {0: UPDATE_MODAL_SCREEN, 1: ["ready", "›"], 2: ["thinking"]}, idle_after={2: False}
+        )
+
+        outcome = self.deliver(pane, confirm=lambda _sent_at: False, ack_out_of_band=True)
+
+        record = outcome.evidence.to_json()
+        self.assertEqual(record["modal_resolution"], "answered-skip")
+        self.assertEqual(record["delivery_receipt"], DELIVERY_RECEIPT_ACCEPTED)
+        self.assertFalse(record["provider_bound"], "the caller's own criterion never fired")
+        self.assertTrue(record["turn_confirmed"], "the pane's own evidence did")
+
