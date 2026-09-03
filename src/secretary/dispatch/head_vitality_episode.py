@@ -42,6 +42,16 @@ The invariants encoded here (each pinned by a named test):
   * an unavailable source freezes its evidence and never counts as no-progress; with every strong
     source dark the truthful verdict is ``Unverifiable`` -- except that an already-confirmed
     episode is not quietly laundered back to health by its observers going blind;
+  * that freeze is BOUNDED (secretary-1543): a progress source known to this episode and not
+    answering holds the stall clock for at most ``thresholds.dark_ceiling``, after which the
+    episode ages on the pid's own sustained "running, and nothing else" exactly as a run whose
+    progress source never answered at all. A live pid is never indefinite evidence of liveness;
+  * a source does not have to SAY it is unavailable to be dark: a progress source this episode has
+    heard from that produces no snapshot on a tick is stamped dark too, because the status shapes
+    for a live head whose pane the inventory lost carry a heartbeat and no provider channel at all;
+  * a rejected report the head has not answered, followed by an advisory turn seen to END, raises
+    ``HealthyQuiet`` to ``SuspectedStall`` at once (``answer_owed_since``): the pair is an
+    explicit signal, not something a ceiling eventually notices;
   * advisory pane readings corroborate in ``basis`` and can never drive a stall verdict;
   * quiet accumulates from ``last_progress_at`` (or episode start), not from the last tick, so
     irregular ticks cannot stretch or shrink a stall;
@@ -64,6 +74,7 @@ from secretary.dispatch.head_vitality import (
     ProgressState,
     SnapshotSource,
     SourceAvailability,
+    TurnState,
     VitalitySnapshot,
 )
 from secretary.dispatcher_watchdog import IDLE_STALL_DEFAULT
@@ -80,6 +91,10 @@ BASIS_ENTRY_LIMIT = 10
 
 # Progress sources distinguish a broken observed channel from pid-only aging.
 _PROGRESS_SOURCES = frozenset({SnapshotSource.PROVIDER_CURSOR.value})
+
+# How long a *dark* progress source may freeze an episode's stall clock before the episode ages
+# anyway (secretary-1543). See ``VitalityThresholds.dark_ceiling`` for why this number.
+DARK_CEILING_DEFAULT = 2.0 * float(IDLE_STALL_DEFAULT)
 
 
 class VitalityVerdict(StrEnum):
@@ -107,13 +122,30 @@ class VitalityThresholds:
     six-hour worker-report ceiling whose uncritical application produced the codegen-orchestrator
     incidents. Nothing in this module enforces these numbers on a decision: they parameterise a
     shadow verdict, and a later policy card owns whatever the production numbers turn out to be.
+
+    ``dark_ceiling`` is the one number this vocabulary makes load-bearing for a real recovery
+    (secretary-1543), so it is argued rather than borrowed. It bounds how long a progress source
+    that is *known to this episode and not answering* may freeze the stall clock. Before this
+    card the freeze was unbounded: on ``issue:7bff833fef6d9d9b404d`` (2026-08-30) a Codex head
+    with no bound provider baseline sat ``healthy_quiet`` for 65+ minutes behind a live PID, with
+    no wake, no replacement and no terminal outcome. Lower bound on the number: it must outlast a
+    genuine provider-startup window, and secretary-1542 measured one on real Codex v0.152.1 --
+    minutes, during which Orca answers ``tui-idle`` satisfied and the output cursor never moves,
+    so nothing else distinguishes a starting head from a settled one. Upper bound: it must stay
+    far below the six-hour worker-report ceiling whose uncritical application produced the
+    codegen-orchestrator incidents, and it must leave the wake early enough to be worth having.
+    Two ``IDLE_STALL_DEFAULT`` (ten minutes) sits between them: a dark-and-quiet head earns its
+    first conversational nudge at ``max(dark_ceiling, suspect_after)`` -- ten minutes instead of
+    never -- while nothing destructive happens before ``suspect_after + confirm_after`` of quiet
+    AND the guard's own outer ceiling (:mod:`head_vitality_guard`).
     """
 
     suspect_after: float
     confirm_after: float
+    dark_ceiling: float = float(DARK_CEILING_DEFAULT)
 
     def __post_init__(self) -> None:
-        for name in ("suspect_after", "confirm_after"):
+        for name in ("suspect_after", "confirm_after", "dark_ceiling"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise HeadVitalityError(f"vitality threshold {name} is a number")
@@ -121,11 +153,13 @@ class VitalityThresholds:
                 raise HeadVitalityError(f"vitality threshold {name} is positive and finite")
         object.__setattr__(self, "suspect_after", float(self.suspect_after))
         object.__setattr__(self, "confirm_after", float(self.confirm_after))
+        object.__setattr__(self, "dark_ceiling", float(self.dark_ceiling))
 
 
 DEFAULT_VITALITY_THRESHOLDS = VitalityThresholds(
     suspect_after=float(IDLE_STALL_DEFAULT),
     confirm_after=2.0 * float(IDLE_STALL_DEFAULT),
+    dark_ceiling=float(DARK_CEILING_DEFAULT),
 )
 
 
@@ -161,6 +195,12 @@ class VitalityEpisode:
     # no advancement has ever been observed in this episode.
     last_progress_at: float = 0.0
     last_progress_source: str = ""
+    # A conversational rung's restart of the quiet clock. The dispatcher's one report nudge asks
+    # the head a question it could not have answered before being asked, so the quiet the ladder
+    # charges it with begins at the prompt -- but the head's real progress history stays on file,
+    # which is why this is its own stamp instead of a rewritten ``last_progress_at``. 0.0 when no
+    # rung has restarted anything; the quiet reference is the later of this and last progress.
+    quiet_since: float = 0.0
     # Per-source opaque cursors, compared but never parsed: the caller feeds them back as
     # ``previous_cursor`` when building the next provider snapshot, which is how one reduction
     # knows the cursor moved.
@@ -186,6 +226,14 @@ class VitalityEpisode:
     # began. Cleared on the first reduction that no longer sees suspension, whose reference
     # timestamps are shifted forward by the frozen span so suspended time feeds no threshold.
     stall_frozen_since: float = 0.0
+    # The last advisory Turn reading this episode saw ("active"/"idle"/""), and the instant a
+    # reading went active -> idle. Advisory evidence stays advisory: neither field may raise a
+    # verdict on its own, and ``turn_ended_at`` is read only to NARROW a conclusion the caller's
+    # own ``answer_owed_since`` already established (secretary-1543). A head that never showed an
+    # active turn -- a Codex head still starting, which answers idle throughout (secretary-1542's
+    # measurement) -- never stamps it.
+    last_turn: str = ""
+    turn_ended_at: float = 0.0
 
     def __post_init__(self) -> None:
         if not str(self.run_id or "").strip():
@@ -197,8 +245,10 @@ class VitalityEpisode:
             "suspected_since",
             "confirmed_since",
             "last_progress_at",
+            "quiet_since",
             "updated_at",
             "stall_frozen_since",
+            "turn_ended_at",
         ):
             object.__setattr__(self, name, _finite_timestamp(getattr(self, name), name))
         if isinstance(self.recovery_rung, bool) or not isinstance(self.recovery_rung, int):
@@ -235,6 +285,10 @@ class VitalityEpisode:
             self, "basis", tuple(str(token)[:BASIS_TOKEN_LIMIT] for token in self.basis)[:BASIS_ENTRY_LIMIT]
         )
         object.__setattr__(self, "reason", str(self.reason or "")[:REASON_LIMIT])
+        turn = str(self.last_turn or "")
+        if turn not in ("", "active", "idle"):
+            raise HeadVitalityError("a vitality episode last turn is active, idle or unrecorded")
+        object.__setattr__(self, "last_turn", turn)
 
     def to_json(self) -> dict[str, Any]:
         """The durable form stored on the dispatcher record beside its run."""
@@ -247,6 +301,7 @@ class VitalityEpisode:
             "confirmed_since": self.confirmed_since,
             "last_progress_at": self.last_progress_at,
             "last_progress_source": self.last_progress_source,
+            "quiet_since": self.quiet_since,
             "evidence_cursors": dict(self.evidence_cursors),
             "unavailable_since": dict(self.unavailable_since),
             "basis": list(self.basis),
@@ -257,6 +312,8 @@ class VitalityEpisode:
             "activity_epoch": self.activity_epoch,
             "updated_at": self.updated_at,
             "stall_frozen_since": self.stall_frozen_since,
+            "last_turn": self.last_turn,
+            "turn_ended_at": self.turn_ended_at,
         }
 
     @classmethod
@@ -306,6 +363,10 @@ class VitalityEpisode:
             confirmed_since=_finite_timestamp(payload.get("confirmed_since"), "confirmed_since"),
             last_progress_at=_finite_timestamp(payload.get("last_progress_at"), "last_progress_at"),
             last_progress_source=str(payload.get("last_progress_source") or "")[:80],
+            # Absent in records written before secretary-1543's nudge restart, and absent is
+            # exactly what "no rung has restarted this episode's quiet clock" says, so the field
+            # answers for itself rather than stranding a live dispatcher's records.
+            quiet_since=_finite_timestamp(payload.get("quiet_since", 0.0), "quiet_since"),
             evidence_cursors=dict(cursors),
             unavailable_since=dict(unavailable),
             basis=tuple(basis),
@@ -316,6 +377,13 @@ class VitalityEpisode:
             activity_epoch=epoch,
             updated_at=_finite_timestamp(payload.get("updated_at"), "updated_at"),
             stall_frozen_since=_finite_timestamp(payload.get("stall_frozen_since"), "stall_frozen_since"),
+            # Written before secretary-1543 added the Turn-transition fields: their absence means
+            # no advisory turn was ever recorded for this episode, which is exactly what an
+            # unstamped pair says. Refusing such a record would strand every episode a running
+            # dispatcher persisted under EPISODE_VERSION 1, so the version stays where it is and
+            # the missing fields answer for themselves.
+            last_turn=str(payload.get("last_turn") or ""),
+            turn_ended_at=_finite_timestamp(payload.get("turn_ended_at", 0.0), "turn_ended_at"),
         )
 
 
@@ -326,6 +394,7 @@ def reduce_vitality(
     thresholds: VitalityThresholds = DEFAULT_VITALITY_THRESHOLDS,
     *,
     retained: bool = False,
+    answer_owed_since: float = 0.0,
 ) -> VitalityEpisode:
     """Fold one tick's snapshots into the run's episode, purely and deterministically.
 
@@ -341,6 +410,18 @@ def reduce_vitality(
     one, and guessing is what let the watchdog SIGCONT a retained worker out from under the gate
     (secretary-1539). It changes exactly one thing -- a suspended reading becomes ``Retained``
     instead of ``Suspended`` -- and nothing else about the fold.
+
+    ``answer_owed_since`` is the other caller-declared fact (secretary-1543): the instant the
+    dispatcher put a question to this head that it has not answered -- today, a rejected done
+    report that sent the head back to rework. Like ``retained`` it is an INPUT: the reducer cannot
+    see a board rejection. It changes exactly one thing too. When the head owes an answer that no
+    progress has followed AND the advisory Turn axis has been seen to END a turn since the
+    question was put (``active`` then ``idle``), a ``HealthyQuiet`` verdict is raised to
+    ``SuspectedStall`` at once instead of waiting out the quiet thresholds: a head that took its
+    turn, ended it and answered nothing is not quiet-below-threshold, it is finished and silent.
+    The advisory reading still cannot convict on its own -- with no owed answer it stays exactly
+    as weightless as before -- and it can never raise anything but ``HealthyQuiet``, so it lowers
+    no verdict and launders no confirmation.
     """
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
         raise HeadVitalityError("reduce_vitality needs a finite now")
@@ -353,6 +434,14 @@ def reduce_vitality(
         raise HeadVitalityError("reduce_vitality continues a VitalityEpisode")
     if not isinstance(retained, bool):
         raise HeadVitalityError("reduce_vitality needs a boolean retained")
+    if (
+        isinstance(answer_owed_since, bool)
+        or not isinstance(answer_owed_since, (int, float))
+        or not math.isfinite(float(answer_owed_since))
+        or float(answer_owed_since) < 0
+    ):
+        raise HeadVitalityError("reduce_vitality needs a finite answer_owed_since")
+    answer_owed_since = float(answer_owed_since)
 
     if not snapshots:
         # No observation, no movement: an episode must not age on ticks that looked at nothing.
@@ -418,6 +507,49 @@ def reduce_vitality(
                     evidence_cursors={**episode.evidence_cursors, snapshot.source.value: snapshot.cursor},
                 )
 
+    # A progress source this episode has heard from that produced NO snapshot on this tick is
+    # dark, exactly like one that answered "unavailable" (secretary-1543 round 2). The status
+    # shapes that carry a live heartbeat and no ``provider_progress`` key at all -- an exact live
+    # pid with no matching pane, a pane that is not connected -- used to leave ``unavailable_since``
+    # empty while the cursor from the tick that did answer stayed on file, so the episode read as
+    # "witnessed and not dark": the freeze window this card designed was skipped and the guard
+    # counted one channel as two. Darkness is therefore recorded from the absence of an answer,
+    # not only from an answer of absence, which is what makes "not dark" mean "answering now".
+    answered = {snapshot.source.value for snapshot in owned.values()}
+    witnessed_progress = (set(episode.evidence_cursors) | {episode.last_progress_source}) & _PROGRESS_SOURCES
+    for source_value in sorted(witnessed_progress - answered):
+        if source_value not in episode.unavailable_since:
+            episode = replace(
+                episode,
+                unavailable_since={**episode.unavailable_since, source_value: now},
+            )
+            basis.append(f"absent@{source_value}")
+
+    # The Turn axis, recorded and nothing more. An advisory reading that goes active -> idle
+    # stamps ``turn_ended_at``; one that goes back to active clears it. Recording is not
+    # convicting: only ``answer_owed_since`` below ever reads the stamp, and only to narrow.
+    advisory_turn = next(
+        (
+            snapshot
+            for snapshot in owned.values()
+            if snapshot.advisory
+            and snapshot.availability is SourceAvailability.AVAILABLE
+            and snapshot.turn is not TurnState.UNKNOWN
+        ),
+        None,
+    )
+    if advisory_turn is not None:
+        if advisory_turn.turn is TurnState.ACTIVE:
+            episode = replace(episode, last_turn="active", turn_ended_at=0.0)
+        else:
+            episode = replace(
+                episode,
+                last_turn="idle",
+                turn_ended_at=(episode.turn_ended_at if episode.last_turn == "idle" else now)
+                if episode.last_turn
+                else episode.turn_ended_at,
+            )
+
     verdict = VitalityVerdict.UNVERIFIABLE
     if any(snapshot.process is ProcessState.DEAD for snapshot in strong):
         # Death outranks everything: a gone process cannot also be quietly working.
@@ -464,7 +596,7 @@ def reduce_vitality(
         # Only observed quiet from a strong, admitted source accumulates toward a stall, and it
         # is measured from the last real progress (or the episode's start), never from the tick.
         quietest = max(progress_evidence, key=lambda snapshot: snapshot.observed_at)
-        reference = episode.last_progress_at or episode.started_at
+        reference = _quiet_reference(episode)
         quiet_seconds = max(0.0, now - reference)
         basis.append(f"quiet:{int(quiet_seconds)}s@{quietest.source.value}")
         episode = replace(episode, stall_frozen_since=0.0)
@@ -494,21 +626,95 @@ def reduce_vitality(
         else:
             verdict = VitalityVerdict.HEALTHY_QUIET
     elif strong:
-        # A witnessed dark progress source freezes stall time; pid-only runs age without
-        # inventing progress evidence. Either path preserves an earned confirmation.
-        reference = episode.last_progress_at or episode.started_at
+        # A progress source that is known to this episode and not answering freezes stall time --
+        # but only for ``dark_ceiling`` (secretary-1543). Past that window the episode ages
+        # exactly as a pid-only run does, because the two situations are the same situation: a
+        # live PID and nothing that can say the work moved. Either path still preserves an earned
+        # confirmation, and a genuinely dark channel is never itself read as no-progress; what
+        # ends is only its power to hold an episode healthy for as long as the PID lives.
+        reference = _quiet_reference(episode)
         quiet_seconds = max(0.0, now - reference)
         basis.append(
             "alive-no-progress-source@" + ",".join(sorted(snapshot.source.value for snapshot in strong))
         )
         episode = replace(episode, stall_frozen_since=0.0)
-        progress_witnessed = bool(
-            episode.unavailable_since.keys() & _PROGRESS_SOURCES
-            or episode.evidence_cursors.keys() & _PROGRESS_SOURCES
-        )
-        if progress_witnessed:
-            # Dark sources freeze an earned phase and preserve their diagnostic for policy.
-            if episode.verdict is VitalityVerdict.CONFIRMED_STALL:
+        dark_progress = {
+            name: since for name, since in episode.unavailable_since.items() if name in _PROGRESS_SOURCES
+        }
+        dark_since = min(dark_progress.values()) if dark_progress else 0.0
+        dark_seconds = max(0.0, now - dark_since) if dark_progress else 0.0
+        dark_names = ",".join(sorted(dark_progress))
+        # Naming the source and its darkness on every tick of this arm: the operator question
+        # this card exists to answer is "which channel is missing, and for how long".
+        if dark_progress:
+            basis.append(f"dark:{int(dark_seconds)}s@{dark_names}")
+        within_ceiling = bool(dark_progress) and dark_seconds < thresholds.dark_ceiling
+        if episode.verdict is VitalityVerdict.CONFIRMED_STALL:
+            # Sticky, and sticky first: a dark source may not launder a confirmation back to
+            # health, whatever the ceiling has done.
+            verdict = VitalityVerdict.CONFIRMED_STALL
+            episode = replace(
+                episode,
+                confirmed_since=(
+                    episode.confirmed_since or reference + thresholds.suspect_after + thresholds.confirm_after
+                ),
+                reason=(
+                    f"{dark_names} not answering for {int(dark_seconds)}s; confirmation stands"
+                    if dark_progress
+                    else "progress source known but not answering; confirmation stands"
+                ),
+            )
+            basis.append("preserved-confirmation:provider-dark-pid-alive")
+        elif within_ceiling and episode.verdict is VitalityVerdict.SUSPECTED_STALL:
+            # Inside the freeze window a dark source neither rewinds nor advances a phase.
+            verdict = VitalityVerdict.SUSPECTED_STALL
+            episode = replace(
+                episode,
+                suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
+                reason=(
+                    f"{dark_names} not answering for {int(dark_seconds)}s; suspicion stands"
+                    if dark_progress
+                    else "progress source known but not answering; suspicion stands"
+                ),
+            )
+            basis.append("preserved-suspicion:provider-dark-pid-alive")
+        elif within_ceiling:
+            verdict = VitalityVerdict.HEALTHY_QUIET
+            episode = replace(
+                episode,
+                reason=(
+                    # The frozen note is the honest conclusion here, but a dark
+                    # channel's own diagnostic wins when it has one: an authoritative
+                    # launch refusal is more useful to the operator (and to the
+                    # policy's deterministic allowlist) than the generic frozen words.
+                    next(
+                        (
+                            snapshot.reason
+                            for name in sorted(owned)
+                            if (snapshot := owned[name]).availability is SourceAvailability.UNAVAILABLE
+                            and snapshot.reason
+                        ),
+                        (
+                            f"{dark_names} known to this episode but not answering for "
+                            f"{int(dark_seconds)}s; frozen for another "
+                            f"{int(thresholds.dark_ceiling - dark_seconds)}s"
+                        ),
+                    )
+                ),
+            )
+        else:
+            # Either no progress source ever answered (the issue 656 pid-only arm) or the one
+            # that did has been dark past the ceiling. Both age on the pid's sustained answer of
+            # "running, and nothing else"; the reason says which, and names the dark source.
+            aged = (
+                f"{dark_names} has been dark for {int(dark_seconds)}s "
+                f"(past the {int(thresholds.dark_ceiling)}s ceiling) and the head has shown no "
+                f"progress for {int(quiet_seconds)}s"
+                if dark_progress
+                else f"running with no progress evidence for {int(quiet_seconds)}s"
+            )
+            if quiet_seconds >= thresholds.suspect_after + thresholds.confirm_after:
+                # A pid-only run ages: existence alone is not liveness.
                 verdict = VitalityVerdict.CONFIRMED_STALL
                 episode = replace(
                     episode,
@@ -516,59 +722,20 @@ def reduce_vitality(
                         episode.confirmed_since
                         or reference + thresholds.suspect_after + thresholds.confirm_after
                     ),
-                    reason="progress source known but not answering; confirmation stands",
+                    suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
+                    reason=aged,
                 )
-                basis.append("preserved-confirmation:provider-dark-pid-alive")
-            elif episode.verdict is VitalityVerdict.SUSPECTED_STALL:
+                basis.append("confirmed-stall")
+            elif quiet_seconds >= thresholds.suspect_after:
                 verdict = VitalityVerdict.SUSPECTED_STALL
                 episode = replace(
                     episode,
                     suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
-                    reason="progress source known but not answering; suspicion stands",
+                    reason=aged,
                 )
-                basis.append("preserved-suspicion:provider-dark-pid-alive")
+                basis.append("suspected-stall")
             else:
                 verdict = VitalityVerdict.HEALTHY_QUIET
-                episode = replace(
-                    episode,
-                    reason=(
-                        # The frozen note is the honest conclusion here, but a dark
-                        # channel's own diagnostic wins when it has one: an authoritative
-                        # launch refusal is more useful to the operator (and to the
-                        # policy's deterministic allowlist) than the generic frozen words.
-                        next(
-                            (
-                                snapshot.reason
-                                for name in sorted(owned)
-                                if (snapshot := owned[name]).availability is SourceAvailability.UNAVAILABLE
-                                and snapshot.reason
-                            ),
-                            "progress source known to this episode but not answering; frozen",
-                        )
-                    ),
-                )
-        elif quiet_seconds >= thresholds.suspect_after + thresholds.confirm_after:
-            # A pid-only run ages: existence alone is not liveness.
-            verdict = VitalityVerdict.CONFIRMED_STALL
-            episode = replace(
-                episode,
-                confirmed_since=(
-                    episode.confirmed_since or reference + thresholds.suspect_after + thresholds.confirm_after
-                ),
-                suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
-                reason=f"running with no progress evidence for {int(quiet_seconds)}s",
-            )
-            basis.append("confirmed-stall")
-        elif quiet_seconds >= thresholds.suspect_after:
-            verdict = VitalityVerdict.SUSPECTED_STALL
-            episode = replace(
-                episode,
-                suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
-                reason=f"running with no progress evidence for {int(quiet_seconds)}s",
-            )
-            basis.append("suspected-stall")
-        else:
-            verdict = VitalityVerdict.HEALTHY_QUIET
     else:
         # Every strong source is dark (or only the advisory pane answered). Nothing may be
         # concluded -- and an already-confirmed episode is not laundered back to health by its
@@ -580,7 +747,7 @@ def reduce_vitality(
             # confirmation by a tick whose observers then went dark does not, and a phase without
             # its onset is a claim nobody can audit. The quiet it confirmed is still measured
             # from the same reference every other quiet conclusion uses.
-            quiet_reference = episode.last_progress_at or episode.started_at
+            quiet_reference = _quiet_reference(episode)
             episode = replace(
                 episode,
                 confirmed_since=(
@@ -592,6 +759,31 @@ def reduce_vitality(
         else:
             verdict = VitalityVerdict.UNVERIFIABLE
             basis.append("no-strong-source-answered")
+    if (
+        verdict is VitalityVerdict.HEALTHY_QUIET
+        and answer_owed_since > 0.0
+        and episode.last_progress_at < answer_owed_since
+        and episode.turn_ended_at >= answer_owed_since
+    ):
+        # The explicit watchdog signal (secretary-1543): the dispatcher rejected this head's
+        # report at ``answer_owed_since`` and sent it back to work, the head then ENDED a turn,
+        # and no source has shown progress since. That pair is a conclusion on its own -- there is
+        # nothing left running to wait for -- so it does not queue behind the quiet thresholds or
+        # the outer ceiling. It can only raise HealthyQuiet: an advancing, dead, suspended,
+        # retained or already-stalled head is decided by the arms above, and the advisory reading
+        # that stamped ``turn_ended_at`` never establishes health here or anywhere else.
+        verdict = VitalityVerdict.SUSPECTED_STALL
+        owed_seconds = int(max(0.0, now - answer_owed_since))
+        episode = replace(
+            episode,
+            suspected_since=(episode.suspected_since or episode.turn_ended_at),
+            reason=(
+                f"the dispatcher's rejected report has gone unanswered for {owed_seconds}s and "
+                "the head's turn ended with no new work"
+            ),
+        )
+        basis.append("answer-owed:turn-ended")
+
     for snapshot in owned.values():
         if snapshot.advisory and snapshot.availability is SourceAvailability.AVAILABLE:
             # Corroboration only: recorded so a human reading the basis sees the pane agreed,
@@ -616,6 +808,62 @@ def reduce_vitality(
         basis=tuple(basis[:BASIS_ENTRY_LIMIT]),
         updated_at=now,
     )
+
+
+def recovery_outlook(
+    episode: Any,
+    now: float,
+    thresholds: VitalityThresholds = DEFAULT_VITALITY_THRESHOLDS,
+) -> dict[str, Any]:
+    """What an operator needs to read off one episode: what is dark, how long, what happens next.
+
+    Pure like everything else here, and derived from the same arithmetic the reducer uses, so the
+    deadline a human is shown is the instant the next reduction will actually act on. It answers
+    for one episode only: it starts nothing, and it never re-observes anything.
+
+    ``next_deadline`` is ``None`` where the ladder has no further vitality rung to climb -- a
+    confirmed stall (the recovery path owns it), a suspended or retained process (the clocks are
+    frozen by the stop signal), death, and a verdict nobody could reach.
+    """
+    if not isinstance(episode, VitalityEpisode) or not isinstance(thresholds, VitalityThresholds):
+        return {"quiet_seconds": 0.0, "dark_sources": [], "next_deadline": None, "note": ""}
+    if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
+        return {"quiet_seconds": 0.0, "dark_sources": [], "next_deadline": None, "note": ""}
+    now = float(now)
+    reference = _quiet_reference(episode)
+    quiet_seconds = max(0.0, now - reference)
+    dark = [
+        {
+            "source": name,
+            "dark_since": since,
+            "dark_seconds": max(0.0, now - since),
+            "freeze_expires_at": since + thresholds.dark_ceiling,
+        }
+        for name, since in sorted(episode.unavailable_since.items())
+        if name in _PROGRESS_SOURCES
+    ]
+    frozen_until = max((entry["freeze_expires_at"] for entry in dark), default=0.0)
+    note = ""
+    at: float | None = None
+    becomes = ""
+    if episode.verdict is VitalityVerdict.HEALTHY_QUIET:
+        becomes = VitalityVerdict.SUSPECTED_STALL.value
+        at = max(reference + thresholds.suspect_after, frozen_until)
+    elif episode.verdict is VitalityVerdict.SUSPECTED_STALL:
+        becomes = VitalityVerdict.CONFIRMED_STALL.value
+        at = max(reference + thresholds.suspect_after + thresholds.confirm_after, frozen_until)
+    elif episode.verdict is VitalityVerdict.CONFIRMED_STALL:
+        note = "the stall is confirmed; the recovery path owns this head, not another threshold"
+    elif episode.verdict in (VitalityVerdict.SUSPENDED, VitalityVerdict.RETAINED):
+        note = "the stall clocks are frozen while the process is parked on a stop signal"
+    return {
+        "quiet_seconds": quiet_seconds,
+        "dark_sources": dark,
+        "next_deadline": (
+            None if at is None else {"verdict": becomes, "at": at, "in_seconds": max(0.0, at - now)}
+        ),
+        "note": note,
+    }
 
 
 def _resolve_run_id(
@@ -666,6 +914,17 @@ def _freeze_stall_clocks(episode: VitalityEpisode, now: float, *, retained: bool
     return episode
 
 
+def _quiet_reference(episode: VitalityEpisode) -> float:
+    """The instant this episode's current quiet began: what every threshold is measured from.
+
+    The later of the last observed advancement and the last conversational restart
+    (``quiet_since``), falling back to the episode's start before either has happened. A nudge
+    that restarts the clock therefore buys the head the grace its own comment promises, without
+    erasing the progress history an operator reads (secretary-1543).
+    """
+    return max(episode.last_progress_at, episode.quiet_since) or episode.started_at
+
+
 def _unfreeze_if_resumed(
     episode: VitalityEpisode, owned: Mapping[SnapshotSource, VitalitySnapshot], now: float
 ) -> VitalityEpisode:
@@ -693,6 +952,7 @@ def _unfreeze_if_resumed(
         episode,
         started_at=shift(episode.started_at),
         last_progress_at=shift(episode.last_progress_at),
+        quiet_since=shift(episode.quiet_since),
         suspected_since=shift(episode.suspected_since),
         confirmed_since=shift(episode.confirmed_since),
         stall_frozen_since=0.0,

@@ -2493,10 +2493,18 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 episode["started_at"] = time.time()
                 episode["updated_at"] = time.time()
             # Age only evidence-time fields: the verdict stays what was earned, but
-            # its quiet reference moves with the same operator rewind.
-            for name in ("started_at", "updated_at"):
+            # its quiet reference moves with the same operator rewind. Since
+            # secretary-1543 that reference is `quiet_since` once a report nudge has
+            # restarted the clock, so the rewind moves it too -- these tests model a head
+            # that really was silent for `seconds`, prompt included.
+            for name in ("started_at", "quiet_since", "updated_at"):
                 if episode.get(name):
                     episode[name] -= seconds
+            # A source's outage is evidence-time too: the same rewind moves when it was
+            # first seen dark, or the bounded dark window could never expire in a test.
+            episode["unavailable_since"] = {
+                name: stamp - seconds for name, stamp in (episode.get("unavailable_since") or {}).items()
+            }
             record[f"{kind}_vitality_episode"] = episode
         self.runtime.production_state.save(payload)
 
@@ -2849,7 +2857,14 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         """secretary-1063 changed this. A heartbeat says the process is alive; it does not say the
         head is doing anything, and when nothing can say — an adopted head with no pane identity,
         a pane binding the runtime has lost — the wait was unbounded. The long ceiling is the
-        fallback for exactly that, as it is for a runtime with no signals at all."""
+        fallback for exactly that, as it is for a runtime with no signals at all.
+
+        The shape is the one `command_terminal_status` really returns for a live heartbeat whose
+        pane the inventory no longer lists: a `pid_status` and NO provider channel at all. Since
+        secretary-1543 that absent channel is an outage like any other, so the first such tick
+        freezes the episode for the bounded dark window and the reclaim lands one aged tick
+        later — a window later, not a rung weaker.
+        """
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "review-started")
@@ -2861,8 +2876,19 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             "reason": "pid",
             "last_activity": None,
             "pid_confirmed": True,
+            "pid_status": {
+                "known": True,
+                "alive": True,
+                "match": True,
+                "state": "live-match",
+                "stopped": False,
+            },
         }
 
+        frozen = self.tick()
+
+        self.assertEqual(frozen["action"], "waiting-review-verdict")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
         respawned = self.tick()
 
         self.assertEqual(respawned["action"], "review-respawned")

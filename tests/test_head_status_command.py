@@ -435,6 +435,67 @@ class HeadStatusTests(unittest.TestCase):
         self.assertEqual(head["episode"]["run_id"], "run-1450")
         self.assertNotIn("episode_note", head)
 
+    def test_a_head_frozen_behind_a_dark_provider_reads_its_whole_recovery_story(self) -> None:
+        """secretary-1543: the state `issue:7bff833fef6d9d9b404d` sat in for 65 minutes.
+
+        `healthy_quiet` plus a basis token is not enough for the operator standing in front of
+        that card: the row has to say which progress source is dark and for how long, how long
+        the head has been quiet, what the last progress was, and when the next rung falls due.
+        """
+        import time as _time
+
+        record = self._record()
+        self._write_heartbeat(record, self._live_pid(), alive=True)
+        now = _time.time()
+        record.worker_progress_at = now - 3_000.0
+        record.worker_waiting_since = now - 3_600.0
+        record.worker_vitality_episode = VitalityEpisode(
+            run_id="run-1450",
+            verdict=VitalityVerdict.HEALTHY_QUIET,
+            started_at=now - 1_200.0,
+            unavailable_since={"provider_cursor": now - 400.0},
+            basis=("alive-no-progress-source@pid_heartbeat", "dark:400s@provider_cursor"),
+            reason="provider_cursor known to this episode but not answering for 400s",
+            updated_at=now,
+        )
+
+        episode = self._answer(record)["heads"][0]["episode"]
+
+        dark = episode["dark_progress_sources"]
+        self.assertEqual([entry["source"] for entry in dark], ["provider_cursor"])
+        self.assertAlmostEqual(dark[0]["dark_seconds"], 400.0, delta=5.0)
+        self.assertAlmostEqual(episode["quiet_seconds"], 1_200.0, delta=5.0)
+        self.assertEqual(episode["last_progress"]["at"], 0.0)
+        self.assertAlmostEqual(episode["last_progress"]["pane_output_at"], now - 3_000.0, delta=5.0)
+        summary = self._answer(record)["heads"][0]["summary"]
+        self.assertIn("provider_cursor has been dark for", summary)
+        self.assertIn("becomes suspected_stall in", summary)
+        deadline = episode["next_recovery_deadline"]
+        self.assertEqual(deadline["verdict"], "suspected_stall")
+        # The freeze expires later than the plain quiet threshold, so it sets the deadline.
+        self.assertAlmostEqual(deadline["at"], now - 400.0 + 600.0, delta=5.0)
+        self.assertAlmostEqual(deadline["in_seconds"], 200.0, delta=5.0)
+
+    def test_a_confirmed_stall_row_says_the_recovery_path_owns_it(self) -> None:
+        import time as _time
+
+        record = self._record()
+        self._write_heartbeat(record, self._live_pid(), alive=True)
+        now = _time.time()
+        record.worker_vitality_episode = VitalityEpisode(
+            run_id="run-1450",
+            verdict=VitalityVerdict.CONFIRMED_STALL,
+            started_at=now - 4_000.0,
+            confirmed_since=now - 3_100.0,
+            updated_at=now,
+        )
+
+        episode = self._answer(record)["heads"][0]["episode"]
+
+        self.assertIsNone(episode["next_recovery_deadline"])
+        self.assertIn("recovery path owns", episode["deadline_note"])
+        self.assertEqual(episode["missing_progress_sources"], ["provider_cursor"])
+
     def test_a_head_identity_without_a_durable_run_proves_nothing_either_way(self) -> None:
         record = self._record(run_id="")
         self._write_heartbeat(record, self._live_pid(), alive=True)

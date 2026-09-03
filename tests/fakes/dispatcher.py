@@ -47,6 +47,10 @@ from tests.fakes.board import BatchedCalls
 from tests.head_registry import write_installed_pair
 from triggered_agents.runtime.head import operations as head_ops
 
+#: The `command_terminal_status` answers that report a LIVE head with a pid heartbeat and no
+#: provider channel at all, because no readable pane was matched to probe one from.
+_PROVIDER_LESS_STATUS_REASONS = frozenset({"pid", "disconnected"})
+
 
 def _legacy_unbound_v1_run(run_json: dict[str, Any], *, root: Path) -> dict[str, Any]:
     """Give a production-shaped Codex HeadRun its exact, still-unbound v1 descriptor."""
@@ -1066,7 +1070,20 @@ class FakeHost:
                     "match": False,
                     "state": "not-yet-written",
                 }
-        if "provider_progress" not in result:
+        # Only the live-pane branch of the real `command_terminal_status` probes the provider at
+        # all, so the two shapes that report a LIVE head with a heartbeat and no pane to read --
+        # `pid` (an exact live heartbeat the worktree inventory has no pane for) and
+        # `disconnected` -- carry a `pid_status` and NO provider channel. The fake used to attach
+        # one to every scripted shape, so no in-repo fixture could express the provider-less
+        # status the reduction really sees, which is why the absent-channel defect went unseen
+        # (secretary-1543). Withheld for exactly those two here; the not-live classifications
+        # (`missing-terminal`, `process-exited`) carry no provider channel in production either,
+        # but a fixture depends on the fake's one and repairing it is another card's business --
+        # see the report for this round.
+        if (
+            "provider_progress" not in result
+            and str(result.get("reason") or "") not in _PROVIDER_LESS_STATUS_REASONS
+        ):
             result["provider_progress"] = dict(self.provider_progress(task, record, kind))
         if result.get("live") is False:
             # A scripted not-live answer models a terminal the inventory lost. The

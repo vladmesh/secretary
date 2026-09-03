@@ -15,11 +15,13 @@ import os
 import tempfile
 import time
 import unittest
+from typing import ClassVar
 from unittest import mock
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary.dispatcher_types import HostError
+from secretary.dispatcher_watchdog import idle_stall_seconds, stall_seconds
 from secretary.dispatcher_worker_lifecycle import head_run_binding
 from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
 
@@ -559,5 +561,445 @@ class VitalityVerdictCommentIdempotencyTests(DispatcherRuntimeFixture, unittest.
         )
 
 
+class Secretary1517WaitTickTests(DispatcherRuntimeFixture, unittest.TestCase):
+    """End to end, through the real wait tick: the shape `issue:7bff833fef6d9d9b404d` froze in.
+
+    A Codex worker head whose provider source has no bound v1 baseline (so the cursor answers
+    unavailable), a live PID, an idle pane, and no file or event progress. Before secretary-1543
+    the reduction returned ``healthy_quiet`` with the freeze reason on every tick for as long as
+    the PID lived: 65+ minutes claimed, no wake, no replacement, no terminal outcome.
+    """
+
+    #: The dark window and the quiet window both have to elapse before anything is earned.
+    DARK_CEILING = 600.0
+
+    def setUp(self) -> None:
+        super().setUp()
+        # An addressable head: the wake this card is about is a real report prompt typed into a
+        # live conversation, not the degraded fallback an unaddressable fixture head produces.
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()  # claim + launch; the worker heartbeat binds a live pid
+        self._codex_head_with_no_provider_baseline()
+
+    def _codex_head_with_no_provider_baseline(self) -> None:
+        self.host.worker_status_result = {
+            "known": True,
+            "live": True,
+            "reason": "live",
+            "pid_confirmed": True,
+            # The pane answers idle throughout -- which, per secretary-1542's measurement against
+            # real Codex, does not distinguish a starting head from a settled one.
+            "idle": True,
+            "provider_progress": {
+                "state": "unavailable",
+                "reason": "codex provider source has no bound v1 baseline for this HeadRun",
+            },
+        }
+
+    def _age(self, seconds: float) -> None:
+        """Age the episode's quiet reference AND its dark stamp, as wall-clock would."""
+        payload = self.runtime.production_state.load()
+        record = payload["records"][CARD_REF]
+        episode = record.get("worker_vitality_episode")
+        assert episode is not None
+        for name in ("started_at", "quiet_since", "updated_at", "last_progress_at", "suspected_since"):
+            if episode.get(name):
+                episode[name] -= seconds
+        episode["unavailable_since"] = {
+            name: stamp - seconds for name, stamp in (episode.get("unavailable_since") or {}).items()
+        }
+        record["worker_vitality_episode"] = episode
+        self.runtime.production_state.save(payload)
+
+    def test_the_frozen_head_is_woken_instead_of_sitting_claimed(self) -> None:
+        frozen = self.tick()
+        self.assertEqual(frozen["action"], "waiting-worker-report")
+        episode = self._pilot_record()["worker_vitality_episode"]
+        self.assertEqual(episode["verdict"], "healthy_quiet")
+        self.assertIn("provider_cursor", episode["unavailable_since"])
+
+        # Ten minutes later -- past the dark ceiling and past `suspect_after`.
+        self._age(self.DARK_CEILING + 60.0)
+        woken = self.tick()
+
+        self.assertEqual(woken["action"], "worker-report-prompted")
+        self.assertEqual(woken["status"], "degraded")
+        episode = self._pilot_record()["worker_vitality_episode"]
+        # The prompt restarts the quiet clock on purpose, so the persisted verdict after the wake
+        # is healthy again; what matters is that the wake happened, and why it happened.
+        self.assertIn("suspects a stall", woken["reason"])
+        self.assertIn("provider_cursor has been dark for", woken["reason"])
+        # Nothing was stopped or replaced to get there.
+        self.assertEqual(self._pilot_record()["worker_respawns"], 0)
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_the_head_is_never_destroyed_on_the_dark_channel_alone(self) -> None:
+        """Past confirmation the guard still holds the destructive rung behind the ceiling."""
+        self.tick()
+        self._age(self.DARK_CEILING + 60.0)
+        self.assertEqual(self.tick()["action"], "worker-report-prompted")
+
+        # The nudge is spent for this generation; the head stays dark and quiet.
+        outcomes = []
+        for _ in range(3):
+            self._age(20 * 60.0)
+            outcomes.append(self.tick())
+
+        episode = self._pilot_record()["worker_vitality_episode"]
+        self.assertEqual(episode["verdict"], "confirmed_stall")
+        # Every tick still says something: the card is never silently claimed with nothing
+        # running. And nothing destructive fired -- the confirmation rests on the pid alone,
+        # so the guard holds it behind the role's outer ceiling.
+        for outcome in outcomes:
+            self.assertEqual(outcome["status"], "degraded", outcome)
+        self.assertEqual(self._pilot_record()["worker_respawns"], 0)
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertIn(
+            "guard-refused",
+            " ".join(str(outcome.get("action") or "") for outcome in outcomes),
+        )
+
+    def test_a_retained_head_in_the_same_shape_is_left_alone(self) -> None:
+        """A deliberately parked worker is exempt from every rung this card can reach."""
+        payload = self.runtime.production_state.load()
+        record = payload["records"][CARD_REF]
+        record["worker_continuation"] = {
+            "stage": "retained",
+            "phase": "validate",
+            "retained_at": time.time(),
+            "session_held": True,
+        }
+        self.runtime.production_state.save(payload)
+        self.host.worker_status_result["pid_status"] = {
+            "known": True,
+            "alive": True,
+            "match": True,
+            "state": "live-match",
+            "stopped": True,
+        }
+
+        self.tick()
+        self._age(90 * 60.0)
+        outcome = self.tick()
+
+        episode = self._pilot_record()["worker_vitality_episode"]
+        self.assertEqual(episode["verdict"], "retained")
+        self.assertEqual(episode["recovery_rung"], 0)
+        self.assertNotEqual(outcome.get("action"), "worker-report-prompted")
+        self.assertEqual(self._pilot_record()["worker_respawns"], 0)
+        self.assertNotIn("restart_worker", self.host.calls)
+
+
+class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase):
+    """secretary-1543: a bounced done report arms an explicit signal, not a ceiling."""
+
+    def _record_field(self) -> float:
+        return float(self._pilot_record().get("worker_answer_owed_since") or 0.0)
+
+    def test_a_bounced_done_report_arms_the_signal_and_an_accepted_one_disarms_it(self) -> None:
+        from tests.fakes.dispatcher import GateResult
+
+        self.board.metadata[12]["task_type"] = "research"
+        self.start_dispatcher()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+        self.assertEqual(self._record_field(), 0.0)
+
+        # The same SHA reported done again: the dispatcher bounces it back to rework.
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference=CARD_REF,
+            kind="done",
+            body="nothing changed",
+            request_id=self._worker_report_request_id(),
+        )
+        self.assertEqual(self.tick()["action"], "stale-done-rework")
+
+        owed = self._record_field()
+        self.assertGreater(owed, 0.0, "the head now owes the dispatcher an answer")
+
+        # Real new work, accepted: whatever the head owed, it has answered.
+        self.host.commit = "b" * 40
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference=CARD_REF,
+            kind="done",
+            body="reworked",
+            request_id=self._worker_report_request_id(),
+        )
+        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self._record_field(), 0.0)
+
+    def test_the_owed_answer_reaches_the_reduction_as_a_declared_input(self) -> None:
+        """The wiring, not the arithmetic: the reducer's own tests own the conclusion."""
+        self.start_dispatcher()
+        self.tick()
+        payload = self.runtime.production_state.load()
+        payload["records"][CARD_REF]["worker_answer_owed_since"] = time.time() - 30.0
+        self.runtime.production_state.save(payload)
+        seen: list[float] = []
+        real = _reduce_vitality_under_test()
+
+        def spy(previous, snapshots, now, thresholds, *, retained=False, answer_owed_since=0.0):
+            seen.append(answer_owed_since)
+            return real(
+                previous,
+                snapshots,
+                now,
+                thresholds,
+                retained=retained,
+                answer_owed_since=answer_owed_since,
+            )
+
+        with mock.patch("secretary.dispatcher._reduce_vitality", spy):
+            self._head_at_its_prompt()
+            self.tick()
+
+        self.assertTrue(seen)
+        self.assertGreater(seen[0], 0.0)
+
+
+def _reduce_vitality_under_test():
+    from secretary.dispatch.head_vitality_episode import reduce_vitality
+
+    return reduce_vitality
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class ProviderLessStatusShapesTests(DispatcherRuntimeFixture, unittest.TestCase):
+    """The two live-heartbeat status shapes that carry no provider channel at all.
+
+    `command_terminal_status` answers with a `pid_status` and *no* `provider_progress` key in two
+    real situations: an exact live heartbeat whose pane is not in the worktree inventory any more
+    ("Missing inventory does not beat an exact live heartbeat; never respawn beside it"), and a
+    pane that matched but is not connected. A head that has outlived its pane binding is precisely
+    the head the vitality ladder must not kill, so the shapes are pinned here as the production
+    function actually produces them -- not as a fixture wishes them -- and then driven through the
+    reduction and the guard.
+
+    Before secretary-1543's round 2 an absent provider channel left `unavailable_since` empty
+    while the cursor from the tick that did answer stayed on file, so the episode read as
+    "witnessed and not dark": the freeze window was skipped, the guard counted one channel as two
+    and a live head was respawnable fifteen minutes after its last provider advance.
+    """
+
+    LIVE_MATCH: ClassVar[dict] = {
+        "known": True,
+        "alive": True,
+        "match": True,
+        "state": "live-match",
+        "stopped": False,
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Addressable, so the conversational rung this card protects is a real report prompt.
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()  # claim + launch; the worker heartbeat binds a live pid
+
+    def _live_record(self):
+        payload = self.runtime.production_state.load()
+        return self.runtime.production_state.records(payload)[CARD_REF]
+
+    def _production_status(self, *, matching: bool, connected: bool) -> dict:
+        """What the real `command_terminal_status` returns for one pane inventory.
+
+        Only the two host reads are stubbed -- the Orca inventory and the /proc heartbeat probe.
+        Everything that decides the shape is the production function.
+        """
+        from secretary import dispatcher_review
+
+        record = self._live_record()
+        pane = mock.Mock()
+        pane.leaf = record.worker_leaf if matching else "another-worktree-leaf"
+        pane.handle = record.handle if matching else "another-handle"
+        pane.title = "worker" if matching else "someone-else"
+        pane.connected = connected
+        pane.last_output_at = time.time()
+        host = mock.Mock(mode="orca")
+        with (
+            mock.patch.object(dispatcher_review, "worktree_panes", return_value=[pane]),
+            mock.patch.object(
+                dispatcher_review, "_head_run_process_status", return_value=dict(self.LIVE_MATCH)
+            ),
+        ):
+            return dispatcher_review.command_terminal_status(
+                host, self.reader.show(CARD_REF), record, kind="worker"
+            )
+
+    def _witness_the_provider(self) -> None:
+        """Ticks on which the provider answers and advances, as the real incident's head did.
+
+        Two cursors, so the episode carries a real ``last_progress_at`` as well as an evidence
+        cursor: that is the state in which the old nudge bought no grace at all, and the state
+        the reviewer's reproduction started from.
+        """
+        for cursor in ("cursor-a", "cursor-b"):
+            record = self._live_record()
+            self.host.worker_status_result = {
+                "known": True,
+                "live": True,
+                "reason": "live",
+                "pid_confirmed": True,
+                "pid_status": dict(self.LIVE_MATCH),
+                "provider_progress": self._bound_provider_progress(record, cursor),
+            }
+            self.tick()
+        episode = self._pilot_record()["worker_vitality_episode"]
+        self.assertIn("provider_cursor", episode["evidence_cursors"])
+        self.assertGreater(episode["last_progress_at"], 0.0)
+        self.assertEqual(episode["unavailable_since"], {})
+
+    def _lose_the_pane(self, *, matching: bool = False, connected: bool = True) -> None:
+        """The inventory stops answering for this head: one tick on the provider-less shape."""
+        self.host.worker_status_result = self._production_status(matching=matching, connected=connected)
+        self.tick()
+        episode = self._pilot_record()["worker_vitality_episode"]
+        self.assertIn("provider_cursor", episode["unavailable_since"])
+
+    def _age(self, seconds: float) -> None:
+        """Age every clock this episode reads, as wall-clock would."""
+        payload = self.runtime.production_state.load()
+        record = payload["records"][CARD_REF]
+        episode = record.get("worker_vitality_episode")
+        assert episode is not None
+        for name in ("started_at", "quiet_since", "updated_at", "last_progress_at", "suspected_since"):
+            if episode.get(name):
+                episode[name] -= seconds
+        episode["unavailable_since"] = {
+            name: stamp - seconds for name, stamp in (episode.get("unavailable_since") or {}).items()
+        }
+        record["worker_vitality_episode"] = episode
+        self.runtime.production_state.save(payload)
+
+    def test_the_two_shapes_carry_a_heartbeat_and_no_provider_channel(self) -> None:
+        """Pinned from the production function: this is the wiring the reduction really sees."""
+        lost_pane = self._production_status(matching=False, connected=True)
+        self.assertEqual(lost_pane["reason"], "pid")
+        self.assertTrue(lost_pane["pid_confirmed"])
+        self.assertIn("pid_status", lost_pane)
+        self.assertNotIn("provider_progress", lost_pane)
+
+        disconnected = self._production_status(matching=True, connected=False)
+        self.assertEqual(disconnected["reason"], "disconnected")
+        self.assertIn("pid_status", disconnected)
+        self.assertNotIn("provider_progress", disconnected)
+
+    def test_an_absent_provider_channel_is_recorded_dark_not_answering(self) -> None:
+        """The repair itself: darkness is read from the absence of an answer, both shapes."""
+        for matching, connected, reason in ((False, True, "pid"), (True, False, "disconnected")):
+            with self.subTest(reason=reason):
+                self.setUp()
+                self._witness_the_provider()
+                self.host.worker_status_result = self._production_status(
+                    matching=matching, connected=connected
+                )
+                self.tick()
+
+                episode = self._pilot_record()["worker_vitality_episode"]
+                self.assertIn("provider_cursor", episode["unavailable_since"])
+                self.assertIn("absent@provider_cursor", episode["basis"])
+                # Inside the window it is still healthy, and the reason says which source is
+                # dark and for how long -- not "running with no progress evidence".
+                self.assertEqual(episode["verdict"], "healthy_quiet")
+                self.assertIn("provider_cursor", episode["reason"])
+
+    def test_a_live_head_with_no_pane_binding_is_not_respawned_before_the_outer_ceiling(self) -> None:
+        """The blocker, end to end: the reduction may confirm, the guard may not destroy.
+
+        The sequence the reviewer recorded -- provider answers, then fifteen minutes of heartbeat
+        alone -- now spends the conversational rung and then sits behind the role's own six-hour
+        ceiling instead of stopping a head whose pane the inventory merely lost.
+        """
+        self._witness_the_provider()
+        self._lose_the_pane()
+
+        # Past the dark ceiling and past `suspect_after`: the one nudge, and nothing destructive.
+        self._age(2 * idle_stall_seconds() + 60.0)
+        woken = self.tick()
+        self.assertEqual(woken["action"], "worker-report-prompted")
+        self.assertIn("provider_cursor has been dark for", woken["reason"])
+
+        # The nudge is spent for this generation; the head stays live, quiet and unreadable.
+        outcomes = []
+        for _ in range(3):
+            self._age(20 * 60.0)
+            outcomes.append(self.tick())
+
+        episode = self._pilot_record()["worker_vitality_episode"]
+        self.assertEqual(episode["verdict"], "confirmed_stall")
+        for outcome in outcomes:
+            self.assertEqual(outcome["status"], "degraded", outcome)
+        self.assertIn(
+            "guard-refused",
+            " ".join(str(outcome.get("action") or "") for outcome in outcomes),
+        )
+        self.assertEqual(self._pilot_record()["worker_respawns"], 0)
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_a_retained_head_in_the_provider_less_shape_is_still_exempt(self) -> None:
+        """The absent channel may not wake a head the dispatcher itself parked."""
+        self._witness_the_provider()
+        status = self._production_status(matching=False, connected=True)
+        status["pid_status"] = {**self.LIVE_MATCH, "stopped": True}
+        payload = self.runtime.production_state.load()
+        payload["records"][CARD_REF]["worker_continuation"] = {
+            "stage": "retained",
+            "phase": "validate",
+            "retained_at": time.time(),
+            "session_held": True,
+        }
+        self.runtime.production_state.save(payload)
+        self.host.worker_status_result = status
+
+        self.tick()
+        self._age(90 * 60.0)
+        outcome = self.tick()
+
+        episode = self._pilot_record()["worker_vitality_episode"]
+        self.assertEqual(episode["verdict"], "retained")
+        self.assertNotEqual(outcome.get("action"), "worker-report-prompted")
+        self.assertEqual(self._pilot_record()["worker_respawns"], 0)
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_the_nudge_buys_the_head_real_grace_before_the_next_rung(self) -> None:
+        """The rung, not a formality: the tick after a prompt may not re-confirm at once.
+
+        The nudge used to rewrite ``started_at`` only, while the reducer measures quiet from the
+        later of the last progress and the last restart, so an episode that had ever seen the
+        provider advance was re-confirmed immediately -- removing the one conversational rung
+        that stands between a quiet head and a respawn.
+        """
+        self._witness_the_provider()
+        self._lose_the_pane()
+        self._age(2 * idle_stall_seconds() + 60.0)
+        self.assertEqual(self.tick()["action"], "worker-report-prompted")
+        episode = self._pilot_record()["worker_vitality_episode"]
+        self.assertGreater(episode["quiet_since"], 0.0)
+
+        after = self.tick()
+
+        self.assertEqual(after["action"], "waiting-worker-report")
+        self.assertEqual(self._pilot_record()["worker_vitality_episode"]["verdict"], "healthy_quiet")
+        self.assertEqual(self._pilot_record()["worker_respawns"], 0)
+
+    def test_past_the_outer_ceiling_the_same_head_is_recovered(self) -> None:
+        """Bounded, not merely held: the hold is the role's ceiling, and it does elapse."""
+        self._witness_the_provider()
+        self._lose_the_pane()
+        self._age(2 * idle_stall_seconds() + 60.0)
+        self.assertEqual(self.tick()["action"], "worker-report-prompted")
+        self._age(stall_seconds("worker") + 600.0)
+
+        outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-respawned")
+        self.assertEqual(self._pilot_record()["worker_respawns"], 1)

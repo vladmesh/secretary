@@ -114,6 +114,15 @@ Rules the reducer enforces (each pinned by a named test in `tests/test_head_vita
   stall timer, and is tracked in `unavailable_since` until it answers again. When every strong
   source (pid + provider) is dark the verdict is `Unverifiable` — except that an already-confirmed
   episode is not laundered back to health by its observers going blind.
+- **That freeze is bounded** (secretary-1543). A progress source known to this episode and not
+  answering holds the stall clock for at most `dark_ceiling`, measured from the instant *that*
+  outage began. Past it the episode ages on the pid's own sustained "running, and nothing else",
+  exactly as a run whose progress source never answered at all — see "A dark source freezes for a
+  bounded window" below. A live pid is never indefinite evidence of liveness.
+- A **rejected report the head has not answered**, followed by an advisory turn seen to end,
+  raises `HealthyQuiet` to `SuspectedStall` at once. The rejection is a caller-declared input
+  (`answer_owed_since`, like `retained`), not something the reducer can observe; the advisory
+  reading only narrows it, and with no owed answer it stays exactly as weightless as ever.
 - Advisory pane readings corroborate in `basis` only; they can never drive a stall verdict.
 - Quiet accumulates from `last_progress_at` (or episode start), not from the observing tick: ticks
   are irregular, the quiet they sample is not. The ladder climbs HealthyQuiet → SuspectedStall →
@@ -142,11 +151,75 @@ heartbeat — Running, with no progress source ever heard from. S1-3 settled it 
 Since S1-4 this is no longer shadow-only: the reduction is the wait tick's decision input, and
 since S1-5 the recovery policy consumes the persisted episode (including a dark source's reason,
 which rides on `episode.reason`) on the wait path and in the gate phase.
-One reachability note for sizing the production risk: today's wait tick always attaches a
-provider snapshot to the status it reduces — even `{"state": "unavailable"}` witnesses the
-source — so the pid-only aging arm is reachable through the builders and a future policy, but
-is not produced by the current wiring. A wired tick with an unadmitted provider lands in the
-freeze arm instead; S1-4 must decide which arm each wired shape deserves.
+
+### A dark source freezes for a bounded window (secretary-1543)
+
+The split above left one half unbounded, and that half is what `issue:7bff833fef6d9d9b404d`
+(2026-08-30) froze on. `progress_witnessed` was true for a source that was merely *known and not
+answering*, so a Codex head with no bound provider baseline — provider cursor unavailable, PID
+alive, pane idle, no file or event progress — reduced to `HealthyQuiet` with the reason "progress
+source known to this episode but not answering; frozen" on every tick for as long as the PID
+lived. The card sat `in_progress`/claimed for 65+ minutes with no wake, no replacement and no
+terminal outcome. The aging arm was not missing; the freeze in front of it had no end.
+
+So the freeze is now a window, `thresholds.dark_ceiling`, measured from the start of the current
+outage (a source that answers again leaves `unavailable_since`, and its next outage starts a fresh
+window):
+
+- **Inside the window** everything is as before: `Unavailable != no progress`, an earned
+  `SuspectedStall` or `ConfirmedStall` stands, and a healthy episode stays `HealthyQuiet` with the
+  dark channel's own diagnostic as its reason. The basis says `dark:<n>s@<source>` every tick.
+- **Past the window** the episode ages on the pid alone, exactly as the never-witnessed shape does:
+  `HealthyQuiet` → `SuspectedStall` at `suspect_after` of quiet → `ConfirmedStall` at
+  `suspect_after + confirm_after`, with a reason that names which source is dark and for how long.
+  An earned confirmation is still sticky and is preserved first, whatever the ceiling has done.
+
+The rungs behind it are the existing ones, unchanged: suspicion earns the one idempotent report
+nudge (the wake the incident never got — at `max(dark_ceiling, suspect_after)`, ten minutes rather
+than never), confirmation earns the S1-4 recovery path, and the guard below still fences every
+destructive step. What is NOT killed by this: a genuinely running long command. The pane's quiet is
+advisory and drives nothing; the ladder's first rung is conversational; and a confirmation earned
+with no answering progress source waits out the role's whole outer ceiling before anything
+destructive happens (see the guard section).
+
+### Darkness is read from the absence of an answer, not only an answer of absence
+
+An earlier form of this section claimed that the wait tick always attaches a provider snapshot to
+the status it reduces. It does not, and the difference was a defect. `snapshots_from_status`
+builds a `provider_cursor` snapshot only when the status carries a `provider_progress` key, and
+`command_terminal_status` probes the provider only on the branch where a connected pane matched
+this head. Two of its answers carry a live `pid_status` and no provider channel at all:
+
+- `reason: "pid"` — an exact live heartbeat whose pane the worktree inventory no longer lists
+  ("Missing inventory does not beat an exact live heartbeat; never respawn beside it");
+- `reason: "disconnected"` — the pane matched but is not connected.
+
+A head that has outlived its pane binding is precisely the head this ladder must not kill. Yet
+with darkness recorded only for a snapshot that *says* UNAVAILABLE, such a tick left
+`unavailable_since` empty while the cursor from the tick that did answer stayed in
+`evidence_cursors`: the episode read as witnessed-and-not-dark, skipped the window above, and the
+guard counted one channel as two — a live worker respawnable fifteen minutes after its last
+provider advance, where the guard's own contract promises the role's six-hour ceiling.
+
+So the reducer stamps `unavailable_since` for a witnessed progress source that produced **no
+snapshot on this tick** as well as for one that answered UNAVAILABLE (`basis` says
+`absent@<source>`). An absent channel is therefore an outage like any other: it takes the same
+`dark_ceiling` window, the same reason text naming the source and its darkness, and the same
+outer-ceiling hold at the guard. A source that never answered at all is *not* invented as dark —
+that stays the never-witnessed pid-only arm above, with its own words.
+
+The consequence for the guard is the point: `not dark` now means "answered on the most recent
+reduction", so its two-channel test states the proposition its contract always claimed.
+
+### A conversational rung really restarts the quiet clock
+
+The dispatcher's one report nudge (`_prompt_worker_report`) says the episode restarts its quiet
+reference at now. It used to rewrite only `started_at`, while the reducer measures quiet from
+`max(last_progress_at, quiet_since) or started_at`, so an episode that had ever seen the provider
+advance got no grace at all and the next tick re-confirmed immediately. The restart is now its own
+stamp, `quiet_since`: the head is charged with the silence *after* it was actually asked, and its
+progress history stays on file for the operator to read. Records written before the field exists
+carry no restart, which is exactly what their absence means.
 
 ## Regression table
 
@@ -165,6 +238,8 @@ under `DEFAULT_VITALITY_THRESHOLDS`. The asymmetry-of-cost principle behind ever
 | `issue:fe04011b` (board 1156, codegen-orchestrator-1197): worker+child in `T (stopped)` 27 min, revived by SIGCONT; ticks wrote `gate-pending ok`, six-hour ceiling applied | `IssueFe04011bStoppedWorkerSixHourCeilingTests`; gate-phase twin: `IssueFe04011bLegacyGatePendingTests` | `/proc` state `T` ⇒ `Suspended` within one tick; stall clocks frozen for the whole stop; never ConfirmedStall, never Dead. Since S1-5 the gate-pending tick runs the same reduction + policy, so a suspended head gets its SIGCONT within one tick instead of waiting out `GATE_PENDING_STALL_SECONDS` |
 | codegen-orchestrator-1194 (board card, sprint 1148): reviewer spawn failed 49 min, 45× identical deterministic `terminal_split_source_not_found` with a live terminal | `CodegenOrchestrator1194DeterministicSplitFailureTests`; `ReviewPaneTests.test_reviewer_falls_back_when_connected_anchor_is_not_split_capable` | the token can occur before or after Orca attempts a child. Reviewer bring-up opens one standalone pane only when before/after worktree inventories show that no pane appeared; otherwise it fails closed. It is not a vitality question: if that launch path cannot recover, snapshot Unavailable with the deterministic reason keeps `Unverifiable` forever; the policy escalates identical authoritative sightings at 3, while a heuristic reason repeated just as often earns only observation |
 | `issue:02fe04d7` (codegen-orchestrator-1248, 2026-09-02; same wording on -1235 the day before): a worker retained on `report:done` at 15:14:53 was SIGCONT'd by the watchdog at 15:17:32; red CI at 15:18:37 then read "retained worker session is no longer confirmably suspended" and took `continuation: replacement` | `Issue02fe04d7RetainedWorkerTests` (gate ticks, red reuse, and death still detected) | a confirmed retention ⇒ `Retained`, never `Suspended`: no SIGCONT and no other rung from any tick that runs the worker vitality policy, so the red gate still finds a confirmable suspension and reuses the session. `Dead` still outranks the retention |
+| `issue:7bff833fef6d9d9b404d` (secretary-1517, 2026-08-30): a Codex head with no bound provider baseline — cursor unavailable, PID alive, pane idle — sat `healthy_quiet` and `in_progress`/claimed for 65+ minutes with no wake, no replacement, no terminal outcome | `Secretary1517Tests` (reducer, tick by tick) and `Secretary1517WaitTickTests` (the real wait tick end to end) | the freeze is bounded by `dark_ceiling`: `HealthyQuiet` while the source has been dark under ten minutes, then `SuspectedStall` (which spends the round's one report nudge — the wake) and `ConfirmedStall` at `suspect_after + confirm_after` of quiet. The reason names the dark source and its darkness; the pane's idle answer stays corroboration; nothing is stopped or replaced, because the confirmation rests on the pid alone and the guard holds it behind the outer ceiling |
+| A live worker head whose pane the worktree inventory no longer lists (`reason: "pid"`) or that is not connected (`reason: "disconnected"`), after the provider had answered once: the status carries no provider channel at all | `ProviderLessStatusShapesTests` (the shapes pinned from `command_terminal_status`, then the reduction and the guard end to end) | the absent channel is stamped dark (`absent@provider_cursor`), so the episode takes the `dark_ceiling` window, spends the conversational nudge, and — confirmed — is held behind the role's outer ceiling instead of being respawned fifteen minutes after the last provider advance |
 | `issue:06dcf6cb` (board 656): umbrella contract — child-process existence ≠ liveness | `Issue06dcf6cbUmbrellaLivenessContractTests` | pid-only Running with no progress evidence ages ⇒ SuspectedStall ⇒ ConfirmedStall (see "Pid-only evidence ages" above) |
 
 The legacy decision path itself is characterised in `tests/test_head_vitality_legacy_path.py`:
@@ -199,7 +274,16 @@ stopped WITHOUT an active retention keeps the whole fe04011b `Suspended` ladder 
 
 ### Thresholds
 
-Defaults are comparability choices, not authority: `suspect_after = IDLE_STALL_DEFAULT`
+`dark_ceiling` is the one number here that is load-bearing for a real recovery, and it is argued
+rather than borrowed. Lower bound: it must outlast a genuine provider-startup window — secretary-1542
+measured one against real Codex v0.152.1 on this host, and across it Orca answered `tui-idle`
+satisfied on sixteen consecutive probes while the output cursor never advanced, so neither of those
+signals distinguishes a starting head from a settled one and only time does. Upper bound: it must
+stay far below the six-hour worker-report ceiling and still make the wake worth having. The default
+is `2 × IDLE_STALL_DEFAULT` (ten minutes): a dark-and-quiet head is nudged at ten minutes instead of
+never, while nothing destructive happens before both quiet thresholds AND the guard's outer ceiling.
+
+The other two are comparability choices, not authority: `suspect_after = IDLE_STALL_DEFAULT`
 (secretary-1063's five-minute readiness-idle window, where today's machinery first treats idle as
 actionable) and `confirm_after = 2×IDLE_STALL_DEFAULT`, echoing the watchdog's principle that a
 destructive-looking conclusion wants evidence separated in time. Both are far below the six-hour
@@ -246,12 +330,22 @@ the one being acted on), `healthy-active`, `healthy-quiet`, `unverifiable`, `sus
 `retained`, `suspected-stall`, and `pid-only-ceiling-unelapsed` (below). Allowed only for `ConfirmedStall`
 and `Dead`.
 
-**Belt-and-braces for the first production release:** a confirmation earned by the pid-only aging
-arm (issue 656 — the provider source never answered at all) additionally requires the role's
-ordinary outer ceiling (`WORKER_REPORT_STALL_DEFAULT` class) to have elapsed since the episode
-began accumulating. Such a stall is therefore acted on strictly later than the old clock-only
-machinery would have, never earlier. Confirmations earned on witnessed strong quiet are not held.
-A raising reducer fails safe to `wait` + one comment.
+**Belt-and-braces for the first production release:** a confirmation earned with no progress source
+*answering* — the pid-only aging arm (issue 656, the provider never answered at all) and, since
+secretary-1543, a source that answered and has since gone dark, whether it answered UNAVAILABLE or
+stopped producing a snapshot at all — additionally requires the role's
+ordinary outer ceiling (`WORKER_REPORT_STALL_DEFAULT` class) to have elapsed since the episode began
+accumulating. Such a stall is therefore acted on strictly later than the old clock-only machinery
+would have, never earlier. Only a confirmation earned on quiet a progress source is still answering
+for is unheld: that is the two-channel evidence the sprint exists to listen for. A raising reducer
+fails safe to `wait` + one comment.
+
+The refusal comment is keyed on the wait cycle **and the refusal class**, and its body says only
+what that key names; the live measurement (the quiet, the dark sources, the next deadline) stays on
+the durable episode and is read with `secretary head-status`. A body carrying the elapsed seconds
+under a key that does not name them is not an idempotent replay — it is the secretary-1477
+`request id belongs to another operation or payload` failure, raised out of the tick before it can
+decide.
 
 A refusal produces a degraded `{kind}-guard-refused` outcome plus one idempotent durable comment
 keyed on the wait-cycle token — never a silent no-op loop without telemetry.

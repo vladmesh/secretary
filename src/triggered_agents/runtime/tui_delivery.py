@@ -61,9 +61,11 @@ TUI_DELIVERY_RESEND_GRACE_S = float(
         "SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")
     )
 )
-# How long a pane that is not yet able to take a prompt is given to become able to. A Codex head
-# that is still starting its MCP servers is the ordinary case and it clears on its own; a head that
-# does not clear inside this window is a head the caller has to replace, not one to keep typing at.
+# How long a pane holding something delivery cannot write past -- a dialog -- is given to let go
+# of it. It is not a wait for a starting head: the pre-write `starting` gate was withdrawn in
+# secretary-1542 because a head bringing its MCP servers up paints nothing before the write that
+# this code can read, so there is no signal to wait out. A pane still holding a dialog at the end
+# of this window is a head the caller has to replace, not one to keep typing at.
 TUI_PRE_DELIVERY_TIMEOUT_S = float(
     os.environ.get(
         "SECRETARY_TUI_PRE_DELIVERY_TIMEOUT_S", os.environ.get("TA_TUI_PRE_DELIVERY_TIMEOUT_S", "45")
@@ -927,8 +929,10 @@ def deliver_interactive_prompt(
         # recovery; once ready, activation remains immediately before the existing send path.
         with _transport_evidence(evidence, "activate-head"):
             before_send()
-    # Nothing is written into a pane that is not yet able to take a prompt. This is the step that
-    # separates "Orca says ready" from "sendable", and it runs before the first byte.
+    # The dialog step, before the first byte: it answers the one known modal and refuses any other
+    # dialog-shaped screen. It does NOT establish that the pane can take a prompt -- nothing this
+    # backend offers before a write does (secretary-1542) -- so what it records is evidence, and
+    # the delivery itself rests on its receipt.
     before = _settle_pre_delivery(
         handle, run_json=run_json, host=host, payload=prepared.text, evidence=evidence
     )

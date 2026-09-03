@@ -34,6 +34,7 @@ def episode(
     started_at: float = NOW - 10_000.0,
     evidence: dict[str, str] | None = None,
     last_progress_at: float = 0.0,
+    unavailable: dict[str, float] | None = None,
 ) -> VitalityEpisode:
     """One persisted episode shaped like the reducer writes it."""
     return VitalityEpisode(
@@ -45,7 +46,7 @@ def episode(
         last_progress_at=last_progress_at,
         last_progress_source="",
         evidence_cursors=evidence or {},
-        unavailable_since={},
+        unavailable_since=unavailable or {},
         basis=("quiet:9600s@provider_cursor",),
         reason="",
         recovery_rung=0,
@@ -194,6 +195,36 @@ class RefusalClassesTests(unittest.TestCase):
             pid_only_outer_ceiling_seconds=9_000.0,
         )
         self.assertTrue(decision.allowed, decision.reason)
+
+    def test_a_confirmation_earned_while_the_provider_is_dark_is_held_too(self) -> None:
+        """secretary-1543: the source answered once, then went dark, then the episode aged.
+
+        The reducer's dark ceiling means such an episode can now reach ConfirmedStall on the
+        pid alone. The evidence behind the destructive step is therefore one channel again, so
+        the outer ceiling holds it exactly as it holds the never-witnessed shape.
+        """
+        went_dark = episode(
+            started_at=NOW - 5_400.0,
+            evidence={"provider_cursor": "fake:unchanged"},
+            unavailable={"provider_cursor": NOW - 3_000.0},
+        )
+        decision = assert_destructive_allowed(
+            went_dark,
+            "worker-respawn",
+            NOW,
+            pid_only_outer_ceiling_seconds=9_000.0,
+        )
+        self.assertIs(decision.refusal, GuardRefusal.PID_ONLY_CEILING_UNELAPSED)
+        self.assertIn("provider_cursor dark", decision.reason)
+
+        # Past the outer ceiling the same episode is allowed: the hold is a delay, not a veto.
+        old_enough = assert_destructive_allowed(
+            went_dark,
+            "worker-respawn",
+            NOW,
+            pid_only_outer_ceiling_seconds=1_000.0,
+        )
+        self.assertTrue(old_enough.allowed, old_enough.reason)
 
     def test_a_progress_stamp_counts_as_witnessing_even_without_a_cursor(self) -> None:
         stamped = episode(started_at=NOW - 5_400.0, last_progress_at=NOW - 9_000.0)

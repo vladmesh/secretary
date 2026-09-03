@@ -2242,6 +2242,18 @@ Every row answers two questions and never lets the second qualify the first:
   or naming no identity the pty can be compared by — and `unavailable` is a pane inventory that
   refused.
 
+- `episode` — the persisted vitality conclusion for that run, and since secretary-1543 what an
+  operator needs when a head goes quiet behind it: `quiet_seconds` (how long since the last
+  advancement, or since the episode began), `dark_progress_sources` (each progress source that
+  answered and stopped, with `dark_since`, `dark_seconds` and the instant its freeze expires),
+  `missing_progress_sources` (a progress channel this episode never heard from at all),
+  `last_progress` (the episode's own advancement plus the card's pane-output and waiting-since
+  stamps beside it), and `next_recovery_deadline` — the verdict the next reduction will reach and
+  when, or `null` with a `deadline_note` where the ladder has no further rung to climb (a confirmed
+  stall belongs to the recovery path, a suspended or retained process has its clocks frozen). The
+  `summary` sentence carries the dark source and the deadline too, so the one line an operator
+  reads names both.
+
 The invariant is printed on the answer and beside every row: pane readings are advisory. A pane with
 no runtime pane, a disconnected pane, a pane no inventory names and an unreadable pane channel are
 all facts about the window, and none of them is evidence that a head is absent. So an empty-looking

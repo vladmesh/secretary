@@ -90,6 +90,34 @@ class RefusingTransport(head_operations.HostTransport):
         raise RuntimeError(self.reason)
 
 
+class StartupHeldTransport(head_operations.HostTransport):
+    """A delivery that refused with the state the boundary observes AFTER the write.
+
+    secretary-1542 withdrew the pre-write `starting` gate: a Codex head bringing its MCP servers
+    up paints nothing the classifier can read before the first byte, so this evidence is what a
+    startup-held launch actually produces -- an empty `pre_delivery_before` and a
+    `pre_delivery_after` naming the composer that queued the payload.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(confirm=confirmed)
+
+    def deliver(self, run, pointer, *, host, subject):
+        from triggered_agents.runtime.tui_delivery import TuiDeliveryError
+
+        raise TuiDeliveryError(
+            "the pane never confirmed the prompt",
+            evidence={
+                "stage": "payload_written",
+                "readiness_after": "ready",
+                "pre_delivery_before": "",
+                "pre_delivery_after": "starting",
+                "payload_left_in_composer": True,
+                "reason": "payload-left-in-composer",
+            },
+        )
+
+
 class ProbeHost(FakeSessionHost):
     """`FakeSessionHost` with the two answers an observation depends on made settable.
 
@@ -201,6 +229,18 @@ class HeadRuntimeContractTests(unittest.TestCase):
         self.assertTrue(receipt.deferred)
         self.assertIsInstance(receipt.failure, HeadPaneBusy)
         self.assertEqual(receipt.failure.readiness, "busy")
+
+    def test_a_startup_held_pane_is_classified_from_the_post_write_state(self) -> None:
+        """secretary-1543 carry-over: the telemetry that went unreachable when the gate was cut.
+
+        `_pre_delivery_state` read `pre_delivery_before` only, so a launch held by a starting head
+        -- which now names the state only after the write -- fell through to the generic
+        host-unavailable cause instead of `HeadPaneBusy` / `CAUSE_PANE_NEVER_READY`.
+        """
+        receipt = self.bring_up(pointer=NudgePointer.line("report now"), transport=StartupHeldTransport())
+
+        self.assertIsInstance(receipt.failure, HeadPaneBusy)
+        self.assertEqual(receipt.failure.readiness, "starting")
 
     def test_a_session_manager_failing_on_its_own_terms_is_not_classified_here(self) -> None:
         """A boundary that invented a classification for it would be guessing about the head."""
