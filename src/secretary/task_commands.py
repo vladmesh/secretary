@@ -163,6 +163,12 @@ def add_task_subcommands(subparsers) -> None:
         if name == "decide":
             command.add_argument("--kind", required=True, choices=("release", "rework", "reslice"))
             command.add_argument("--reason-file")
+            command.add_argument(
+                "--protocol-prerequisite",
+                action="append",
+                default=[],
+                help="registry artifact required by a rework worker; repeat for multiple prerequisites",
+            )
         if name == "move":
             # `--target` is the spelling the restore commands use for the same idea, and the one
             # operators reach for. Both names write the same dest, so neither is a second contract.
@@ -361,6 +367,7 @@ def run_task_verdict(args: argparse.Namespace) -> int:
             reference=args.ref,
             kind=args.kind,
             body=body,
+            protocol_prerequisites=args.protocol_prerequisite,
             request_id=args.request_id,
         ),
     )

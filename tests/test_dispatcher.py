@@ -8388,6 +8388,36 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertNotIn("## Reviewer verdict to address", document)
 
+    def test_worker_document_renders_only_validated_structured_prerequisites(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        self._run_worker_to_validate()
+        self.tick()
+        self._review_red()
+
+        self._park_and_decide(
+            "rework",
+            reason="Do not obtain an executed exact-SHA gate receipt; add the focused regression.",
+            protocol_prerequisites=("worker_local_broad_check_receipt", "external_dependency"),
+        )
+
+        document = self._task_document()
+        self.assertIn("## Authoritative protocol prerequisites", document)
+        self.assertIn("worker_local_broad_check_receipt", document)
+        self.assertIn("external_dependency", document)
+        self.assertNotIn("dispatcher_executed_exact_sha_gate_receipt", document)
+        self.assertEqual(
+            self._pilot_record()["report_protocol_prerequisites"],
+            ["worker_local_broad_check_receipt", "external_dependency"],
+        )
+        self._drop_records_and_restart_attempt()
+        self.tick()
+        self.assertEqual(
+            self._pilot_record()["report_protocol_prerequisites"],
+            ["worker_local_broad_check_receipt", "external_dependency"],
+        )
+
     def test_the_continuation_prompt_names_the_decision_as_authoritative(self) -> None:
         """The retained conversation is told what outranks what before it re-reads the file: a
         pointer that only names a document leaves the ranking to the worker (secretary-1064).

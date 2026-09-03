@@ -30,7 +30,10 @@ from secretary.board.models import (
     EventKind,
     RelatedRefs,
 )
-from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_instruction
+from secretary.board.protocol_artifacts import (
+    ArtifactOwnershipViolation,
+    validate_rework_prerequisites,
+)
 from secretary.board.transitions import BoardProtocolError
 from secretary.board_transport import (
     BoardTransport,
@@ -2149,7 +2152,15 @@ class TaskWriter:
         )
 
     def decide(
-        self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        kind: str,
+        body: str,
+        protocol_prerequisites: Iterable[str] = (),
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Record what to do with a parked card, apart from the move that does it.
 
@@ -2168,6 +2179,7 @@ class TaskWriter:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
         if not body.strip():
             raise TaskError("validation", "a decision requires a non-empty reason", 2)
+        declared_prerequisites = tuple(protocol_prerequisites)
         request_id = request_id or str(uuid.uuid4())
         with assessment_decision_lock(self.data_dir, reference):
             # Resolve immutable request ownership before mutable decision state.
@@ -2182,13 +2194,15 @@ class TaskWriter:
                 # A retry must carry the immutable binding which the first decision committed.
                 # Do not re-derive it from mutable board state or drop it from the marker identity.
                 owned_data = owned.data if isinstance(owned.data, dict) else {}
+                if tuple(owned_data.get("protocol_prerequisites") or ()) != declared_prerequisites:
+                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
                 replay_data = {
                     "marker": f"decision:{kind}",
                     "decision": kind,
                     "body": body,
                     "body_sha256": _digest(body),
                 }
-                for field_name in ("description_sha256", "specification_revision"):
+                for field_name in ("description_sha256", "specification_revision", "protocol_prerequisites"):
                     if field_name in owned_data:
                         replay_data[field_name] = owned_data[field_name]
                 return self._marker_write(
@@ -2233,6 +2247,7 @@ class TaskWriter:
                 "description_sha256": _digest(current["description"]),
                 "specification_revision": specification_revision(committed_events, current["description"])
                 or None,
+                "protocol_prerequisites": list(declared_prerequisites),
             }
             if current["state"] != "assessment":
                 raise TaskError(
@@ -2261,19 +2276,24 @@ class TaskWriter:
                     "replayed": True,
                 }
             if kind == "rework":
-                violation = validate_rework_instruction(
-                    body,
-                    specification_revision=marker_data["specification_revision"],
-                )
-                if violation is not None:
+                try:
+                    validate_rework_prerequisites(
+                        declared_prerequisites,
+                        specification_revision=marker_data["specification_revision"],
+                    )
+                except ValueError as exc:
+                    raise TaskError("validation", str(exc), 2) from None
+                except ArtifactOwnershipViolation as violation:
                     self._deny_rework_artifact_ownership(
                         violation=violation,
                         role=role,
                         actor=actor,
                         reference=reference,
                         request_id=request_id,
-                        instruction=body,
+                        protocol_prerequisites=declared_prerequisites,
                     )
+            elif declared_prerequisites:
+                raise TaskError("validation", "protocol prerequisites are only supported for rework", 2)
             return self._marker_write(
                 action="decided",
                 event_kind=EventKind.CARD_DECIDED,
@@ -3425,7 +3445,7 @@ class TaskWriter:
         actor: str,
         reference: str,
         request_id: str,
-        instruction: str,
+        protocol_prerequisites: tuple[str, ...],
     ) -> None:
         """Persist the denied rework without mutating its parked card.
 
@@ -3439,9 +3459,8 @@ class TaskWriter:
             "artifact": violation.artifact.name,
             "artifact_owner": violation.artifact.owner.value,
             "requested_role": violation.requested_role.value,
-            "required_action": violation.required_action,
             "specification_revision": violation.specification_revision,
-            "instruction_sha256": _digest(instruction),
+            "protocol_prerequisites": list(protocol_prerequisites),
         }
         existing = self.board_host.canon.event(refusal_request_id)
         if existing is None:

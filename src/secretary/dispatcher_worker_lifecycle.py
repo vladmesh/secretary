@@ -717,6 +717,8 @@ class WorkerContinuation:
     instruction the round was opened on. Reserved with `reserved_generation`, in the same immutable
     transition, so the document and the round always name the same adjudication.
     """
+    decision_protocol_prerequisites: tuple[str, ...] = ()
+    """The structured prerequisites validated with ``decision_body`` and this round."""
     session_held: bool = False
     """Whether a suspended session of this round is still there to be resumed.
 
@@ -813,6 +815,7 @@ class WorkerContinuation:
         decision: str = "",
         reserved_generation: int = 0,
         decision_body: str = "",
+        decision_protocol_prerequisites: tuple[str, ...] = (),
     ) -> None:
         """Record the red verdict before the board is moved.
 
@@ -839,6 +842,7 @@ class WorkerContinuation:
         self.decision = decision
         self.reserved_generation = int(reserved_generation)
         self.decision_body = decision_body
+        self.decision_protocol_prerequisites = decision_protocol_prerequisites
 
     def begin_delivery(self, phase: str, now: float) -> None:
         # `DELIVERY_PENDING` is allowed back in: a tick that died between the send and its
@@ -904,6 +908,7 @@ class WorkerContinuation:
         self.verdict_outcome = ""
         self.decision = ""
         self.decision_body = ""
+        self.decision_protocol_prerequisites = ()
         self.session_held = False
         self.busy_attempts = 0
         self.busy_next_at = 0.0
@@ -922,6 +927,7 @@ class WorkerContinuation:
             "verdict_outcome": self.verdict_outcome,
             "decision": self.decision,
             "decision_body": self.decision_body,
+            "decision_protocol_prerequisites": list(self.decision_protocol_prerequisites),
             "session_held": self.session_held,
             "busy_attempts": self.busy_attempts,
             "busy_next_at": self.busy_next_at,
@@ -947,6 +953,11 @@ class WorkerContinuation:
             # A transition written before the decision text was frozen carries none. Its round then
             # renders the way it did when it was written: reviewer findings only.
             decision_body=str(value.get("decision_body") or ""),
+            decision_protocol_prerequisites=tuple(
+                item
+                for item in value.get("decision_protocol_prerequisites", ())
+                if isinstance(item, str) and item
+            ),
             # Records written before the session flag existed only ever reached a stage by
             # retaining one.
             session_held=bool(value.get("session_held", stage != WorkerContinuationStage.NONE)),

@@ -3098,9 +3098,7 @@ class AssessmentStateTests(unittest.TestCase):
         """issue:7360d39d4956435c9cc6: the gate receipt is not worker evidence."""
         self._park()
         self.reserve_project()
-        body = (
-            "Require the worker to obtain an executed exact-SHA gate receipt before reporting the repair."
-        )
+        body = "Repair the local implementation and report the focused regression coverage."
         request_id = "dispatcher-receipt-rework"
 
         with mock.patch("secretary.tasks.specification_revision", return_value="specification-revision-1"):
@@ -3111,6 +3109,7 @@ class AssessmentStateTests(unittest.TestCase):
                     reference="secretary-468",
                     kind="rework",
                     body=body,
+                    protocol_prerequisites=("dispatcher_executed_exact_sha_gate_receipt",),
                     request_id=request_id,
                 )
 
@@ -3123,6 +3122,7 @@ class AssessmentStateTests(unittest.TestCase):
                     reference="secretary-468",
                     kind="rework",
                     body=body,
+                    protocol_prerequisites=("dispatcher_executed_exact_sha_gate_receipt",),
                     request_id=request_id,
                 )
 
@@ -3140,6 +3140,7 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(refusal["code"], "artifact_ownership_violation")
         self.assertEqual(refusal["artifact_owner"], "dispatcher")
         self.assertEqual(refusal["requested_role"], "worker")
+        self.assertEqual(refusal["protocol_prerequisites"], ["dispatcher_executed_exact_sha_gate_receipt"])
         self.assertEqual(refusal["specification_revision"], "specification-revision-1")
         self.assertNotIn("external_fact", str(refusal))
 
@@ -3151,6 +3152,7 @@ class AssessmentStateTests(unittest.TestCase):
             reference="secretary-468",
             kind="rework",
             body="Repair the local implementation and report the focused regression coverage.",
+            protocol_prerequisites=("worker_local_broad_check_receipt",),
             request_id=request_id,
         )
         self.assertFalse(corrected["replayed"])
@@ -3158,6 +3160,7 @@ class AssessmentStateTests(unittest.TestCase):
         decisions = self.writer.audit.events("secretary-468", kind="card.decided")
         self.assertEqual(len(decisions), 1)
         self.assertTrue(decisions[0]["data"]["assessment_visit"])
+        self.assertEqual(decisions[0]["data"]["protocol_prerequisites"], ["worker_local_broad_check_receipt"])
 
     def test_normal_rework_with_reviewer_verdict_context_is_recordable(self) -> None:
         self._park()
@@ -3168,7 +3171,8 @@ class AssessmentStateTests(unittest.TestCase):
             actor="observer",
             reference="secretary-468",
             kind="rework",
-            body="Address each blocker in the reviewer verdict, then produce focused regression coverage.",
+            body="Do not obtain an executed exact-SHA gate receipt. Address each reviewer finding.",
+            protocol_prerequisites=(),
             request_id="normal-reviewer-context-rework",
         )
 

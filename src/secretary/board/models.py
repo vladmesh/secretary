@@ -431,21 +431,25 @@ def _validate_control_marker_event(
             "artifact",
             "artifact_owner",
             "requested_role",
-            "required_action",
             "specification_revision",
-            "instruction_sha256",
+            "protocol_prerequisites",
         }
         if set(data) != required:
             raise ValueError("Card decision refusal has an unsupported payload")
         if data.get("decision") != "rework" or data.get("code") != "artifact_ownership_violation":
             raise ValueError("Card decision refusal has an unsupported reason")
-        for field in ("artifact", "artifact_owner", "requested_role", "required_action", "instruction_sha256"):
+        for field in ("artifact", "artifact_owner", "requested_role"):
             value = data.get(field)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"Card decision refusal needs {field}")
         revision = data.get("specification_revision")
         if revision is not None and (not isinstance(revision, str) or not revision):
             raise ValueError("Card decision refusal needs a specification revision or null")
+        prerequisites = data.get("protocol_prerequisites")
+        if not isinstance(prerequisites, list) or not prerequisites or any(
+            not isinstance(value, str) or not value for value in prerequisites
+        ):
+            raise ValueError("Card decision refusal needs declared protocol prerequisites")
         return
     marker_kinds = {
         EventKind.CARD_REPORTED,
@@ -480,6 +484,11 @@ def _validate_control_marker_event(
     decision = data.get("decision")
     if decision not in {"release", "rework", "reslice"} or marker != f"decision:{decision}":
         raise ValueError("Card decision event has an unsupported marker payload")
+    prerequisites = data.get("protocol_prerequisites")
+    if not isinstance(prerequisites, list) or any(not isinstance(value, str) or not value for value in prerequisites):
+        raise ValueError("Card decision event has invalid protocol prerequisites")
+    if len(set(prerequisites)) != len(prerequisites):
+        raise ValueError("Card decision event has duplicate protocol prerequisites")
 
 
 def _validate_attempt_usage_event(

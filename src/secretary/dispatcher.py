@@ -15,6 +15,7 @@ from secretary.board.terminal_taxonomy import (
     TerminalTaxonomyValidationError,
     normalize_terminal_taxonomy,
 )
+from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
@@ -126,6 +127,7 @@ from secretary.dispatcher_helpers import (
     _round_report_marker,
     _spent_report_generations,
     _task_doc_decision,
+    _task_doc_protocol_prerequisites,
     _task_doc_report_generation,
     _worker_id,
     scrub_host_output,
@@ -374,7 +376,6 @@ from secretary.tasks import (
     TaskWriter,
     assessment_resolution,
     specification_revision,
-    standing_decision,
 )
 from triggered_agents.runtime import head as head_ops
 from triggered_agents.runtime.codex_preflight import (
@@ -2434,6 +2435,7 @@ class DispatcherRuntime:
         # Nobody adjudicated this round: it was opened by the bounce, not an observer. The decision
         # that opened the previous one goes with it, or the document names a review this is not about.
         record.report_decision = ""
+        record.report_protocol_prerequisites = ()
         _reset_wait(record, "worker")
         _reset_wait(record, "review")
         moved = self.reader.show(ref)
@@ -4454,6 +4456,7 @@ class DispatcherRuntime:
         verdict_outcome: str,
         decision: str = "",
         decision_body: str = "",
+        decision_protocol_prerequisites: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """The only way a card goes back to In progress for rework.
 
@@ -4476,6 +4479,7 @@ class DispatcherRuntime:
             decision,
             reserved_generation=record.report_generation + 1,
             decision_body=decision_body,
+            decision_protocol_prerequisites=decision_protocol_prerequisites,
         )
         records[ref] = record
         self.save_records(payload, records)
@@ -4538,6 +4542,7 @@ class DispatcherRuntime:
         # never merged: a red gate has no decision, and inheriting the prior round's would hand a
         # worker an adjudication of review findings its code has already answered.
         record.report_decision = continuation.decision_body
+        record.report_protocol_prerequisites = continuation.decision_protocol_prerequisites
         current_sha = self.host.head_commit(record)
         reuse_report_only_gate = self._can_reuse_report_only_rework_gate(
             task, record, current_sha, observer_rework=continuation.decision == "rework"
@@ -5833,7 +5838,7 @@ class DispatcherRuntime:
             record.state = "assessment"
             records[ref] = record
             self.save_records(payload, records)
-        decision, reason = self._recorded_decision(task)
+        decision, reason, prerequisites = self._recorded_decision(task)
         if not decision:
             return {
                 "status": "ok",
@@ -5862,17 +5867,37 @@ class DispatcherRuntime:
                 # will retain an explicit missing-decision diagnostic instead.
                 pass
         if decision == "rework":
-            return self._rework_parked(task, record, records, payload, attempt_id, reason=reason)
+            return self._rework_parked(
+                task, record, records, payload, attempt_id, reason=reason, protocol_prerequisites=prerequisites
+            )
         if decision == "reslice":
             return self._reslice_parked(task, record, records, payload, attempt_id, reason=reason)
         return self._release_parked(task, record, records, payload, attempt_id, reason=reason)
 
-    def _recorded_decision(self, task: dict[str, Any]) -> tuple[str, str]:
-        """The decision standing on this card since it entered Assessment, with its reason."""
-        decision = standing_decision(self.audit.events(task["ref"]))
-        if not decision:
-            return "", ""
-        return decision, _last_marker_body(task, f"decision:{decision}") or ""
+    def _recorded_decision(self, task: dict[str, Any]) -> tuple[str, str, tuple[str, ...]]:
+        """The current Assessment decision and its registry-validated prerequisite declaration."""
+        events = self.audit.events(task["ref"])
+        _visit, event = assessment_resolution(events)
+        data = event.get("data") if isinstance(event, dict) and isinstance(event.get("data"), dict) else {}
+        decision = str(data.get("decision") or "")
+        body = data.get("body")
+        if decision not in {"release", "rework", "reslice"} or not isinstance(body, str) or not body.strip():
+            return "", "", ()
+        declared = data.get("protocol_prerequisites")
+        if not isinstance(declared, list):
+            return "", "", ()
+        if decision != "rework":
+            return decision, body, ()
+        try:
+            prerequisites = validate_rework_prerequisites(
+                declared,
+                specification_revision=specification_revision(events, str(task.get("description") or "")) or None,
+            )
+        except (ValueError, ArtifactOwnershipViolation):
+            # An invalid declaration is never a worker instruction. The writer rejects it before
+            # commit; this is the recovery fence for a malformed historical audit record.
+            return "", "", ()
+        return decision, body, tuple(artifact.name for artifact in prerequisites)
 
     def _rework_parked(
         self,
@@ -5883,6 +5908,7 @@ class DispatcherRuntime:
         attempt_id: str,
         *,
         reason: str,
+        protocol_prerequisites: tuple[str, ...],
     ) -> dict[str, Any]:
         """A rework decision releases the round the park was holding back."""
         ref = task["ref"]
@@ -5913,6 +5939,7 @@ class DispatcherRuntime:
             verdict_outcome="red",
             decision="rework",
             decision_body=reason,
+            decision_protocol_prerequisites=protocol_prerequisites,
         )
 
     def _reslice_parked(
@@ -7021,6 +7048,7 @@ class DispatcherRuntime:
         # And the decision that round was opened on, from the same document. The card's newest
         # decision comment answers "what was decided since", which must not reach a running round.
         report_decision = _task_doc_decision(workspace)
+        report_protocol_prerequisites = _task_doc_protocol_prerequisites(workspace)
         # The lost state file took the round's terminal path with it. The card's own lifecycle
         # state is the same dispatcher-owned fact and outlives that file: a card cannot stand in
         # Validate or Assessment without an accepted report. The reconstructed record state is
@@ -7039,6 +7067,7 @@ class DispatcherRuntime:
             review_baseline=review_baseline,
             report_generation=report_generation,
             report_decision=report_decision,
+            report_protocol_prerequisites=report_protocol_prerequisites,
             state=state,
             claimed_at=time.time(),
             # A reviewer launches only over a green gate, so a card in review inherits a passed gate.
