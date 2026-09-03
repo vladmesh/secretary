@@ -421,6 +421,32 @@ def _tree_state_label(dirty: Any) -> str:
     return "dirty" if dirty else "clean"
 
 
+def _headless_episode_token(record: DispatcherRecord) -> str:
+    """The id discriminator that separates one headless episode of a card from the next.
+
+    A card with no dispatcher record does not get a minted attempt id: production ticks it under the
+    constant `production_adopt_attempt_id(ref)`, the same string for that card forever
+    (`dispatcher_production.py`). So an attempt-scoped request id is a *card*-scoped one here, and a
+    second episode would replay the first episode's committed event instead of moving the board —
+    the tick reporting a transition that did not happen (secretary-1544 round 5).
+
+    The stamp this returns is dispatcher-owned and episode-scoped in both directions. It is written
+    once, when the episode is first observed, and it survives every tick of that episode, so a tick
+    that died between the board move and its own bookkeeping replays onto the same id and moves
+    nothing twice. It does not survive the episode, because the refusal drops the record with it, so
+    the next return of the same card mints a new one and gets its own move.
+
+    Two parts, because neither alone is enough. The wall clock is what a replay must not disturb,
+    but it has a resolution and two episodes of a fast-moving card could land inside it. The card's
+    comment count cannot: a refusal writes its own move and reason onto the card, so the next
+    episode is stamped strictly higher whatever the clock says.
+    """
+    episode = record.worker_headless or {}
+    since = float(episode.get("since") or 0.0)
+    comments = int(episode.get("comment_baseline") or 0)
+    return f"episode-{since:.6f}-c{comments}" if since else "episode-unstamped"
+
+
 def _headless_worker(record: DispatcherRecord) -> bool:
     """Whether this card owes a worker that nothing on the record can name or reach.
 
@@ -1919,6 +1945,11 @@ class DispatcherRuntime:
         state = self.host.retained_workspace_state(task, record)
         record.worker_headless = {
             "since": float(record.worker_headless.get("since") or 0.0) or time.time(),
+            # Where the card stood when this episode opened. Read once and carried, so it is the
+            # episode's own discriminator rather than whatever the board says on a later tick.
+            "comment_baseline": int(
+                record.worker_headless.get("comment_baseline") or len(task.get("comments") or [])
+            ),
             "record_state": record.state,
             "handle_known": False,
             "heartbeat": str(live.get("state") or "") or "absent",
@@ -1981,6 +2012,7 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """Put a replacement worker on the retained checkout, on its branch and its exact SHA."""
         ref = task["ref"]
+        episode_token = _headless_episode_token(record)
         # The intent is bound to the checkout that was verified above, not to a fresh one: the
         # workspace is passed through rather than re-derived, so a replacement can never land in a
         # different worktree than the candidate it was decided on.
@@ -2039,7 +2071,9 @@ class DispatcherRuntime:
                 record.attempt_id or attempt_id,
                 "headless-worker-recovery",
                 ref,
-                str(record.report_generation),
+                # The episode, not the generation: an adopted record's attempt id is a constant and
+                # two episodes can share a generation, which would suppress the second comment.
+                f"{record.report_generation}-{episode_token}",
             ),
         )
         return {
@@ -2089,8 +2123,13 @@ class DispatcherRuntime:
                 " The card is returned to Blocked rather than left in an active state with no"
                 " worker."
             ),
+            # Episode-scoped, or a card returned twice would replay the first refusal's committed
+            # event: no board move, no comment, and a tick still reporting `blocked`.
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, f"headless-recovery-{recovery_error}", ref
+                record.attempt_id or attempt_id,
+                f"headless-recovery-{recovery_error}",
+                ref,
+                _headless_episode_token(record),
             ),
             terminal_state="blocked",
             disposition="blocked",

@@ -20,7 +20,7 @@ from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
 from secretary import role_env
-from secretary._fsutil import try_file_lock
+from secretary._fsutil import file_lock, try_file_lock
 from secretary.board.analytics import project_analytics_checkpoint
 from secretary.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
@@ -80,7 +80,7 @@ from secretary.dispatcher_launcher import (
     ensure_codex_workspace_trusted,
 )
 from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
-from secretary.dispatcher_production import _budget_event_type
+from secretary.dispatcher_production import _budget_event_type, production_adopt_attempt_id
 from secretary.dispatcher_review import (
     start_review as start_reviewer,
 )
@@ -15426,6 +15426,103 @@ class HeadlessActiveCardTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
         self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
 
+    def test_the_refusal_moves_the_card_every_time_it_is_needed(self) -> None:
+        """A human returning the same card twice is the field motivation for this card.
+
+        With no dispatcher record production ticks under `production_adopt_attempt_id(ref)` — one
+        constant string per card, forever. A refusal keyed only on that attempt id produces the same
+        request id on the second return, the audit hands back the event that already owns it, no
+        board move happens, and the tick still answers `blocked` while the card sits In progress
+        with no record at all: nothing on the card, nothing in `headless`, nothing in
+        `degraded_cards`, and the only signal saying the opposite of what happened.
+        """
+        self._blocked_by_its_worker()
+        self._returned_to_in_progress()
+
+        first = self._production_tick()
+
+        self.assertEqual(first["action"], "headless-worker-recovery-refused")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertEqual(len(self._refusal_comments()), 1)
+
+        # The observer returns the very same card again, exactly as one did by hand on
+        # secretary-1542. The record is gone, so this second episode is ticked under the identical
+        # attempt id -- and it must still reach the board.
+        self.board.tasks[0]["column_id"] = 3
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+
+        second = self._production_tick()
+
+        self.assertEqual(second["action"], "headless-worker-recovery-refused")
+        self.assertEqual(second["recovery_error"], "round_already_answered")
+        self.assertEqual(
+            self.reader.show(CARD_REF)["state"],
+            "blocked",
+            "the second refusal moved the board, it did not replay the first one's event",
+        )
+        self.assertEqual(len(self._refusal_comments()), 2, "and said so on the card again")
+
+    def test_two_episodes_in_the_same_instant_each_reach_the_board(self) -> None:
+        """The wall clock has a resolution; the card's own comment count does not need one.
+
+        The stamp that separates episodes has to be stable across the ticks of one episode, which is
+        why it is a clock reading. A card returned twice inside that resolution would then collide
+        and replay the first refusal's event, so the stamp also carries where the card stood when
+        the episode opened -- and a refusal writes its own move and reason onto the card, so the
+        next episode is strictly higher whatever the clock says.
+        """
+        self._blocked_by_its_worker()
+        self._returned_to_in_progress()
+
+        with mock.patch.object(time, "time", return_value=1_700_000_000.0):
+            first = self._production_tick()
+            self.board.tasks[0]["column_id"] = 3
+            second = self._production_tick()
+
+        self.assertEqual(first["action"], "headless-worker-recovery-refused")
+        self.assertEqual(second["action"], "headless-worker-recovery-refused")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertEqual(len(self._refusal_comments()), 2)
+
+    def test_one_episode_refuses_once_however_often_its_tick_is_replayed(self) -> None:
+        """The other half of the same id: episode-scoped, not tick-scoped.
+
+        A tick that died between the board move and its own bookkeeping is replayed with the record
+        still in place. The stamp that separates episodes is written once when the episode is first
+        observed and survives every tick of it, so the replay lands on the committed event and moves
+        nothing twice.
+        """
+        self._blocked_by_its_worker()
+        self._returned_to_in_progress()
+        # The episode stamp as the refusing tick persisted it, before it popped the record.
+        stamped: list[dict] = []
+        original = type(self.runtime)._refuse_headless_worker
+
+        def capture(runtime, task, record, records, payload, attempt_id, recovery_error):
+            stamped.append(dict(record.worker_headless))
+            return original(runtime, task, record, records, payload, attempt_id, recovery_error)
+
+        with mock.patch.object(type(self.runtime), "_refuse_headless_worker", capture):
+            first = self._production_tick()
+
+        # The record a tick dying between the board move and its own bookkeeping leaves behind:
+        # same episode, same stamp. The board move already committed.
+        attempt = production_adopt_attempt_id(CARD_REF)
+        self.board.tasks[0]["column_id"] = 3
+        payload = self.runtime.production_state.load()
+        records = self.runtime.production_state.records(payload)
+        record = self.runtime._adopt(self.reader.show(CARD_REF), attempt)
+        record.worker_headless = dict(stamped[0])
+        records[CARD_REF] = record
+        self.runtime.production_state.put_records(payload, records)
+        self.runtime.production_state.save(payload)
+
+        replay = self._production_tick()
+
+        self.assertEqual(first["action"], "headless-worker-recovery-refused")
+        self.assertEqual(replay["action"], "headless-worker-recovery-refused")
+        self.assertEqual(len(self._refusal_comments()), 1, "one episode, one refusal on the card")
+
     def test_the_adopted_record_never_settles_into_a_wait_for_a_report(self) -> None:
         """The negative this card is named for, asserted over every outcome the path can reach."""
         self._blocked_by_its_worker()
@@ -15444,3 +15541,33 @@ class HeadlessActiveCardTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.production_state.put_records(payload, {})
         payload["attempt_id"] = "attempt-after-restart"
         self.runtime.production_state.save(payload)
+
+    def _production_tick(self) -> dict:
+        """Tick this card with the attempt id production actually passes.
+
+        The shared fixture `tick` mints a payload-scoped attempt id through `ensure_attempt`. A card
+        with no dispatcher record never gets one in production: `_production_tick_task` passes the
+        constant `production_adopt_attempt_id(ref)`, the same string for that card forever. Every
+        request id derived from it is therefore card-scoped rather than episode-scoped, which is the
+        whole of the repeat defect, so the repeat tests drive this instead.
+        """
+        with file_lock(self.runtime.production_state.tick_lock):
+            payload = self.runtime.production_state.load()
+            records = self.runtime.production_state.records(payload)
+            record = records.get(CARD_REF)
+            attempt_id = (
+                record.attempt_id
+                if record is not None and record.attempt_id
+                else production_adopt_attempt_id(CARD_REF)
+            )
+            outcome = self.runtime._tick_task(self.reader.show(CARD_REF), records, payload, attempt_id)
+            self.runtime.production_state.put_records(payload, records)
+            self.runtime.production_state.save(payload)
+        return outcome
+
+    def _refusal_comments(self) -> list[str]:
+        return [
+            comment["body"]
+            for comment in self.reader.show(CARD_REF)["comments"]
+            if "headless worker recovery refused" in comment["body"]
+        ]
