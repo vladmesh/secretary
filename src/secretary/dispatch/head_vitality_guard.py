@@ -146,6 +146,14 @@ def _progress_source_answering(episode: VitalityEpisode) -> bool:
     destructive step the evidence behind that confirmation is again one channel, and it
     earns the same outer-ceiling hold. Two-channel evidence means a progress source that
     is answering NOW, not one that answered once.
+
+    "Not dark" is that present-tense fact rather than an inference from it, because the
+    reducer stamps ``unavailable_since`` for a witnessed progress source that produced no
+    snapshot on the tick as well as for one that answered UNAVAILABLE. A status shape with
+    no provider channel at all -- the exact live heartbeat with no matching pane, the
+    disconnected pane -- therefore reaches this test as dark, which is what it is; before
+    that stamp existed it reached here as two-channel evidence and let a live head with no
+    pane binding be respawned 15 minutes after its last provider advance.
     """
     witnessed = bool(set(episode.evidence_cursors) & _PROGRESS_SOURCE_NAMES) or episode.last_progress_at > 0.0
     dark = bool(set(episode.unavailable_since) & _PROGRESS_SOURCE_NAMES)

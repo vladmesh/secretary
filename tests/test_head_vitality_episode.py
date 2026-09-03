@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace as dataclass_replace
 
 from secretary.dispatch.head_vitality import (
     HeadVitalityError,
@@ -540,6 +541,120 @@ class UnavailableTests(unittest.TestCase):
         self.assertEqual(resumed.verdict, VitalityVerdict.HEALTHY_ACTIVE)
         self.assertEqual(resumed.suspected_since, 0.0)
         self.assertEqual(resumed.confirmed_since, 0.0)
+
+
+class AbsentProgressChannelTests(unittest.TestCase):
+    """secretary-1543 round 2: a source that produces NO snapshot is dark, not answering.
+
+    Darkness used to be recorded only from an answer of absence (a snapshot that says
+    UNAVAILABLE). The two production status shapes that carry a live heartbeat and no
+    ``provider_progress`` key at all -- an exact live heartbeat whose pane the inventory lost, a
+    pane that is not connected -- produce no provider snapshot whatsoever, so they left
+    ``unavailable_since`` empty while the cursor from the tick that did answer stayed on file.
+    The episode then read as witnessed-and-not-dark: it skipped the freeze window this card
+    designed and the guard counted one channel as two.
+    """
+
+    def _witnessed(self) -> VitalityEpisode:
+        return reduce_vitality(
+            episode(),
+            [heartbeat(10.0), provider(10.0)],
+            now=10.0,
+            thresholds=THRESHOLDS,
+        )
+
+    def test_a_witnessed_source_that_stops_answering_at_all_is_stamped_dark(self) -> None:
+        witnessed = self._witnessed()
+        self.assertEqual(witnessed.unavailable_since, {})
+        self.assertIn(SnapshotSource.PROVIDER_CURSOR.value, witnessed.evidence_cursors)
+
+        absent = reduce_vitality(witnessed, [heartbeat(20.0)], now=20.0, thresholds=THRESHOLDS)
+
+        self.assertEqual(absent.unavailable_since[SnapshotSource.PROVIDER_CURSOR.value], 20.0)
+        self.assertIn(f"absent@{SnapshotSource.PROVIDER_CURSOR.value}", absent.basis)
+        self.assertEqual(absent.verdict, VitalityVerdict.HEALTHY_QUIET)
+        self.assertIn("not answering", absent.reason)
+
+    def test_the_absent_channel_ages_on_the_same_ceiling_not_immediately(self) -> None:
+        """The window, not a shortcut: 15 minutes of heartbeat alone used to confirm at once."""
+        absent = reduce_vitality(self._witnessed(), [heartbeat(20.0)], now=20.0, thresholds=THRESHOLDS)
+
+        # Quiet is past both thresholds at t=900, but the source has been dark for 880s < 600s?
+        # No: it has been dark for 880s, which IS past the ceiling, so the ladder resumes.
+        held = reduce_vitality(absent, [heartbeat(400.0)], now=400.0, thresholds=THRESHOLDS)
+        self.assertEqual(held.verdict, VitalityVerdict.HEALTHY_QUIET, "inside the dark ceiling")
+
+        aged = reduce_vitality(held, [heartbeat(700.0)], now=700.0, thresholds=THRESHOLDS)
+        self.assertEqual(aged.verdict, VitalityVerdict.SUSPECTED_STALL)
+        self.assertIn("provider_cursor has been dark for", aged.reason)
+
+    def test_a_source_that_answers_again_leaves_the_dark_map(self) -> None:
+        absent = reduce_vitality(self._witnessed(), [heartbeat(20.0)], now=20.0, thresholds=THRESHOLDS)
+
+        back = reduce_vitality(
+            absent,
+            [heartbeat(30.0), provider(30.0, cursor="13:def", progress=ProgressState.ADVANCING)],
+            now=30.0,
+            thresholds=THRESHOLDS,
+        )
+
+        self.assertEqual(back.unavailable_since, {})
+        self.assertEqual(back.verdict, VitalityVerdict.HEALTHY_ACTIVE)
+
+    def test_a_source_never_witnessed_is_not_invented_as_dark(self) -> None:
+        """The issue 656 pid-only arm keeps its own words: nothing was ever heard from."""
+        pid_only = reduce_vitality(episode(), [heartbeat(10.0)], now=10.0, thresholds=THRESHOLDS)
+        aged = reduce_vitality(pid_only, [heartbeat(1000.0)], now=1000.0, thresholds=THRESHOLDS)
+
+        self.assertEqual(aged.unavailable_since, {})
+        self.assertEqual(aged.verdict, VitalityVerdict.CONFIRMED_STALL)
+        self.assertIn("running with no progress evidence", aged.reason)
+
+
+class QuietRestartTests(unittest.TestCase):
+    """secretary-1543 round 2: a conversational rung really restarts the quiet clock.
+
+    The dispatcher's report nudge rewrote ``started_at``, but the reducer measures quiet from the
+    LATER of the last observed progress and the last restart, so an episode that had ever seen
+    the provider advance was re-confirmed on the very next tick -- removing the one rung that
+    stands between a quiet head and a respawn.
+    """
+
+    def test_the_restart_stamp_moves_the_reference_past_an_older_progress(self) -> None:
+        advanced = reduce_vitality(
+            episode(),
+            [heartbeat(10.0), provider(10.0, progress=ProgressState.ADVANCING)],
+            now=10.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(advanced.last_progress_at, 10.0)
+
+        # The dispatcher's nudge, as it writes it: verdict reset and the clock restarted at 1000.
+        nudged = dataclass_replace(advanced, quiet_since=1000.0, started_at=1000.0)
+        soon = reduce_vitality(
+            nudged,
+            [heartbeat(1100.0), provider(1100.0)],
+            now=1100.0,
+            thresholds=THRESHOLDS,
+        )
+
+        self.assertEqual(soon.verdict, VitalityVerdict.HEALTHY_QUIET, "100s of grace, not 1090s")
+        # And the head's real progress history is still on file for the operator.
+        self.assertEqual(soon.last_progress_at, 10.0)
+        later = reduce_vitality(
+            soon,
+            [heartbeat(1400.0), provider(1400.0)],
+            now=1400.0,
+            thresholds=THRESHOLDS,
+        )
+        self.assertEqual(later.verdict, VitalityVerdict.SUSPECTED_STALL, "the grace is bounded")
+
+    def test_the_restart_survives_a_round_trip_through_the_durable_form(self) -> None:
+        stamped = episode(quiet_since=1234.0)
+        self.assertEqual(VitalityEpisode.from_json(stamped.to_json()).quiet_since, 1234.0)
+        # Records written before the field existed carry no restart, which is what they mean.
+        legacy = {key: value for key, value in stamped.to_json().items() if key != "quiet_since"}
+        self.assertEqual(VitalityEpisode.from_json(legacy).quiet_since, 0.0)
 
 
 class DarkCeilingTests(unittest.TestCase):

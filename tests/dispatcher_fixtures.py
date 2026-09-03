@@ -412,8 +412,9 @@ class DispatcherRuntimeFixture:
         """Age the persisted episode's quiet reference so the next reduction sees a stall.
 
         The verdict ladder measures quiet from the episode's reference (``started_at``
-        before any progress), not from any fence field, so an episode is aged by moving
-        that reference back -- the same operator clock-rewind the old helpers applied to
+        before any progress, ``quiet_since`` once a conversational rung has restarted the
+        clock), not from any fence field, so an episode is aged by moving that reference
+        back -- the same operator clock-rewind the old helpers applied to
         ``worker_idle_since``, applied to the state the decision now actually reads. A
         run whose reduction is patched out has no episode to age; that is the shape the
         no-episode tests drive, and aging is simply skipped.
@@ -423,9 +424,14 @@ class DispatcherRuntimeFixture:
         episode = record.get(f"{kind}_vitality_episode")
         if episode is None:
             return
-        for name in ("started_at", "updated_at"):
+        for name in ("started_at", "quiet_since", "updated_at"):
             if episode.get(name):
                 episode[name] -= seconds
+        # A source's outage is evidence-time too: the same rewind moves when it was first seen
+        # dark, or the bounded dark window could never expire in a test.
+        episode["unavailable_since"] = {
+            name: stamp - seconds for name, stamp in (episode.get("unavailable_since") or {}).items()
+        }
         record[f"{kind}_vitality_episode"] = episode
         self.runtime.production_state.save(payload)
 

@@ -1066,7 +1066,12 @@ class FakeHost:
                     "match": False,
                     "state": "not-yet-written",
                 }
-        if "provider_progress" not in result:
+        # Only the live-pane branch of the real `command_terminal_status` probes the provider at
+        # all: an exact live heartbeat with no matching pane, a disconnected pane and every
+        # terminal classification answer with a `pid_status` and NO provider channel. The fake
+        # used to attach one to every scripted shape, which is why no in-repo fixture could
+        # express the provider-less status the reduction really sees (secretary-1543).
+        if "provider_progress" not in result and str(result.get("reason") or "live") == "live":
             result["provider_progress"] = dict(self.provider_progress(task, record, kind))
         if result.get("live") is False:
             # A scripted not-live answer models a terminal the inventory lost. The

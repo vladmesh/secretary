@@ -46,6 +46,9 @@ The invariants encoded here (each pinned by a named test):
     answering holds the stall clock for at most ``thresholds.dark_ceiling``, after which the
     episode ages on the pid's own sustained "running, and nothing else" exactly as a run whose
     progress source never answered at all. A live pid is never indefinite evidence of liveness;
+  * a source does not have to SAY it is unavailable to be dark: a progress source this episode has
+    heard from that produces no snapshot on a tick is stamped dark too, because the status shapes
+    for a live head whose pane the inventory lost carry a heartbeat and no provider channel at all;
   * a rejected report the head has not answered, followed by an advisory turn seen to END, raises
     ``HealthyQuiet`` to ``SuspectedStall`` at once (``answer_owed_since``): the pair is an
     explicit signal, not something a ceiling eventually notices;
@@ -192,6 +195,12 @@ class VitalityEpisode:
     # no advancement has ever been observed in this episode.
     last_progress_at: float = 0.0
     last_progress_source: str = ""
+    # A conversational rung's restart of the quiet clock. The dispatcher's one report nudge asks
+    # the head a question it could not have answered before being asked, so the quiet the ladder
+    # charges it with begins at the prompt -- but the head's real progress history stays on file,
+    # which is why this is its own stamp instead of a rewritten ``last_progress_at``. 0.0 when no
+    # rung has restarted anything; the quiet reference is the later of this and last progress.
+    quiet_since: float = 0.0
     # Per-source opaque cursors, compared but never parsed: the caller feeds them back as
     # ``previous_cursor`` when building the next provider snapshot, which is how one reduction
     # knows the cursor moved.
@@ -236,6 +245,7 @@ class VitalityEpisode:
             "suspected_since",
             "confirmed_since",
             "last_progress_at",
+            "quiet_since",
             "updated_at",
             "stall_frozen_since",
             "turn_ended_at",
@@ -291,6 +301,7 @@ class VitalityEpisode:
             "confirmed_since": self.confirmed_since,
             "last_progress_at": self.last_progress_at,
             "last_progress_source": self.last_progress_source,
+            "quiet_since": self.quiet_since,
             "evidence_cursors": dict(self.evidence_cursors),
             "unavailable_since": dict(self.unavailable_since),
             "basis": list(self.basis),
@@ -352,6 +363,10 @@ class VitalityEpisode:
             confirmed_since=_finite_timestamp(payload.get("confirmed_since"), "confirmed_since"),
             last_progress_at=_finite_timestamp(payload.get("last_progress_at"), "last_progress_at"),
             last_progress_source=str(payload.get("last_progress_source") or "")[:80],
+            # Absent in records written before secretary-1543's nudge restart, and absent is
+            # exactly what "no rung has restarted this episode's quiet clock" says, so the field
+            # answers for itself rather than stranding a live dispatcher's records.
+            quiet_since=_finite_timestamp(payload.get("quiet_since", 0.0), "quiet_since"),
             evidence_cursors=dict(cursors),
             unavailable_since=dict(unavailable),
             basis=tuple(basis),
@@ -492,6 +507,24 @@ def reduce_vitality(
                     evidence_cursors={**episode.evidence_cursors, snapshot.source.value: snapshot.cursor},
                 )
 
+    # A progress source this episode has heard from that produced NO snapshot on this tick is
+    # dark, exactly like one that answered "unavailable" (secretary-1543 round 2). The status
+    # shapes that carry a live heartbeat and no ``provider_progress`` key at all -- an exact live
+    # pid with no matching pane, a pane that is not connected -- used to leave ``unavailable_since``
+    # empty while the cursor from the tick that did answer stayed on file, so the episode read as
+    # "witnessed and not dark": the freeze window this card designed was skipped and the guard
+    # counted one channel as two. Darkness is therefore recorded from the absence of an answer,
+    # not only from an answer of absence, which is what makes "not dark" mean "answering now".
+    answered = {snapshot.source.value for snapshot in owned.values()}
+    witnessed_progress = (set(episode.evidence_cursors) | {episode.last_progress_source}) & _PROGRESS_SOURCES
+    for source_value in sorted(witnessed_progress - answered):
+        if source_value not in episode.unavailable_since:
+            episode = replace(
+                episode,
+                unavailable_since={**episode.unavailable_since, source_value: now},
+            )
+            basis.append(f"absent@{source_value}")
+
     # The Turn axis, recorded and nothing more. An advisory reading that goes active -> idle
     # stamps ``turn_ended_at``; one that goes back to active clears it. Recording is not
     # convicting: only ``answer_owed_since`` below ever reads the stamp, and only to narrow.
@@ -563,7 +596,7 @@ def reduce_vitality(
         # Only observed quiet from a strong, admitted source accumulates toward a stall, and it
         # is measured from the last real progress (or the episode's start), never from the tick.
         quietest = max(progress_evidence, key=lambda snapshot: snapshot.observed_at)
-        reference = episode.last_progress_at or episode.started_at
+        reference = _quiet_reference(episode)
         quiet_seconds = max(0.0, now - reference)
         basis.append(f"quiet:{int(quiet_seconds)}s@{quietest.source.value}")
         episode = replace(episode, stall_frozen_since=0.0)
@@ -599,7 +632,7 @@ def reduce_vitality(
         # live PID and nothing that can say the work moved. Either path still preserves an earned
         # confirmation, and a genuinely dark channel is never itself read as no-progress; what
         # ends is only its power to hold an episode healthy for as long as the PID lives.
-        reference = episode.last_progress_at or episode.started_at
+        reference = _quiet_reference(episode)
         quiet_seconds = max(0.0, now - reference)
         basis.append(
             "alive-no-progress-source@" + ",".join(sorted(snapshot.source.value for snapshot in strong))
@@ -714,7 +747,7 @@ def reduce_vitality(
             # confirmation by a tick whose observers then went dark does not, and a phase without
             # its onset is a claim nobody can audit. The quiet it confirmed is still measured
             # from the same reference every other quiet conclusion uses.
-            quiet_reference = episode.last_progress_at or episode.started_at
+            quiet_reference = _quiet_reference(episode)
             episode = replace(
                 episode,
                 confirmed_since=(
@@ -797,7 +830,7 @@ def recovery_outlook(
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
         return {"quiet_seconds": 0.0, "dark_sources": [], "next_deadline": None, "note": ""}
     now = float(now)
-    reference = episode.last_progress_at or episode.started_at
+    reference = _quiet_reference(episode)
     quiet_seconds = max(0.0, now - reference)
     dark = [
         {
@@ -881,6 +914,17 @@ def _freeze_stall_clocks(episode: VitalityEpisode, now: float, *, retained: bool
     return episode
 
 
+def _quiet_reference(episode: VitalityEpisode) -> float:
+    """The instant this episode's current quiet began: what every threshold is measured from.
+
+    The later of the last observed advancement and the last conversational restart
+    (``quiet_since``), falling back to the episode's start before either has happened. A nudge
+    that restarts the clock therefore buys the head the grace its own comment promises, without
+    erasing the progress history an operator reads (secretary-1543).
+    """
+    return max(episode.last_progress_at, episode.quiet_since) or episode.started_at
+
+
 def _unfreeze_if_resumed(
     episode: VitalityEpisode, owned: Mapping[SnapshotSource, VitalitySnapshot], now: float
 ) -> VitalityEpisode:
@@ -908,6 +952,7 @@ def _unfreeze_if_resumed(
         episode,
         started_at=shift(episode.started_at),
         last_progress_at=shift(episode.last_progress_at),
+        quiet_since=shift(episode.quiet_since),
         suspected_since=shift(episode.suspected_since),
         confirmed_since=shift(episode.confirmed_since),
         stall_frozen_since=0.0,

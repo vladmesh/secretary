@@ -3339,7 +3339,14 @@ class DispatcherRuntime:
         # with the episode that produced the prompt would escalate on the next tick before
         # the worker could have answered. The episode restarts its quiet reference at now,
         # keeping the run identity and history, so the ladder must re-earn suspicion from
-        # the moment the worker was actually asked.
+        # the moment the worker was actually asked. That restart is ``quiet_since``, not
+        # ``started_at`` alone: the reducer measures quiet from the LATER of the last
+        # observed progress and the last restart, so for an episode that ever saw the
+        # provider advance, rewriting only ``started_at`` bought the head no grace at all
+        # and the next tick re-confirmed immediately -- removing the one conversational
+        # rung that stands between a quiet head and a respawn (secretary-1543). The
+        # progress history itself is left alone: an operator still reads when this head
+        # last actually moved.
         _reset_idle(record, "worker")
         episode = record.worker_vitality_episode
         if episode is not None:
@@ -3349,6 +3356,7 @@ class DispatcherRuntime:
                 suspected_since=0.0,
                 confirmed_since=0.0,
                 started_at=time.time(),
+                quiet_since=time.time(),
                 updated_at=time.time(),
                 reason="report prompt delivered; the quiet clock restarts here",
             )
