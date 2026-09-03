@@ -3159,6 +3159,26 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(len(decisions), 1)
         self.assertTrue(decisions[0]["data"]["assessment_visit"])
 
+    def test_normal_rework_with_reviewer_verdict_context_is_recordable(self) -> None:
+        self._park()
+        self.reserve_project()
+
+        decided = self.writer.decide(
+            role="observer",
+            actor="observer",
+            reference="secretary-468",
+            kind="rework",
+            body="Address each blocker in the reviewer verdict, then produce focused regression coverage.",
+            request_id="normal-reviewer-context-rework",
+        )
+
+        self.assertFalse(decided["replayed"])
+        self.assertEqual(decided["task"]["state"], "assessment")
+        self.assertEqual(
+            self.writer.audit.events("secretary-468", kind="card.decision_refused"), []
+        )
+        self.assertEqual(self.writer.audit.events("secretary-468", kind="card.decided")[0]["data"]["decision"], "rework")
+
     def test_assessment_visit_accepts_one_canonical_decision_across_delivery_retries(self) -> None:
         self._park()
 

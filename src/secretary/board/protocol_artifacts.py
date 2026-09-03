@@ -80,25 +80,28 @@ class ArtifactOwnershipViolation(Exception):
 
 @dataclass(frozen=True)
 class ArtifactRequirement:
-    """One action directed at the artifact named in its own instruction clause."""
+    """One ordered action, object, and direction parsed from a rework instruction."""
 
-    artifact: ProtocolArtifact
     action: str
+    object_text: str
     requested_role: ArtifactOwner
     negated: bool
+    artifact: ProtocolArtifact | None
 
 
 _ACTION = re.compile(r"\b(produce|obtain|attest)\b", re.IGNORECASE)
-_CLAUSE_BREAK = re.compile(r"(?:[.;\n]+|\b(?:and|but)\b)", re.IGNORECASE)
+_HARD_BOUNDARY = re.compile(r"[,;.\n]")
+_OBJECT_CONTEXT = re.compile(
+    r"\b(?:for|in|about|from|before|after|while|when|because|so|that)\b", re.IGNORECASE
+)
 _ROLE_DIRECTION = re.compile(
     r"\b(?:require|ask|tell|instruct|have)\s+(?:the\s+)?"
-    r"(?P<role>worker|dispatcher|reviewer|observer)\s+to\s+"
-    r"(?:produce|obtain|attest)\b"
+    r"(?P<role>worker|dispatcher|reviewer|observer)\s+to\b"
     r"|\b(?:the\s+)?(?P<subject>worker|dispatcher|reviewer|observer)\s+"
-    r"(?:must|shall|should|needs?\s+to|will|is\s+to)\s+(?:produce|obtain|attest)\b",
+    r"(?:must|shall|should|needs?\s+to|will|is\s+to)\b",
     re.IGNORECASE,
 )
-_NEGATED_PREFIX = re.compile(r"\b(?:do\s+not|must\s+not|never)\s+$", re.IGNORECASE)
+_NEGATED_PREFIX = re.compile(r"\b(?:do\s+not|must\s+not|never)\s*$", re.IGNORECASE)
 
 
 def _mentions(clause: str, artifact: ProtocolArtifact) -> bool:
@@ -106,37 +109,60 @@ def _mentions(clause: str, artifact: ProtocolArtifact) -> bool:
     return any(" ".join(name.casefold().replace("-", " ").split()) in normalized for name in artifact.instruction_names)
 
 
-def _clauses(instruction: str) -> tuple[str, ...]:
-    """Split human rework prose at boundaries that cannot share an action target."""
-    return tuple(clause.strip() for clause in _CLAUSE_BREAK.split(instruction) if clause.strip())
-
-
-def _direction(clause: str) -> ArtifactOwner:
-    """Read the actor from a requirement's direction, defaulting only an imperative to its worker."""
-    match = _ROLE_DIRECTION.search(clause)
+def _direction_before(instruction: str, action_start: int) -> ArtifactOwner:
+    """Read this action's closest direction since the preceding comma or sentence boundary."""
+    boundary = max(instruction.rfind(mark, 0, action_start) for mark in ",;.\n")
+    match = None
+    for candidate in _ROLE_DIRECTION.finditer(instruction, boundary + 1, action_start):
+        match = candidate
     if match is None:
-        # Rework text is addressed to the retained worker, so a bare imperative is a parsed
-        # implicit worker direction, not an ownership guess at the audit boundary.
+        # Rework text is addressed to the retained worker, so a bare imperative has an implicit
+        # worker direction. This is direction parsing, not an ownership guess.
         return ArtifactOwner.WORKER
     return ArtifactOwner(match.group("role") or match.group("subject"))
 
 
-def parse_rework_requirements(instruction: str) -> tuple[ArtifactRequirement, ...]:
-    """Parse only clause-local action/artifact pairs from worker rework prose.
+def _object_after(instruction: str, action_end: int, next_action: int) -> str:
+    """Return the action's direct object, excluding subordinate reference context."""
+    end = next_action
+    boundary = _HARD_BOUNDARY.search(instruction, action_end, next_action)
+    if boundary is not None:
+        end = boundary.start()
+    context = _OBJECT_CONTEXT.search(instruction, action_end, end)
+    if context is not None:
+        end = context.start()
+    return instruction[action_end:end].strip(" \t,:;.-")
 
-    A mention in one clause cannot borrow an action from another. Negation is evaluated relative
-    to the action immediately before the matched artifact clause, never over the whole body.
+
+def _negated_before(instruction: str, previous_action_end: int, action_start: int) -> bool:
+    """Negation belongs to this unit's own prefix, never to an earlier action."""
+    boundary = max(instruction.rfind(mark, 0, action_start) for mark in ",;.\n")
+    start = max(boundary + 1, previous_action_end)
+    return bool(_NEGATED_PREFIX.search(instruction[start:action_start]))
+
+
+def parse_rework_requirements(instruction: str) -> tuple[ArtifactRequirement, ...]:
+    """Parse rework prose into action/object/direction units in source order.
+
+    An artifact is recognized only in the direct object span of its own action. Commas terminate
+    both object and direction context, so a later requirement cannot inherit the prior actor.
     """
     requirements: list[ArtifactRequirement] = []
-    for clause in _clauses(instruction):
-        for action in _ACTION.finditer(clause):
-            prefix = clause[: action.start()]
-            negated = bool(_NEGATED_PREFIX.search(prefix))
-            for artifact in PROTOCOL_ARTIFACTS.values():
-                if _mentions(clause, artifact):
-                    requirements.append(
-                        ArtifactRequirement(artifact, action.group(1).lower(), _direction(clause), negated)
-                    )
+    actions = tuple(_ACTION.finditer(instruction))
+    for index, action in enumerate(actions):
+        next_start = actions[index + 1].start() if index + 1 < len(actions) else len(instruction)
+        previous_end = actions[index - 1].end() if index else 0
+        object_text = _object_after(instruction, action.end(), next_start)
+        artifact = next((item for item in PROTOCOL_ARTIFACTS.values() if _mentions(object_text, item)), None)
+        requirements.append(
+            ArtifactRequirement(
+                action.group(1).lower(),
+                object_text,
+                _direction_before(instruction, action.start()),
+                _negated_before(instruction, previous_end, action.start()),
+                artifact,
+            )
+        )
     return tuple(requirements)
 
 
@@ -149,7 +175,12 @@ def validate_rework_instruction(
     always the registry lookup below, so changing prompt wording cannot assign a different owner.
     """
     for requirement in parse_rework_requirements(instruction):
-        if not requirement.negated and requirement.requested_role is not requirement.artifact.owner:
+        if (
+            not requirement.negated
+            and requirement.requested_role is ArtifactOwner.WORKER
+            and requirement.artifact is not None
+            and requirement.artifact.owner is ArtifactOwner.DISPATCHER
+        ):
             return ArtifactOwnershipViolation(
                 requirement.artifact,
                 requirement.action,
