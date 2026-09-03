@@ -3438,7 +3438,7 @@ class TaskWriter:
             "code": "artifact_ownership_violation",
             "artifact": violation.artifact.name,
             "artifact_owner": violation.artifact.owner.value,
-            "requested_role": "worker",
+            "requested_role": violation.requested_role.value,
             "required_action": violation.required_action,
             "specification_revision": violation.specification_revision,
             "instruction_sha256": _digest(instruction),

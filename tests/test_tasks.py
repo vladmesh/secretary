@@ -3139,6 +3139,7 @@ class AssessmentStateTests(unittest.TestCase):
         refusal = refusals[0]["data"]
         self.assertEqual(refusal["code"], "artifact_ownership_violation")
         self.assertEqual(refusal["artifact_owner"], "dispatcher")
+        self.assertEqual(refusal["requested_role"], "worker")
         self.assertEqual(refusal["specification_revision"], "specification-revision-1")
         self.assertNotIn("external_fact", str(refusal))
 
