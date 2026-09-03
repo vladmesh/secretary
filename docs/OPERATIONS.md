@@ -1118,6 +1118,16 @@ again before writing the pointer. **No delivery ever upgrades codex to get past 
 separate, explicit action. A dialog the code does not recognise gets no keystrokes at all — it is a typed refusal
 that takes the bounded bring-up deferral above and then the operator-visible infrastructure Blocked.
 
+All of that is decided from the pane's **live screen**, not from everything `orca terminal read` returns. Orca
+retains raw output and a TUI redraws in place, so a started, idle Codex pane still carries `Starting MCP servers`
+in its tail and a settled update modal still carries its own six lines: the live screen is what follows the last
+prompt marker, or the end of the tail when nothing is painting a composer. Two consequences an operator sees.
+A head reported un-sendable with `pre-delivery-starting` and zero bytes written is a real state and not stale
+text — a pane whose composer is painting the startup status. And a keystroke is authorised only while the dialog
+is that live screen: a delivery that recognises the update modal's words in history refuses with
+`modal-not-on-screen`, having typed nothing, rather than submitting a bare `3` to the provider ahead of the card's
+own pointer.
+
 Reviewer launch prefers a split from the worker pane. Orca can return
 `terminal_split_source_not_found` before or after it attempts to create the child, so the dispatcher
 compares the worktree's pane inventory from before and after that refusal. It opens a standalone

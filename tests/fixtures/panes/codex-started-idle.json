@@ -1,0 +1,31 @@
+{
+  "note": "One `orca terminal read` of a real Orca pane running the interactive Codex the heads run (CODEX_HOME=$HOME/.config/orca/codex-runtime-home/home codex, v0.152.1), captured on this host on 2026-09-03 about 20s after the pane finished starting. The pane is idle and sendable: the model is resolved, both MCP servers are up and the composer is painting its own hint. The tail still carries `Starting MCP servers (0/2): codex_apps, po_memory` because Orca retains the pane's raw output, not a rendered screen, and the cursor had stopped advancing (nextCursor was identical to the read taken 20s earlier). Kept verbatim, ANSI and all.",
+  "terminal": {
+    "status": "running",
+    "truncated": false,
+    "limited": false,
+    "oldestCursor": "0",
+    "nextCursor": "16",
+    "latestCursor": "16",
+    "returnedLineCount": 17,
+    "tail": [
+      "dev@5uoc:~/orca/workspaces/secretary/secretary-1542-codex-pre-delivery-state$CODEX_HOME=$HOME/.config/orca/codex-runtime-home/home codex",
+      "╭───────────────────────────────────────╮│ >_ OpenAI Codex (v0.152.1)            ││                                       ││ model:     loading   /model to change ││ directory: loading                    │╰───────────────────────────────────────╯  › Ask Codex to do anything   ? for shortcuts╭╭╭╭╭╭─────────────────╮                 │                 │                 │~/…/secretary-1542-codex-pre-delivery-state │─────────────────╯╭╭╭╭╭╭╭╭╭╭╭╭╭╭gpt-5.6-sol default · ~/orca/workspaces/secretary/secretary-1542-codex-pre-delivery-state╭",
+      "⚠ Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites:",
+      "  https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the bundled bubblewrap in the meantime.╭────────────────────────────────────────────────────────╮│ >_ OpenAI Codex (v0.152.1)                             ││                                                        ││ model:     loading   /model to change                  ││ directory: ~/…/secretary-1542-codex-pre-delivery-state │╰────────────────────────────────────────────────────────╯  › Ask Codex to do anything   gpt-5.6-sol default · ~/orca/workspaces/secretary/secretary-1542-codex-pre-delivery-state╭╭",
+      "",
+      "⚠ Heads up, you have less than 5% of your weekly limit left. Run /status for a breakdown.╭────────────────────────────────────────────────────────╮│ >_ OpenAI Codex (v0.152.1)                             ││                                                        ││ model:     loading   /model to change                  ││ directory: ~/…/secretary-1542-codex-pre-delivery-state │╰────────────────────────────────────────────────────────╯ • You have 1 usage limit reset available. Run /usage to use one.  › Ask Codex to do anything   gpt-5.6-sol default · ~/orca/workspaces/secretary/secretary-1542-codex-pre-delivery-state╭╭",
+      "",
+      "╭────────────────────────────────────────────────────────╮",
+      "│ >_ OpenAI Codex (v0.152.1)                             │",
+      "│                                                        │",
+      "│ model:     gpt-5.6-sol medium   /model to change       │",
+      "│ directory: ~/…/secretary-1542-codex-pre-delivery-state │",
+      "╰────────────────────────────────────────────────────────╯",
+      "",
+      "  Tip: Use /compact when the conversation gets long to summarize history and free up context.",
+      "",
+      "• You have 1 usage limit reset available. Run /usage to use one. • Starting MCP servers (1/2): po_memory (1s • esc to interrupt)  › Ask Codex to do anything   gpt-5.6-sol medium · ~/orca/workspaces/secretary/secretary-1542-codex-pre-delivery-stateSt•Stng MCP se•ng MC serv2• MCP servers (1/•rvers(1/2)•ers (1/2): p  › Ask Codex to do anything   gpt-5.6-sol medium · ~/orca/workspaces/secretary/secretary-1542-codex-pre-delivery-state"
+    ]
+  }
+}

@@ -452,7 +452,17 @@ A TUI holding its own update dialog, or still starting its MCP servers, is perfe
 answers `tui-idle` satisfied, `terminal send` answers `accepted` with a byte count, and nothing
 reaches a provider. So readiness and sendability are two questions, and the delivery boundary asks
 both. Before a single byte is written it classifies the screen into a **pre-delivery state**, typed
-and named, distinct from `busy` and from `blocked`:
+and named, distinct from `busy` and from `blocked`.
+
+That classification is asked of the **live screen** and never of the whole answer `terminal read`
+returns. Orca retains a pane's raw output rather than a rendered screen, and a TUI redraws in
+place, so every frame it ever painted is still in that text: a started, idle Codex pane keeps
+`Starting MCP servers` in its tail with its output cursor no longer moving, and a settled update
+modal keeps its own words there too. The live screen is what follows the last prompt marker the TUI
+paints, or the bounded end of the tail when nothing is painting a composer — which is what a dialog
+owning the terminal looks like. Reading the tail as a screen is how a boundary built to stop a
+false delivery instead refuses every real one.
+
 
   * `update-modal` — Codex's own `Update available! … 1. Update now 2. Skip 3. Skip until next
     version`. Preferably it never appears: the runtime `CODEX_HOME`'s `version.json` has
@@ -461,7 +471,12 @@ and named, distinct from `busy` and from `blocked`:
     place and the same shape as the directory-trust answer. If one appears anyway it is answered on
     screen with that one documented choice, a bounded number of times, and readiness is proved
     again before the pointer is written. **Upgrading is a separate, explicit action; no delivery
-    ever performs one to get past a dialog**, so the other two choices are not reachable from here;
+    ever performs one to get past a dialog**, so the other two choices are not reachable from here.
+    Two conditions authorise that keystroke and they are asked separately: the screen is the modal
+    this code knows, *and* that dialog is the frame the pane is painting now. The second is not a
+    consequence of the first and never inherited by a pattern added later — a modal recognised in
+    history is a refusal with nothing typed, because a `3` at a live composer is not a dismissal
+    but a bare prompt submitted to the provider;
   * `starting` — `Starting MCP servers`, and the composer that queues rather than submits (`tab to
     queue message`). It clears on its own and is waited out inside a bounded window;
   * `unknown-dialog` — anything else that is dialog-shaped: Orca naming a `blockedReason`, or
@@ -500,8 +515,11 @@ will not confirm keeps the intent instead.
 
 This is about delivery and adoption only. It does not change the vitality watchdog's rungs or the
 `healthy_quiet` ceiling for an idle Codex shell, and the headless Blocked→In-progress adopt with no
-worker identity keeps its own missing-identity relaunch: the two meet in `_adopt`, where this
-contract governs the delivery-evidence refusal and nothing else.
+worker identity keeps its own missing-identity relaunch. The two share the word and not the code:
+the delivery-evidence refusal above lives in `_adopt_launch_intent`, which has a launch intent and
+therefore a receipt to read, while the missing-identity path is `_adopt`, which rebuilds a record
+from the board and has no delivery evidence to consult at all. A relaunch there would need its own
+answer to "was this head ever delivered to".
 
 ### Broad-check handling
 
