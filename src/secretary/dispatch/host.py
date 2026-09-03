@@ -3866,7 +3866,7 @@ class CommandHostRuntime:
         if not revision:
             return "", None
         digest = hashlib.sha256(description.encode("utf-8")).hexdigest()
-        decision = (decision or "").strip()
+        decision = CommandHostRuntime._canonical_decision_binding(decision)
         if decision:
             if not self._bound_marker_body(task, events, "decision:rework", revision, digest, decision):
                 return "", None
@@ -3888,8 +3888,11 @@ class CommandHostRuntime:
             data = event.get("data") if isinstance(event.get("data"), dict) else event.get("payload")
             if not isinstance(data, dict) or data.get("marker") != "decision:rework":
                 continue
+            body = data.get("body")
             if (
-                data.get("body") != decision
+                not isinstance(body, str)
+                or CommandHostRuntime._canonical_decision_binding(body)
+                != CommandHostRuntime._canonical_decision_binding(decision)
                 or data.get("specification_revision") != revision
                 or data.get("description_sha256") != digest
                 or data.get("protocol_prerequisites") != list(expected)
@@ -3900,6 +3903,17 @@ class CommandHostRuntime:
             except (ValueError, ArtifactOwnershipViolation):
                 return ()
         return ()
+
+    @staticmethod
+    def _canonical_decision_binding(body: str) -> str:
+        """The one comparison form for raw observer decision bodies.
+
+        Audit records retain the body exactly as the observer submitted it, including a final
+        newline from a supported reason file.  Worker documents deliberately render the concise
+        form, so every revision-bound match must use this same form rather than accidentally
+        comparing rendered prose to raw audit content.
+        """
+        return body.strip()
 
     @staticmethod
     def _bound_marker_body(
@@ -3930,7 +3944,10 @@ class CommandHostRuntime:
                 or occurrence < 1
             ):
                 return None
-            if required_body and body.strip() != required_body:
+            if required_body and (
+                CommandHostRuntime._canonical_decision_binding(body)
+                != CommandHostRuntime._canonical_decision_binding(required_body)
+            ):
                 continue
             rendered = f"[{marker}]\n{body}"
             matches = [
@@ -3940,7 +3957,7 @@ class CommandHostRuntime:
             ]
             if len(matches) < occurrence:
                 return None
-            return body.strip()
+            return CommandHostRuntime._canonical_decision_binding(body)
         return None
 
     def _review_prompt(

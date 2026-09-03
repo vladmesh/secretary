@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import inspect
+import io
 import json
 import os
 import shlex
@@ -25,6 +27,7 @@ from secretary.board.analytics import project_analytics_checkpoint
 from secretary.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
+from secretary.cli import main as task_main
 from secretary.data import export_board as export_board_snapshot
 from secretary.dispatch import attempt_usage as attempt_usage_module
 from secretary.dispatch import host as dispatcher_host_module
@@ -62,6 +65,7 @@ from secretary.dispatcher_helpers import (
     _decision_record_line,
     _round_record_line,
     _task_doc_decision,
+    _task_doc_protocol_prerequisites,
     red_review_count,
 )
 from secretary.dispatcher_launch import (
@@ -8388,21 +8392,59 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertNotIn("## Reviewer verdict to address", document)
 
-    def test_worker_document_renders_only_validated_structured_prerequisites(self) -> None:
+    def test_reason_file_decision_binds_newline_body_to_structured_prerequisites(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
         self.tick()
         self._run_worker_to_validate()
         self.tick()
         self._review_red()
+        self.assertEqual(self.tick()["to"], "assessment")
+        raw_body = "\nDo not obtain an executed exact-SHA gate receipt; add the focused regression.\n"
+        reason_file = self.data_dir / "observer-rework-reason.md"
+        reason_file.write_text(raw_body, encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.board),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = task_main(
+                [
+                    "task",
+                    "decide",
+                    "--ref",
+                    "secretary-510-pilot",
+                    "--role",
+                    "observer",
+                    "--kind",
+                    "rework",
+                    "--protocol-prerequisite",
+                    "worker_local_broad_check_receipt",
+                    "--protocol-prerequisite",
+                    "external_dependency",
+                    "--reason-file",
+                    str(reason_file),
+                    "--data-dir",
+                    str(self.data_dir),
+                    "--request-id",
+                    "newline-reason-file-decision",
+                ]
+            )
 
-        self._park_and_decide(
-            "rework",
-            reason="Do not obtain an executed exact-SHA gate receipt; add the focused regression.",
-            protocol_prerequisites=("worker_local_broad_check_receipt", "external_dependency"),
-        )
+        self.assertEqual((code, errors.getvalue()), (0, ""))
+        self.assertEqual(self.tick()["action"], "review-red-reused-worker")
 
         document = self._task_document()
+        event = self.writer.audit.events("secretary-510-pilot", kind="card.decided")[-1]
+        self.assertEqual(
+            event["data"]["body"],
+            raw_body,
+        )
+        self.assertEqual(
+            self._document_decision(),
+            "Do not obtain an executed exact-SHA gate receipt; add the focused regression.",
+        )
         self.assertIn("## Authoritative protocol prerequisites", document)
         self.assertIn("worker_local_broad_check_receipt", document)
         self.assertIn("external_dependency", document)
@@ -8417,6 +8459,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             self._pilot_record()["report_protocol_prerequisites"],
             ["worker_local_broad_check_receipt", "external_dependency"],
         )
+        self.assertEqual(
+            _task_doc_protocol_prerequisites(self._pilot_record()["workspace"]),
+            ("worker_local_broad_check_receipt", "external_dependency"),
+        )
+        self.assertIn("## Authoritative protocol prerequisites", self._task_document())
 
     def test_legacy_payload_decision_recovers_with_an_empty_structured_declaration(self) -> None:
         self.start_dispatcher()
@@ -8443,6 +8490,35 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(
             self.runtime._recorded_decision(self.reader.show("secretary-510-pilot")),
             ("rework", "repair the legacy path", ()),
+        )
+
+    def test_legacy_payload_decision_keeps_its_raw_body_for_recovery(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()
+        self._review_red()
+        self.assertEqual(self.tick()["to"], "assessment")
+        raw_body = "\nrepair the legacy raw-body path\n"
+        self._post_raw_comment("decision:rework", raw_body)
+        self.writer.audit.append(
+            "legacy-raw-decision",
+            {
+                "event_id": "legacy-raw-decision",
+                "kind": "decided",
+                "ref": "secretary-510-pilot",
+                "request_id": "legacy-raw-decision",
+                "payload": {
+                    "marker": "decision:rework",
+                    "decision": "rework",
+                    "body": raw_body,
+                    "body_sha256": "a" * 64,
+                },
+            },
+        )
+
+        self.assertEqual(
+            self.runtime._recorded_decision(self.reader.show("secretary-510-pilot")),
+            ("rework", raw_body, ()),
         )
 
     def test_the_continuation_prompt_names_the_decision_as_authoritative(self) -> None:

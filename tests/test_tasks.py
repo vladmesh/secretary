@@ -3218,6 +3218,7 @@ class AssessmentStateTests(unittest.TestCase):
 
         self.assertEqual((code, errors.getvalue()), (0, ""))
         event = TaskAudit(data_dir).events("secretary-468", kind="card.decided")[-1]
+        self.assertEqual(event["data"]["body"], "repair the local implementation\n")
         self.assertEqual(event["data"]["protocol_prerequisites"], ["worker_local_broad_check_receipt"])
 
     def test_verdict_cli_uses_the_established_writer_path(self) -> None:
