@@ -1893,6 +1893,59 @@ class CommandHostRuntime:
         if durability_dirt(completed.stdout):
             raise HostError("worker reported done with uncommitted changes")
 
+    def retained_workspace_state(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
+        """Describe the retained worker checkout of a card recovered without a live head.
+
+        Read-only by construction: nothing here creates, re-seeds, resets or moves a branch. A
+        checkout that cannot be bound to this card is reported unbound with a typed reason, so the
+        caller refuses rather than recreating the work from base somewhere else (secretary-1544).
+        The four facts the recovery is allowed to rest on are the ones returned: the path, the
+        branch, whether the tree is dirty, and the exact candidate commit.
+        """
+        expected_branch = _legacy_worker_branch(task["ref"])
+        workspace = record.workspace or self.restore_workspace(task, record.worker)
+        state: dict[str, Any] = {
+            "workspace": workspace,
+            "expected_branch": expected_branch,
+            "branch": "",
+            "dirty": None,
+            "sha": "",
+            "bound": False,
+            "reason": "",
+            "detail": "",
+        }
+        if self.mode == "noop":
+            state.update(bound=True, branch=expected_branch, dirty=False)
+            return state
+        if not workspace or not Path(workspace).is_dir():
+            state["reason"] = "workspace_missing"
+            return state
+        try:
+            self._validate_resumable_workspace(task, workspace)
+        except HostError as exc:
+            state["reason"] = "workspace_unbindable"
+            state["detail"] = scrub_host_output(str(exc))
+            return state
+        state["branch"] = expected_branch
+        try:
+            tree = self._run(
+                ["git", "-C", workspace, "status", "--porcelain"], "retained workspace tree"
+            ).stdout
+            sha = self._run(
+                ["git", "-C", workspace, "rev-parse", "HEAD"], "retained workspace candidate"
+            ).stdout.strip()
+        except HostError as exc:
+            state["reason"] = "workspace_unreadable"
+            state["detail"] = scrub_host_output(str(exc))
+            return state
+        state["dirty"] = bool(durability_dirt(tree))
+        state["sha"] = sha
+        if not sha:
+            state["reason"] = "candidate_unknown"
+            return state
+        state["bound"] = True
+        return state
+
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
         """Where this card's worker checkout lives, new or already cut.
 

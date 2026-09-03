@@ -24,6 +24,7 @@ from typing import Any
 from unittest import mock
 
 from secretary import dispatcher as secretary_dispatcher
+from secretary import dispatcher_launch
 from secretary.dispatch import host as dispatcher_host_module
 from secretary._fsutil import file_lock
 from secretary.dispatcher import (
@@ -1453,26 +1454,21 @@ class LaunchIntentTests(unittest.TestCase):
 
         # Nothing of that launch is running: the intent's liveness check reads the dead
         # heartbeat at the intent's pid path, stops the leftover, clears the reservation
-        # holder and hands the card back to the ordinary path. S1-4: the relaunch is
-        # evidence-driven -- the record itself carries no heartbeat for a head that never
-        # finished binding, so the first tick only clears the phantom; the second ages
-        # past every threshold and the confirmed stall relaunches inside round 2.
+        # holder and hands the card back to the ordinary path inside the same tick. What that
+        # path finds is a card in an active state owing a worker nothing on the record can name
+        # -- no pane, no heartbeat, no intent -- and the headless recovery relaunches it on the
+        # retained checkout inside the round the rework reserved (secretary-1544).
+        #
+        # No clock, ladder or scripted terminal status takes part. Before this round the test
+        # scripted a `missing-terminal` answer and aged a vitality episode until a confirmed
+        # stall respawned the head; that only worked because the fake attached a provider cursor
+        # to a shape production probes no provider for, and a record with no head is not
+        # something a watchdog can observe at all.
         self.host.head_pid = os.getpid()
         self.kill_worker_heartbeat(path=self.stored_intent().get("pid_file") or "")
-        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
-        self.tick()
-        # Age the fresh phantom episode past every threshold so the confirmed stall
-        # relaunches inside the round it reserved.
-        payload = self.runtime.production_state.load()
-        record_payload = payload["records"][REF]
-        episode = dict(record_payload["worker_vitality_episode"] or {})
-        for name in ("started_at", "updated_at"):
-            if episode.get(name):
-                episode[name] -= 10_000.0
-        record_payload["worker_vitality_episode"] = episode
-        self.runtime.production_state.save(payload)
-        self.tick()
+        recovered = self.tick()
 
+        self.assertEqual(recovered["action"], "headless-worker-replacement-launched")
         record = self.record()
         assert record is not None
         self.assertEqual(record.attempt_round, 2, "the rework runs in the round it reserved")
@@ -2056,6 +2052,68 @@ class LaunchIntentTests(unittest.TestCase):
         )
         self.assertTrue(self.stored_intent(), "and the intent is not spent")
         self.assertEqual(self.host.calls.count("prepare_worker"), 1, "no second head beside it")
+
+    def test_the_delivery_refusal_runs_before_any_identity_question_is_asked(self) -> None:
+        """The composition secretary-1542 and secretary-1544 rest on, proved rather than asserted.
+
+        `_adopt_launch_intent` asks two independent questions: was this head ever delivered to, and
+        which head is it. The first must return before the second is asked, because a head that
+        never took its pointer is not this card's head however completely it can be identified.
+        The two changes therefore compose by ordering and share no predicate.
+
+        The proof is the identity seam itself: `_remember_head_run` is the first thing adoption
+        does with a run, and every later identity write (`handle`, `worker_leaf`, the routing
+        event, the state) is downstream of it. It is watched here, and an undelivered intent must
+        leave it untouched — not merely leave the record looking unchanged.
+        """
+        self.host.fail_prepare_error = HeadLaunchAborted(
+            "the launch nudge was not confirmed delivered, and the pane may have taken it anyway",
+            handle="term:leftover",
+            leaf="leaf:leftover",
+            workspace=str(self.data_dir / "workspaces" / f"{REF}-pilot"),
+            pid_file=pid_file_path("worker", REF),
+            evidence={
+                "subject": "worker-launch",
+                "handle": "term:leftover",
+                "stage": "payload_written",
+                "readiness_after": "ready",
+                "send_accepted": True,
+                "bytes_written": 1,
+                "attempts": 3,
+                "turn_confirmed": False,
+                "payload_left_in_composer": True,
+                "pre_delivery_before": "",
+                "pre_delivery_after": "starting",
+                "reason": "payload-left-in-composer",
+            },
+        )
+        self.assertEqual(self.tick()["action"], "worker-launch-aborted")
+        self.host.fail_prepare_error = None
+        # The intent carries a complete identity: a run id, a pane and a leaf. Nothing about the
+        # identity question is unanswerable here, so an ordering that asked it first would answer.
+        intent = self.stored_intent()
+        self.assertTrue(intent["run_id"])
+        self.assertEqual(intent["delivery"]["receipt"], "refused")
+
+        identity_calls: list[tuple[str, str]] = []
+        real_remember = dispatcher_launch._remember_head_run
+
+        def watched(record, role, head_run):
+            identity_calls.append((role, str((head_run or {}).get("run_id") or "")))
+            return real_remember(record, role, head_run)
+
+        with mock.patch.object(dispatcher_launch, "_remember_head_run", side_effect=watched):
+            refused = self.tick()
+
+        self.assertEqual(refused["action"], "worker-launch-undelivered")
+        self.assertEqual(
+            identity_calls, [], "the refusal returned before adoption asked which head this is"
+        )
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.worker_head_run, {}, "no run was promoted onto the record")
+        self.assertNotEqual(record.state, "claimed")
+        self.assertTrue(self.stored_intent(), "and the intent survives for the next tick")
 
     def test_a_head_that_never_accepts_its_pointer_is_replaced_within_a_bounded_window(self) -> None:
         """It never sits indefinitely while the card reports progress.
