@@ -133,10 +133,12 @@ python3 -P -m secretary secret checkpoint-github set --instance INSTANCE --stdin
 ```
 
 `set` and `import` are aliases for this one-value operation. Repeating an unchanged input is a no-op;
-replacement preserves the single catalog identity. Checkpoint Git children clear all ambient credential
-helpers and explicitly select Secretary's native Git credential helper. The helper emits the token only
-to Git's credential protocol for `https://github.com`, never to command arguments, repository config,
-logs, or status. A locked, missing, malformed, or rejected value stops the HTTPS checkpoint push.
+replacement preserves the single catalog identity. One product-owned remote-execution boundary classifies
+the transport, resolves the actual Git child identity, selects the permitted source, and gives that child
+an operation-scoped capability. For `https://github.com`, it clears all ambient credential helpers and
+explicitly selects Secretary's native Git credential helper. The helper emits the token only to Git's
+credential protocol, never to command arguments, repository config, logs, or status. A locked, missing,
+malformed, or rejected value stops the HTTPS checkpoint push.
 
 A clean host cannot fetch an inaccessible private repository from the encrypted store inside it. Supply
 one external bootstrap credential for the initial clone. The same recover command is safe after an
@@ -152,8 +154,12 @@ sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --instal
 
 `--bootstrap-credential-stdin` is also supported, but cannot share stdin with a recovery phrase. A
 mode-0600 bootstrap file may be owned by the account invoking `sudo` or by the effective command user;
-any other owner is refused. The bootstrap input is mode-checked, is neither tracked nor retained after
-the Git operation, and is not an ongoing checkpoint source. `status --json` reports
+any other owner is refused. Before Git starts, Secretary copies either input into a mode-0600,
+operation-scoped capability owned by the actual installation-user Git child, then removes it on success
+or failure. The bootstrap input is neither tracked nor retained after the Git operation, and is not an
+ongoing checkpoint source. Local/file remotes remain ordinary hermetic Git; SSH remotes are explicit
+manual-bypass transport and use no HTTPS helper. Any HTTPS host other than `github.com` is refused,
+rather than falling through to an ambient helper. `status --json` reports
 `checkpoint.credential` readiness, source, and verification age only; it never compares or prints
 values while the store is locked.
 

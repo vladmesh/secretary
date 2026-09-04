@@ -54,10 +54,8 @@ from secretary.host_apply import (
 )
 from secretary.infra.github_credential import (
     CredentialError,
-    RemoteAuthSelection,
+    RemoteExecution,
     bootstrap_file_owner_is_allowed,
-    is_github_https_remote,
-    select_private_remote_auth,
     validate_checkpoint_credential,
 )
 from secretary.restore import (
@@ -234,67 +232,36 @@ def _clone_or_reuse(
         raise InstallError(str(exc)) from None
     if dirty:
         raise InstallError("instance checkout has local changes; recovery will not overwrite them")
-    if not dry_run and is_github_https_remote(remote):
-        try:
-            auth = select_private_remote_auth(
-                "recovery-reuse", instance_dir=target, bootstrap_file=bootstrap_credential
-            )
-        except CredentialError as exc:
-            raise InstallError(str(exc)) from None
-        _authenticated_instance_git(target, ["fetch", "--quiet", "origin"], "fetch instance remote", auth)
-        _authenticated_instance_git(
-            target, ["merge", "--ff-only", "@{u}"], "fast-forward instance checkout", auth
+    if dry_run:
+        return "reused checkpoint checkout"
+    remote_git = RemoteExecution(
+        remote, "recovery-reuse", instance_dir=target, bootstrap_file=bootstrap_credential
+    )
+    try:
+        fetch = remote_git.run_instance(target, ["fetch", "--quiet", "origin"], label="fetch instance remote")
+        if fetch.returncode:
+            detail = (fetch.stderr or fetch.stdout or "").strip().splitlines()
+            raise InstallError(f"fetch instance remote: {detail[-1] if detail else f'exited {fetch.returncode}'}")
+        merge = remote_git.run_instance(
+            target, ["merge", "--ff-only", "@{u}"], label="fast-forward instance checkout"
         )
-    elif not dry_run:
-        # A local or SSH fixture has no GitHub HTTPS credential exchange.  Keep
-        # its ordinary Git behavior rather than requiring an unusable token;
-        # the guarded branch above remains the only path to a private GitHub
-        # remote and clears ambient helpers before it contacts the network.
-        try:
-            state_repo.git(target, ["fetch", "--quiet", "origin"], label="fetch instance remote")
-            state_repo.git(
-                target, ["merge", "--ff-only", "@{u}"], label="fast-forward instance checkout"
+        if merge.returncode:
+            detail = (merge.stderr or merge.stdout or "").strip().splitlines()
+            raise InstallError(
+                f"fast-forward instance checkout: {detail[-1] if detail else f'exited {merge.returncode}'}"
             )
-        except state_repo.StateRepoError as exc:
-            raise InstallError(str(exc)) from None
+    except CredentialError as exc:
+        raise InstallError(str(exc)) from None
     return "reused checkpoint checkout"
 
 
 def _clone_instance(remote: str, target: Path, *, bootstrap_credential: Path | None) -> None:
-    if not is_github_https_remote(remote):
-        _run(
-            ["git", "clone", "--", remote, str(target)],
-            label="clone instance remote",
-            timeout=300,
-        )
-        return
     try:
-        auth = select_private_remote_auth("initial-clone", bootstrap_file=bootstrap_credential)
+        RemoteExecution(remote, "initial-clone", bootstrap_file=bootstrap_credential).run_clone(
+            target, label="clone instance remote", timeout=300
+        )
     except CredentialError as exc:
         raise InstallError(str(exc)) from None
-    _run(
-        ["git", *auth.command(["clone", "--", remote, str(target)])],
-        label="clone instance remote",
-        timeout=300,
-        environment=auth.environment,
-    )
-
-
-def _authenticated_instance_git(target: Path, args: list[str], label: str, auth: RemoteAuthSelection) -> str:
-    """Run a recovery remote operation after the shared source selector chose auth."""
-    try:
-        result = state_repo.run_git(
-            target,
-            auth.command(args),
-            label=label,
-            extra_env=auth.environment,
-        )
-    except state_repo.StateRepoError as exc:
-        raise InstallError(str(exc)) from None
-    if result.returncode:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise InstallError(f"{label}: {detail[-1] if detail else f'exited {result.returncode}'}")
-    return result.stdout
 
 
 def _bootstrap_credential(args: argparse.Namespace, target: Path) -> tuple[Path | None, Path | None]:
@@ -957,9 +924,9 @@ def install(args: argparse.Namespace) -> InstallResult:
             else ("would-change" if args.dry_run else "changed"),
             args.installation_user,
         )
-        # A reused checkout and a dry-run neither clone nor need bootstrap
-        # material.  In particular do not consume stdin merely because a
-        # caller supplied the optional clone-only flag.
+        # A supplied bootstrap capability can authenticate a reused recovery
+        # checkout too, so consume it only when this non-dry-run invocation
+        # will execute one of those remote paths.
         needs_clone = not target.exists() or (target.is_dir() and not any(target.iterdir()))
         bootstrap: Path | None = None
         disposable_bootstrap: Path | None = None

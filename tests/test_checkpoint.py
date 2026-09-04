@@ -949,10 +949,7 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
         def run_git(command: list[str], **_kwargs):
             commands.append(command)
             args = command[command.index("-C") + 2 :]
-            helper = args[:4]
-            self.assertEqual(helper[:3], ["-c", "credential.helper=", "-c"])
-            self.assertIn("secretary.infra.github_credential helper", helper[3])
-            operation = args[4:]
+            operation = args
             if operation[:3] == ["symbolic-ref", "--quiet", "--short"]:
                 return self.result(operation, stdout="main\n")
             if operation == ["remote"]:
@@ -983,7 +980,7 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
 
         self.assertEqual(state["status"], "pushed")
         self.assertEqual(
-            [command[command.index("-C") + 6 :] for command in commands],
+            [command[command.index("-C") + 2 :] for command in commands],
             [
                 ["symbolic-ref", "--quiet", "--short", "HEAD"],
                 ["remote"],

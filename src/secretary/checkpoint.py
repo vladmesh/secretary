@@ -49,9 +49,8 @@ from secretary.data import (
 )
 from secretary.infra.github_credential import (
     CredentialError,
+    RemoteExecution,
     checkpoint_credential_readiness,
-    is_github_https_remote,
-    select_private_remote_auth,
 )
 from secretary.product_issues import (
     ProductIssueTransaction,
@@ -633,9 +632,10 @@ class CheckpointPusher:
                     return PushOutcome("skipped", "instance repo has no checked-out branch")
                 if not self._has_remote():
                     return PushOutcome("skipped", f"instance repo has no remote '{self.remote}'")
-                self._check_managed_credential()
+                remote_url = self._git(["remote", "get-url", self.remote], "checkpoint remote URL").strip()
+                remote_git = self._remote_execution(remote_url)
                 head = self._git(["rev-parse", "HEAD"], "checkpoint head").strip()
-                remote_head = self._remote_head(branch)
+                remote_head = self._remote_head(branch, remote_git)
                 if remote_head and remote_head == head:
                     return PushOutcome("unchanged", commit=head)
                 if remote_head and not self._fast_forward(remote_head, head):
@@ -644,7 +644,8 @@ class CheckpointPusher:
                         f"remote {self.remote}/{branch} is at {remote_head[:12]}, "
                         "which the checkpoint history does not contain",
                     )
-                self._git(
+                self._remote_git(
+                    remote_git,
                     ["push", "--quiet", self.remote, f"HEAD:refs/heads/{branch}"],
                     "checkpoint push",
                     timeout=PUSH_TIMEOUT_SECONDS,
@@ -711,28 +712,33 @@ class CheckpointPusher:
         remotes = self._git(["remote"], "checkpoint remote").split()
         return self.remote in remotes
 
-    def _check_managed_credential(self) -> None:
-        """Fail closed for the supported GitHub HTTPS endpoint.
-
-        Local/SSH remotes stay usable for disposable tests and explicit operator
-        maintenance, but are never reported as having exercised managed auth.
-        The Git command still clears ambient helpers in either case.
-        """
-        remote_url = self._git(["remote", "get-url", self.remote], "checkpoint remote URL").strip()
-        if not is_github_https_remote(remote_url):
+    def _remote_execution(self, remote_url: str) -> RemoteExecution:
+        """Select a transport once; only the boundary may start remote Git."""
+        remote_git = RemoteExecution(remote_url, "checkpoint", instance_dir=self.instance_dir)
+        readiness = remote_git.credential_state
+        if remote_git.transport != "github-https":
+            if remote_git.transport == "https-unsupported":
+                self._credential = {
+                    "state": "missing/unavailable",
+                    "reason": "private instance HTTPS remote is unsupported; only https://github.com is managed",
+                    "source": "none",
+                }
+                raise _GitFailure("private instance HTTPS remote is unsupported; only https://github.com is managed")
             self._credential = {
                 "state": "ambient/manual-bypass",
                 "reason": "checkpoint remote is not HTTPS github.com",
+                "source": "manual-bypass",
             }
-            return
-        readiness = checkpoint_credential_readiness(self.instance_dir)
-        self._credential = {"state": readiness.state, "reason": readiness.reason}
+            return remote_git
+        self._credential = {"state": readiness.state, "reason": readiness.reason, "source": "managed-store"}
         if not readiness.ready:
             raise _GitFailure(f"managed GitHub credential {readiness.state}: {readiness.reason}")
+        return remote_git
 
-    def _remote_head(self, branch: str) -> str:
+    def _remote_head(self, branch: str, remote_git: RemoteExecution) -> str:
         """The remote branch tip, or "" when the remote does not carry it yet."""
-        listing = self._git(
+        listing = self._remote_git(
+            remote_git,
             ["ls-remote", "--heads", self.remote, f"refs/heads/{branch}"],
             "checkpoint ls-remote",
             timeout=PUSH_TIMEOUT_SECONDS,
@@ -770,17 +776,28 @@ class CheckpointPusher:
             self._raise_git_failure(result, label)
         return result.stdout
 
+    def _remote_git(
+        self, remote_git: RemoteExecution, args: list[str], label: str, *, timeout: float = 120
+    ) -> str:
+        try:
+            result = remote_git.run_instance(self.instance_dir, args, label=label, timeout=timeout)
+        except CredentialError as exc:
+            raise _GitFailure(str(exc)) from None
+        if result.returncode != 0:
+            self._raise_git_failure(result, label)
+        if remote_git.source:
+            self._credential["source"] = remote_git.source
+        return result.stdout
+
     def _run(self, args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
         try:
-            auth = select_private_remote_auth("checkpoint", instance_dir=self.instance_dir)
             return state_repo.run_git(
                 self.instance_dir,
-                auth.command(args),
+                args,
                 label=f"checkpoint {args[0]}",
                 timeout=timeout,
-                extra_env=auth.environment,
             )
-        except (CredentialError, state_repo.StateRepoError) as exc:
+        except state_repo.StateRepoError as exc:
             raise _GitFailure(str(exc)) from None
 
     @staticmethod
@@ -837,18 +854,21 @@ def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: floa
     current = checkpoint_credential_readiness(instance_dir)
     state = current.state
     reason = current.reason
-    remote_is_managed: bool | None = None
+    transport = "unknown"
     if recorded.get("state") != "ambient/manual-bypass":
         try:
             remote = state_repo.git(
                 instance_dir, ["remote", "get-url", DEFAULT_REMOTE], label="inspect checkpoint remote"
             ).strip()
-            remote_is_managed = is_github_https_remote(remote)
+            transport = RemoteExecution(remote, "checkpoint", instance_dir=instance_dir).transport
         except state_repo.StateRepoError:
-            remote_is_managed = None
-    if recorded.get("state") == "ambient/manual-bypass" or remote_is_managed is False:
+            transport = "unknown"
+    if recorded.get("state") == "ambient/manual-bypass" or transport in {"local", "ssh", "unmanaged"}:
         state = "ambient/manual-bypass"
         reason = str(recorded.get("reason") or "checkpoint remote is not HTTPS github.com")
+    elif transport == "https-unsupported":
+        state = "missing/unavailable"
+        reason = str(recorded.get("reason") or "private instance HTTPS remote is unsupported")
     verified_at = str(recorded.get("last_verified_at") or "")
     verified_epoch = _float_field(recorded, "last_verified_epoch")
     return {

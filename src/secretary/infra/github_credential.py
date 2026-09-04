@@ -6,12 +6,16 @@ import argparse
 import os
 import stat
 import sys
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from secretary import _proc, state_repo
 from secretary.secret_store import SecretStoreError, SecretStoreStateError, read_secret
-from secretary.state_repo import StateRepoError
+from secretary.state_repo import GitChildIdentity, StateRepoError
 
 CHECKPOINT_CREDENTIAL_ID = "github.checkpoint-token"
 CHECKPOINT_CREDENTIAL_PURPOSE = "GitHub credential for checkpoint remote"
@@ -22,18 +26,19 @@ class CredentialError(RuntimeError):
     """A managed credential cannot safely be used."""
 
 
-def is_github_https_remote(remote: str) -> bool:
-    """Whether this remote can use the GitHub HTTPS credential helper.
-
-    Local and SSH remotes do not ask Git for a GitHub HTTPS credential.  They
-    remain useful for hermetic recovery fixtures and explicit maintenance,
-    while the private GitHub path remains fail-closed.
-    """
+def _remote_transport(remote: str) -> str:
+    """Classify every transport before a remote Git child is started."""
     try:
         parsed = urlsplit(remote)
     except ValueError:
-        return False
-    return parsed.scheme == "https" and (parsed.hostname or "").lower() == GITHUB_HOST
+        return "unsupported"
+    if parsed.scheme == "https":
+        return "github-https" if (parsed.hostname or "").lower() == GITHUB_HOST else "https-unsupported"
+    if parsed.scheme == "ssh" or (not parsed.scheme and "@" in remote and ":" in remote):
+        return "ssh"
+    if parsed.scheme in {"", "file"}:
+        return "local"
+    return "unmanaged"
 
 
 @dataclass(frozen=True)
@@ -42,9 +47,6 @@ class RemoteAuthSelection:
 
     source: str
     environment: dict[str, str]
-
-    def command(self, args: list[str]) -> list[str]:
-        return [*helper_config_args(), *args]
 
 
 @dataclass(frozen=True)
@@ -93,7 +95,13 @@ def checkpoint_credential_readiness(instance_dir: Path) -> CredentialReadiness:
 def helper_command() -> str:
     import shlex
 
-    return "!" + shlex.quote(sys.executable) + " -m secretary.infra.github_credential helper"
+    # An installed product imports normally.  Source-checkout tests cross to a
+    # different Unix user, whose runuser environment deliberately drops the
+    # caller's PYTHONPATH, so make that checkout import root explicit too.  It
+    # is product code location, never credential material.
+    source_root = Path(__file__).resolve().parents[2]
+    prefix = f"PYTHONPATH={shlex.quote(str(source_root))} " if (source_root / "secretary").is_dir() else ""
+    return "!" + prefix + shlex.quote(sys.executable) + " -m secretary.infra.github_credential helper"
 
 
 def helper_environment(
@@ -107,9 +115,137 @@ def helper_environment(
     return environment
 
 
-def helper_config_args() -> list[str]:
+def _helper_config_args() -> list[str]:
     """Clear every ambient helper then select this helper for one Git process."""
     return ["-c", "credential.helper=", "-c", f"credential.helper={helper_command()}"]
+
+
+@dataclass
+class RemoteExecution:
+    """The sole remote-Git trust boundary for the private instance repository.
+
+    It classifies the transport, resolves the Git child's real identity, selects
+    a permitted source for the phase, creates an operation-scoped capability,
+    starts Git with ambient HTTPS helpers disabled, then removes that capability
+    before returning.  Callers supply a remote operation, never helper options
+    or a credential path for a child they have not resolved.
+    """
+
+    remote: str
+    phase: str
+    instance_dir: Path | None = None
+    bootstrap_file: Path | None = None
+    source: str = ""
+
+    @property
+    def transport(self) -> str:
+        return _remote_transport(self.remote)
+
+    @property
+    def credential_state(self) -> CredentialReadiness:
+        if self.transport == "github-https":
+            if self.phase == "checkpoint":
+                return checkpoint_credential_readiness(Path(self.instance_dir or "."))
+            return CredentialReadiness("managed-ready")
+        return CredentialReadiness("ambient/manual-bypass", f"{self.transport} remote is unmanaged")
+
+    def run_clone(self, target: Path, *, label: str, timeout: float) -> str:
+        """Clone through the same boundary before a checkout owner exists."""
+        child = GitChildIdentity(os.geteuid(), os.getegid())
+        with self._authorized(child) as (prefix, environment, source):
+            self.source = source
+            child_environment = state_repo.git_env()
+            child_environment.update(environment)
+            try:
+                completed = _proc.run(
+                    ["git", *prefix, "clone", "--", self.remote, str(target)],
+                    timeout=timeout,
+                    env=child_environment,
+                )
+            except FileNotFoundError:
+                raise CredentialError(f"{label}: command not found") from None
+            except OSError:
+                raise CredentialError(f"{label}: command could not run") from None
+            if completed.returncode:
+                detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+                raise CredentialError(f"{label}: {detail[-1] if detail else f'exited {completed.returncode}'}")
+            return (completed.stdout or "").strip()
+
+    def run_instance(
+        self,
+        target: Path,
+        args: list[str],
+        *,
+        label: str,
+        timeout: float = 120,
+        input: str | None = None,
+    ):
+        """Run one existing-checkout remote operation through the boundary."""
+        try:
+            child = state_repo.git_child_identity(target)
+        except StateRepoError as exc:
+            raise CredentialError(f"{label}: {exc}") from None
+        with self._authorized(child) as (prefix, environment, source):
+            self.source = source
+            try:
+                return state_repo.run_git(
+                    target, [*prefix, *args], label=label, timeout=timeout, extra_env=environment, input=input
+                )
+            except StateRepoError as exc:
+                raise CredentialError(str(exc)) from None
+
+    @contextmanager
+    def _authorized(self, child: GitChildIdentity) -> Iterator[tuple[list[str], dict[str, str], str]]:
+        transport = self.transport
+        if transport == "https-unsupported":
+            raise CredentialError("private instance HTTPS remote is unsupported; only https://github.com is managed")
+        if transport == "local":
+            yield [], {}, "local"
+            return
+        if transport in {"ssh", "unmanaged"}:
+            yield [], {}, "manual-bypass"
+            return
+        selection = select_private_remote_auth(
+            self.phase, instance_dir=self.instance_dir, bootstrap_file=self.bootstrap_file
+        )
+        with _operation_capability(selection, child) as environment:
+            yield _helper_config_args(), environment, selection.source
+
+
+@contextmanager
+def _operation_capability(selection: RemoteAuthSelection, child: GitChildIdentity) -> Iterator[dict[str, str]]:
+    """Give one resolved Git child a bootstrap file only for this operation."""
+    if selection.source != "bootstrap":
+        yield selection.environment
+        return
+    raw_path = selection.environment.get("SECRETARY_GITHUB_BOOTSTRAP_FILE", "")
+    if not raw_path:
+        raise CredentialError("bootstrap credential is unavailable")
+    token = _bootstrap_token(Path(raw_path))
+    directory = Path(tempfile.mkdtemp(prefix="secretary-github-bootstrap-"))
+    capability = directory / "credential"
+    try:
+        try:
+            os.chmod(directory, 0o700)
+            if directory.stat().st_uid != child.uid:
+                os.chown(directory, child.uid, child.gid)
+            descriptor = os.open(capability, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(token.encode("utf-8"))
+            os.chmod(capability, 0o600)
+            if capability.stat().st_uid != child.uid:
+                os.chown(capability, child.uid, child.gid)
+        except OSError as exc:
+            raise CredentialError("could not prepare bootstrap credential capability") from exc
+        environment = dict(selection.environment)
+        environment["SECRETARY_GITHUB_BOOTSTRAP_FILE"] = str(capability)
+        yield environment
+    finally:
+        try:
+            capability.unlink(missing_ok=True)
+            directory.rmdir()
+        except OSError:
+            pass
 
 
 def select_private_remote_auth(
@@ -123,8 +259,7 @@ def select_private_remote_auth(
     The three phases are deliberately explicit: the private checkout cannot
     read its own store before clone; recovery reuse may use supplied bootstrap
     material or an unlocked managed envelope; checkpoint operations never use
-    bootstrap material.  Every result clears ambient helpers through
-    :meth:`RemoteAuthSelection.command`.
+    bootstrap material.  RemoteExecution owns the helper arguments and launch.
     """
     if phase == "initial-clone":
         if bootstrap_file is None:

@@ -17,6 +17,7 @@ import pwd
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from secretary._fsutil import file_lock, write_text_atomic
@@ -56,6 +57,34 @@ SECRETS_RELATIVE = Path("secrets")
 
 class StateRepoError(RuntimeError):
     """A git command against the instance repo did not run or did not succeed."""
+
+
+@dataclass(frozen=True)
+class GitChildIdentity:
+    """The identity that will execute an instance-repository Git child."""
+
+    uid: int
+    gid: int
+    name: str | None = None
+
+
+def git_child_identity(instance_dir: Path) -> GitChildIdentity:
+    """Resolve the actual Git child before handing it an operation capability.
+
+    Root lifecycle commands cross to the checkout owner.  Everybody else runs
+    Git as their current effective identity.  Keep this decision shared with
+    :func:`run_git`: a credential handoff must not guess from a caller's uid.
+    """
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    if os.getuid() == 0:
+        try:
+            owner = instance_dir.stat()
+            if owner.st_uid != 0:
+                account = pwd.getpwuid(owner.st_uid)
+                return GitChildIdentity(owner.st_uid, owner.st_gid, account.pw_name)
+        except (KeyError, OSError) as exc:
+            raise StateRepoError(f"could not select instance runtime user: {exc}") from None
+    return GitChildIdentity(os.geteuid(), os.getegid())
 
 
 def memory_facts_dir(instance_dir: Path) -> Path:
@@ -154,6 +183,7 @@ def run_git(
     label: str,
     timeout: float = 120,
     extra_env: dict[str, str] | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one instance-repository Git command through its privilege boundary.
 
@@ -176,8 +206,8 @@ def run_git(
     # unprivileged process attempt `runuser`.
     if os.getuid() == 0:
         try:
-            owner = instance_dir.stat()
-            if owner.st_uid != 0:
+            child = git_child_identity(instance_dir)
+            if child.uid != 0:
                 # `runuser` rebuilds the calling environment, and what it keeps
                 # depends on its PAM configuration. Restate the whole policy as
                 # command arguments, so neither a credential prompt nor an
@@ -186,7 +216,7 @@ def run_git(
                 command = [
                     "runuser",
                     "--user",
-                    pwd.getpwuid(owner.st_uid).pw_name,
+                    child.name or pwd.getpwuid(child.uid).pw_name,
                     "--",
                     "env",
                     *[argument for name in GIT_SELECTION_VARIABLES for argument in ("--unset", name)],
@@ -210,6 +240,7 @@ def run_git(
             timeout=timeout,
             check=False,
             env=env,
+            input=input,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise StateRepoError(f"{label} failed: {exc}") from None

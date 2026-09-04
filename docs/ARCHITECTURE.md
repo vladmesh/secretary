@@ -519,11 +519,14 @@ needed and it does not race the tick writer.
   checkpoint; the raw installation key and the recovery phrase do not (see
   [Recovery](RECOVERY.md#secrets)). The host `runtime.env` is outside the store, and facts, exports and
   diagnostics carry no secrets.
-- Private HTTPS GitHub instance-remote Git uses one product-owned credential-selection boundary. Initial clone
-  requires explicit bootstrap input; existing-checkout recovery uses supplied bootstrap input or the
-  unlocked managed envelope; checkpoint probes and pushes use only the managed envelope. Each selected
-  Git child clears ambient helpers, so a per-user credential file remains available to its other
-  consumers but cannot silently authenticate recovery or checkpoint.
+- Private instance-remote Git uses one product-owned remote-execution boundary. It classifies transport,
+  resolves the eventual Git-child identity, selects the phase source, creates and cleans an operation-scoped
+  capability, then launches Git. Initial `https://github.com` clone requires explicit bootstrap input;
+  existing-checkout recovery uses supplied bootstrap input or the unlocked managed envelope; checkpoint
+  probes and pushes use only the managed envelope. Those HTTPS children clear ambient helpers, so a
+  per-user credential file remains available to its other consumers but cannot silently authenticate
+  recovery or checkpoint. Local/file remotes are ordinary Git, SSH is explicit manual-bypass, and other
+  HTTPS hosts are refused.
 - Task audit and pending writes are fail-closed: an unfinished board mutation blocks a consistent
   export and the recovery checkpoint.
 
