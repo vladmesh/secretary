@@ -53,7 +53,9 @@ because the execution boundary cannot be trusted.
 `integration-memory` requires the `secretary[memory]` dependency, and `integration-board` requires
 its disposable FakeKanboard fixture. If either required setup is unavailable, its suite is an
 infrastructure failure, never a green skip. These fixtures use only temporary state and never
-contact a live board; real host, systemd, Orca and credential contours remain outside PR CI.
+contact a live board; real host, systemd, Orca and credential contours remain outside PR CI. Managed
+checkpoint GitHub authentication is tested hermetically with disposable encrypted stores and remotes;
+the later live token entry, cutover and recovery drill remain an operator exercise.
 The manifest owns the taxonomy: every top-level tests/test_*.py file must occur once, under one
 of those names. Unknown names, missing files, stale entries, duplicate entries and empty suites
 make the manifest invalid before a selected suite starts.

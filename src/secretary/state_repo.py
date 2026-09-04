@@ -153,6 +153,7 @@ def run_git(
     *,
     label: str,
     timeout: float = 120,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one instance-repository Git command through its privilege boundary.
 
@@ -164,6 +165,8 @@ def run_git(
     instance_dir = Path(instance_dir).expanduser().resolve()
     command = git_command(instance_dir, args)
     env = git_env()
+    if extra_env:
+        env.update(extra_env)
     # The instance checkout is runtime-user-owned.  Root install/upgrade may need to reconcile
     # it, but Git reads repository configuration before a command (including fsmonitor), so a
     # root Git process would execute runtime-user-controlled configuration.  Cross that boundary

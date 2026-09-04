@@ -21,6 +21,7 @@ import json
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -71,6 +72,7 @@ from secretary.secret_store import (
     key_path,
     normalize_phrase,
 )
+from secretary.infra.github_credential import CredentialError, helper_config_args, helper_environment, validate_checkpoint_credential
 from secretary.state_repo import StateRepoError
 from secretary.tasks import KanboardClient, TaskError, TaskReader
 from secretary.upgrade import (
@@ -133,12 +135,15 @@ def _run(
     label: str,
     timeout: int = 120,
     cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
 ) -> str:
     # Installation clones before there is an instance checkout to cross into, so it
     # takes the environment half of the instance-repository boundary on its own.
-    environment = state_repo.git_env()
+    child_environment = state_repo.git_env()
+    if environment:
+        child_environment.update(environment)
     try:
-        completed = _proc.run(argv, timeout=timeout, env=environment, cwd=cwd)
+        completed = _proc.run(argv, timeout=timeout, env=child_environment, cwd=cwd)
     except FileNotFoundError:
         raise InstallError(f"{label}: command not found") from None
     except (OSError, subprocess.TimeoutExpired):
@@ -178,13 +183,20 @@ def _set_installation_owner(path: Path, name: str | None) -> None:
         raise InstallError(str(exc)) from None
 
 
-def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool) -> str:
+def _clone_or_reuse(
+    remote: str,
+    target: Path,
+    *,
+    recovery: bool,
+    dry_run: bool,
+    bootstrap_credential: Path | None = None,
+) -> str:
     empty_target = target.is_dir() and not any(target.iterdir())
     if not target.exists() or empty_target:
         if dry_run:
             return "would clone private instance remote"
         target.parent.mkdir(parents=True, exist_ok=True)
-        _run(["git", "clone", "--", remote, str(target)], label="clone instance remote", timeout=300)
+        _clone_instance(remote, target, bootstrap_credential=bootstrap_credential)
         return "cloned private instance remote"
     if not target.is_dir() or not (target / ".git").exists():
         raise InstallError(
@@ -223,6 +235,51 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
         except state_repo.StateRepoError as exc:
             raise InstallError(str(exc)) from None
     return "reused checkpoint checkout"
+
+
+def _clone_instance(remote: str, target: Path, *, bootstrap_credential: Path | None) -> None:
+    argv = ["git", *helper_config_args(), "clone", "--", remote, str(target)]
+    # Clearing credential.helper is intentional even when no bootstrap input was
+    # supplied: a clean recovery must not silently succeed through a per-user
+    # ambient credential and then claim that the store is its source.
+    environment = helper_environment(bootstrap_file=bootstrap_credential)
+    _run(argv, label="clone instance remote", timeout=300, environment=environment)
+
+
+def _bootstrap_credential(args: argparse.Namespace, target: Path) -> tuple[Path | None, Path | None]:
+    """Return external bootstrap material and a disposable file to remove afterwards."""
+    source = getattr(args, "bootstrap_credential_file", None)
+    from_stdin = bool(getattr(args, "bootstrap_credential_stdin", False))
+    if not source and not from_stdin:
+        return None, None
+    if source:
+        path = Path(source).expanduser()
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise InstallError("could not inspect bootstrap credential file") from exc
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.geteuid():
+            raise InstallError("bootstrap credential file must be a regular mode-0600 file owned by this user")
+        try:
+            validate_checkpoint_credential(path.read_bytes())
+        except (OSError, CredentialError) as exc:
+            raise InstallError("bootstrap credential is rejected") from exc
+        return path, None
+    try:
+        value = sys.stdin.buffer.read()
+        validate_checkpoint_credential(value)
+    except CredentialError as exc:
+        raise InstallError("bootstrap credential is rejected") from exc
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".secretary-bootstrap-credential-", dir=target.parent)
+    path = Path(temporary)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+    except OSError as exc:
+        raise InstallError("could not prepare bootstrap credential") from exc
+    return path, path
 
 
 def _runtime_env_file(instance_dir: Path, override: str | None) -> Path:
@@ -843,7 +900,18 @@ def install(args: argparse.Namespace) -> InstallResult:
             else ("would-change" if args.dry_run else "changed"),
             args.installation_user,
         )
-        detail = _clone_or_reuse(args.instance_remote, target, recovery=recovery, dry_run=args.dry_run)
+        bootstrap, disposable_bootstrap = _bootstrap_credential(args, target)
+        try:
+            detail = _clone_or_reuse(
+                args.instance_remote,
+                target,
+                recovery=recovery,
+                dry_run=args.dry_run,
+                bootstrap_credential=bootstrap,
+            )
+        finally:
+            if disposable_bootstrap is not None:
+                disposable_bootstrap.unlink(missing_ok=True)
         result.add(
             "instance-checkout",
             "unchanged" if detail.startswith("reused") else ("would-change" if args.dry_run else "changed"),
@@ -1044,6 +1112,16 @@ def add_install_commands(subparsers) -> None:
         phrase.add_argument(
             "--recovery-phrase-file",
             help="read the recovery phrase from this file; never pass it on the command line",
+        )
+        bootstrap = parser.add_mutually_exclusive_group()
+        bootstrap.add_argument(
+            "--bootstrap-credential-file",
+            help="mode-0600 external GitHub credential used only to clone a private instance remote",
+        )
+        bootstrap.add_argument(
+            "--bootstrap-credential-stdin",
+            action="store_true",
+            help="read a one-line external bootstrap credential from standard input before clone",
         )
         phrase.add_argument(
             "--recovery-phrase-stdin",

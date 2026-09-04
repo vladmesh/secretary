@@ -121,6 +121,37 @@ commit; an unchanged tick makes none. The scheduled pusher is not forced: it onl
 the remote tip is an ancestor of local `HEAD`, and it otherwise records the failure or divergence
 for the next window or operator action.
 
+## GitHub checkpoint credential
+
+The HTTPS `github.com` checkpoint remote has one product-managed credential, stored as the encrypted,
+versioned `github.checkpoint-token` envelope. Set or rotate it without putting its value on an argument
+list:
+
+```bash
+python3 -P -m secretary secret checkpoint-github set --instance INSTANCE --stdin
+# or: --file TOKEN_FILE     # regular, owned-by-caller, mode 0600
+```
+
+`set` and `import` are aliases for this one-value operation. Repeating an unchanged input is a no-op;
+replacement preserves the single catalog identity. Checkpoint Git children clear all ambient credential
+helpers and explicitly select Secretary's native Git credential helper. The helper emits the token only
+to Git's credential protocol for `https://github.com`, never to command arguments, repository config,
+logs, or status. A locked, missing, malformed, or rejected value stops the HTTPS checkpoint push.
+
+A clean host cannot fetch an inaccessible private repository from the encrypted store inside it. Supply
+one external bootstrap credential only for the initial clone, then recover the installation key and use
+the encrypted checkpoint value thereafter:
+
+```bash
+sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
+  --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
+```
+
+`--bootstrap-credential-stdin` is also supported, but cannot share stdin with a recovery phrase. The
+bootstrap input is mode-checked, is neither tracked nor retained after clone, and is not an ongoing
+credential source. `status --json` reports `checkpoint.credential` readiness, source, and verification
+age only; it never compares or prints values while the store is locked.
+
 ## Writers
 
 Six writers touch the repository, each with its own pathspec:

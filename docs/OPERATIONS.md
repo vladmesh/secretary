@@ -104,6 +104,21 @@ userinfo remains sensitive.
 Instance config holds no secret materialisation inputs. `reconcile` builds the host plan from bindings
 and config and never decrypts the store.
 
+### Checkpoint GitHub access
+
+For a private HTTPS GitHub instance remote, enter the one checkpoint token with `secret checkpoint-github
+set --instance INSTANCE --stdin` or a caller-owned, regular mode-0600 `--file`. Use the same command to
+rotate it. Output contains only id, byte count, creation/replacement metadata and commit. The checkpoint
+pusher disables ambient Git helpers and uses its own native credential helper, so do not treat a manual
+`~/.git-credentials` entry as proof of checkpoint readiness. Read `checkpoint.credential` in
+`secretary status --json --instance INSTANCE` for managed-ready, locked/unverifiable,
+missing/unavailable, or ambient/manual-bypass state.
+
+On a clean recovery, provide `--bootstrap-credential-file` (or `--bootstrap-credential-stdin`) solely
+to clone the still-private instance repository, and use `--recovery-phrase-file` separately to restore
+the installation key. This hermetically supported path does not perform the later live credential entry,
+cutover, or recovery drill: schedule those as an operator change after the candidate is accepted.
+
 ## Codex provider-internal fan-out policy
 
 Secretary does not require provider-native child-agent isolation. Codex launches use the validated

@@ -26,6 +26,11 @@ from pathlib import Path
 from typing import Any
 
 from secretary import state_repo
+from secretary.infra.github_credential import (
+    checkpoint_credential_readiness,
+    helper_config_args,
+    helper_environment,
+)
 from secretary._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
 )
@@ -575,6 +580,7 @@ class PushOutcome:
     status: str
     reason: str = ""
     commit: str = ""
+    credential: dict[str, Any] | None = None
 
 
 class CheckpointPusher:
@@ -597,6 +603,7 @@ class CheckpointPusher:
         self.remote = remote
         self.interval_seconds = float(interval_seconds)
         self._clock = clock
+        self._credential: dict[str, Any] = {"state": "ambient/manual-bypass", "reason": "not verified"}
 
     def push(self, state: dict[str, Any] | None = None) -> dict[str, Any]:
         """Run the push if its window is due; return the new push state."""
@@ -623,6 +630,7 @@ class CheckpointPusher:
                     return PushOutcome("skipped", "instance repo has no checked-out branch")
                 if not self._has_remote():
                     return PushOutcome("skipped", f"instance repo has no remote '{self.remote}'")
+                self._check_managed_credential()
                 head = self._git(["rev-parse", "HEAD"], "checkpoint head").strip()
                 remote_head = self._remote_head(branch)
                 if remote_head and remote_head == head:
@@ -656,6 +664,14 @@ class CheckpointPusher:
                 "attempted_at": _rfc3339(now),
             }
         )
+        if outcome.credential is not None:
+            state["credential"] = outcome.credential
+        elif self._credential:
+            credential = dict(self._credential)
+            if credential.get("state") != "ambient/manual-bypass":
+                credential["last_verified_epoch"] = now
+                credential["last_verified_at"] = _rfc3339(now)
+            state["credential"] = credential
         state.setdefault("failures", 0)
         state.setdefault("last_push_at", "")
         state.setdefault("last_push_commit", "")
@@ -691,6 +707,25 @@ class CheckpointPusher:
     def _has_remote(self) -> bool:
         remotes = self._git(["remote"], "checkpoint remote").split()
         return self.remote in remotes
+
+    def _check_managed_credential(self) -> None:
+        """Fail closed for the supported GitHub HTTPS endpoint.
+
+        Local/SSH remotes stay usable for disposable tests and explicit operator
+        maintenance, but are never reported as having exercised managed auth.
+        The Git command still clears ambient helpers in either case.
+        """
+        remote_url = self._git(["remote", "get-url", self.remote], "checkpoint remote URL").strip()
+        if not _is_github_https(remote_url):
+            self._credential = {
+                "state": "ambient/manual-bypass",
+                "reason": "checkpoint remote is not HTTPS github.com",
+            }
+            return
+        readiness = checkpoint_credential_readiness(self.instance_dir)
+        self._credential = {"state": readiness.state, "reason": readiness.reason}
+        if not readiness.ready:
+            raise _GitFailure(f"managed GitHub credential {readiness.state}: {readiness.reason}")
 
     def _remote_head(self, branch: str) -> str:
         """The remote branch tip, or "" when the remote does not carry it yet."""
@@ -736,9 +771,10 @@ class CheckpointPusher:
         try:
             return state_repo.run_git(
                 self.instance_dir,
-                args,
+                [*helper_config_args(), *args],
                 label=f"checkpoint {args[0]}",
                 timeout=timeout,
+                extra_env=helper_environment(self.instance_dir),
             )
         except state_repo.StateRepoError as exc:
             raise _GitFailure(str(exc)) from None
@@ -752,6 +788,17 @@ class CheckpointPusher:
     @staticmethod
     def _git_output(result: subprocess.CompletedProcess[str]) -> str:
         return (result.stderr or result.stdout or "").strip()
+
+
+def _is_github_https(remote: str) -> bool:
+    """The helper itself makes the final host decision; this is preflight only."""
+    from urllib.parse import urlsplit
+
+    try:
+        parsed = urlsplit(remote)
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() == "github.com"
 
 
 def checkpoint_snapshot(
@@ -783,6 +830,33 @@ def checkpoint_snapshot(
         "push_failures": int(_float_field(push, "failures")),
         "remote_diverged": bool(push.get("remote_diverged")),
         "blocked_reason": str(write.get("reason") or "") if write.get("status") == "blocked" else "",
+        "credential": _credential_snapshot(Path(instance_dir), _object_field(push, "credential"), stamp),
+    }
+
+
+def _object_field(value: dict[str, Any], name: str) -> dict[str, Any]:
+    field = value.get(name)
+    return dict(field) if isinstance(field, dict) else {}
+
+
+def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: float) -> dict[str, Any]:
+    """Non-secret credential health. A locked store never implies equality."""
+    current = checkpoint_credential_readiness(instance_dir)
+    state = current.state
+    reason = current.reason
+    if recorded.get("state") == "ambient/manual-bypass":
+        state = "ambient/manual-bypass"
+        reason = str(recorded.get("reason") or "not verified for this remote")
+    verified_at = str(recorded.get("last_verified_at") or "")
+    verified_epoch = _float_field(recorded, "last_verified_epoch")
+    return {
+        "state": state,
+        "reason": reason,
+        "store": "available" if state == "managed-ready" else ("locked" if state == "locked/unverifiable" else "unavailable"),
+        "source": "encrypted-store" if state == "managed-ready" else ("remote" if state == "ambient/manual-bypass" else "none"),
+        "consumer": "native-git-credential-helper" if state == "managed-ready" else "not-ready",
+        "last_verified_at": verified_at,
+        "last_verified_age_minutes": max(0, int((now - verified_epoch) // 60)) if verified_epoch > 0 else None,
     }
 
 
