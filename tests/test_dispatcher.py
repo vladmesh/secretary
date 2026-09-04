@@ -10901,10 +10901,48 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
     def _refuse(self, receipt) -> None:
         self.host.head_runtime.deliver = lambda *_args, **_kwargs: receipt  # type: ignore[method-assign]
 
+    @staticmethod
+    def _attested_preflight(
+        _head: str,
+        *,
+        role: str,
+        workspace: str,
+        task_ref: TaskRef,
+        pid_file: str,
+        run_id: str,
+    ) -> HeadRun:
+        """Delivery tests start from the admission boundary's already-verified run."""
+        return HeadRun(
+            run_id=run_id,
+            spec=HeadSpec(profile_id="codex-observer", adapter="codex"),
+            workspace=workspace,
+            task_ref=task_ref,
+            role=role,
+            pid_file=pid_file,
+        ).with_fanout_policy(
+            {
+                "version": 1,
+                "state": "allowed",
+                "terminal_state": "clean",
+                "run_id": run_id,
+                "role": role,
+                "model": "",
+                "binary_path": "/test/codex",
+                "binary_digest": "0" * 64,
+                "cli_version": "test-codex",
+                "tool_schema_digest": "0" * 64,
+                "provider_schema_verdict": "no_callable_child_spawn_surface",
+                "events": [],
+            }
+        )
+
     def test_a_launch_prompt_refused_by_the_drain_gate_is_not_a_delivered_launch(self) -> None:
         self._refuse(DeliverReceipt(status=HEAD_DRAINING, reason="a drain was requested for this head"))
 
-        with self.assertRaises(dispatcher_host_module.ObserverLaunchAborted):
+        with (
+            mock.patch.object(self.host, "preflight_codex_run", side_effect=self._attested_preflight),
+            self.assertRaises(dispatcher_host_module.ObserverLaunchAborted),
+        ):
             self.host.prepare_observer({"ref": "sprint:1462"}, "codex-observer", prompt="# Sprint")
 
         self.assertEqual(self.stopped, [str(self.workspace)], "the pane it opened was taken back down")
@@ -10920,7 +10958,8 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
         )
         self._refuse(DeliverReceipt(status=HEAD_OK, run=run))
 
-        prepared = self.host.prepare_observer({"ref": "sprint:1462"}, "codex-observer", prompt="# Sprint")
+        with mock.patch.object(self.host, "preflight_codex_run", side_effect=self._attested_preflight):
+            prepared = self.host.prepare_observer({"ref": "sprint:1462"}, "codex-observer", prompt="# Sprint")
 
         self.assertTrue(prepared["prompt_delivered"])
         self.assertEqual(self.stopped, [])

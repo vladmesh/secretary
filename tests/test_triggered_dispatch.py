@@ -648,25 +648,24 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         claude_ready.assert_called_once_with(self.workspace)
         self.assertFalse(self.codex_home.exists())
 
-    def test_a_schema_absent_service_preflight_opens_and_delivers(self) -> None:
-        """Schema evidence is advisory; the shared trust preflight still precedes the pane."""
+    def test_a_schema_absent_service_preflight_refuses_before_pane_or_delivery(self) -> None:
+        """A service head has no alternate transport around Codex capability admission."""
         state = mock.Mock()
 
         with (
             mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
             mock.patch.object(dispatch, "_create_terminal", return_value="term-codex") as create,
             mock.patch.object(dispatch, "_deliver_interactive_skill") as deliver,
+            self.assertRaisesRegex(codex_preflight.CodexFanoutPolicyError, "no provider-schema attestation"),
         ):
             dispatch._spawn_fresh_terminal(
                 "retro", None, self.workspace, state, "dispatch", host=FakeSessionHost()
             )
 
-        create.assert_called_once()
-        deliver.assert_called_once_with("term-codex", self.workspace, "/retro", host=mock.ANY)
-        state.save_active_report.assert_called_once_with(None, "term-codex")
-        self.assertEqual(
-            self._trusted()["projects"][str(Path(self.workspace).resolve())]["trust_level"], "trusted"
-        )
+        create.assert_not_called()
+        deliver.assert_not_called()
+        state.save_active_report.assert_not_called()
+        self.assertFalse(self.codex_home.exists())
 
     def test_an_untrusted_workspace_rejects_an_otherwise_allowed_service_preflight(self) -> None:
         """Trust is still the hard pre-pane check, regardless of provider telemetry."""
@@ -719,6 +718,7 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         with (
             mock.patch.object(dispatch, "_dispatch_command", return_value=command),
             mock.patch.object(dispatch, "_create_terminal") as create,
+            mock.patch.object(codex_preflight, "attest_codex_fanout", side_effect=self._allowed_attestation),
             self.assertRaises(dispatch.CodexPreflightError),
         ):
             dispatch._spawn_fresh_terminal(

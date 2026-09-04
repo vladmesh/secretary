@@ -423,11 +423,10 @@ def attest_codex_fanout(
 
 
 class CodexProviderEventRecorder:
-    """Durably append advisory provider-edge evidence to one exact HeadRun.
+    """Durably append provider-edge evidence to one exact HeadRun.
 
-    The recorder owns no pane and has no screen or transcript fallback. Its classifications are
-    diagnostics only: an observed edge or a telemetry-write failure never controls a head's
-    lifecycle, delivery, replacement or continuation liveness.
+    The recorder owns no pane and has no screen or transcript fallback.  Its caller turns every
+    recorded edge, and every durable-write failure, into the exact run's terminal policy effect.
     """
 
     def __init__(
@@ -493,7 +492,6 @@ def enforce_provider_event(
     captured_at: str | None = None,
 ) -> ProviderEventOutcome:
     """Record a provider edge before stopping and blocking its exact launched run."""
-    prior_run = recorder.run
     try:
         outcome = recorder.record(
             raw_event,

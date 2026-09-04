@@ -1512,7 +1512,6 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         records = {task["ref"]: record}
         payload: dict = {}
         self._arm_source(record.workspace)
-        self._add_recording_failure_event()
 
         self.assertIsNone(
             write_launch_intent(
@@ -1527,27 +1526,20 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
                 workspace=record.workspace,
             )
         )
-        with mock.patch.object(
-            codex_preflight.CodexProviderEventRecorder,
-            "record",
-            new=self._fail_recorder,
-        ):
-            launched, failure = runtime._bring_up_worker_head(
-                task,
-                record,
-                records,
-                payload,
-                record.attempt_id,
-                step="advance",
-                stage="rework",
-                blocked_reason="contract",
-                blocked_action="contract-worker-blocked",
-            )
+        launched, failure = runtime._bring_up_worker_head(
+            task,
+            record,
+            records,
+            payload,
+            record.attempt_id,
+            step="advance",
+            stage="rework",
+            blocked_reason="contract",
+            blocked_action="contract-worker-blocked",
+        )
 
-        self.assertIsNone(launched)
-        self.assertIsNotNone(failure)
-        self.assertIn("recorder storage unavailable", str(failure))
-        return
+        self.assertIsNone(failure)
+        assert launched is not None
         self._assert_bound(record.worker_head_run, role="worker")
         self.assertRegex(
             record.worker_head_run["fanout_policy"]["prompt_identity"]["version"],
@@ -1640,7 +1632,6 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         records = {task["ref"]: record}
         payload: dict = {}
         self._arm_source(record.workspace)
-        self._add_recording_failure_event()
         calls = [0]
 
         def crash_after_confirm(*_args) -> None:
@@ -1649,12 +1640,8 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
                 raise OSError("dispatcher crashed after reviewer confirmation")
 
         runtime.record_review_routing = crash_after_confirm
-        with mock.patch.object(
-            codex_preflight.CodexProviderEventRecorder,
-            "record",
-            new=self._fail_recorder,
-        ):
-            outcome = dispatcher_review.start_review(
+        with self.assertRaisesRegex(OSError, "crashed after reviewer confirmation"):
+            dispatcher_review.start_review(
                 runtime,
                 task,
                 records,
@@ -1663,9 +1650,6 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
                 action="review-started",
                 payload=payload,
             )
-        self.assertEqual(outcome["status"], "degraded")
-        self.assertIn("recorder storage unavailable", outcome["reason"])
-        return
 
         self._assert_bound(record.review_head_run, role="reviewer")
         self.assertRegex(
@@ -1708,20 +1692,13 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             )
         )
         self._arm_source(record.workspace)
-        self._add_recording_failure_event()
         _bind_codex_provider_ingress(runtime, payload, observers, record.sprint, record)
-        with mock.patch.object(
-            codex_preflight.CodexProviderEventRecorder,
-            "record",
-            new=self._fail_recorder,
-        ), self.assertRaisesRegex(Exception, "recorder storage unavailable"):
-            self.host.prepare_observer(
-                {"ref": record.sprint},
-                "codex-contract",
-                prompt="# Sprint\n",
-                heartbeat_run_id=str(record.head_run["run_id"]),
-            )
-        return
+        launched = self.host.prepare_observer(
+            {"ref": record.sprint},
+            "codex-contract",
+            prompt="# Sprint\n",
+            heartbeat_run_id=str(record.head_run["run_id"]),
+        )
 
         self.assertEqual(record.head_run, launched["head_run"])
         self._assert_bound(record.head_run, role=OBSERVER_ROLE)

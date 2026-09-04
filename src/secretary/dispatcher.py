@@ -661,7 +661,7 @@ class DispatcherRuntime:
         *,
         reference: str,
     ) -> dict[str, Any] | None:
-        """Refresh advisory fan-out telemetry for recovered worker/reviewer runs."""
+        """Refresh terminal Codex provider-edge evidence for recovered worker/reviewer runs."""
         for role, stored in (
             (WORKER_ROLE, record.worker_head_run),
             (REVIEW_ROLE, record.review_head_run),

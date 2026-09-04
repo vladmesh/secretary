@@ -106,26 +106,28 @@ and config and never decrypts the store.
 
 ## Codex provider-internal fan-out policy
 
-Secretary does not require provider-native child-agent isolation. Codex launches use the validated
-best-effort v2 low-fan-out configuration and every worker, reviewer and observer prompt explicitly
-forbids spawning or delegating to subagents. Do not describe that as proof that the tool surface is
-absent; the historical capability evidence remains in [Codex provider-internal fan-out capability
-evidence](evidence/codex-provider-fanout-2026-08-13.md).
+Codex worker, reviewer and observer launches require provider-native child-agent isolation. The
+low-fan-out v2 configuration and prompt prohibition are expected launch inputs and defence in depth,
+not capability proof. The historical [Codex provider-internal fan-out capability
+evidence](evidence/codex-provider-fanout-2026-08-13.md) documents why no observed call cannot prove
+an unavailable tool surface.
 
-The runtime keeps the v1 diagnostic protocol. An attested `HeadRun` may record the exact CLI path and
-SHA-256 digest, CLI version, model, role, canonical tool-schema digest and explicit
-`no_callable_child_spawn_surface` verdict. `schema_absent`, `schema_unknown`, malformed,
-unsupported and historical records remain non-clean diagnostics, but they do not prevent a pane
-from opening. Workspace trust failures still refuse launch.
+The runtime requires a run-bound capability attestation: canonical tool schema and digest, exact CLI
+path/SHA-256 digest/version, model, role, bounded capture window, the explicit
+`no_callable_child_spawn_surface` verdict, and provider-observed acceptance of the strict launch
+configuration. `schema_absent`, `schema_unknown`, malformed, stale, mismatched, rejected, drifted,
+silently ignored or collaboration-bearing evidence refuses before pane creation or prompt delivery.
+Historical `HeadRun` records remain readable as non-clean diagnostics and are never upgraded.
 
 Provider events are durable run data, not screen observations. The collector records only
 `collaboration_call`, `child_thread_edge`, `unknown_thread_edge` and
 `unparseable_provider_event`, each with available parent/child identities, tool name, raw-event
 digest, source sequence/location and capture time. Collaboration calls and child edges are violations;
 unknown tools/relations, missing parent identity, malformed input and an event-write failure are
-unknown. All such observations are telemetry only: do not stop or replace the head, block work,
-refuse delivery, or change continuation liveness because of a collaboration event, child edge,
-ambiguous source, or telemetry-write failure.
+unknown. Every such observation is a typed, attempt-bound violation. The recorder persists the
+event before the launch owner stops the exact run and records its blocked card or observer audit
+effect. A durable event-write failure is itself an `unknown` violation. These observations cannot
+count as worker output, independent review, a mechanical gate, or release/rework authorization.
 
 Where available, the recorder attaches to Codex's structured session-event JSONL at
 launch. It reads the journal's `session_meta` and `event_msg` envelopes, not pane text. The v1
@@ -141,11 +143,11 @@ observed range, then starts the shared scanner at an anchored zero cursor. The s
 complete initially observed selected source from its first raw record through the root and all existing
 tail records before prompt delivery, then every later line before lifecycle work. Selecting a journal by
 valid session/root identity never exempts its pre-root data. Ordinary records may move the cursor only
-through a durable write. A malformed, collaboration-shaped, child-edge, unknown-relation or
-cursor-write failure is retained as diagnostic state where possible. None gates delivery. This is
-not the tolerant workspace rollout-activity scan. Recovery verifies the same source's complete
-initial range and cursor before consuming a later line; a missing, unreadable, changed or ambiguous
-source is non-fatal unknown telemetry.
+through a durable write. A malformed, collaboration-shaped, child-edge or unknown-relation event is
+retained before it stops the run and applies the typed violation. This is not the tolerant workspace
+rollout-activity scan. Recovery verifies the same source's complete initial range and cursor before
+consuming a later line; missing, unreadable, changed or ambiguous source state remains non-clean and
+cannot establish capability proof.
 
 Rerun the matrix only when a new approved disposable-auth probe is warranted, such as an installed
 Codex binary/model change or a candidate provider control. Use the committed
@@ -154,7 +156,7 @@ Codex binary/model change or a candidate provider control. Use the committed
 source, does not parse or log it, copies it only into the temporary home and deletes the copy before
 the next matrix row. Its JSON result has only raw-stream digests and typed event summaries. A live
 canary measures the practical child-edge rate under the configured suppression and prompt rule. It
-does not require an allowed schema attestation and never stops a run for an observed edge.
+is not authorized until a reviewed, gated candidate exists.
 
 ## System requirements
 

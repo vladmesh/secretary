@@ -1,10 +1,11 @@
-"""Best-effort, launch-bound ingestion of Codex's structured session event journal.
+"""Launch-bound ingestion of Codex's structured session event journal.
 
 This is intentionally separate from the inexpensive workspace activity lookup used by the
 watchdog.  A source is accepted only after it is bound to the exact ``HeadRun`` and its cursor is
-durably written.  Every later read re-proves that binding before consuming a new line.  Missing,
-malformed, ambiguous, or unwritable fan-out telemetry never controls launch, delivery, stop,
-replacement, board state, or continuation liveness.
+durably written.  Every later read re-proves that binding before consuming a new line.  A typed
+provider edge is recorded before the launch owner stops the run and applies its terminal effect;
+the collector has no screen or transcript fallback that could turn missing evidence into a clean
+capability surface.
 """
 
 from __future__ import annotations
@@ -49,11 +50,11 @@ class SourceLine:
 
 
 class CodexProviderEventIngress:
-    """One best-effort Codex event source and its exact ``HeadRun``.
+    """One Codex event source and its exact ``HeadRun``.
 
-    ``persist`` is the same lifecycle writer used for the role's HeadRun.  ``stop`` and ``block``
-    are retained callback parameters for the installed launch-owner shape, but this observer has
-    no lifecycle authority: source and event diagnostics never invoke them.
+    ``persist`` is the same lifecycle writer used for the role's HeadRun.  The launch owner passes
+    ``stop`` and ``block`` so a typed provider edge is durably recorded before it terminates the
+    exact run and produces its card or observer audit effect.
     """
 
     def __init__(
@@ -87,8 +88,8 @@ class CodexProviderEventIngress:
         Binding is not a permission to skip what the provider wrote while the pane was coming
         up.  The durable parent cursor is the only point at which a source belongs to this run;
         once it is committed, ``poll`` is the one classifier for the complete initially observed
-        source and every later lifecycle poll.  Source selection and event classification are
-        advisory telemetry, so an unavailable or ambiguous recorder cannot prevent delivery.
+        source and every later lifecycle poll.  Source selection never supplies capability proof,
+        and a classified provider edge invokes the launch owner's terminal callbacks.
         """
         self.poll()
         return self.run
