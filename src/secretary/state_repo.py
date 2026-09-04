@@ -192,6 +192,12 @@ def run_git(
                     *[argument for name in GIT_SELECTION_VARIABLES for argument in ("--unset", name)],
                     f"GIT_TERMINAL_PROMPT={env['GIT_TERMINAL_PROMPT']}",
                     f"GIT_SSH_COMMAND={env['GIT_SSH_COMMAND']}",
+                    # PAM decides which parent environment entries survive
+                    # runuser.  `extra_env` is the explicit, controlled seam
+                    # for non-secret per-command context such as the managed
+                    # credential helper's instance location, so restate it
+                    # after the privilege crossing as well.
+                    *[f"{name}={value}" for name, value in sorted((extra_env or {}).items())],
                     *command,
                 ]
         except (KeyError, OSError) as exc:

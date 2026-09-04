@@ -19,6 +19,12 @@ from functools import wraps
 from pathlib import Path
 
 from secretary.cli_output import print_json
+from secretary.infra.github_credential import (
+    CHECKPOINT_CREDENTIAL_ID,
+    CHECKPOINT_CREDENTIAL_PURPOSE,
+    CredentialError,
+    validate_checkpoint_credential,
+)
 from secretary.secret_store import (
     CONFIRM_WORDS,
     MATERIALIZE_FILE,
@@ -38,12 +44,6 @@ from secretary.secret_store import (
     set_secret,
 )
 from secretary.state_repo import StateRepoError
-from secretary.infra.github_credential import (
-    CHECKPOINT_CREDENTIAL_ID,
-    CHECKPOINT_CREDENTIAL_PURPOSE,
-    CredentialError,
-    validate_checkpoint_credential,
-)
 
 SECRET_EXIT_VALIDATION = 2
 SECRET_EXIT_STATE = 3
@@ -266,7 +266,9 @@ def run_secret_set(args: argparse.Namespace) -> int:
 def run_checkpoint_github_set(args: argparse.Namespace) -> int:
     value = _read_checkpoint_credential(args)
     try:
-        validate_checkpoint_credential(value)
+        # Persist the canonical token, not the ordinary line terminator an
+        # operator used to deliver it.
+        value = validate_checkpoint_credential(value).encode("utf-8")
     except CredentialError as exc:
         raise SecretStoreValidationError(str(exc)) from None
     result = set_secret(

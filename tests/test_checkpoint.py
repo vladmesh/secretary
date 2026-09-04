@@ -1319,6 +1319,14 @@ class CheckpointSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["blocked_reason"], "")
         self.assertEqual(snapshot["push_status"], "pending")
 
+    def test_non_https_remote_is_reported_as_bypass_before_the_first_push(self):
+        with mock.patch(
+            "secretary.checkpoint.state_repo.git", return_value="ssh://example.invalid/private.git\n"
+        ):
+            snapshot = checkpoint_snapshot(self.instance_dir)
+        self.assertEqual(snapshot["credential"]["state"], "ambient/manual-bypass")
+        self.assertEqual(snapshot["credential"]["source"], "remote")
+
 
 class BoardEventCheckpointCompatibilityTests(unittest.TestCase):
     def test_legacy_decision_event_is_accepted_by_checkpoint_validation(self) -> None:

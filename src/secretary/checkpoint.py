@@ -26,11 +26,6 @@ from pathlib import Path
 from typing import Any
 
 from secretary import state_repo
-from secretary.infra.github_credential import (
-    checkpoint_credential_readiness,
-    helper_config_args,
-    helper_environment,
-)
 from secretary._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
 )
@@ -51,6 +46,11 @@ from secretary.data import (
     PIPELINE_STATE_DIR,
     export_board,
     export_runs,
+)
+from secretary.infra.github_credential import (
+    checkpoint_credential_readiness,
+    helper_config_args,
+    helper_environment,
 )
 from secretary.product_issues import (
     ProductIssueTransaction,
@@ -190,7 +190,9 @@ def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
         if not _is_int(entry["bytes"]) or entry["bytes"] < 0:
             _analytics_failure(manifest_path, f"files[{number}] entry for {relative} has malformed bytes")
         if relative.endswith(".ndjson") and (not _is_int(entry["line_count"]) or entry["line_count"] < 0):
-            _analytics_failure(manifest_path, f"files[{number}] entry for {relative} has malformed line_count")
+            _analytics_failure(
+                manifest_path, f"files[{number}] entry for {relative} has malformed line_count"
+            )
         indexed[relative] = entry
 
     missing_entries = [name for name in ANALYTICS_FILES if name not in indexed]
@@ -844,19 +846,36 @@ def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: floa
     current = checkpoint_credential_readiness(instance_dir)
     state = current.state
     reason = current.reason
-    if recorded.get("state") == "ambient/manual-bypass":
+    remote_is_managed: bool | None = None
+    if recorded.get("state") != "ambient/manual-bypass":
+        try:
+            remote = state_repo.git(
+                instance_dir, ["remote", "get-url", DEFAULT_REMOTE], label="inspect checkpoint remote"
+            ).strip()
+            remote_is_managed = _is_github_https(remote)
+        except state_repo.StateRepoError:
+            remote_is_managed = None
+    if recorded.get("state") == "ambient/manual-bypass" or remote_is_managed is False:
         state = "ambient/manual-bypass"
-        reason = str(recorded.get("reason") or "not verified for this remote")
+        reason = str(recorded.get("reason") or "checkpoint remote is not HTTPS github.com")
     verified_at = str(recorded.get("last_verified_at") or "")
     verified_epoch = _float_field(recorded, "last_verified_epoch")
     return {
         "state": state,
         "reason": reason,
-        "store": "available" if state == "managed-ready" else ("locked" if state == "locked/unverifiable" else "unavailable"),
-        "source": "encrypted-store" if state == "managed-ready" else ("remote" if state == "ambient/manual-bypass" else "none"),
-        "consumer": "native-git-credential-helper" if state == "managed-ready" else "not-ready",
+        "store": "available"
+        if current.ready
+        else ("locked" if current.state == "locked/unverifiable" else "unavailable"),
+        "source": "encrypted-store"
+        if state == "managed-ready"
+        else ("remote" if state == "ambient/manual-bypass" else "none"),
+        "consumer": "native-git-credential-helper"
+        if state == "managed-ready"
+        else ("ambient/manual-bypass" if state == "ambient/manual-bypass" else "not-ready"),
         "last_verified_at": verified_at,
-        "last_verified_age_minutes": max(0, int((now - verified_epoch) // 60)) if verified_epoch > 0 else None,
+        "last_verified_age_minutes": max(0, int((now - verified_epoch) // 60))
+        if verified_epoch > 0
+        else None,
     }
 
 

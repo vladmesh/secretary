@@ -36,8 +36,16 @@ def validate_checkpoint_credential(value: bytes) -> str:
         token = value.decode("utf-8")
     except UnicodeDecodeError:
         raise CredentialError("managed GitHub credential is not UTF-8") from None
+    # Shell pipelines and editors normally finish one input line with LF (or
+    # CRLF).  It is transport syntax, not token padding.  Normalize only that
+    # one terminator: a second terminator remains an embedded line and is
+    # refused below, as are all other leading or trailing whitespace changes.
+    if token.endswith("\r\n"):
+        token = token[:-2]
+    elif token.endswith("\n"):
+        token = token[:-1]
     if not token or token.strip() != token or any(char in token for char in "\x00\r\n"):
-        raise CredentialError("managed GitHub credential must be one non-empty line")
+        raise CredentialError("managed GitHub credential content must be one non-empty unpadded line")
     return token
 
 
@@ -62,7 +70,9 @@ def helper_command() -> str:
     return "!" + shlex.quote(sys.executable) + " -m secretary.infra.github_credential helper"
 
 
-def helper_environment(instance_dir: Path | None = None, *, bootstrap_file: Path | None = None) -> dict[str, str]:
+def helper_environment(
+    instance_dir: Path | None = None, *, bootstrap_file: Path | None = None
+) -> dict[str, str]:
     environment: dict[str, str] = {}
     if instance_dir is not None:
         environment["SECRETARY_CHECKPOINT_INSTANCE"] = str(Path(instance_dir).expanduser().resolve())
@@ -122,6 +132,8 @@ def _bootstrap_token(path: Path) -> str:
         raise CredentialError("bootstrap credential file is unavailable") from exc
     if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
         raise CredentialError("bootstrap credential file must be a regular mode-0600 file")
+    if info.st_uid != os.geteuid():
+        raise CredentialError("bootstrap credential file belongs to another user")
     try:
         return validate_checkpoint_credential(path.read_bytes())
     except OSError as exc:

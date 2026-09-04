@@ -1302,9 +1302,12 @@ def _clean_scope(scope: str) -> str:
         return value
     if value.startswith(PROJECT_SCOPE_PREFIX):
         project = value[len(PROJECT_SCOPE_PREFIX) :]
-        if project and project[0] in _ID_ALLOWED - set("._-"):
-            if all(char in _ID_ALLOWED for char in project):
-                return value
+        if (
+            project
+            and project[0] in _ID_ALLOWED - set("._-")
+            and all(char in _ID_ALLOWED for char in project)
+        ):
+            return value
     raise SecretStoreValidationError(f"scope must be '{INSTALLATION_SCOPE}' or '{PROJECT_SCOPE_PREFIX}<id>'")
 
 

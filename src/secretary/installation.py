@@ -52,6 +52,12 @@ from secretary.host_apply import (
     SystemdUnitInstaller,
     resolve_runtime_owner,
 )
+from secretary.infra.github_credential import (
+    CredentialError,
+    helper_config_args,
+    helper_environment,
+    validate_checkpoint_credential,
+)
 from secretary.restore import (
     RestoreError,
     import_normalized_board,
@@ -72,7 +78,6 @@ from secretary.secret_store import (
     key_path,
     normalize_phrase,
 )
-from secretary.infra.github_credential import CredentialError, helper_config_args, helper_environment, validate_checkpoint_credential
 from secretary.state_repo import StateRepoError
 from secretary.tasks import KanboardClient, TaskError, TaskReader
 from secretary.upgrade import (
@@ -214,14 +219,13 @@ def _clone_or_reuse(
         raise InstallError(str(exc)) from None
     if origin != remote:
         raise InstallError("existing target belongs to a different instance remote")
-    if not recovery:
-        # Only a checkout explicitly prepared by `bootstrap` may continue into its
-        # first install. runtime.env alone is normal state of every live installation.
-        if not (target / ".secretary-bootstrap").is_file():
-            raise InstallError(
-                f"target {target} already contains an installation; choose --recover or use the "
-                "separate adopt workflow"
-            )
+    # Only a checkout explicitly prepared by `bootstrap` may continue into its
+    # first install. runtime.env alone is normal state of every live installation.
+    if not recovery and not (target / ".secretary-bootstrap").is_file():
+        raise InstallError(
+            f"target {target} already contains an installation; choose --recover or use the "
+            "separate adopt workflow"
+        )
     try:
         dirty = state_repo.git(target, ["status", "--porcelain"], label="inspect instance checkout")
     except state_repo.StateRepoError as exc:
@@ -266,17 +270,21 @@ def _bootstrap_credential(args: argparse.Namespace, target: Path) -> tuple[Path 
         except OSError as exc:
             raise InstallError("could not inspect bootstrap credential file") from exc
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.geteuid():
-            raise InstallError("bootstrap credential file must be a regular mode-0600 file owned by this user")
+            raise InstallError(
+                "bootstrap credential file must be a regular mode-0600 file owned by this user"
+            )
         try:
             validate_checkpoint_credential(path.read_bytes())
-        except (OSError, CredentialError) as exc:
-            raise InstallError("bootstrap credential is rejected") from exc
+        except OSError as exc:
+            raise InstallError("bootstrap credential file is unreadable") from exc
+        except CredentialError as exc:
+            raise InstallError(f"bootstrap credential content is rejected: {exc}") from None
         return path, None
     try:
         value = sys.stdin.buffer.read()
         validate_checkpoint_credential(value)
     except CredentialError as exc:
-        raise InstallError("bootstrap credential is rejected") from exc
+        raise InstallError(f"bootstrap credential content is rejected: {exc}") from None
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".secretary-bootstrap-credential-", dir=target.parent)
     path = Path(temporary)
@@ -804,7 +812,9 @@ def _reconcile_managed_memory_mcp(destination: Path, source: Path) -> bool:
     start = next((index for index, line in enumerate(lines) if line.strip() == section), None)
     if start is None:
         return False
-    end = next((index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("[")), len(lines))
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("[")), len(lines)
+    )
     newline = "\r\n" if "\r\n" in current_text else "\n"
     lines.insert(end, f'bearer_token_env_var = "{bearer_name}"{newline}')
     try:
@@ -907,7 +917,14 @@ def install(args: argparse.Namespace) -> InstallResult:
             else ("would-change" if args.dry_run else "changed"),
             args.installation_user,
         )
-        bootstrap, disposable_bootstrap = _bootstrap_credential(args, target)
+        # A reused checkout and a dry-run neither clone nor need bootstrap
+        # material.  In particular do not consume stdin merely because a
+        # caller supplied the optional clone-only flag.
+        needs_clone = not target.exists() or (target.is_dir() and not any(target.iterdir()))
+        bootstrap: Path | None = None
+        disposable_bootstrap: Path | None = None
+        if needs_clone and not args.dry_run:
+            bootstrap, disposable_bootstrap = _bootstrap_credential(args, target)
         try:
             detail = _clone_or_reuse(
                 args.instance_remote,
@@ -1089,6 +1106,19 @@ def install(args: argparse.Namespace) -> InstallResult:
 
 
 def run_install(args: argparse.Namespace) -> int:
+    if args.bootstrap_credential_stdin and args.recovery_phrase_stdin:
+        print(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "usage",
+                        "message": "--bootstrap-credential-stdin and --recovery-phrase-stdin cannot share standard input; use a mode-0600 file for one input",
+                    }
+                }
+            ),
+            file=sys.stderr,
+        )
+        return 2
     result = install(args)
     if args.json:
         print(

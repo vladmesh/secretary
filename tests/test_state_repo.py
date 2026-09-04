@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
 
 from secretary import checkpoint, installation, state_repo, upgrade
@@ -61,6 +62,26 @@ class StateRepoPrivilegeTests(unittest.TestCase):
         self.assertIn("core.hooksPath=/dev/null", command)
         self.assertEqual(run.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
 
+    def test_root_owner_crossing_restates_controlled_helper_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            result = SimpleNamespace(returncode=0, stdout="", stderr="")
+            account = SimpleNamespace(pw_name="runtime")
+            with (
+                mock.patch("secretary.state_repo.os.getuid", return_value=0),
+                mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
+                mock.patch("secretary.state_repo.subprocess.run", return_value=result) as run,
+            ):
+                state_repo.run_git(
+                    instance,
+                    ["status", "--porcelain"],
+                    label="test",
+                    extra_env={"SECRETARY_CHECKPOINT_INSTANCE": str(instance)},
+                )
+        command = run.call_args.args[0]
+        self.assertIn(f"SECRETARY_CHECKPOINT_INSTANCE={instance}", command)
+        self.assertLess(command.index("SECRETARY_CHECKPOINT_INSTANCE=" + str(instance)), command.index("git"))
+
     def test_root_boundary_never_runs_runtime_hooks_or_config_as_root(self) -> None:
         """The pusher shares this boundary before any Git subcommand starts."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,7 +119,7 @@ class StateRepoPrivilegeTests(unittest.TestCase):
 class GitEnvironmentTests(unittest.TestCase):
     """The canonical boundary drops the caller's repository selection."""
 
-    CONTAMINATION = {
+    CONTAMINATION: ClassVar[dict[str, str]] = {
         "GIT_DIR": "/foreign/.git",
         "GIT_INDEX_FILE": "/foreign/.git/index",
         "GIT_WORK_TREE": "/foreign",
