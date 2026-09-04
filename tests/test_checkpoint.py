@@ -949,21 +949,24 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
         def run_git(command: list[str], **_kwargs):
             commands.append(command)
             args = command[command.index("-C") + 2 :]
-            if args[:3] == ["symbolic-ref", "--quiet", "--short"]:
-                return self.result(args, stdout="main\n")
-            if args == ["remote"]:
-                return self.result(args, stdout="origin\n")
-            if args == ["rev-parse", "HEAD"]:
-                return self.result(args, stdout=f"{head}\n")
-            if args[:3] == ["ls-remote", "--heads", "origin"]:
-                return self.result(args, stdout=f"{remote}\trefs/heads/main\n")
-            if args[:2] == ["cat-file", "-e"]:
-                return self.result(args)
-            if args[:2] == ["merge-base", "--is-ancestor"]:
-                return self.result(args)
-            if args == ["push", "--quiet", "origin", "HEAD:refs/heads/main"]:
-                return self.result(args)
-            self.fail(f"unexpected pusher Git command: {args}")
+            operation = args
+            if operation[:3] == ["symbolic-ref", "--quiet", "--short"]:
+                return self.result(operation, stdout="main\n")
+            if operation == ["remote"]:
+                return self.result(operation, stdout="origin\n")
+            if operation == ["remote", "get-url", "origin"]:
+                return self.result(operation, stdout="/tmp/checkpoint.git\n")
+            if operation == ["rev-parse", "HEAD"]:
+                return self.result(operation, stdout=f"{head}\n")
+            if operation[:3] == ["ls-remote", "--heads", "origin"]:
+                return self.result(operation, stdout=f"{remote}\trefs/heads/main\n")
+            if operation[:2] == ["cat-file", "-e"]:
+                return self.result(operation)
+            if operation[:2] == ["merge-base", "--is-ancestor"]:
+                return self.result(operation)
+            if operation == ["push", "--quiet", "origin", "HEAD:refs/heads/main"]:
+                return self.result(operation)
+            self.fail(f"unexpected pusher Git command: {operation}")
 
         with (
             mock.patch(
@@ -981,6 +984,7 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
             [
                 ["symbolic-ref", "--quiet", "--short", "HEAD"],
                 ["remote"],
+                ["remote", "get-url", "origin"],
                 ["rev-parse", "HEAD"],
                 ["ls-remote", "--heads", "origin", "refs/heads/main"],
                 ["cat-file", "-e", f"{remote}^{{commit}}"],
@@ -1311,6 +1315,14 @@ class CheckpointSnapshotTests(unittest.TestCase):
 
         self.assertEqual(snapshot["blocked_reason"], "")
         self.assertEqual(snapshot["push_status"], "pending")
+
+    def test_non_https_remote_is_reported_as_bypass_before_the_first_push(self):
+        with mock.patch(
+            "secretary.checkpoint.state_repo.git", return_value="ssh://example.invalid/private.git\n"
+        ):
+            snapshot = checkpoint_snapshot(self.instance_dir)
+        self.assertEqual(snapshot["credential"]["state"], "ambient/manual-bypass")
+        self.assertEqual(snapshot["credential"]["source"], "remote")
 
 
 class BoardEventCheckpointCompatibilityTests(unittest.TestCase):

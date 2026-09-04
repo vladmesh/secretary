@@ -673,6 +673,24 @@ def set_secret(
         )
         catalog = _catalog(entries)
 
+        # A retried credential entry must not generate a new random envelope or
+        # a pointless store commit. This also makes the generic `secret set`
+        # operation safe to repeat when its requested metadata and plaintext
+        # already describe the canonical value.
+        if existing is not None and entries[secret_id] == existing:
+            try:
+                unchanged = _read_value(instance_dir, secret_id, key) == bytes(value)
+            except SecretStoreError:
+                unchanged = False
+            if unchanged and not state_repo.status(instance_dir, SECRETS_PATHSPEC):
+                return SetResult(
+                    secret_id=secret_id,
+                    scope=scope,
+                    path=value_path(instance_dir, secret_id),
+                    commit=state_repo.head(instance_dir) or "",
+                    created=False,
+                )
+
         catalog_text = _catalog_text(catalog)
         _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
         envelope_text = json.dumps(seal_value(key, secret_id, bytes(value)), indent=2, sort_keys=True) + "\n"
@@ -1284,9 +1302,12 @@ def _clean_scope(scope: str) -> str:
         return value
     if value.startswith(PROJECT_SCOPE_PREFIX):
         project = value[len(PROJECT_SCOPE_PREFIX) :]
-        if project and project[0] in _ID_ALLOWED - set("._-"):
-            if all(char in _ID_ALLOWED for char in project):
-                return value
+        if (
+            project
+            and project[0] in _ID_ALLOWED - set("._-")
+            and all(char in _ID_ALLOWED for char in project)
+        ):
+            return value
     raise SecretStoreValidationError(f"scope must be '{INSTALLATION_SCOPE}' or '{PROJECT_SCOPE_PREFIX}<id>'")
 
 

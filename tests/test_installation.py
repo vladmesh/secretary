@@ -307,9 +307,11 @@ class InstallationTests(unittest.TestCase):
             (target / ".git").mkdir(parents=True)
             (target / "runtime.env").write_text("KANBOARD_API_TOKEN=existing\n", encoding="utf-8")
 
-            with mock.patch("secretary.installation.state_repo.git", return_value="remote\n"):
-                with self.assertRaisesRegex(InstallError, "choose --recover"):
-                    _clone_or_reuse("remote", target, recovery=False, dry_run=True)
+            with (
+                mock.patch("secretary.installation.state_repo.git", return_value="remote\n"),
+                self.assertRaisesRegex(InstallError, "choose --recover"),
+            ):
+                _clone_or_reuse("remote", target, recovery=False, dry_run=True)
 
             (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
             with mock.patch("secretary.installation.state_repo.git", side_effect=("remote\n", "")):
@@ -531,6 +533,9 @@ class InstallationTests(unittest.TestCase):
             remote = root / "instance.git"
             target = root / "target"
             data = root / "data"
+            bootstrap = root / "bootstrap-token"
+            bootstrap.write_text("fixture-bootstrap\n", encoding="utf-8")
+            bootstrap.chmod(0o600)
             source.mkdir()
             _checkpoint(source, data)
             _git(source, "init")
@@ -561,10 +566,15 @@ class InstallationTests(unittest.TestCase):
                 getpass.getuser(),
                 "--product-root",
                 str(PRODUCT_ROOT),
+                "--bootstrap-credential-file",
+                str(bootstrap),
             ]
             host = SimpleNamespace(steps=[SimpleNamespace(status="changed")])
             patches = (
-                mock.patch("secretary.installation.check_prerequisites"),
+                mock.patch(
+                    "secretary.installation.check_prerequisites",
+                    side_effect=(InstallError("simulated interrupted recovery"), None, None),
+                ),
                 mock.patch("secretary.installation.import_normalized_board", return_value=1),
                 mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
                 mock.patch("secretary.installation.materialize_host", return_value=host),
@@ -587,14 +597,15 @@ class InstallationTests(unittest.TestCase):
                 second_code, second_output = self._cli(["recover", *base])
                 third_code, third_output = self._cli(["recover", *base])
 
-            self.assertEqual(first_code, 0, first_output)
+            self.assertEqual(first_code, 1, first_output)
+            self.assertIn("simulated interrupted recovery", first_output)
             self.assertIn(
                 mock.call(target / ".gitignore", getpass.getuser()),
                 set_owner.call_args_list,
             )
             self.assertTrue((target / ".git").exists())
             self.assertFalse((target / "runtime.env").exists())
-            self.assertIn("skipped   runtime-env", first_output)
+            self.assertIn("skipped   runtime-env", second_output)
             self.assertEqual(second_code, 0, second_output)
             self.assertEqual(third_code, 0, third_output)
             self.assertIn("status: ok", second_output)

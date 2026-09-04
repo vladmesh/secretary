@@ -104,6 +104,31 @@ userinfo remains sensitive.
 Instance config holds no secret materialisation inputs. `reconcile` builds the host plan from bindings
 and config and never decrypts the store.
 
+### Checkpoint GitHub access
+
+For a private HTTPS GitHub instance remote, enter the one checkpoint token with `secret checkpoint-github
+set --instance INSTANCE --stdin` or a caller-owned, regular mode-0600 `--file`. Use the same command to
+rotate it. Output contains only id, byte count, creation/replacement metadata and commit. The checkpoint
+pusher disables ambient Git helpers and uses its own native credential helper, so do not treat a manual
+`~/.git-credentials` entry as proof of checkpoint readiness. Read `checkpoint.credential` in
+`secretary status --json --instance INSTANCE` for managed-ready, locked/unverifiable,
+missing/unavailable, or ambient/manual-bypass state.
+
+On a clean recovery, provide `--bootstrap-credential-file` (or `--bootstrap-credential-stdin`) for the
+initial clone, and use `--recovery-phrase-file` separately to restore the installation key. Repeating
+that command after an interrupted recovery uses the supplied bootstrap input for the existing checkout's
+fetch; without it, recovery uses the unlocked managed store credential and otherwise fails closed before
+remote contact. Ambient Git helpers are never a recovery or checkpoint fallback. Under `sudo`, a
+mode-0600 bootstrap file may be owned by the sudo caller or root; Secretary creates a temporary mode-0600
+copy owned by the installation-user Git child and removes it in the same operation. Local/file remotes
+need no GitHub credential, SSH is reported as manual-bypass, and non-GitHub HTTPS remotes are refused.
+This hermetically supported path does not perform the later live credential entry, cutover, or recovery
+drill: schedule those as an operator change after the candidate is accepted.
+
+Credential readiness and its verification timestamp belong to the installation-user Git consumer. A
+root `status`, `recover`, or `upgrade` orchestrates that same child rather than reading a user-owned
+installation key itself; a failed readiness attempt preserves the last successful verification time.
+
 ## Codex provider-internal fan-out policy
 
 Secretary does not require provider-native child-agent isolation. Codex launches use the validated

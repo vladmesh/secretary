@@ -17,6 +17,7 @@ import pwd
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from secretary._fsutil import file_lock, write_text_atomic
@@ -56,6 +57,34 @@ SECRETS_RELATIVE = Path("secrets")
 
 class StateRepoError(RuntimeError):
     """A git command against the instance repo did not run or did not succeed."""
+
+
+@dataclass(frozen=True)
+class GitChildIdentity:
+    """The identity that will execute an instance-repository Git child."""
+
+    uid: int
+    gid: int
+    name: str | None = None
+
+
+def git_child_identity(instance_dir: Path) -> GitChildIdentity:
+    """Resolve the actual Git child before handing it an operation capability.
+
+    Root lifecycle commands cross to the checkout owner.  Everybody else runs
+    Git as their current effective identity.  Keep this decision shared with
+    :func:`run_git`: a credential handoff must not guess from a caller's uid.
+    """
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    if os.getuid() == 0:
+        try:
+            owner = instance_dir.stat()
+            if owner.st_uid != 0:
+                account = pwd.getpwuid(owner.st_uid)
+                return GitChildIdentity(owner.st_uid, owner.st_gid, account.pw_name)
+        except (KeyError, OSError) as exc:
+            raise StateRepoError(f"could not select instance runtime user: {exc}") from None
+    return GitChildIdentity(os.geteuid(), os.getegid())
 
 
 def memory_facts_dir(instance_dir: Path) -> Path:
@@ -153,6 +182,9 @@ def run_git(
     *,
     label: str,
     timeout: float = 120,
+    extra_env: dict[str, str] | None = None,
+    input: str | None = None,
+    child: GitChildIdentity | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one instance-repository Git command through its privilege boundary.
 
@@ -164,6 +196,8 @@ def run_git(
     instance_dir = Path(instance_dir).expanduser().resolve()
     command = git_command(instance_dir, args)
     env = git_env()
+    if extra_env:
+        env.update(extra_env)
     # The instance checkout is runtime-user-owned.  Root install/upgrade may need to reconcile
     # it, but Git reads repository configuration before a command (including fsmonitor), so a
     # root Git process would execute runtime-user-controlled configuration.  Cross that boundary
@@ -173,8 +207,8 @@ def run_git(
     # unprivileged process attempt `runuser`.
     if os.getuid() == 0:
         try:
-            owner = instance_dir.stat()
-            if owner.st_uid != 0:
+            child = child or git_child_identity(instance_dir)
+            if child.uid != 0:
                 # `runuser` rebuilds the calling environment, and what it keeps
                 # depends on its PAM configuration. Restate the whole policy as
                 # command arguments, so neither a credential prompt nor an
@@ -183,12 +217,18 @@ def run_git(
                 command = [
                     "runuser",
                     "--user",
-                    pwd.getpwuid(owner.st_uid).pw_name,
+                    child.name or pwd.getpwuid(child.uid).pw_name,
                     "--",
                     "env",
                     *[argument for name in GIT_SELECTION_VARIABLES for argument in ("--unset", name)],
                     f"GIT_TERMINAL_PROMPT={env['GIT_TERMINAL_PROMPT']}",
                     f"GIT_SSH_COMMAND={env['GIT_SSH_COMMAND']}",
+                    # PAM decides which parent environment entries survive
+                    # runuser.  `extra_env` is the explicit, controlled seam
+                    # for non-secret per-command context such as the managed
+                    # credential helper's instance location, so restate it
+                    # after the privilege crossing as well.
+                    *[f"{name}={value}" for name, value in sorted((extra_env or {}).items())],
                     *command,
                 ]
         except (KeyError, OSError) as exc:
@@ -201,10 +241,59 @@ def run_git(
             timeout=timeout,
             check=False,
             env=env,
+            input=input,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise StateRepoError(f"{label} failed: {exc}") from None
     return result
+
+
+def run_as_git_child(
+    instance_dir: Path,
+    argv: list[str],
+    *,
+    label: str,
+    timeout: float = 120,
+    extra_env: dict[str, str] | None = None,
+    child: GitChildIdentity | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a non-Git consumer under the identity selected for instance Git.
+
+    A managed credential readiness probe must not inspect a runtime-user-owned
+    installation key as root and then speak for the eventual Git child.  This
+    narrow runner shares the same identity crossing and controlled environment
+    as :func:`run_git`, without accepting repository-controlled Git config.
+    """
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    resolved = child or git_child_identity(instance_dir)
+    env = git_env()
+    if extra_env:
+        env.update(extra_env)
+    command = list(argv)
+    if os.getuid() == 0 and resolved.uid != 0:
+        command = [
+            "runuser",
+            "--user",
+            resolved.name or pwd.getpwuid(resolved.uid).pw_name,
+            "--",
+            "env",
+            *[argument for name in GIT_SELECTION_VARIABLES for argument in ("--unset", name)],
+            f"GIT_TERMINAL_PROMPT={env['GIT_TERMINAL_PROMPT']}",
+            f"GIT_SSH_COMMAND={env['GIT_SSH_COMMAND']}",
+            *[f"{name}={value}" for name, value in sorted((extra_env or {}).items())],
+            *command,
+        ]
+    try:
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise StateRepoError(f"{label} failed: {exc}") from None
 
 
 def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120) -> str:

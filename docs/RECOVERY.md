@@ -121,6 +121,50 @@ commit; an unchanged tick makes none. The scheduled pusher is not forced: it onl
 the remote tip is an ancestor of local `HEAD`, and it otherwise records the failure or divergence
 for the next window or operator action.
 
+## GitHub checkpoint credential
+
+The HTTPS `github.com` checkpoint remote has one product-managed credential, stored as the encrypted,
+versioned `github.checkpoint-token` envelope. Set or rotate it without putting its value on an argument
+list:
+
+```bash
+python3 -P -m secretary secret checkpoint-github set --instance INSTANCE --stdin
+# or: --file TOKEN_FILE     # regular, owned-by-caller, mode 0600
+```
+
+`set` and `import` are aliases for this one-value operation. Repeating an unchanged input is a no-op;
+replacement preserves the single catalog identity. One product-owned remote-execution boundary classifies
+the transport, resolves the actual Git child identity, selects the permitted source, and gives that child
+an operation-scoped capability. For `https://github.com`, it clears all ambient credential helpers and
+explicitly selects Secretary's native Git credential helper. The helper emits the token only to Git's
+credential protocol, never to command arguments, repository config, logs, or status. A locked, missing,
+malformed, or rejected value stops the HTTPS checkpoint push.
+
+A clean host cannot fetch an inaccessible private repository from the encrypted store inside it. Supply
+one external bootstrap credential for the initial clone. The same recover command is safe after an
+interruption: its existing-checkout fetch uses that supplied bootstrap credential when present, or the
+unlocked encrypted checkpoint credential when it is not. If neither source is available, recovery stops
+before contacting the remote with an actionable credential-input reason; it never falls through to an
+ambient Git helper.
+
+```bash
+sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
+  --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
+```
+
+`--bootstrap-credential-stdin` is also supported, but cannot share stdin with a recovery phrase. A
+mode-0600 bootstrap file may be owned by the account invoking `sudo` or by the effective command user;
+any other owner is refused. Before Git starts, Secretary copies either input into a mode-0600,
+operation-scoped capability owned by the actual installation-user Git child, then removes it on success
+or failure. The bootstrap input is neither tracked nor retained after the Git operation, and is not an
+ongoing checkpoint source. Local/file remotes remain ordinary hermetic Git; SSH remotes are explicit
+manual-bypass transport and use no HTTPS helper. Any HTTPS host other than `github.com` is refused,
+rather than falling through to an ambient helper. `status --json` reports
+`checkpoint.credential` readiness, source, and verification age only; it never compares or prints
+values while the store is locked. When an operator invokes status, recovery, or an upgrade through
+`sudo`, readiness is evaluated by the resolved installation-user Git consumer, not by the root
+orchestrator reading a user-owned installation key.
+
 ## Writers
 
 Six writers touch the repository, each with its own pathspec:

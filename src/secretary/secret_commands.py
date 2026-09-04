@@ -13,11 +13,18 @@ from __future__ import annotations
 import argparse
 import os
 import secrets as pysecrets
+import stat
 import sys
 from functools import wraps
 from pathlib import Path
 
 from secretary.cli_output import print_json
+from secretary.infra.github_credential import (
+    CHECKPOINT_CREDENTIAL_ID,
+    CHECKPOINT_CREDENTIAL_PURPOSE,
+    CredentialError,
+    validate_checkpoint_credential,
+)
 from secretary.secret_store import (
     CONFIRM_WORDS,
     MATERIALIZE_FILE,
@@ -120,6 +127,22 @@ def add_secret_subcommands(subparsers) -> None:
         help="write only this target; by default every target in the catalog is written",
     )
     materialize_command.set_defaults(handler=run_secret_materialize)
+
+    github = secret_subcommands.add_parser(
+        "checkpoint-github", help="manage the one encrypted GitHub credential used by checkpoint pushes"
+    )
+    github_commands = github.add_subparsers(dest="checkpoint_github_command")
+    for verb in ("set", "import"):
+        command = github_commands.add_parser(
+            verb, help="read a GitHub token from stdin or a mode-0600 file; never from argv"
+        )
+        command.add_argument("--instance", required=True)
+        command.add_argument("--actor", default=DEFAULT_ACTOR)
+        source = command.add_mutually_exclusive_group(required=True)
+        source.add_argument("--file", help="regular mode-0600 token file")
+        source.add_argument("--stdin", action="store_true", help="read the token from standard input")
+        command.set_defaults(handler=run_checkpoint_github_set)
+    github.set_defaults(handler=lambda args: _usage(github))
 
     secret.set_defaults(handler=lambda args: _usage(secret))
 
@@ -239,6 +262,33 @@ def run_secret_set(args: argparse.Namespace) -> int:
     }
 
 
+@_secret_command("checkpoint-github")
+def run_checkpoint_github_set(args: argparse.Namespace) -> int:
+    value = _read_checkpoint_credential(args)
+    try:
+        # Persist the canonical token, not the ordinary line terminator an
+        # operator used to deliver it.
+        value = validate_checkpoint_credential(value).encode("utf-8")
+    except CredentialError as exc:
+        raise SecretStoreValidationError(str(exc)) from None
+    result = set_secret(
+        _instance_dir(args.instance),
+        secret_id=CHECKPOINT_CREDENTIAL_ID,
+        value=value,
+        scope="installation",
+        purpose=CHECKPOINT_CREDENTIAL_PURPOSE,
+        actor=args.actor,
+    )
+    return {
+        "ok": True,
+        "op": "checkpoint-github",
+        "id": result.secret_id,
+        "created": result.created,
+        "bytes": len(value),
+        "commit": result.commit,
+    }
+
+
 @_secret_command("list")
 def run_secret_list(args: argparse.Namespace) -> int:
     entries = list_secrets(_instance_dir(args.instance))
@@ -325,6 +375,22 @@ def _read_value(args: argparse.Namespace) -> bytes:
     if not value:
         raise SecretStoreValidationError("secret value is empty")
     return value
+
+
+def _read_checkpoint_credential(args: argparse.Namespace) -> bytes:
+    """The dedicated credential file has the same ownership boundary as the key."""
+    if not args.file:
+        return _read_value(args)
+    path = Path(args.file).expanduser()
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise SecretStoreValidationError(f"could not inspect credential file: {exc}") from None
+    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+        raise SecretStoreValidationError("credential file must be a regular mode-0600 file")
+    if info.st_uid != os.geteuid():
+        raise SecretStoreValidationError("credential file belongs to another user")
+    return _read_value(args)
 
 
 def _stdin_and_stderr_are_interactive() -> bool:

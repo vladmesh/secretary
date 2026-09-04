@@ -47,6 +47,10 @@ from secretary.data import (
     export_board,
     export_runs,
 )
+from secretary.infra.github_credential import (
+    CredentialError,
+    RemoteExecution,
+)
 from secretary.product_issues import (
     ProductIssueTransaction,
     ProductIssueValidationError,
@@ -185,7 +189,9 @@ def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
         if not _is_int(entry["bytes"]) or entry["bytes"] < 0:
             _analytics_failure(manifest_path, f"files[{number}] entry for {relative} has malformed bytes")
         if relative.endswith(".ndjson") and (not _is_int(entry["line_count"]) or entry["line_count"] < 0):
-            _analytics_failure(manifest_path, f"files[{number}] entry for {relative} has malformed line_count")
+            _analytics_failure(
+                manifest_path, f"files[{number}] entry for {relative} has malformed line_count"
+            )
         indexed[relative] = entry
 
     missing_entries = [name for name in ANALYTICS_FILES if name not in indexed]
@@ -575,6 +581,7 @@ class PushOutcome:
     status: str
     reason: str = ""
     commit: str = ""
+    credential: dict[str, Any] | None = None
 
 
 class CheckpointPusher:
@@ -597,6 +604,7 @@ class CheckpointPusher:
         self.remote = remote
         self.interval_seconds = float(interval_seconds)
         self._clock = clock
+        self._credential: dict[str, Any] = {"state": "ambient/manual-bypass", "reason": "not verified"}
 
     def push(self, state: dict[str, Any] | None = None) -> dict[str, Any]:
         """Run the push if its window is due; return the new push state."""
@@ -623,8 +631,10 @@ class CheckpointPusher:
                     return PushOutcome("skipped", "instance repo has no checked-out branch")
                 if not self._has_remote():
                     return PushOutcome("skipped", f"instance repo has no remote '{self.remote}'")
+                remote_url = self._git(["remote", "get-url", self.remote], "checkpoint remote URL").strip()
+                remote_git = self._remote_execution(remote_url)
                 head = self._git(["rev-parse", "HEAD"], "checkpoint head").strip()
-                remote_head = self._remote_head(branch)
+                remote_head = self._remote_head(branch, remote_git)
                 if remote_head and remote_head == head:
                     return PushOutcome("unchanged", commit=head)
                 if remote_head and not self._fast_forward(remote_head, head):
@@ -633,7 +643,8 @@ class CheckpointPusher:
                         f"remote {self.remote}/{branch} is at {remote_head[:12]}, "
                         "which the checkpoint history does not contain",
                     )
-                self._git(
+                self._remote_git(
+                    remote_git,
                     ["push", "--quiet", self.remote, f"HEAD:refs/heads/{branch}"],
                     "checkpoint push",
                     timeout=PUSH_TIMEOUT_SECONDS,
@@ -656,6 +667,19 @@ class CheckpointPusher:
                 "attempted_at": _rfc3339(now),
             }
         )
+        if outcome.credential is not None:
+            state["credential"] = outcome.credential
+        elif self._credential:
+            credential = dict(self._credential)
+            previous = _object_field(state, "credential")
+            if credential.get("state") == "managed-ready":
+                credential["last_verified_epoch"] = now
+                credential["last_verified_at"] = _rfc3339(now)
+            else:
+                for field in ("last_verified_epoch", "last_verified_at"):
+                    if field in previous:
+                        credential[field] = previous[field]
+            state["credential"] = credential
         state.setdefault("failures", 0)
         state.setdefault("last_push_at", "")
         state.setdefault("last_push_commit", "")
@@ -692,9 +716,33 @@ class CheckpointPusher:
         remotes = self._git(["remote"], "checkpoint remote").split()
         return self.remote in remotes
 
-    def _remote_head(self, branch: str) -> str:
+    def _remote_execution(self, remote_url: str) -> RemoteExecution:
+        """Select a transport once; only the boundary may start remote Git."""
+        remote_git = RemoteExecution(remote_url, "checkpoint", instance_dir=self.instance_dir)
+        readiness = remote_git.credential_state
+        if remote_git.transport != "github-https":
+            if remote_git.transport == "https-unsupported":
+                self._credential = {
+                    "state": "missing/unavailable",
+                    "reason": "private instance HTTPS remote is unsupported; only https://github.com is managed",
+                    "source": "none",
+                }
+                raise _GitFailure("private instance HTTPS remote is unsupported; only https://github.com is managed")
+            self._credential = {
+                "state": "ambient/manual-bypass",
+                "reason": "checkpoint remote is not HTTPS github.com",
+                "source": "manual-bypass",
+            }
+            return remote_git
+        self._credential = {"state": readiness.state, "reason": readiness.reason, "source": "managed-store"}
+        if not readiness.ready:
+            raise _GitFailure(f"managed GitHub credential {readiness.state}: {readiness.reason}")
+        return remote_git
+
+    def _remote_head(self, branch: str, remote_git: RemoteExecution) -> str:
         """The remote branch tip, or "" when the remote does not carry it yet."""
-        listing = self._git(
+        listing = self._remote_git(
+            remote_git,
             ["ls-remote", "--heads", self.remote, f"refs/heads/{branch}"],
             "checkpoint ls-remote",
             timeout=PUSH_TIMEOUT_SECONDS,
@@ -730,6 +778,19 @@ class CheckpointPusher:
         result = self._run(args, timeout=timeout)
         if result.returncode != 0:
             self._raise_git_failure(result, label)
+        return result.stdout
+
+    def _remote_git(
+        self, remote_git: RemoteExecution, args: list[str], label: str, *, timeout: float = 120
+    ) -> str:
+        try:
+            result = remote_git.run_instance(self.instance_dir, args, label=label, timeout=timeout)
+        except CredentialError as exc:
+            raise _GitFailure(str(exc)) from None
+        if result.returncode != 0:
+            self._raise_git_failure(result, label)
+        if remote_git.source:
+            self._credential["source"] = remote_git.source
         return result.stdout
 
     def _run(self, args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
@@ -783,6 +844,54 @@ def checkpoint_snapshot(
         "push_failures": int(_float_field(push, "failures")),
         "remote_diverged": bool(push.get("remote_diverged")),
         "blocked_reason": str(write.get("reason") or "") if write.get("status") == "blocked" else "",
+        "credential": _credential_snapshot(Path(instance_dir), _object_field(push, "credential"), stamp),
+    }
+
+
+def _object_field(value: dict[str, Any], name: str) -> dict[str, Any]:
+    field = value.get(name)
+    return dict(field) if isinstance(field, dict) else {}
+
+
+def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: float) -> dict[str, Any]:
+    """Non-secret credential health. A locked store never implies equality."""
+    remote_git = RemoteExecution("", "checkpoint", instance_dir=instance_dir)
+    current = remote_git.managed_credential_state
+    state = current.state
+    reason = current.reason
+    transport = "unknown"
+    try:
+        remote = state_repo.git(
+            instance_dir, ["remote", "get-url", DEFAULT_REMOTE], label="inspect checkpoint remote"
+        ).strip()
+        remote_git = RemoteExecution(remote, "checkpoint", instance_dir=instance_dir)
+        transport = remote_git.transport
+    except state_repo.StateRepoError:
+        transport = "unknown"
+    if recorded.get("state") == "ambient/manual-bypass" or transport in {"local", "ssh", "unmanaged"}:
+        state = "ambient/manual-bypass"
+        reason = str(recorded.get("reason") or "checkpoint remote is not HTTPS github.com")
+    elif transport == "https-unsupported":
+        state = "missing/unavailable"
+        reason = str(recorded.get("reason") or "private instance HTTPS remote is unsupported")
+    verified_at = str(recorded.get("last_verified_at") or "")
+    verified_epoch = _float_field(recorded, "last_verified_epoch")
+    return {
+        "state": state,
+        "reason": reason,
+        "store": "available"
+        if current.ready
+        else ("locked" if current.state == "locked/unverifiable" else "unavailable"),
+        "source": "encrypted-store"
+        if state == "managed-ready"
+        else ("remote" if state == "ambient/manual-bypass" else "none"),
+        "consumer": "native-git-credential-helper"
+        if state == "managed-ready"
+        else ("ambient/manual-bypass" if state == "ambient/manual-bypass" else "not-ready"),
+        "last_verified_at": verified_at,
+        "last_verified_age_minutes": max(0, int((now - verified_epoch) // 60))
+        if verified_epoch > 0
+        else None,
     }
 
 
