@@ -9,7 +9,7 @@
   "snapshot": {
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "installation", "host", "dispatcher", "checkpoint", "memory", "secret_store", "board_transport"],
+  "required": ["schema_version", "installation", "host", "dispatcher", "checkpoint", "memory", "secret_store", "board_transport", "recovery"],
   "properties": {
     "schema_version": {"const": 1},
     "installation": {
@@ -55,7 +55,20 @@
     "checkpoint": {"type": "object", "required": ["last_commit", "lag_minutes", "remote_diverged", "blocked_reason"]},
     "memory": {"type": "object", "required": ["fact_count", "last_reindex_at", "index_present"]},
     "secret_store": {"type": "object", "required": ["initialized", "secret_count", "last_modified_at", "installation_key", "materialize"], "properties": {"installation_key": {"type": "object", "required": ["present", "usable"]}, "materialize": {"type": "array", "items": {"type": "object", "required": ["target", "path", "count"]}}}},
-    "board_transport": {"type": "object", "required": ["findings"], "properties": {"findings": {"type": "array", "items": {"type": "string"}}}}
+    "board_transport": {"type": "object", "required": ["findings"], "properties": {"findings": {"type": "array", "items": {"type": "string"}}}},
+    "recovery": {
+      "type": "object",
+      "required": ["resources", "credential_consumers", "paths", "materializations", "bypasses", "catalog_envelope_divergences", "registry_error"],
+      "properties": {
+        "resources": {"type": "array"},
+        "credential_consumers": {"type": "array"},
+        "paths": {"type": "array"},
+        "materializations": {"type": "array"},
+        "bypasses": {"type": "array"},
+        "catalog_envelope_divergences": {"type": "array", "items": {"type": "string"}},
+        "registry_error": {"type": ["string", "null"]}
+      }
+    }
   }
   },
   "invalid": {

@@ -13,6 +13,7 @@ from typing import Any
 from secretary import _proc, head_registry
 from secretary.board_transport import findings as board_transport_findings
 from secretary.checkpoint import checkpoint_snapshot
+from secretary.dispatch.headless import headless_cards, headless_worker
 from secretary.dispatcher_observer import observer_snapshot
 from secretary.dispatcher_pause import ProductionPause
 from secretary.dispatcher_review import command_terminal_status
@@ -24,8 +25,8 @@ from secretary.host import (
     LiveHostSource,
     build_doctor_expectations,
 )
-from secretary.dispatch.headless import headless_cards, headless_worker
 from secretary.host_apply import resolve_installed_packaged
+from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.secret_store import store_health
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.tasks import KanboardClient, TaskError
@@ -39,6 +40,7 @@ def collect_status(
     host_fixture: str | None = None,
     offline: bool = False,
     sprint_client: KanboardClient | None = None,
+    recovery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a stable, non-mutating snapshot for one validated instance."""
     assert report.data_dir is not None
@@ -60,6 +62,12 @@ def collect_status(
     else:
         source = FixtureHostSource(Path(host_fixture)) if host_fixture else LiveHostSource()
         collected = source.collect(expected)
+    checkpoint = checkpoint_snapshot(
+        report.instance_path.parent,
+        write_state=_object(production.get("checkpoint")),
+        push_state=_object(production.get("checkpoint_push")),
+    )
+    recovery = recovery or collect_recovery_inventory(report, inspect_live=not offline, checkpoint=checkpoint)
     return {
         "schema_version": STATUS_SCHEMA_VERSION,
         "installation": {
@@ -91,14 +99,11 @@ def collect_status(
             "divergences": _divergences(production),
             "reconciliation": _reconciliation(production),
         },
-        "checkpoint": checkpoint_snapshot(
-            report.instance_path.parent,
-            write_state=_object(production.get("checkpoint")),
-            push_state=_object(production.get("checkpoint_push")),
-        ),
+        "checkpoint": checkpoint,
         "memory": _memory_status(data_dir),
         "board_transport": {"findings": board_transport_findings(instance_dir)},
         "secret_store": store_health(report.instance_path.parent),
+        "recovery": recovery,
     }
 
 

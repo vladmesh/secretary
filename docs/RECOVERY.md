@@ -165,6 +165,18 @@ values while the store is locked. When an operator invokes status, recovery, or 
 `sudo`, readiness is evaluated by the resolved installation-user Git consumer, not by the root
 orchestrator reading a user-owned installation key.
 
+For a complete pre-recovery inventory, inspect `status.recovery` or run text doctor. Resource rows are
+derived only from the installed registry and retain probe provenance and age. Online doctor reuses a
+fresh dispatcher verdict; it performs a read-only probe for stale or absent evidence and never writes
+the dispatcher's cache. Offline doctor performs no probe and says `stale` or `unknown`. Provider-red
+states (`unauthenticated`, `exhausted`, or `unavailable`) are distinct from `probe_broken`, which means
+the probe executable or import itself failed.
+
+Credential consumers, the last checkpoint operation, path configuration, secret materialization, and
+manual Git bypasses are independent rows and findings. Remediate with each row's
+`supported_next_action`; do not infer credential health from a successful old push, infer current
+credential failure from an old failed push, or treat an ambient helper as supported recovery access.
+
 ## Writers
 
 Six writers touch the repository, each with its own pathspec:

@@ -263,8 +263,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("broken-probe: probe_broken (recorded)", output)
         self.assertIn("No module named triggered_agents", output)
         self.assertIn("resource broken-probe probe cannot run", output)
-        # Offline cannot answer for the other resource at all, and says nothing rather than green.
-        self.assertNotIn("green-probe", output)
+        # secretary-1549: installed resources are an inventory, not merely a list of observations.
+        # Offline cannot answer for the other resource, so it stays visible and explicitly unknown.
+        self.assertIn("green-probe: unknown", output)
+        self.assertIn("source=unavailable", output)
 
     def test_doctor_says_nothing_about_probes_without_an_installed_registry(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -83,6 +83,7 @@ unit tests/test_project_contract.py
 unit tests/test_prompt_document.py
 packaging tests/test_provision.py
 unit tests/test_redact.py
+component tests/test_recovery_inventory.py
 unit tests/test_references.py
 integration-recovery tests/test_restore.py
 integration-recovery tests/test_restore_archive.py

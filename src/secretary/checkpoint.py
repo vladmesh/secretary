@@ -861,8 +861,13 @@ def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: floa
     reason = current.reason
     transport = "unknown"
     try:
+        # Read the declared URL, not `git remote get-url`: the latter applies url.*.insteadOf
+        # rewrites and would collapse a separately reported ambient bypass into current managed
+        # credential readiness.
         remote = state_repo.git(
-            instance_dir, ["remote", "get-url", DEFAULT_REMOTE], label="inspect checkpoint remote"
+            instance_dir,
+            ["config", "--get", f"remote.{DEFAULT_REMOTE}.url"],
+            label="inspect checkpoint remote",
         ).strip()
         remote_git = RemoteExecution(remote, "checkpoint", instance_dir=instance_dir)
         transport = remote_git.transport

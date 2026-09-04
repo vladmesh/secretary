@@ -510,6 +510,11 @@ needed and it does not race the tick writer.
 - The current security profile assumes one trusted owner of the host. Agents are not isolated as
   untrusted tenants.
 - `doctor` reads config, data and host inventory, but never changes the host.
+- `status` and `doctor` share one recovery projection. It joins the installed head registry to the
+  dispatcher's TTL verdicts and read-only probes, then inventories credential consumers, declared
+  materialization targets, canonical path selections and Git bypass metadata. It does not decrypt
+  values to compare them, update the probe cache, or launch a head. Current capability readiness and
+  persisted operation outcomes remain separate facts.
 - `reconcile plan` computes desired state. A matching name or prefix confers no ownership without a
   managed manifest or a product-written marker.
 - The lazy session-manager registration of the observer root belongs to installation config but not to

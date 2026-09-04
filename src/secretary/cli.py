@@ -75,6 +75,7 @@ from secretary.memory_write import (
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.product_issue_commands import add_product_issue_subcommands
 from secretary.provision import apply_provision_result, render_result, start_provision
+from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.restore import RestoreError, _target, restore_findings
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
 from secretary.role_skills import add_role_skills_subcommands
@@ -106,6 +107,7 @@ class DoctorInspection:
     secret_store: list[str]
     board_transport: list[str]
     resource_probes: list[HeadReadiness]
+    recovery: dict[str, object]
     expected: object | None = None
     collected: CollectResult | None = None
     diffs: dict[str, KindDiff] | None = None
@@ -506,7 +508,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     print_dispatcher_status(
         report, inspection.collected, inspect_live=not args.offline, findings=inspection.dispatcher
     )
-    print_resource_probes(inspection.resource_probes)
+    print_recovery_inventory(inspection.recovery)
     print_checkpoint_status(report, findings=inspection.checkpoint)
     print_secret_store_status(report, findings=inspection.secret_store)
     if inspection.board_transport:
@@ -583,9 +585,8 @@ def run_status(args: argparse.Namespace) -> int:
         stopped = sum(sprint["status"] == "stopped" for sprint in sprint_status["items"])
         stale = sum(not sprint["resume_freshness"]["fresh"] for sprint in sprint_status["items"])
         print(f"sprints: {len(sprint_status['items'])}, {stopped} stopped, {stale} resume errors")
-    print(
-        f"memory facts: {snapshot['memory']['fact_count'] if snapshot['memory']['fact_count'] is not None else 'unknown'}"
-    )
+    memory_facts = snapshot["memory"]["fact_count"]
+    print(f"memory facts: {memory_facts if memory_facts is not None else 'unknown'}")
     print(f"checkpoint lag: {snapshot['checkpoint']['lag_minutes']} min")
     return 0
 
@@ -606,8 +607,13 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
             )
         )
         return 1 if args.dry_run else 2
-    snapshot = collect_status(report, host_fixture=args.host_fixture, offline=args.offline)
     inspection = collect_doctor_inspection(report, args)
+    snapshot = collect_status(
+        report,
+        host_fixture=args.host_fixture,
+        offline=args.offline,
+        recovery=inspection.recovery,
+    )
     payload = {
         "schema_version": 1,
         "ok": not inspection.findings,
@@ -652,7 +658,27 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     checkpoint = checkpoint_findings(report)
     secret_store = secret_store_findings(report)
     board_transport = _board_transport_findings(report.instance_path.parent)
-    resource_probes = resource_probe_readiness(report, inspect_live=not args.offline)
+    production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    checkpoint_snapshot_value = checkpoint_snapshot(
+        report.instance_path.parent,
+        write_state=production.get("checkpoint"),
+        push_state=production.get("checkpoint_push"),
+    )
+    recovery = collect_recovery_inventory(
+        report,
+        inspect_live=not args.offline,
+        checkpoint=checkpoint_snapshot_value,
+    )
+    resource_probes = [
+        HeadReadiness(
+            str(row["resource"]),
+            str(row["state"]),
+            str(row["reason"]),
+            float(time.time() - int(row["age_seconds"])) if row.get("age_seconds") is not None else 0,
+            row.get("source") == "dispatcher-cache",
+        )
+        for row in recovery["resources"]
+    ]
     findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
     findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint)
     findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
@@ -662,6 +688,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         for readiness in resource_probes
         if readiness.status == PROBE_BROKEN
     )
+    findings.extend(_recovery_findings(recovery))
     if args.strict:
         findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
     return DoctorInspection(
@@ -673,10 +700,63 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         secret_store,
         board_transport,
         resource_probes,
+        recovery,
         expected,
         collected,
         diffs,
     )
+
+
+def _recovery_findings(recovery: dict[str, object]) -> list[dict[str, object]]:
+    """Actionable recovery defects, kept distinct by capability and resource."""
+    findings: list[dict[str, object]] = []
+    for row in recovery.get("resources", []):
+        if not isinstance(row, dict) or row.get("state") in {"ready", "unknown", "stale"}:
+            continue
+        if row.get("state") == PROBE_BROKEN:
+            continue
+        findings.append(
+            {
+                "code": "resource_readiness",
+                "resource": row.get("resource"),
+                "state": row.get("state"),
+                "message": row.get("reason"),
+            }
+        )
+    for row in recovery.get("credential_consumers", []):
+        if not isinstance(row, dict) or row.get("consumer") != "checkpoint-github":
+            continue
+        if row.get("state") in {"managed-ready", "ambient/manual-bypass", "unknown"}:
+            continue
+        findings.append(
+            {
+                "code": "credential_consumer",
+                "consumer": row.get("consumer"),
+                "state": row.get("state"),
+                "message": row.get("reason"),
+                "supported_next_action": row.get("supported_next_action"),
+            }
+        )
+    for section, code in (
+        ("paths", "recovery_path"),
+        ("materializations", "materialization"),
+        ("bypasses", "recovery_bypass"),
+    ):
+        for row in recovery.get(section, []):
+            if not isinstance(row, dict) or row.get("state") in {"supported", "ready"}:
+                continue
+            findings.append(
+                {
+                    "code": code,
+                    "capability": row.get("capability"),
+                    "state": row.get("state"),
+                    "message": row.get("reason") or row.get("supported_next_action"),
+                    "supported_next_action": row.get("supported_next_action"),
+                }
+            )
+    for message in recovery.get("catalog_envelope_divergences", []):
+        findings.append({"code": "secret_store_divergence", "message": str(message)})
+    return findings
 
 
 def print_restore_status(report, *, findings: list[str] | None = None) -> list[str]:
@@ -757,9 +837,9 @@ def print_dispatcher_status(
     print(f"  production owner: {production_owner or '(none)'}")
     pause = ProductionPause(data_dir).summary()
     if pause.get("paused"):
-        print(
-            f"  pause: {pause['mode']} since {pause.get('since') or '(unknown)'} by {pause.get('actor') or '(unknown)'}"
-        )
+        since = pause.get("since") or "(unknown)"
+        actor = pause.get("actor") or "(unknown)"
+        print(f"  pause: {pause['mode']} since {since} by {actor}")
     else:
         print("  pause: none")
 
@@ -891,6 +971,69 @@ def print_resource_probes(readiness: list[HeadReadiness]) -> list[HeadReadiness]
         for verdict in broken:
             print(f"  {_probe_finding(verdict)}")
     return readiness
+
+
+def print_recovery_inventory(recovery: dict[str, object]) -> None:
+    """Render the same recovery facts exposed by structured status."""
+    resources = recovery.get("resources") if isinstance(recovery.get("resources"), list) else []
+    if resources:
+        print()
+        print("resource probes: read-only")
+        for row in resources:
+            if not isinstance(row, dict):
+                continue
+            profiles = ",".join(str(item) for item in row.get("profiles", [])) or "(none)"
+            observed = row.get("observed_at") or "never"
+            age = f", age={row['age_seconds']}s" if row.get("age_seconds") is not None else ""
+            prior = f", observed_state={row['observed_state']}" if row.get("observed_state") else ""
+            recorded = " (recorded)" if row.get("source") == "dispatcher-cache" else ""
+            print(
+                f"  {row['resource']}: {row['state']}{recorded} - {row['reason']} "
+                f"[source={row['source']}, freshness={row['freshness']}, "
+                f"observed={observed}{age}{prior}; profiles={profiles}]"
+            )
+        broken = [row for row in resources if isinstance(row, dict) and row.get("state") == PROBE_BROKEN]
+        if broken:
+            print("resource probe findings:")
+            for row in broken:
+                readiness = HeadReadiness(str(row["resource"]), PROBE_BROKEN, str(row["reason"]), 0)
+                print(f"  {_probe_finding(readiness)}")
+    consumers = (
+        recovery.get("credential_consumers") if isinstance(recovery.get("credential_consumers"), list) else []
+    )
+    if consumers:
+        print("credential consumers: read-only")
+        for row in consumers:
+            if not isinstance(row, dict):
+                continue
+            verified = row.get("verified_at") or "never"
+            print(
+                f"  {row['consumer']}: {row['state']} - {row['reason']} "
+                f"[source={row['source']}, verification={row['verification_source']} at {verified}; "
+                f"capability={row['capability']}]"
+            )
+    for key, title in (
+        ("paths", "recovery paths"),
+        ("materializations", "materialization targets"),
+        ("bypasses", "recovery bypasses"),
+    ):
+        rows = recovery.get(key) if isinstance(recovery.get(key), list) else []
+        if not rows:
+            continue
+        print(f"{title}: read-only")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            reason = row.get("reason") or row.get("kind") or "recorded"
+            print(
+                f"  {row.get('capability') or row.get('target')}: {row.get('state')} - {reason}; "
+                f"next: {row.get('supported_next_action') or 'none'}"
+            )
+    divergences = recovery.get("catalog_envelope_divergences")
+    if isinstance(divergences, list) and divergences:
+        print("catalog/envelope divergences:")
+        for item in divergences:
+            print(f"  {item}")
 
 
 def print_checkpoint_status(report, *, findings: list[str] | None = None) -> list[str]:
