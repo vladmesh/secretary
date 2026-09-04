@@ -424,7 +424,18 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         restricted_tmp = Path(tempfile.mkdtemp(prefix="secretary-restricted-tmp-", dir="/tmp"))
         restricted_tmp.chmod(0o700)
         self.addCleanup(restricted_tmp.rmdir)
-        with mock.patch.dict(os.environ, {"TMPDIR": str(restricted_tmp)}, clear=False):
+        capability_directories: list[Path] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracked_mkdtemp(*args, **kwargs):
+            directory = Path(real_mkdtemp(*args, **kwargs))
+            capability_directories.append(directory)
+            return str(directory)
+
+        with (
+            mock.patch.dict(os.environ, {"TMPDIR": str(restricted_tmp)}, clear=False),
+            mock.patch("secretary.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
+        ):
             result = remote.run_instance(
                 self.instance,
                 ["credential", "fill"],
@@ -435,7 +446,8 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         reply = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         self.assertEqual(self.digest(reply.get("password", "")), self.digest(token))
         self.assertNotIn(str(bootstrap), result.args if isinstance(result.args, str) else " ".join(result.args))
-        self.assertEqual(list(Path(tempfile.gettempdir()).glob("secretary-github-bootstrap-*")), [])
+        self.assertEqual(len(capability_directories), 1)
+        self.assertFalse(capability_directories[0].exists())
 
     def test_bootstrap_file_accepts_sudo_original_caller_only(self) -> None:
         source = Path(self.temporary.name) / "bootstrap"
@@ -528,18 +540,51 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         bootstrap = Path(self.temporary.name) / "bootstrap-timeout"
         bootstrap.write_text("fixture-bootstrap\n", encoding="utf-8")
         bootstrap.chmod(0o600)
+        capability_directories: list[Path] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def tracked_mkdtemp(*args, **kwargs):
+            directory = Path(real_mkdtemp(*args, **kwargs))
+            capability_directories.append(directory)
+            return str(directory)
+
         with (
             mock.patch(
                 "secretary.infra.github_credential._proc.run",
                 side_effect=subprocess.TimeoutExpired(["git", "clone"], 300),
             ),
+            mock.patch("secretary.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
             self.assertRaisesRegex(installation.InstallError, "clone instance remote: command could not run") as failure,
         ):
             installation._clone_instance(
                 "https://github.com/example/private.git", self.instance / "clone", bootstrap_credential=bootstrap
             )
         self.assertNotIn("fixture-bootstrap", str(failure.exception))
-        self.assertEqual(list(Path("/tmp").glob("secretary-github-bootstrap-*")), [])
+        self.assertEqual(len(capability_directories), 1)
+        self.assertFalse(capability_directories[0].exists())
+
+    def test_bypass_status_reports_the_managed_store_condition_independently(self) -> None:
+        self.set_token()
+        transports = {
+            "ssh://git@github.com/example/private.git": ("ambient/manual-bypass", "available"),
+            str(self.instance): ("ambient/manual-bypass", "available"),
+            "https://gitlab.com/example/private.git": ("missing/unavailable", "available"),
+        }
+        for remote, expected in transports.items():
+            with self.subTest(remote=remote), mock.patch(
+                "secretary.checkpoint.state_repo.git", return_value=remote
+            ):
+                snapshot = _credential_snapshot(self.instance, {}, 1_700_000_000)
+            self.assertEqual((snapshot["state"], snapshot["store"]), expected)
+
+        (self.instance / "secrets" / secret_store.KEY_NAME).unlink()
+        with mock.patch(
+            "secretary.checkpoint.state_repo.git",
+            return_value="ssh://git@github.com/example/private.git",
+        ):
+            locked = _credential_snapshot(self.instance, {}, 1_700_000_000)
+        self.assertEqual(locked["state"], "ambient/manual-bypass")
+        self.assertEqual(locked["store"], "locked")
 
     def test_failed_credential_attempt_keeps_the_previous_verification_timestamp(self) -> None:
         pusher = CheckpointPusher(self.instance, clock=lambda: 1000)

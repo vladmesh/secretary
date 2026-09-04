@@ -49,7 +49,6 @@ from secretary.data import (
 )
 from secretary.infra.github_credential import (
     CredentialError,
-    CredentialReadiness,
     RemoteExecution,
 )
 from secretary.product_issues import (
@@ -856,7 +855,8 @@ def _object_field(value: dict[str, Any], name: str) -> dict[str, Any]:
 
 def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: float) -> dict[str, Any]:
     """Non-secret credential health. A locked store never implies equality."""
-    current = CredentialReadiness("missing/unavailable", "checkpoint remote is unavailable")
+    remote_git = RemoteExecution("", "checkpoint", instance_dir=instance_dir)
+    current = remote_git.managed_credential_state
     state = current.state
     reason = current.reason
     transport = "unknown"
@@ -866,10 +866,6 @@ def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: floa
         ).strip()
         remote_git = RemoteExecution(remote, "checkpoint", instance_dir=instance_dir)
         transport = remote_git.transport
-        if transport == "github-https":
-            current = remote_git.credential_state
-            state = current.state
-            reason = current.reason
     except state_repo.StateRepoError:
         transport = "unknown"
     if recorded.get("state") == "ambient/manual-bypass" or transport in {"local", "ssh", "unmanaged"}:

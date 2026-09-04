@@ -185,15 +185,20 @@ class RemoteExecution:
     def credential_state(self) -> CredentialReadiness:
         if self.transport == "github-https":
             if self.phase == "checkpoint":
-                if self.instance_dir is None:
-                    return CredentialReadiness("missing/unavailable", "managed credential has no instance context")
-                try:
-                    child = self._child_identity(Path(self.instance_dir))
-                except StateRepoError as exc:
-                    return CredentialReadiness("missing/unavailable", _safe_reason(str(exc)))
-                return checkpoint_credential_readiness_for_child(self.instance_dir, child)
+                return self.managed_credential_state
             return CredentialReadiness("managed-ready")
         return CredentialReadiness("ambient/manual-bypass", f"{self.transport} remote is unmanaged")
+
+    @property
+    def managed_credential_state(self) -> CredentialReadiness:
+        """Inspect the store as its Git child, independently of remote transport."""
+        if self.instance_dir is None:
+            return CredentialReadiness("missing/unavailable", "managed credential has no instance context")
+        try:
+            child = self._child_identity(Path(self.instance_dir))
+        except StateRepoError as exc:
+            return CredentialReadiness("missing/unavailable", _safe_reason(str(exc)))
+        return checkpoint_credential_readiness_for_child(self.instance_dir, child)
 
     def run_clone(self, target: Path, *, label: str, timeout: float) -> str:
         """Clone through the same boundary before a checkout owner exists."""
