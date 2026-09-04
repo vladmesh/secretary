@@ -242,8 +242,15 @@ def _clone_instance(remote: str, target: Path, *, bootstrap_credential: Path | N
     # Clearing credential.helper is intentional even when no bootstrap input was
     # supplied: a clean recovery must not silently succeed through a per-user
     # ambient credential and then claim that the store is its source.
-    environment = helper_environment(bootstrap_file=bootstrap_credential)
-    _run(argv, label="clone instance remote", timeout=300, environment=environment)
+    if bootstrap_credential is None:
+        _run(argv, label="clone instance remote", timeout=300)
+    else:
+        _run(
+            argv,
+            label="clone instance remote",
+            timeout=300,
+            environment=helper_environment(bootstrap_file=bootstrap_credential),
+        )
 
 
 def _bootstrap_credential(args: argparse.Namespace, target: Path) -> tuple[Path | None, Path | None]:
