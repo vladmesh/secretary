@@ -139,18 +139,23 @@ to Git's credential protocol for `https://github.com`, never to command argument
 logs, or status. A locked, missing, malformed, or rejected value stops the HTTPS checkpoint push.
 
 A clean host cannot fetch an inaccessible private repository from the encrypted store inside it. Supply
-one external bootstrap credential only for the initial clone, then recover the installation key and use
-the encrypted checkpoint value thereafter:
+one external bootstrap credential for the initial clone. The same recover command is safe after an
+interruption: its existing-checkout fetch uses that supplied bootstrap credential when present, or the
+unlocked encrypted checkpoint credential when it is not. If neither source is available, recovery stops
+before contacting the remote with an actionable credential-input reason; it never falls through to an
+ambient Git helper.
 
 ```bash
 sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
   --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
 ```
 
-`--bootstrap-credential-stdin` is also supported, but cannot share stdin with a recovery phrase. The
-bootstrap input is mode-checked, is neither tracked nor retained after clone, and is not an ongoing
-credential source. `status --json` reports `checkpoint.credential` readiness, source, and verification
-age only; it never compares or prints values while the store is locked.
+`--bootstrap-credential-stdin` is also supported, but cannot share stdin with a recovery phrase. A
+mode-0600 bootstrap file may be owned by the account invoking `sudo` or by the effective command user;
+any other owner is refused. The bootstrap input is mode-checked, is neither tracked nor retained after
+the Git operation, and is not an ongoing checkpoint source. `status --json` reports
+`checkpoint.credential` readiness, source, and verification age only; it never compares or prints
+values while the store is locked.
 
 ## Writers
 

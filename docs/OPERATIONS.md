@@ -114,10 +114,14 @@ pusher disables ambient Git helpers and uses its own native credential helper, s
 `secretary status --json --instance INSTANCE` for managed-ready, locked/unverifiable,
 missing/unavailable, or ambient/manual-bypass state.
 
-On a clean recovery, provide `--bootstrap-credential-file` (or `--bootstrap-credential-stdin`) solely
-to clone the still-private instance repository, and use `--recovery-phrase-file` separately to restore
-the installation key. This hermetically supported path does not perform the later live credential entry,
-cutover, or recovery drill: schedule those as an operator change after the candidate is accepted.
+On a clean recovery, provide `--bootstrap-credential-file` (or `--bootstrap-credential-stdin`) for the
+initial clone, and use `--recovery-phrase-file` separately to restore the installation key. Repeating
+that command after an interrupted recovery uses the supplied bootstrap input for the existing checkout's
+fetch; without it, recovery uses the unlocked managed store credential and otherwise fails closed before
+remote contact. Ambient Git helpers are never a recovery or checkpoint fallback. Under `sudo`, a
+mode-0600 bootstrap file may be owned by the sudo caller or root. This hermetically supported path does
+not perform the later live credential entry, cutover, or recovery drill: schedule those as an operator
+change after the candidate is accepted.
 
 ## Codex provider-internal fan-out policy
 

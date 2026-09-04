@@ -22,6 +22,17 @@ class CredentialError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RemoteAuthSelection:
+    """Non-secret Git configuration selected before a private remote child starts."""
+
+    source: str
+    environment: dict[str, str]
+
+    def command(self, args: list[str]) -> list[str]:
+        return [*helper_config_args(), *args]
+
+
+@dataclass(frozen=True)
 class CredentialReadiness:
     state: str
     reason: str = ""
@@ -86,6 +97,52 @@ def helper_config_args() -> list[str]:
     return ["-c", "credential.helper=", "-c", f"credential.helper={helper_command()}"]
 
 
+def select_private_remote_auth(
+    phase: str,
+    *,
+    instance_dir: Path | None = None,
+    bootstrap_file: Path | None = None,
+) -> RemoteAuthSelection:
+    """Select the only allowed credential source before a private Git child starts.
+
+    The three phases are deliberately explicit: the private checkout cannot
+    read its own store before clone; recovery reuse may use supplied bootstrap
+    material or an unlocked managed envelope; checkpoint operations never use
+    bootstrap material.  Every result clears ambient helpers through
+    :meth:`RemoteAuthSelection.command`.
+    """
+    if phase == "initial-clone":
+        if bootstrap_file is None:
+            raise CredentialError("bootstrap credential is required to clone the private instance remote")
+        return RemoteAuthSelection("bootstrap", helper_environment(bootstrap_file=bootstrap_file))
+    if phase == "recovery-reuse":
+        if bootstrap_file is not None:
+            return RemoteAuthSelection("bootstrap", helper_environment(bootstrap_file=bootstrap_file))
+        if instance_dir is None:
+            raise CredentialError("managed credential needs the existing instance checkout")
+        readiness = checkpoint_credential_readiness(instance_dir)
+        if not readiness.ready:
+            detail = f": {readiness.reason}" if readiness.reason else ""
+            raise CredentialError(
+                "recovery remote access needs a bootstrap credential or an available managed "
+                f"credential ({readiness.state}){detail}"
+            )
+        return RemoteAuthSelection("managed-store", helper_environment(instance_dir))
+    if phase == "checkpoint":
+        if instance_dir is None:
+            raise CredentialError("managed checkpoint credential needs the instance checkout")
+        return RemoteAuthSelection("managed-store", helper_environment(instance_dir))
+    raise CredentialError(f"unknown private remote authentication phase: {phase}")
+
+
+def bootstrap_file_owner_is_allowed(info: os.stat_result) -> bool:
+    """Allow the current identity or sudo's original caller to own a 0600 file."""
+    if info.st_uid == os.geteuid():
+        return True
+    original = os.environ.get("SUDO_UID", "")
+    return os.geteuid() == 0 and original.isdecimal() and info.st_uid == int(original)
+
+
 def _safe_reason(message: str) -> str:
     return " ".join(message.replace("\r", " ").replace("\n", " ").split())[:240]
 
@@ -132,7 +189,7 @@ def _bootstrap_token(path: Path) -> str:
         raise CredentialError("bootstrap credential file is unavailable") from exc
     if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
         raise CredentialError("bootstrap credential file must be a regular mode-0600 file")
-    if info.st_uid != os.geteuid():
+    if not bootstrap_file_owner_is_allowed(info):
         raise CredentialError("bootstrap credential file belongs to another user")
     try:
         return validate_checkpoint_credential(path.read_bytes())

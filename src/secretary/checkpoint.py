@@ -48,9 +48,9 @@ from secretary.data import (
     export_runs,
 )
 from secretary.infra.github_credential import (
+    CredentialError,
     checkpoint_credential_readiness,
-    helper_config_args,
-    helper_environment,
+    select_private_remote_auth,
 )
 from secretary.product_issues import (
     ProductIssueTransaction,
@@ -771,14 +771,15 @@ class CheckpointPusher:
 
     def _run(self, args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
         try:
+            auth = select_private_remote_auth("checkpoint", instance_dir=self.instance_dir)
             return state_repo.run_git(
                 self.instance_dir,
-                [*helper_config_args(), *args],
+                auth.command(args),
                 label=f"checkpoint {args[0]}",
                 timeout=timeout,
-                extra_env=helper_environment(self.instance_dir),
+                extra_env=auth.environment,
             )
-        except state_repo.StateRepoError as exc:
+        except (CredentialError, state_repo.StateRepoError) as exc:
             raise _GitFailure(str(exc)) from None
 
     @staticmethod

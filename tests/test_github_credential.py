@@ -209,6 +209,96 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertIn("cannot share standard input", error)
 
+    def test_private_remote_selector_enforces_clone_reuse_and_checkpoint_sources(self) -> None:
+        with self.assertRaisesRegex(github_credential.CredentialError, "bootstrap credential is required"):
+            github_credential.select_private_remote_auth("initial-clone")
+        bootstrap = Path(self.temporary.name) / "bootstrap"
+        bootstrap.write_text("fixture-bootstrap\n", encoding="utf-8")
+        bootstrap.chmod(0o600)
+        selected = github_credential.select_private_remote_auth("initial-clone", bootstrap_file=bootstrap)
+        self.assertEqual(selected.source, "bootstrap")
+        self.assertEqual(selected.environment["SECRETARY_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
+        self.assertEqual(selected.command(["fetch", "origin"])[:2], ["-c", "credential.helper="])
+
+        with self.assertRaisesRegex(github_credential.CredentialError, "needs a bootstrap credential"):
+            github_credential.select_private_remote_auth("recovery-reuse", instance_dir=self.instance)
+        self.set_token()
+        managed = github_credential.select_private_remote_auth("recovery-reuse", instance_dir=self.instance)
+        self.assertEqual(managed.source, "managed-store")
+        self.assertEqual(managed.environment["SECRETARY_CHECKPOINT_INSTANCE"], str(self.instance))
+        checkpoint = github_credential.select_private_remote_auth("checkpoint", instance_dir=self.instance)
+        self.assertEqual(checkpoint.source, "managed-store")
+
+    def test_recovery_reuse_selects_bootstrap_or_managed_auth_and_never_ambient(self) -> None:
+        remote = "https://github.com/example/private.git"
+        commands: list[tuple[list[str], dict[str, str]]] = []
+
+        def inspect(_instance, args, **_kwargs):
+            if args == ["remote", "get-url", "origin"]:
+                return remote + "\n"
+            if args == ["status", "--porcelain"]:
+                return ""
+            self.fail(f"unexpected local operation: {args}")
+
+        def run(_instance, args, **kwargs):
+            commands.append((args, kwargs["extra_env"]))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        self.set_token()
+        with (
+            mock.patch("secretary.installation.state_repo.git", side_effect=inspect),
+            mock.patch("secretary.installation.state_repo.run_git", side_effect=run),
+        ):
+            self.assertEqual(
+                installation._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False),
+                "reused checkpoint checkout",
+            )
+        self.assertEqual(len(commands), 2)
+        for args, environment in commands:
+            self.assertEqual(args[:2], ["-c", "credential.helper="])
+            self.assertIn("SECRETARY_CHECKPOINT_INSTANCE", environment)
+
+        (self.instance / "secrets" / secret_store.KEY_NAME).unlink()
+        commands.clear()
+        with (
+            mock.patch("secretary.installation.state_repo.git", side_effect=inspect),
+            mock.patch("secretary.installation.state_repo.run_git", side_effect=run) as remote_run,
+            self.assertRaisesRegex(installation.InstallError, "needs a bootstrap credential"),
+        ):
+            installation._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False)
+        remote_run.assert_not_called()
+
+        bootstrap = Path(self.temporary.name) / "bootstrap"
+        bootstrap.write_text("fixture-bootstrap\n", encoding="utf-8")
+        bootstrap.chmod(0o600)
+        with (
+            mock.patch("secretary.installation.state_repo.git", side_effect=inspect),
+            mock.patch("secretary.installation.state_repo.run_git", side_effect=run),
+        ):
+            installation._clone_or_reuse(
+                remote, self.instance, recovery=True, dry_run=False, bootstrap_credential=bootstrap
+            )
+        self.assertEqual(commands[0][1]["SECRETARY_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
+
+    def test_bootstrap_file_accepts_sudo_original_caller_only(self) -> None:
+        source = Path(self.temporary.name) / "bootstrap"
+        source.write_text("fixture-bootstrap\n", encoding="utf-8")
+        source.chmod(0o600)
+        info = source.lstat()
+        with (
+            mock.patch("secretary.infra.github_credential.os.geteuid", return_value=0),
+            mock.patch.dict(os.environ, {"SUDO_UID": str(info.st_uid)}, clear=False),
+        ):
+            self.assertTrue(github_credential.bootstrap_file_owner_is_allowed(info))
+            self.assertEqual(
+                self.digest(github_credential._bootstrap_token(source)), self.digest("fixture-bootstrap")
+            )
+        with (
+            mock.patch("secretary.infra.github_credential.os.geteuid", return_value=0),
+            mock.patch.dict(os.environ, {"SUDO_UID": str(info.st_uid + 1)}, clear=False),
+        ):
+            self.assertFalse(github_credential.bootstrap_file_owner_is_allowed(info))
+
     def test_helper_emits_only_native_protocol_reply_for_github(self) -> None:
         self.set_token()
         output = io.StringIO()
