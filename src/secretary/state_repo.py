@@ -184,6 +184,7 @@ def run_git(
     timeout: float = 120,
     extra_env: dict[str, str] | None = None,
     input: str | None = None,
+    child: GitChildIdentity | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one instance-repository Git command through its privilege boundary.
 
@@ -206,7 +207,7 @@ def run_git(
     # unprivileged process attempt `runuser`.
     if os.getuid() == 0:
         try:
-            child = git_child_identity(instance_dir)
+            child = child or git_child_identity(instance_dir)
             if child.uid != 0:
                 # `runuser` rebuilds the calling environment, and what it keeps
                 # depends on its PAM configuration. Restate the whole policy as
@@ -245,6 +246,54 @@ def run_git(
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise StateRepoError(f"{label} failed: {exc}") from None
     return result
+
+
+def run_as_git_child(
+    instance_dir: Path,
+    argv: list[str],
+    *,
+    label: str,
+    timeout: float = 120,
+    extra_env: dict[str, str] | None = None,
+    child: GitChildIdentity | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a non-Git consumer under the identity selected for instance Git.
+
+    A managed credential readiness probe must not inspect a runtime-user-owned
+    installation key as root and then speak for the eventual Git child.  This
+    narrow runner shares the same identity crossing and controlled environment
+    as :func:`run_git`, without accepting repository-controlled Git config.
+    """
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    resolved = child or git_child_identity(instance_dir)
+    env = git_env()
+    if extra_env:
+        env.update(extra_env)
+    command = list(argv)
+    if os.getuid() == 0 and resolved.uid != 0:
+        command = [
+            "runuser",
+            "--user",
+            resolved.name or pwd.getpwuid(resolved.uid).pw_name,
+            "--",
+            "env",
+            *[argument for name in GIT_SELECTION_VARIABLES for argument in ("--unset", name)],
+            f"GIT_TERMINAL_PROMPT={env['GIT_TERMINAL_PROMPT']}",
+            f"GIT_SSH_COMMAND={env['GIT_SSH_COMMAND']}",
+            *[f"{name}={value}" for name, value in sorted((extra_env or {}).items())],
+            *command,
+        ]
+    try:
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise StateRepoError(f"{label} failed: {exc}") from None
 
 
 def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120) -> str:

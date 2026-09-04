@@ -5,6 +5,7 @@ import os
 import pwd
 import secrets
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import installation, secret_store
-from secretary.checkpoint import CheckpointPusher
+from secretary.checkpoint import CheckpointPusher, _credential_snapshot
 from secretary.cli import main
 from secretary.infra import github_credential
 from secretary.secret_words import RECOVERY_WORDS
@@ -63,6 +64,43 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             purpose=github_credential.CHECKPOINT_CREDENTIAL_PURPOSE,
             actor="test",
         )
+
+    @staticmethod
+    def runtime_account() -> pwd.struct_passwd | None:
+        """A usable non-root account, without naming a host-specific user."""
+        preferred: list[pwd.struct_passwd] = []
+        try:
+            owner = pwd.getpwuid(Path(__file__).stat().st_uid)
+            if owner.pw_uid:
+                preferred.append(owner)
+        except KeyError:
+            pass
+        seen: set[int] = set()
+        candidates = [*preferred, *pwd.getpwall()]
+        environment = github_credential._helper_runtime_environment()
+        for account in candidates:
+            if not account.pw_uid or account.pw_uid in seen:
+                continue
+            seen.add(account.pw_uid)
+            probe = subprocess.run(
+                [
+                    "runuser",
+                    "--user",
+                    account.pw_name,
+                    "--",
+                    "env",
+                    *[f"{name}={value}" for name, value in environment.items()],
+                    sys.executable,
+                    "-c",
+                    "import secretary.infra.github_credential",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if probe.returncode == 0:
+                return account
+        return None
 
     def run_cli(self, argv: list[str], stdin: bytes = b"") -> tuple[int, str, str]:
         output, error = io.StringIO(), io.StringIO()
@@ -221,8 +259,10 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertEqual(selected.environment["SECRETARY_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
         self.assertNotIn("credential.helper", " ".join(selected.environment))
 
-        with self.assertRaisesRegex(github_credential.CredentialError, "needs a bootstrap credential"):
-            github_credential.select_private_remote_auth("recovery-reuse", instance_dir=self.instance)
+        # Selection does not inspect the caller's filesystem identity. The
+        # RemoteExecution boundary resolves and checks the eventual Git child.
+        unavailable = github_credential.select_private_remote_auth("recovery-reuse", instance_dir=self.instance)
+        self.assertEqual(unavailable.source, "managed-store")
         self.set_token()
         managed = github_credential.select_private_remote_auth("recovery-reuse", instance_dir=self.instance)
         self.assertEqual(managed.source, "managed-store")
@@ -337,9 +377,13 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         run.assert_not_called()
 
     @unittest.skipUnless(os.geteuid() == 0, "requires a real root-to-runtime-user Git crossing")
-    def test_root_hands_bootstrap_to_the_actual_runtime_git_child_then_removes_it(self) -> None:
-        """Exercise real runuser plus Git's helper protocol, not a mocked run_git."""
-        runtime = pwd.getpwnam("dev")
+    def test_root_uses_the_runtime_identity_for_managed_readiness_and_consumption(self) -> None:
+        """Exercise real runuser, readiness, status and Git helper consumption."""
+        runtime = self.runtime_account()
+        if runtime is None:
+            self.skipTest("no usable non-root account can import the product")
+        self.set_token()
+        git(self.instance, "remote", "add", "origin", "https://github.com/example/private.git")
         for path in sorted(self.instance.rglob("*"), key=lambda item: len(item.parts), reverse=True):
             os.chown(path, runtime.pw_uid, runtime.pw_gid)
         os.chown(self.instance, runtime.pw_uid, runtime.pw_gid)
@@ -349,16 +393,44 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         bootstrap.chmod(0o600)
         os.chown(Path(self.temporary.name), runtime.pw_uid, runtime.pw_gid)
         os.chmod(Path(self.temporary.name), 0o700)
+
+        self.assertEqual(
+            github_credential.checkpoint_credential_readiness(self.instance).state, "locked/unverifiable"
+        )
+        managed = github_credential.RemoteExecution(
+            "https://github.com/example/private.git", "checkpoint", instance_dir=self.instance
+        )
+        self.assertEqual(managed.credential_state.state, "managed-ready")
+        self.assertEqual(_credential_snapshot(self.instance, {}, 1_700_000_000)["state"], "managed-ready")
+        self.assertEqual(CheckpointPusher(self.instance)._remote_execution(managed.remote).credential_state.state, "managed-ready")
+
+        recovery = github_credential.RemoteExecution(
+            "https://github.com/example/private.git", "recovery-reuse", instance_dir=self.instance
+        )
+        managed_result = recovery.run_instance(
+            self.instance,
+            ["credential", "fill"],
+            label="managed recovery reuse fixture",
+            input="protocol=https\nhost=github.com\n\n",
+        )
+        self.assertEqual(managed_result.returncode, 0, managed_result.stderr)
+        managed_reply = dict(line.split("=", 1) for line in managed_result.stdout.splitlines() if "=" in line)
+        self.assertEqual(self.digest(managed_reply.get("password", "")), self.digest("github-test-token"))
+
         remote = github_credential.RemoteExecution(
             "https://github.com/example/private.git", "recovery-reuse", instance_dir=self.instance,
             bootstrap_file=bootstrap,
         )
-        result = remote.run_instance(
-            self.instance,
-            ["credential", "fill"],
-            label="root crossing fixture",
-            input="protocol=https\nhost=github.com\n\n",
-        )
+        restricted_tmp = Path(tempfile.mkdtemp(prefix="secretary-restricted-tmp-", dir="/tmp"))
+        restricted_tmp.chmod(0o700)
+        self.addCleanup(restricted_tmp.rmdir)
+        with mock.patch.dict(os.environ, {"TMPDIR": str(restricted_tmp)}, clear=False):
+            result = remote.run_instance(
+                self.instance,
+                ["credential", "fill"],
+                label="root crossing fixture",
+                input="protocol=https\nhost=github.com\n\n",
+            )
         self.assertEqual(result.returncode, 0, result.stderr)
         reply = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         self.assertEqual(self.digest(reply.get("password", "")), self.digest(token))
@@ -451,3 +523,34 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         source.chmod(0o644)
         with self.assertRaisesRegex(installation.InstallError, "mode-0600"):
             installation._bootstrap_credential(args, self.instance / "target")
+
+    def test_clone_timeout_is_a_sanitized_install_error_and_cleans_capability(self) -> None:
+        bootstrap = Path(self.temporary.name) / "bootstrap-timeout"
+        bootstrap.write_text("fixture-bootstrap\n", encoding="utf-8")
+        bootstrap.chmod(0o600)
+        with (
+            mock.patch(
+                "secretary.infra.github_credential._proc.run",
+                side_effect=subprocess.TimeoutExpired(["git", "clone"], 300),
+            ),
+            self.assertRaisesRegex(installation.InstallError, "clone instance remote: command could not run") as failure,
+        ):
+            installation._clone_instance(
+                "https://github.com/example/private.git", self.instance / "clone", bootstrap_credential=bootstrap
+            )
+        self.assertNotIn("fixture-bootstrap", str(failure.exception))
+        self.assertEqual(list(Path("/tmp").glob("secretary-github-bootstrap-*")), [])
+
+    def test_failed_credential_attempt_keeps_the_previous_verification_timestamp(self) -> None:
+        pusher = CheckpointPusher(self.instance, clock=lambda: 1000)
+        pusher._credential = {"state": "locked/unverifiable", "reason": "installation key is unavailable"}
+        previous = {
+            "credential": {
+                "state": "managed-ready",
+                "last_verified_epoch": 100,
+                "last_verified_at": "1970-01-01T00:01:40Z",
+            }
+        }
+        recorded = pusher._record(previous, pusher._attempt(), 1000)
+        self.assertEqual(recorded["credential"]["last_verified_epoch"], 100)
+        self.assertEqual(recorded["credential"]["last_verified_at"], "1970-01-01T00:01:40Z")

@@ -161,7 +161,9 @@ ongoing checkpoint source. Local/file remotes remain ordinary hermetic Git; SSH 
 manual-bypass transport and use no HTTPS helper. Any HTTPS host other than `github.com` is refused,
 rather than falling through to an ambient helper. `status --json` reports
 `checkpoint.credential` readiness, source, and verification age only; it never compares or prints
-values while the store is locked.
+values while the store is locked. When an operator invokes status, recovery, or an upgrade through
+`sudo`, readiness is evaluated by the resolved installation-user Git consumer, not by the root
+orchestrator reading a user-owned installation key.
 
 ## Writers
 

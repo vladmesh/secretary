@@ -125,6 +125,10 @@ need no GitHub credential, SSH is reported as manual-bypass, and non-GitHub HTTP
 This hermetically supported path does not perform the later live credential entry, cutover, or recovery
 drill: schedule those as an operator change after the candidate is accepted.
 
+Credential readiness and its verification timestamp belong to the installation-user Git consumer. A
+root `status`, `recover`, or `upgrade` orchestrates that same child rather than reading a user-owned
+installation key itself; a failed readiness attempt preserves the last successful verification time.
+
 ## Codex provider-internal fan-out policy
 
 Secretary does not require provider-native child-agent isolation. Codex launches use the validated

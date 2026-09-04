@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
@@ -92,16 +94,54 @@ def checkpoint_credential_readiness(instance_dir: Path) -> CredentialReadiness:
     return CredentialReadiness("managed-ready")
 
 
+def checkpoint_credential_readiness_for_child(
+    instance_dir: Path, child: GitChildIdentity
+) -> CredentialReadiness:
+    """Read managed state only as the Git child that would consume it."""
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    if child.uid == os.geteuid():
+        return checkpoint_credential_readiness(instance_dir)
+    try:
+        result = state_repo.run_as_git_child(
+            instance_dir,
+            _helper_argv("readiness"),
+            label="inspect managed GitHub credential",
+            extra_env=_helper_runtime_environment(instance_dir),
+            child=child,
+        )
+    except StateRepoError as exc:
+        return CredentialReadiness("missing/unavailable", _safe_reason(str(exc)))
+    try:
+        payload = json.loads(result.stdout)
+        state = str(payload["state"])
+        reason = _safe_reason(str(payload.get("reason") or ""))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return CredentialReadiness("missing/unavailable", "managed credential readiness probe returned invalid metadata")
+    if result.returncode or state not in {"managed-ready", "locked/unverifiable", "missing/unavailable"}:
+        return CredentialReadiness("missing/unavailable", reason or "managed credential readiness probe failed")
+    return CredentialReadiness(state, reason)
+
+
 def helper_command() -> str:
     import shlex
 
-    # An installed product imports normally.  Source-checkout tests cross to a
-    # different Unix user, whose runuser environment deliberately drops the
-    # caller's PYTHONPATH, so make that checkout import root explicit too.  It
-    # is product code location, never credential material.
+    environment = _helper_runtime_environment()
+    prefix = f"PYTHONPATH={shlex.quote(environment['PYTHONPATH'])} " if "PYTHONPATH" in environment else ""
+    return "!" + prefix + " ".join(shlex.quote(argument) for argument in _helper_argv("helper"))
+
+
+def _helper_argv(mode: str) -> list[str]:
+    return [sys.executable, "-m", "secretary.infra.github_credential", mode]
+
+
+def _helper_runtime_environment(instance_dir: Path | None = None) -> dict[str, str]:
+    environment = helper_environment(instance_dir)
     source_root = Path(__file__).resolve().parents[2]
-    prefix = f"PYTHONPATH={shlex.quote(str(source_root))} " if (source_root / "secretary").is_dir() else ""
-    return "!" + prefix + shlex.quote(sys.executable) + " -m secretary.infra.github_credential helper"
+    # In a source checkout the import root is literally named `src`. Installed
+    # modules live below site-packages and require no PYTHONPATH override.
+    if source_root.name == "src" and (source_root / "secretary").is_dir():
+        environment["PYTHONPATH"] = str(source_root)
+    return environment
 
 
 def helper_environment(
@@ -145,7 +185,13 @@ class RemoteExecution:
     def credential_state(self) -> CredentialReadiness:
         if self.transport == "github-https":
             if self.phase == "checkpoint":
-                return checkpoint_credential_readiness(Path(self.instance_dir or "."))
+                if self.instance_dir is None:
+                    return CredentialReadiness("missing/unavailable", "managed credential has no instance context")
+                try:
+                    child = self._child_identity(Path(self.instance_dir))
+                except StateRepoError as exc:
+                    return CredentialReadiness("missing/unavailable", _safe_reason(str(exc)))
+                return checkpoint_credential_readiness_for_child(self.instance_dir, child)
             return CredentialReadiness("managed-ready")
         return CredentialReadiness("ambient/manual-bypass", f"{self.transport} remote is unmanaged")
 
@@ -164,7 +210,7 @@ class RemoteExecution:
                 )
             except FileNotFoundError:
                 raise CredentialError(f"{label}: command not found") from None
-            except OSError:
+            except (OSError, subprocess.TimeoutExpired):
                 raise CredentialError(f"{label}: command could not run") from None
             if completed.returncode:
                 detail = (completed.stderr or completed.stdout or "").strip().splitlines()
@@ -182,14 +228,20 @@ class RemoteExecution:
     ):
         """Run one existing-checkout remote operation through the boundary."""
         try:
-            child = state_repo.git_child_identity(target)
+            child = self._child_identity(target)
         except StateRepoError as exc:
             raise CredentialError(f"{label}: {exc}") from None
         with self._authorized(child) as (prefix, environment, source):
             self.source = source
             try:
                 return state_repo.run_git(
-                    target, [*prefix, *args], label=label, timeout=timeout, extra_env=environment, input=input
+                    target,
+                    [*prefix, *args],
+                    label=label,
+                    timeout=timeout,
+                    extra_env=environment,
+                    input=input,
+                    child=child,
                 )
             except StateRepoError as exc:
                 raise CredentialError(str(exc)) from None
@@ -205,11 +257,25 @@ class RemoteExecution:
         if transport in {"ssh", "unmanaged"}:
             yield [], {}, "manual-bypass"
             return
-        selection = select_private_remote_auth(
-            self.phase, instance_dir=self.instance_dir, bootstrap_file=self.bootstrap_file
-        )
+        selection = select_private_remote_auth(self.phase, instance_dir=self.instance_dir, bootstrap_file=self.bootstrap_file)
+        if selection.source == "managed-store":
+            if self.instance_dir is None:
+                raise CredentialError("managed credential has no instance context")
+            readiness = checkpoint_credential_readiness_for_child(self.instance_dir, child)
+            if not readiness.ready:
+                detail = f": {readiness.reason}" if readiness.reason else ""
+                if self.phase == "recovery-reuse":
+                    raise CredentialError(
+                        "recovery remote access needs a bootstrap credential or an available managed "
+                        f"credential ({readiness.state}){detail}"
+                    )
+                raise CredentialError(f"managed GitHub credential {readiness.state}{detail}")
         with _operation_capability(selection, child) as environment:
             yield _helper_config_args(), environment, selection.source
+
+    @staticmethod
+    def _child_identity(target: Path) -> GitChildIdentity:
+        return state_repo.git_child_identity(target)
 
 
 @contextmanager
@@ -222,7 +288,9 @@ def _operation_capability(selection: RemoteAuthSelection, child: GitChildIdentit
     if not raw_path:
         raise CredentialError("bootstrap credential is unavailable")
     token = _bootstrap_token(Path(raw_path))
-    directory = Path(tempfile.mkdtemp(prefix="secretary-github-bootstrap-"))
+    # `/tmp` is intentionally chosen over caller-controlled TMPDIR: the child
+    # must be able to traverse the capability's parent after a root handoff.
+    directory = Path(tempfile.mkdtemp(prefix="secretary-github-bootstrap-", dir="/tmp"))
     capability = directory / "credential"
     try:
         try:
@@ -270,13 +338,6 @@ def select_private_remote_auth(
             return RemoteAuthSelection("bootstrap", helper_environment(bootstrap_file=bootstrap_file))
         if instance_dir is None:
             raise CredentialError("managed credential needs the existing instance checkout")
-        readiness = checkpoint_credential_readiness(instance_dir)
-        if not readiness.ready:
-            detail = f": {readiness.reason}" if readiness.reason else ""
-            raise CredentialError(
-                "recovery remote access needs a bootstrap credential or an available managed "
-                f"credential ({readiness.state}){detail}"
-            )
         return RemoteAuthSelection("managed-store", helper_environment(instance_dir))
     if phase == "checkpoint":
         if instance_dir is None:
@@ -349,9 +410,13 @@ def _bootstrap_token(path: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="secretary-github-credential")
-    parser.add_argument("mode", choices=("helper",))
+    parser.add_argument("mode", choices=("helper", "readiness"))
     parser.add_argument("action", nargs="?", default="get")
     args = parser.parse_args(argv)
+    if args.mode == "readiness":
+        readiness = checkpoint_credential_readiness(Path(os.environ.get("SECRETARY_CHECKPOINT_INSTANCE", ".")))
+        print(json.dumps({"state": readiness.state, "reason": readiness.reason}, sort_keys=True))
+        return 0
     return run_helper(args.action)
 
 
