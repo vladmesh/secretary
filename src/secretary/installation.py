@@ -56,6 +56,7 @@ from secretary.infra.github_credential import (
     CredentialError,
     RemoteAuthSelection,
     bootstrap_file_owner_is_allowed,
+    is_github_https_remote,
     select_private_remote_auth,
     validate_checkpoint_credential,
 )
@@ -233,7 +234,7 @@ def _clone_or_reuse(
         raise InstallError(str(exc)) from None
     if dirty:
         raise InstallError("instance checkout has local changes; recovery will not overwrite them")
-    if not dry_run:
+    if not dry_run and is_github_https_remote(remote):
         try:
             auth = select_private_remote_auth(
                 "recovery-reuse", instance_dir=target, bootstrap_file=bootstrap_credential
@@ -244,10 +245,29 @@ def _clone_or_reuse(
         _authenticated_instance_git(
             target, ["merge", "--ff-only", "@{u}"], "fast-forward instance checkout", auth
         )
+    elif not dry_run:
+        # A local or SSH fixture has no GitHub HTTPS credential exchange.  Keep
+        # its ordinary Git behavior rather than requiring an unusable token;
+        # the guarded branch above remains the only path to a private GitHub
+        # remote and clears ambient helpers before it contacts the network.
+        try:
+            state_repo.git(target, ["fetch", "--quiet", "origin"], label="fetch instance remote")
+            state_repo.git(
+                target, ["merge", "--ff-only", "@{u}"], label="fast-forward instance checkout"
+            )
+        except state_repo.StateRepoError as exc:
+            raise InstallError(str(exc)) from None
     return "reused checkpoint checkout"
 
 
 def _clone_instance(remote: str, target: Path, *, bootstrap_credential: Path | None) -> None:
+    if not is_github_https_remote(remote):
+        _run(
+            ["git", "clone", "--", remote, str(target)],
+            label="clone instance remote",
+            timeout=300,
+        )
+        return
     try:
         auth = select_private_remote_auth("initial-clone", bootstrap_file=bootstrap_credential)
     except CredentialError as exc:

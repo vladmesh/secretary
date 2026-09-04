@@ -519,7 +519,7 @@ needed and it does not race the tick writer.
   checkpoint; the raw installation key and the recovery phrase do not (see
   [Recovery](RECOVERY.md#secrets)). The host `runtime.env` is outside the store, and facts, exports and
   diagnostics carry no secrets.
-- Private-instance remote Git uses one product-owned credential-selection boundary. Initial clone
+- Private HTTPS GitHub instance-remote Git uses one product-owned credential-selection boundary. Initial clone
   requires explicit bootstrap input; existing-checkout recovery uses supplied bootstrap input or the
   unlocked managed envelope; checkpoint probes and pushes use only the managed envelope. Each selected
   Git child clears ambient helpers, so a per-user credential file remains available to its other

@@ -50,6 +50,7 @@ from secretary.data import (
 from secretary.infra.github_credential import (
     CredentialError,
     checkpoint_credential_readiness,
+    is_github_https_remote,
     select_private_remote_auth,
 )
 from secretary.product_issues import (
@@ -718,7 +719,7 @@ class CheckpointPusher:
         The Git command still clears ambient helpers in either case.
         """
         remote_url = self._git(["remote", "get-url", self.remote], "checkpoint remote URL").strip()
-        if not _is_github_https(remote_url):
+        if not is_github_https_remote(remote_url):
             self._credential = {
                 "state": "ambient/manual-bypass",
                 "reason": "checkpoint remote is not HTTPS github.com",
@@ -793,17 +794,6 @@ class CheckpointPusher:
         return (result.stderr or result.stdout or "").strip()
 
 
-def _is_github_https(remote: str) -> bool:
-    """The helper itself makes the final host decision; this is preflight only."""
-    from urllib.parse import urlsplit
-
-    try:
-        parsed = urlsplit(remote)
-    except ValueError:
-        return False
-    return parsed.scheme == "https" and (parsed.hostname or "").lower() == "github.com"
-
-
 def checkpoint_snapshot(
     instance_dir: Path,
     *,
@@ -853,7 +843,7 @@ def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: floa
             remote = state_repo.git(
                 instance_dir, ["remote", "get-url", DEFAULT_REMOTE], label="inspect checkpoint remote"
             ).strip()
-            remote_is_managed = _is_github_https(remote)
+            remote_is_managed = is_github_https_remote(remote)
         except state_repo.StateRepoError:
             remote_is_managed = None
     if recorded.get("state") == "ambient/manual-bypass" or remote_is_managed is False:

@@ -280,6 +280,38 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             )
         self.assertEqual(commands[0][1]["SECRETARY_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
 
+    def test_non_github_recovery_reuse_does_not_require_a_github_credential(self) -> None:
+        remote = "file:///fixture/instance.git"
+
+        with (
+            mock.patch(
+                "secretary.installation.state_repo.git",
+                side_effect=(remote + "\n", "", "", ""),
+            ) as git,
+            mock.patch("secretary.installation.state_repo.run_git") as authenticated_git,
+        ):
+            self.assertEqual(
+                installation._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False),
+                "reused checkpoint checkout",
+            )
+
+        self.assertEqual(
+            [call.args[1] for call in git.call_args_list],
+            [
+                ["remote", "get-url", "origin"],
+                ["status", "--porcelain"],
+                ["fetch", "--quiet", "origin"],
+                ["merge", "--ff-only", "@{u}"],
+            ],
+        )
+        authenticated_git.assert_not_called()
+
+    def test_github_remote_detection_accepts_only_https_github(self) -> None:
+        self.assertTrue(github_credential.is_github_https_remote("https://github.com/example/private.git"))
+        self.assertFalse(github_credential.is_github_https_remote("git@github.com:example/private.git"))
+        self.assertFalse(github_credential.is_github_https_remote("https://github.com.example/private.git"))
+        self.assertFalse(github_credential.is_github_https_remote("file:///fixture/instance.git"))
+
     def test_bootstrap_file_accepts_sudo_original_caller_only(self) -> None:
         source = Path(self.temporary.name) / "bootstrap"
         source.write_text("fixture-bootstrap\n", encoding="utf-8")

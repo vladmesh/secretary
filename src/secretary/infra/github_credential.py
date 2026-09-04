@@ -8,6 +8,7 @@ import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from secretary.secret_store import SecretStoreError, SecretStoreStateError, read_secret
 from secretary.state_repo import StateRepoError
@@ -19,6 +20,20 @@ GITHUB_HOST = "github.com"
 
 class CredentialError(RuntimeError):
     """A managed credential cannot safely be used."""
+
+
+def is_github_https_remote(remote: str) -> bool:
+    """Whether this remote can use the GitHub HTTPS credential helper.
+
+    Local and SSH remotes do not ask Git for a GitHub HTTPS credential.  They
+    remain useful for hermetic recovery fixtures and explicit maintenance,
+    while the private GitHub path remains fail-closed.
+    """
+    try:
+        parsed = urlsplit(remote)
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() == GITHUB_HOST
 
 
 @dataclass(frozen=True)
