@@ -348,10 +348,15 @@ class InstanceCatalog:
         self.instance_path = report.instance_path
         self.instance_dir = report.instance_path.parent
         self.instance = report.instance
-        self.bindings = {
+        self.registered_bindings = {
             str(binding.get("id")): binding
             for binding in report.bindings
-            if isinstance(binding, dict) and binding.get("enabled") is True
+            if isinstance(binding, dict) and isinstance(binding.get("id"), str) and binding.get("id")
+        }
+        self.bindings = {
+            project: binding
+            for project, binding in self.registered_bindings.items()
+            if binding.get("enabled") is True
         }
         try:
             # The installation's own snapshot, not the checkout this module was imported from:
@@ -361,9 +366,13 @@ class InstanceCatalog:
             raise DispatcherError("invalid_heads", str(exc), 2) from None
 
     def binding(self, project: str) -> dict[str, Any]:
-        binding = self.bindings.get(project) or self.bindings.get(project.replace("_", "-"))
+        candidates = (project, project.replace("_", "-"))
+        binding = next((self.bindings[name] for name in candidates if name in self.bindings), None)
         if not binding:
-            raise HostError(f"project {project!r} is not enabled in the instance")
+            registered = getattr(self, "registered_bindings", self.bindings)
+            if any(name in registered for name in candidates):
+                raise HostError(f"project {project!r} is registered but not enabled for workloads")
+            raise HostError(f"project {project!r} is not registered in the instance")
         repo = binding.get("repo")
         if not isinstance(repo, str) or not repo:
             raise HostError(f"project {project!r} has no repo path")
@@ -1156,10 +1165,12 @@ class CommandHostRuntime:
         identity: dict[str, str] | None = None,
         heartbeat_run_id: str = "",
     ) -> dict[str, Any]:
-        """Bring one observer head up on its own workspace and terminal."""
-        projects = {*(sprint.get("repositories") or []), *(sprint.get("reservations") or [])}
-        for project in projects:
-            self._require_project_available(str(project))
+        """Bring one observer up in the dedicated observer repository.
+
+        Sprint repositories are canonical source roots and reservations are project ids. Neither
+        is the repository authority for this process: the observer worktree is cut from
+        ``observer_root_repo`` by ``_create_observer_workspace`` below.
+        """
         reference = str(sprint.get("ref") or "")
         if self.mode == "noop":
             workspace = Path(self.observer_workspace(reference))

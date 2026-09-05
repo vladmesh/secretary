@@ -32,6 +32,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from secretary import _proc, state_repo
 from secretary._fsutil import (
@@ -920,6 +921,13 @@ def _project_failure(
     return ProjectProvisionResult(project_id, target, transport, "failed", code, reason, retryable)
 
 
+def _recovery_identity_entry(digest: Any, *, path: bytes, entry_type: bytes, content: bytes) -> None:
+    """Hash one typed recovery input without allowing adjacent components to alias."""
+    for component in (path, entry_type, content):
+        digest.update(len(component).to_bytes(8, "big"))
+        digest.update(component)
+
+
 def _recovery_identity(instance_dir: Path, bindings: list[dict[str, object]]) -> str:
     digest = hashlib.sha256()
     checkpoint_inputs = [
@@ -928,33 +936,53 @@ def _recovery_identity(instance_dir: Path, bindings: list[dict[str, object]]) ->
     ]
     for relative in checkpoint_inputs:
         path = instance_dir / relative
-        digest.update(relative.encode())
-        digest.update(path.read_bytes() if path.is_file() else b"<absent>")
+        if path.is_file():
+            entry_type, content = b"file", path.read_bytes()
+        else:
+            entry_type, content = b"absent", b""
+        _recovery_identity_entry(
+            digest,
+            path=relative.encode(),
+            entry_type=entry_type,
+            content=content,
+        )
     facts = instance_dir / "state" / "memory" / "facts"
-    digest.update(b"state/memory/facts\0")
+    _recovery_identity_entry(
+        digest,
+        path=b"state/memory/facts",
+        entry_type=b"dir" if facts.is_dir() else b"absent",
+        content=b"",
+    )
     try:
         entries = sorted(facts.rglob("*"), key=lambda path: path.relative_to(facts).as_posix())
         for path in entries:
             relative = path.relative_to(facts).as_posix().encode()
-            digest.update(relative)
-            digest.update(b"\0")
             mode = path.lstat().st_mode
             if stat.S_ISREG(mode):
-                digest.update(b"file\0")
-                digest.update(path.read_bytes())
+                entry_type, content = b"file", path.read_bytes()
             elif stat.S_ISDIR(mode):
-                digest.update(b"dir\0")
+                entry_type, content = b"dir", b""
             elif stat.S_ISLNK(mode):
-                digest.update(b"symlink\0")
-                digest.update(os.fsencode(os.readlink(path)))
+                entry_type, content = b"symlink", os.fsencode(os.readlink(path))
             else:
-                digest.update(b"other\0")
+                entry_type, content = b"other", b""
+            _recovery_identity_entry(
+                digest,
+                path=relative,
+                entry_type=entry_type,
+                content=content,
+            )
     except (OSError, RuntimeError) as exc:
         raise InstallError("could not identify memory recovery canon") from exc
     safe_bindings = [
         {key: binding.get(key) for key in ("id", "repo", "remote", "default_branch")} for binding in bindings
     ]
-    digest.update(json.dumps(safe_bindings, sort_keys=True, separators=(",", ":")).encode())
+    _recovery_identity_entry(
+        digest,
+        path=b"project-bindings",
+        entry_type=b"json",
+        content=json.dumps(safe_bindings, sort_keys=True, separators=(",", ":")).encode(),
+    )
     return digest.hexdigest()
 
 

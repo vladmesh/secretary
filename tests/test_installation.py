@@ -16,11 +16,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import _proc, installation
+from secretary import _proc, installation, restore_commands
 from secretary.board_transport import DEFAULT_TRANSPORT
 from secretary.cli import main
 from secretary.config import InstanceReport
 from secretary.data import export_runs
+from secretary.host import CollectResult, HostInventory
 from secretary.installation import (
     InstallError,
     _clone_or_reuse,
@@ -530,6 +531,68 @@ class InstallationTests(unittest.TestCase):
 
             original.unlink()
             self.assertNotEqual(installation._recovery_identity(instance, []), baseline)
+
+    def test_recovery_identity_length_delimits_fact_paths_types_and_contents(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            _checkpoint(instance, root / "data")
+            facts = instance / "state" / "memory" / "facts"
+            (facts / "fact.md").unlink()
+            first = facts / "a"
+            first.write_bytes(b"b\0file\0Z")
+            one_file = installation._recovery_identity(instance, [])
+
+            first.write_bytes(b"")
+            (facts / "b").write_bytes(b"Z")
+            two_files = installation._recovery_identity(instance, [])
+
+            self.assertNotEqual(one_file, two_files)
+
+    def test_restore_reconcile_leaves_unavailable_checkout_explicitly_degraded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = SimpleNamespace(
+                ok=True,
+                data_dir=root / "data",
+                instance_path=root / "instance" / "instance.yaml",
+                instance={},
+                host={},
+                bindings=[
+                    {
+                        "id": "missing",
+                        "repo": str(root / "missing-checkout"),
+                        "enabled": True,
+                        "orca_binding": "missing",
+                    }
+                ],
+            )
+            source = mock.Mock()
+            source.collect.return_value = CollectResult(inventory=HostInventory())
+
+            with (
+                mock.patch.object(restore_commands, "validate_instance", return_value=report),
+                mock.patch.object(restore_commands, "resolve_installed_packaged", return_value=[]),
+                mock.patch.object(
+                    restore_commands,
+                    "_target",
+                    return_value=(report.instance_path, report.data_dir, {}),
+                ),
+                mock.patch.object(restore_commands, "LiveHostSource", return_value=source),
+                mock.patch.object(restore_commands, "_print_json") as emit,
+                mock.patch.object(restore_commands, "mark_reconcile_applied") as mark_applied,
+            ):
+                code = restore_commands.run_restore_reconcile(
+                    SimpleNamespace(instance=str(report.instance_path.parent))
+                )
+
+            self.assertEqual(code, 1)
+            payload = emit.call_args.args[0]
+            self.assertEqual(payload["status"], "degraded")
+            self.assertEqual(payload["unavailable_projects"], ["missing"])
+            self.assertIn("remains incomplete", payload["error"])
+            mark_applied.assert_not_called()
 
     def test_materializer_preserves_desired_bindings_and_carries_availability(self):
         with tempfile.TemporaryDirectory() as temporary:

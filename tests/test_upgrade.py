@@ -40,6 +40,7 @@ from secretary.head_registry import (
     snapshot_path,
 )
 from secretary.host import (
+    CollectResult,
     HostInventory,
     SystemdLayout,
     build_plan,
@@ -625,6 +626,48 @@ class UpgradeStepTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertIn("invalid instance data_dir", result.detail)
+
+    def test_host_step_counts_present_unavailable_registration_drift_as_deferred(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            old = {
+                "id": "alpha",
+                "repo": "/srv/alpha",
+                "orca_binding": "alpha-repo",
+                "enabled": True,
+            }
+            changed = {**old, "repo": "/srv/recovered-alpha"}
+            managed = build_plan({}, [old], packaged=[])
+            (data_dir / "host-managed.json").write_text(
+                json.dumps({"version": 1, "resources": [resource.__dict__ for resource in managed]}),
+                encoding="utf-8",
+            )
+            report = SimpleNamespace(
+                data_dir=data_dir,
+                instance={},
+                bindings=[changed],
+                host={},
+                instance_path=root / "instance" / "instance.yaml",
+            )
+            source = mock.Mock()
+            source.collect.return_value = CollectResult(inventory=HostInventory(orca_repos={"alpha-repo"}))
+            context = self.context(
+                FakeUnitInstaller(),
+                instance_path=report.instance_path.parent,
+                report=report,
+                project_availability=ProjectAvailability(frozenset({"alpha"})),
+            )
+
+            with (
+                mock.patch("secretary.upgrade.resolve_packaged", return_value=[]),
+                mock.patch("secretary.upgrade.LiveHostSource", return_value=source),
+            ):
+                result = upgrade.step_host(context)
+
+        self.assertEqual(result.status, "unchanged")
+        self.assertIn("1 unavailable project registrations deferred", result.detail)
 
     def test_board_transport_step_imports_retires_and_reports_every_action(self):
         with tempfile.TemporaryDirectory() as tmp:

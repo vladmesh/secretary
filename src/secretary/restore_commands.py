@@ -18,6 +18,7 @@ from secretary.host import (
     plan_input_errors,
 )
 from secretary.host_apply import resolve_installed_packaged
+from secretary.projects.availability import ProjectAvailability
 from secretary.restore import (
     RestoreError,
     _target,
@@ -160,7 +161,8 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
     if plan_input_errors(report.instance, report.bindings, packaged=packaged):
         _print_json({"ok": False, "action": "restore-reconcile", "error": "invalid desired state"})
         return 2
-    expected = build_expectations(report.bindings, report.host)
+    availability = ProjectAvailability.inspect(report.bindings)
+    expected = build_expectations(report.bindings, report.host, availability=availability)
     collected = LiveHostSource().collect(expected)
     if collected.errors:
         _print_json({"ok": False, "action": "restore-reconcile", "error": "host inventory unavailable"})
@@ -181,7 +183,19 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
         managed,
         prefix,
         foreign_units(report.host),
+        availability,
     )
+    if availability.unavailable:
+        _print_json(
+            {
+                "ok": False,
+                "action": "restore-reconcile",
+                "status": "degraded",
+                "unavailable_projects": sorted(availability.unavailable),
+                "error": "managed reconcile remains incomplete while project checkouts are unavailable",
+            }
+        )
+        return 1
     if not changes or any(change.action != "unchanged" for change in changes):
         _print_json(
             {"ok": False, "action": "restore-reconcile", "error": "managed reconcile has not been applied"}

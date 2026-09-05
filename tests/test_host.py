@@ -760,6 +760,27 @@ class ReconcilePlanTests(unittest.TestCase):
             [("recovered-alpha", "deferred")],
         )
 
+    def test_unavailable_present_project_reports_same_name_drift_as_deferred(self):
+        old = {
+            "id": "alpha",
+            "repo": "/srv/alpha",
+            "orca_binding": "alpha-repo",
+            "enabled": True,
+        }
+        changed = {**old, "repo": "/srv/recovered-alpha"}
+
+        changes = plan_changes(
+            build_plan({}, [changed], packaged=[]),
+            HostInventory(orca_repos={"alpha-repo"}),
+            build_plan({}, [old], packaged=[]),
+            project_availability=ProjectAvailability(frozenset({"alpha"})),
+        )
+
+        self.assertEqual(
+            [(change.logical_id, change.action) for change in changes],
+            [("orca:project:alpha", "deferred")],
+        )
+
     def test_plan_is_stable_and_name_match_without_manifest_is_conflict(self):
         instance = {
             "host": {"unit_prefix": "secretary-"},

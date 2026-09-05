@@ -1401,14 +1401,19 @@ sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --instal
 ```
 
 The low-level `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` and `restore-reconcile`
-commands remain diagnostic primitives, not the main runbook.
+commands remain diagnostic primitives, not the main runbook. `restore-reconcile` intentionally exits non-zero
+with `status: degraded` while a configured project checkout is unavailable and does not mark reconcile complete;
+repair the checkout through `recover`, then rerun the diagnostic if it is needed.
 
 Recovery prints a structured row for every configured project. `failed` rows make the aggregate status
 `degraded` and the command exits non-zero, but board, memory, run-state, safe host finalization and ownership
 handoff still complete. The host contract preserves an unavailable project's existing managed registration
 but defers checkout-dependent creation. Dispatch may inspect the binding, then refuses it before any worker,
-reviewer or observer process or project worktree starts; global automations do not schedule project work. Fix
-the reported external cause, then rerun the same `secretary recover` command: matching completed board and
+reviewer process or project worktree for that binding starts. Unknown ids and registered inventory-only projects
+are separate configuration outcomes. A sprint observer is not project-dependent: it consumes the dedicated
+observer repository and is unaffected by the sprint's canonical repository roots and project-id reservations.
+Global automations do not schedule project work. Fix the reported external cause, then rerun the same
+`secretary recover` command: matching completed board and
 memory phases are not imported again, existing repositories remain untouched, and only missing projects and
 dependent host state are retried. Persisted project rows are diagnostic only; filesystem checkout truth
 drives retry. Do not edit `recovery-progress.json`, project registry files or Git

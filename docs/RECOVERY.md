@@ -372,10 +372,14 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    after those worktrees and skills exist but before any dispatcher unit is installed or started.
 8. Applies host units and session-manager automations, performs any required memory recovery, then
    verifies restore status. A desired but unavailable project remains in the host plan: an existing
-   managed Orca registration is preserved and a missing registration is deferred. Dispatch may inspect
-   and reject that binding, but rejects it before creating a worker, reviewer or observer process or
-   project worktree. Automations are installation-global and do not schedule project work. Healthy
-   projects continue normally. Heads are connected after bootstrap as a separate step.
+   matching managed Orca registration is preserved and a missing or drifted registration is reported
+   deferred. At a project-consuming dispatch boundary, the task project id resolves to an enabled binding
+   before that exact checkout is inspected; an unavailable binding is rejected before its worker or reviewer
+   process or project worktree. Unknown ids and registered inventory-only projects remain distinct outcomes.
+   Observers consume the dedicated observer repository, not the sprint's canonical repository roots or
+   project-id reservations, so an unavailable reserved project does not leave a sprint headless. Automations
+   are installation-global and do not schedule project work. Healthy projects continue normally. Heads are
+   connected after bootstrap as a separate step.
 
 The ordering is intentional: recovery first reconstructs the normalized board and run exports,
 validates their NDJSON and counters, and only then rebuilds the board, pipeline journal and managed
@@ -407,6 +411,12 @@ stays recoverable itself: its own audit records about the restore go into the ne
 later recovery into another empty backend writes its events under a new namespace instead of counting
 someone else's as already applied. That namespace lives in the restore state file, so retrying one
 recovery stays idempotent.
+
+The recovery identity length-delimits every canonical path, entry type and content value before hashing, so
+different fact-tree shapes cannot alias through adjacent byte sequences. The low-level `restore-reconcile`
+diagnostic intentionally returns a non-zero `degraded` result while any configured checkout is unavailable and
+does not mark reconcile complete. Repair the checkout by rerunning the supported recovery command; do not edit
+the progress or managed-state files.
 
 A checkpoint taken before sprint entities entered the export still restores: it has no sprints file, which
 reads as an installation without sprints, and `doctor` stays green on a completed restore. Terminals,

@@ -459,7 +459,7 @@ def plan_changes(
         if unavailable and not present:
             action = "deferred"
         elif unavailable and owned and owned.kind == resource.kind and owned.name == resource.name:
-            action = "unchanged"
+            action = "deferred" if owned.fingerprint != resource.fingerprint else "unchanged"
         elif not present:
             action = "create"
         elif owned and owned.kind == resource.kind and owned.name == resource.name:

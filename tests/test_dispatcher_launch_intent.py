@@ -3071,17 +3071,47 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(HostError, "project repo.*unavailable"):
                 self.host.start_review(task, record)
             with self.assertRaisesRegex(HostError, "project repo.*unavailable"):
-                self.host.prepare_observer(
-                    {"ref": "sprint:1", "repositories": ["codegen-orchestrator"]},
-                    "observer",
-                    prompt="observe",
-                )
-            with self.assertRaisesRegex(HostError, "project repo.*unavailable"):
                 self.create()
 
         orca.assert_not_called()
         launch.assert_not_called()
         observer_workspace.assert_not_called()
+
+    def test_project_consumers_distinguish_unknown_disabled_and_unavailable_bindings(self) -> None:
+        catalog = object.__new__(InstanceCatalog)
+        catalog.registered_bindings = {
+            "inventory-only": {
+                "id": "inventory-only",
+                "repo": str(self.data_dir / "inventory"),
+                "enabled": False,
+            },
+            "unavailable": {
+                "id": "unavailable",
+                "repo": str(self.data_dir / "missing"),
+                "enabled": True,
+            },
+        }
+        catalog.bindings = {"unavailable": catalog.registered_bindings["unavailable"]}
+        self.host.catalog = catalog  # type: ignore[assignment]
+
+        with (
+            mock.patch.object(self.host, "_run_json") as orca,
+            mock.patch.object(self.host, "_launch") as launch,
+        ):
+            for project, reason in (
+                ("unknown", "not registered"),
+                ("inventory-only", "registered but not enabled"),
+                ("unavailable", "repo.*unavailable"),
+            ):
+                with self.subTest(project=project), self.assertRaisesRegex(HostError, reason):
+                    self.host.prepare_worker(
+                        {"ref": "secretary-1", "project": project, "workspace": {}},
+                        "card-1",
+                        "worker",
+                    )
+
+        orca.assert_not_called()
+        launch.assert_not_called()
 
     def test_instance_catalog_uses_filesystem_truth_for_project_availability(self) -> None:
         catalog = object.__new__(InstanceCatalog)
