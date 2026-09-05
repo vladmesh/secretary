@@ -1416,6 +1416,21 @@ boundary and bounded added objects; repeat once unchanged for idempotence. Then 
 memory, project, host-finalization and checkpoint push validation. Credentials, recovery phrases, helper
 arguments and private remote details do not belong in the evidence.
 
+Root recovery hands the restored instance and data roots to `--installation-user` at the named recovery
+ownership barrier, before a restored mode-`0600` installation key reaches that user's Git or remote child.
+Record only root/child numeric identities, ownership and file type/mode, never key material. The real
+materializer must execute `head-registry` followed by `head-registry-checkpoint`. Prove its successful branch
+against an isolated disposable Git destination; never enable the protected drill copy's production push URL.
+
+If checkpoint publication is disabled, unavailable or divergent, recovery reports
+`checkpoint-publication` as degraded, exits non-zero, and retains the named local commit while completing safe
+host, pipeline-state, reconciliation and ownership work. This is not permission to call the push or recovery
+healthy. Repair only the destination or credential, then rerun the same recovery command. A compatible remote
+fast-forwards to the retained commit; an independently advanced remote remains divergent, with both histories
+preserved. Do not reset, rebase, force-push, delete progress, create an empty replacement commit or use an
+ambient credential helper. `secretary upgrade`, dispatcher checkpointing and explicit checkpoint operations
+remain publication-mandatory and fail closed.
+
 The low-level `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` and `restore-reconcile`
 commands remain diagnostic primitives, not the main runbook. `restore-reconcile` intentionally exits non-zero
 with `status: degraded` while a configured project checkout is unavailable and does not mark reconcile complete;

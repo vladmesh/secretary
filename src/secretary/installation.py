@@ -137,7 +137,9 @@ class InstallResult:
     def status(self) -> str:
         if any(step.status == "failed" for step in self.steps):
             return "failed"
-        if any(project.outcome == "failed" for project in self.projects):
+        if any(step.status == "degraded" for step in self.steps) or any(
+            project.outcome == "failed" for project in self.projects
+        ):
             return "degraded"
         return "ok"
 
@@ -223,6 +225,40 @@ def _set_installation_owner(path: Path, name: str | None) -> None:
         _set_runtime_owner(path, name)
     except GitError as exc:
         raise InstallError(str(exc)) from None
+
+
+def _establish_recovery_ownership_barrier(
+    instance_dir: Path,
+    data_dir: Path,
+    installation_user: str | None,
+) -> None:
+    """Hand every restored root-owned path to its declared runtime account.
+
+    This is the single recovery boundary before user-owned Git, remote execution,
+    checkpoint publication, or host materialization may consume restored secrets.
+    """
+    _set_installation_owner(instance_dir, installation_user)
+    _set_installation_owner(data_dir, installation_user)
+    key = key_path(instance_dir)
+    if not key.exists() and not key.is_symlink():
+        return
+    try:
+        info = key.lstat()
+    except OSError as exc:
+        raise InstallError(f"could not inspect recovered installation key: {exc}") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise InstallError("recovered installation key is not a regular non-symlink file")
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        raise InstallError("recovered installation key must have mode 0600")
+    if installation_user and os.geteuid() == 0:
+        try:
+            account = pwd.getpwnam(installation_user)
+        except KeyError:
+            raise InstallError(f"installation user {installation_user!r} does not exist") from None
+        if (info.st_uid, info.st_gid) != (account.pw_uid, account.pw_gid):
+            raise InstallError(
+                f"recovered installation key is not owned by installation user {installation_user!r}"
+            )
 
 
 def _clone_or_reuse(
@@ -798,6 +834,7 @@ def materialize_host(
     installation_user: str | None = None,
     before_host: Callable[[UpgradeContext], None] | None = None,
     project_availability: ProjectAvailability | None = None,
+    publication_policy: str = "required",
 ):
     report = validate_instance(instance)
     if not report.ok:
@@ -820,6 +857,7 @@ def materialize_host(
         runtime_user=installation_user,
         runtime_home=runtime_home,
         project_availability=project_availability or ProjectAvailability(),
+        publication_policy=publication_policy,
     )
     # The steps resolve their own paths against `runtime_home`; HOME is exported for the
     # subprocesses they start, which read the environment and not this context.
@@ -1277,6 +1315,18 @@ def install(args: argparse.Namespace) -> InstallResult:
             else ("would-change" if args.dry_run else "changed"),
             args.installation_user,
         )
+        # A retry may need its already-restored managed credential to update the
+        # checkpoint checkout. Repair the previous partial run before that first
+        # user-owned consumer; the post-secret call below closes the same barrier
+        # for files materialized by this invocation.
+        if recovery and not args.dry_run and key_path(target).exists():
+            ownership_report = _validated_instance(target)
+            assert ownership_report.data_dir is not None
+            _establish_recovery_ownership_barrier(
+                target,
+                ownership_report.data_dir,
+                args.installation_user,
+            )
         # A supplied bootstrap capability can authenticate a reused recovery
         # checkout too, so consume it only when this non-dry-run invocation
         # will execute one of those remote paths.
@@ -1315,6 +1365,22 @@ def install(args: argparse.Namespace) -> InstallResult:
         )
         result.add("secret-store", *_secret_store_step(secrets))
         _add_secret_steps(result, secrets)
+
+        # Secret recovery can create a root-owned 0600 installation key. Cross
+        # ownership once, before any runtime-user Git or remote consumer starts.
+        if recovery and not args.dry_run:
+            ownership_report = _validated_instance(target)
+            assert ownership_report.data_dir is not None
+            _establish_recovery_ownership_barrier(
+                target,
+                ownership_report.data_dir,
+                args.installation_user,
+            )
+            result.add(
+                "recovery-ownership",
+                "unchanged",
+                "restored paths handed to the installation user",
+            )
 
         runtime_loaded = True
         try:
@@ -1482,9 +1548,21 @@ def install(args: argparse.Namespace) -> InstallResult:
                 args.installation_user,
                 before_host=restore_pipeline_source,
                 project_availability=project_availability,
+                publication_policy="recovery-degraded" if recovery else "required",
             )
             mark_reconcile_applied(data_dir)
             changed = sum(step.status == "changed" for step in host_result.steps)
+            publication = next(
+                (
+                    step
+                    for step in host_result.steps
+                    if getattr(step, "name", "") == "head-registry-checkpoint"
+                ),
+                None,
+            )
+            publication_degraded = publication is not None and publication.status == "degraded"
+            if publication_degraded:
+                result.add("checkpoint-publication", "degraded", publication.detail)
             result.add(
                 "host",
                 "changed" if changed else "unchanged",
@@ -1502,9 +1580,16 @@ def install(args: argparse.Namespace) -> InstallResult:
                 (target / ".secretary-bootstrap").unlink(missing_ok=True)
             result.add(
                 "status",
-                "degraded" if failed else "unchanged",
-                f"core ready; {failed} project checkout(s) unavailable; rerun secretary recover with the same inputs"
+                "degraded" if failed or publication_degraded else "unchanged",
+                (
+                    f"core ready; {failed} project checkout(s) unavailable and checkpoint publication "
+                    "degraded; rerun secretary recover with the same inputs"
+                )
+                if failed and publication_degraded
+                else f"core ready; {failed} project checkout(s) unavailable; rerun secretary recover with the same inputs"
                 if failed
+                else "core ready; checkpoint publication degraded; rerun secretary recover with the same inputs"
+                if publication_degraded
                 else "board, memory and operational configuration are ready"
                 if secrets.complete
                 else f"board and memory are ready, but {secrets.summary()}",

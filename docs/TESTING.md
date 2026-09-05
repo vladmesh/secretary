@@ -167,6 +167,21 @@ base=$(git merge-base main HEAD)
 Use both commands whenever the set contains Python files. The `xargs -r` guard leaves an empty set
 as a no-op, rather than making Ruff choose a repository-wide default.
 
+## Recovery finalization boundaries
+
+`tests.test_secret_recover`, `tests.test_installation`, `tests.test_upgrade`,
+`tests.test_github_credential` and `tests.test_checkpoint` jointly cover secret recovery, the root-to-runtime
+ownership handoff, real child identity, materializer order and checkpoint publication. The root fixture is
+platform-gated because it needs `runuser` and a usable non-root account; when available it loads the installation
+key and runs instance Git as the selected child while reporting only numeric uid/gid and mode evidence.
+
+Head-registry tests use real local repositories. They prove local commit before a disabled push, continuation
+through a genuine later step only under the recovery publication policy, isolated successful publication,
+fast-forward retry of the retained commit, unchanged retry without an empty commit, and divergence without
+reset/rebase/force-push. Ordinary materializer and checkpoint tests retain mandatory stop-on-publication-failure
+semantics. Combined recovery/project tests require safe host and pipeline-state finalization to execute while
+project rows and checkpoint durability remain truthfully degraded.
+
 ## Normalized board bulk recovery
 
 `tests.test_bulk_card_restore` drives the restore-specific card planner through the real

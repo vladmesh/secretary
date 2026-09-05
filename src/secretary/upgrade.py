@@ -116,6 +116,9 @@ class UpgradeContext:
     runtime_user: str | None = None
     runtime_home: Path | None = None
     project_availability: ProjectAvailability = field(default_factory=ProjectAvailability)
+    # Recovery may finish safe local work after retaining a checkpoint whose
+    # remote publication failed. Every other caller keeps publication required.
+    publication_policy: str = "required"
 
 
 @dataclass
@@ -511,7 +514,7 @@ def step_publish_head_registry(context: UpgradeContext) -> StepResult:
         retained = f"; local checkpoint {commit}" if commit else "; local recovery pair remains committed"
         return StepResult(
             "head-registry-checkpoint",
-            "failed",
+            "degraded" if context.publication_policy == "recovery-degraded" else "failed",
             f"head registry checkpoint {status}: {reason}{retained}",
         )
     detail = f"published {commit or outcome.get('last_push_commit', '')[:12]}".rstrip()

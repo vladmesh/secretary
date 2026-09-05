@@ -357,13 +357,18 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    is not yet on disk), the installation key is rebuilt and values are materialised into the files the
    catalog names, including `runtime.env` if any secret materialises there. Without the phrase this step
    writes nothing and reports locked/missing, and `runtime.env` stays whatever is already on disk.
-2. Checks the remote and checkout, materialised credentials (when any), board reachability and the
+2. Crosses the recovery ownership barrier. The instance checkout, secrets, locks and declared data root
+   are handed to `--installation-user` before a restored installation key can be consumed by that user's
+   Git or remote-execution child. A present key must remain a regular non-symlink mode-`0600` file owned by
+   that user. On retry, an already-restored key crosses the same barrier before checkout reuse, then the
+   barrier closes again over any files materialised by this invocation.
+3. Checks the remote and checkout, materialised credentials (when any), board reachability and the
    installed session manager. Board transport is created or read independently of that secret step. If
    `runtime.env` did not appear in step 1 and there is no store at all, it remains a manual operator
    step only for any other required host configuration.
-3. Materialises `state/board` and `state/runs` from the checkpoint into a new local data plane. The
+4. Materialises `state/board` and `state/runs` from the checkpoint into a new local data plane. The
    derived JSON forms are built from the NDJSON, and counters are verified before any live write.
-4. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`.
+5. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`.
    The board import also restores sprint entities: if the export carries them, `restore-board` creates
    the sprints board and returns each entity whole — goal, Definition of Done, repositories, product,
    issues, reservations, status,
@@ -417,18 +422,22 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    or lost move response is reconciled from the live group before any success is recorded, and an already
    repaired third run performs no placement mutation. The existing final content and order parity checks remain
    the fail-closed completion gate; absolute positions of archived rows are deliberately not compared.
-5. Attempts every missing project checkout from the registry and creates the non-secret managed
+6. Attempts every missing project checkout from the registry and creates the non-secret managed
    runtime-home files for the agent CLIs. Each clone uses the same remote-execution boundary as the
    private instance checkout. GitHub HTTPS uses the supplied bootstrap capability when present,
    otherwise the recovered managed-store credential; ambient helpers are disabled. Local/file and SSH
    keep their declared semantics, while other HTTPS hosts are refused. Provider authentication stays
    manual.
-6. Runs the pre-host materialiser: synchronizes role skills and recreates all role worktrees. When it
-   runs under `sudo`, role worktrees and their Git administrative directories are assigned to
+7. Runs the pre-host materialiser. It regenerates the installed head snapshot and source pin, commits the
+   pair locally, and attempts normal managed fast-forward-only checkpoint publication before synchronizing
+   role skills and recreating all role worktrees. A publication failure is a distinct degraded recovery
+   result, not success, but it does not stop the remaining safe recovery steps. Ordinary `secretary upgrade`
+   still stops at this boundary. When the materializer runs under `sudo`, role worktrees and their Git
+   administrative directories are assigned to
    `--installation-user`, so the user services can read and update them.
-7. Rebuilds the pipeline worktree's live JSONL run source from the checkpointed normalized journal,
+8. Rebuilds the pipeline worktree's live JSONL run source from the checkpointed normalized journal,
    after those worktrees and skills exist but before any dispatcher unit is installed or started.
-8. Applies host units and session-manager automations, performs any required memory recovery, then
+9. Applies host units and session-manager automations, performs any required memory recovery, then
    verifies restore status. A desired but unavailable project remains in the host plan: an existing
    matching managed Orca registration is preserved and a missing or drifted registration is reported
    deferred. At a project-consuming dispatch boundary, the task project id resolves to an enabled binding
@@ -457,6 +466,14 @@ binding with its project id, target state, transport classification, outcome (`c
 finalization and the installation-user ownership handoff, then exits non-zero with `status: degraded`.
 Invalid global installation configuration, board/sprint parity, memory corruption, unsafe host
 materialization and operator interruption remain fatal boundaries and are not converted into project rows.
+
+Remote checkpoint publication is a second recovery-only degraded boundary. The generated head-registry pair
+is committed before the managed push. A disabled or unavailable destination, credential refusal, or remote
+divergence leaves the command non-zero and reports the retained local commit while safe later materializer,
+pipeline-state, ownership and reconcile steps complete. The push and full recovery are never labelled healthy.
+With an unchanged compatible remote, rerunning recovery publishes that same commit fast-forward and clears the
+publication degradation without an empty duplicate commit. If the remote advanced independently, retry preserves
+both tips and reports divergence; recovery never resets, rebases, deletes, or force-pushes either history.
 
 Running `secretary recover` again is safe: the checkout is fast-forward only, completed board import and
 memory indexing are skipped when the board, run, memory-fact and binding identity still matches, successful checkouts

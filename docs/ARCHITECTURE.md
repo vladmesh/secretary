@@ -550,6 +550,16 @@ needed and it does not race the tick writer.
   per-user credential file remains available to its other consumers but cannot silently authenticate
   recovery, project provisioning or checkpoint. Local/file remotes are ordinary Git, SSH is explicit manual-bypass, and other
   HTTPS hosts are refused.
+- Root-orchestrated recovery has one named ownership barrier after secret recovery and before the
+  installation account's first secret-consuming Git or remote child. It recursively hands the instance and
+  declared data roots to that account, then verifies that a restored installation key is a regular,
+  non-symlink, mode-`0600` file owned by the account. An existing partial recovery crosses the same barrier
+  before checkout reuse so its already-restored managed credential is readable by the selected Git child.
+- Head-registry materialization always commits the generated snapshot and source pin locally before it tries
+  managed, fast-forward-only publication. Ordinary upgrade and checkpoint callers require that publication
+  and stop on failure. Supported recovery alone classifies a disabled, unavailable or divergent destination
+  as degraded, retains the exact local commit, and continues safe local host finalization. No reset, rebase,
+  force-push or ambient credential fallback exists; a later recovery retries the same local history.
 - Recovery's project boundary catches only one binding's provisioning failure. Core/configuration failures
   and operator interruption remain outside it. A non-secret input digest and phase ledger let a retry skip
   completed board and memory work; the digest includes deterministic memory-fact canon. One
@@ -561,8 +571,9 @@ needed and it does not race the tick writer.
   enabled bindings remain distinct refusals. Observer heads consume the dedicated observer repository, not a
   sprint's canonical repository roots or project-id reservations, so project availability never gates observer
   creation. Desired unavailable bindings stay in the host plan, preserving matching registrations and reporting
-  absent or drifted registrations as deferred. The aggregate installation state remains degraded until every
-  configured binding is available.
+  absent or drifted registrations as deferred. Core usability, unavailable projects and remote checkpoint
+  durability are separate results. The aggregate installation state remains degraded until every configured
+  binding is available and the recovery-created checkpoint has been published.
 - Task audit and pending writes are fail-closed: an unfinished board mutation blocks a consistent
   export and the recovery checkpoint.
 - Normalized recovery owns restore-only bulk boundaries for card initialization and Card/Sprint comments. Card
