@@ -85,6 +85,22 @@ def add_task_subcommands(subparsers) -> None:
     task_show.add_argument("--ref", required=True)
     _add_instance_arg(task_show)
     task_show.set_defaults(handler=run_task_show)
+    repair_preview = task_subcommands.add_parser(
+        "repair-references-preview", help="inspect duplicate task references without writing"
+    )
+    _add_data_dir_args(repair_preview)
+    repair_preview.set_defaults(handler=run_task_repair_references_preview)
+    repair_apply = task_subcommands.add_parser(
+        "repair-references-apply", help="apply an exact previewed duplicate-reference repair"
+    )
+    _add_data_dir_args(repair_apply)
+    repair_apply.add_argument("--role", required=True, choices=("po",))
+    repair_apply.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    repair_apply.add_argument("--plan-id", required=True)
+    repair_apply.add_argument("--task-id", action="append", required=True, type=int)
+    repair_apply.add_argument("--request-id", required=True)
+    repair_apply.add_argument("--reason-file", required=True)
+    repair_apply.set_defaults(handler=run_task_repair_references_apply)
     task_create = task_subcommands.add_parser("create")
     task_create.add_argument(
         "--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro", "observer")
@@ -243,6 +259,31 @@ def run_task_list(args: argparse.Namespace) -> int:
 
 def run_task_show(args: argparse.Namespace) -> int:
     return _run_task_read(args, lambda reader: reader.show(args.ref))
+
+
+def run_task_repair_references_preview(args: argparse.Namespace) -> int:
+    from secretary.board.reference_repair import preview_reference_repair
+
+    return run_task_command(
+        lambda: preview_reference_repair(
+            TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args))
+        )
+    )
+
+
+def run_task_repair_references_apply(args: argparse.Namespace) -> int:
+    from secretary.board.reference_repair import apply_reference_repair
+
+    return run_task_command(
+        lambda: apply_reference_repair(
+            TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args)),
+            plan_id=args.plan_id,
+            task_ids=args.task_id,
+            reason=_read_body(args.reason_file),
+            request_id=args.request_id,
+            actor=args.actor or args.role,
+        )
+    )
 
 
 def _run_task_read(args: argparse.Namespace, operation: Callable[[TaskReader], object]) -> int:

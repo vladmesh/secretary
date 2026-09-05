@@ -230,6 +230,13 @@ def export_board(
         _write_json(staging / "sprints.json", {"version": 1, "sprints": sprints})
         _write_ndjson(staging / "sprints.ndjson", sprints)
         _write_json(staging / "export.json", summary)
+        # Validate the exact pair restore consumes before replacing the last good live export.
+        from secretary.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
+
+        try:
+            validated_normalized_cards(staging)
+        except NormalizedBoardError as exc:
+            raise RuntimeError(f"board export is not restorable: {exc}") from None
         _publish_component_entries(
             staging,
             board_dir,

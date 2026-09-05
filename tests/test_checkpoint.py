@@ -195,6 +195,20 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("state/runs/export.json", files)
         self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), result.commit)
 
+    def test_duplicate_fresh_export_leaves_checkpoint_head_index_and_canon_untouched(self):
+        self.assertEqual(self.write().status, "committed")
+        head = git(self.instance_dir, "rev-parse", "HEAD").strip()
+        canon = (self.instance_dir / "state" / "board" / "cards.ndjson").read_bytes()
+        self.seed_board([CARD, dict(CARD, id=2, title="collision")])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("duplicate references secretary-637", result.reason)
+        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), head)
+        self.assertEqual(git(self.instance_dir, "diff", "--cached", "--name-only"), "")
+        self.assertEqual((self.instance_dir / "state" / "board" / "cards.ndjson").read_bytes(), canon)
+
     def test_missing_live_events_publish_as_an_empty_sealed_journal(self):
         self.write()
         self.assertIn("state/board/events.ndjson", self.head_files())

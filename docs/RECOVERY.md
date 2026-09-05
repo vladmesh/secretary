@@ -205,7 +205,9 @@ history.
 
 - task audit is settled, with no pending board mutation;
 - the writer regenerates `cards.ndjson` and `sprints.ndjson` from the live boards, and both counters
-  in `export.json` match the line counts;
+  in `export.json` match the line counts. The generated `cards.json`/`cards.ndjson` pair must be
+  identical and card references must be unique before either the local export or canonical checkpoint
+  files are replaced;
 - memory staging is empty;
 - the secret scan of `state/` is clean. `state/` goes to the remote and is the one place a secret could
   leak, for example a token pasted into a card or a log. The memory and knowledge writers run the same
@@ -394,6 +396,48 @@ store or separate backup host is required.
 `secretary recover --dry-run` checks the checkout, credentials, runtime prerequisites and checkpoint
 integrity, then prints the steps as `would-change`. The preview writes no local data plane, does not touch
 the board, and runs neither the memory reindex nor the host materialiser.
+
+## Repairing historical duplicate card references
+
+Released task creation before product commit `d9e872b` derived an implicit card reference from the new
+Kanboard row ID. Because row IDs and project reference counters are independent, a later row could reuse an
+archived row's reference. The supported repair retains the older owner and reassigns the later row only when
+the later backend ID equals the duplicated numeric suffix, its exact `created` audit event binds that backend
+ID, both records are tasks with complete metadata, and no active or ambiguous dependent state exists. Numeric
+coincidence without that producer and audit evidence is not authority.
+
+Preview is read-only and enumerates active and archived Pipeline rows. It prints backend IDs, record type,
+state, a bounded title summary, the retention evidence, proposed collision-free references, refusals, and a
+hash of the complete observed plan:
+
+```bash
+secretary task repair-references-preview --instance INSTANCE --data-dir DATA_DIR
+```
+
+Apply names that plan and every proposed reassignment by exact backend identity. Put a non-secret explanation
+in `REASON_FILE`; do not put it on the command line:
+
+```bash
+secretary task repair-references-apply --role po --instance INSTANCE --data-dir DATA_DIR \
+  --plan-id PLAN_ID --task-id BACKEND_ID --request-id REQUEST_ID --reason-file REASON_FILE
+```
+
+Repeat `--task-id` for every row proposed by the preview. Apply takes the normal allocation lock, compares the
+whole preview before its first write, stages all audit intents, then updates each exact row and records
+`reference_repair` metadata plus an append-only `reference_repaired` event. A retry with the same request ID,
+plan, IDs and reason resumes or proves the same effects. It never deletes, merges, reopens or moves a card;
+titles, descriptions, comments, metadata, closed state and position remain unchanged. A target acquired by
+another row, mixed record types, missing producer evidence, active work, reference-bearing task/sprint or
+current run-state companions, or another concurrent board revision fails closed. After a committed backend
+change, pending audit intentionally blocks export until the identical retry or `task reconcile-audit` proves
+and completes it. Rollback is therefore an operator-reviewed reverse repair, never a hand edit of checkpoint
+files or Kanboard storage.
+
+For the post-merge live repair, the PO runs this exact sequence: preview and retain its plan output; apply that
+plan to the listed backend IDs; let the managed checkpoint writer publish; verify the private remote branch SHA
+equals the reported local checkpoint SHA; then rerun recovery into the isolated drill board and verify parity.
+If publication reports a restorable-board or parity failure, stop before the drill and investigate the live
+board. Never edit `cards.ndjson` as the source of truth.
 
 ## Manual recovery sprint closeout
 

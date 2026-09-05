@@ -3868,6 +3868,14 @@ class TaskWriter:
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
+                if event.get("kind") == "reference_repaired":
+                    from secretary.board.reference_repair import finish_pending_reference_repair
+
+                    finish_pending_reference_repair(self, event)
+                    self.audit.stage(str(event["request_id"]), event)
+                    self.audit.append(str(event["request_id"]), event)
+                    repaired += 1
+                    continue
                 if event.get("kind") in {"product_created", "issue_created", "issue_closed"}:
                     # Product/Issue writes have ordered backend cleanup.  Only their supported
                     # command, retried with the original request id, can prove that cleanup.
