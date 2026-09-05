@@ -245,9 +245,11 @@ def _validate_outcome_round_context(data: dict[str, Any]) -> None:
         expected = expected | {"round_id", "specification_revision", "marker"}
     if set(data) != expected or version not in {1, 2}:
         raise TaskError("validation", "outcome round context has an unsupported field set", 2)
-    phases = {"worker", "review", "decision"} if version == 1 else {
-        "worker", "review", "decision", "report", "verdict"
-    }
+    phases = (
+        {"worker", "review", "decision"}
+        if version == 1
+        else {"worker", "review", "decision", "report", "verdict"}
+    )
     if data.get("phase") not in phases:
         raise TaskError("validation", "outcome round context has an unsupported phase", 2)
     if version == 2 and (not isinstance(data.get("round_id"), str) or not data["round_id"].strip()):
@@ -255,7 +257,9 @@ def _validate_outcome_round_context(data: dict[str, Any]) -> None:
     if version == 2:
         revision = data.get("specification_revision")
         if revision is not None and (not isinstance(revision, str) or not revision.strip()):
-            raise TaskError("validation", "outcome round context specification revision must be a string or null", 2)
+            raise TaskError(
+                "validation", "outcome round context specification revision must be a string or null", 2
+            )
         marker = data.get("marker")
         if not isinstance(marker, str):
             raise TaskError("validation", "outcome round context marker must be a string", 2)
@@ -270,9 +274,12 @@ def _validate_outcome_round_context(data: dict[str, Any]) -> None:
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise TaskError("validation", f"outcome round context needs a positive {name}", 2)
     request_ids = data.get("request_ids")
-    if not isinstance(request_ids, list) or not request_ids or any(
-        not isinstance(value, str) or not value.strip() for value in request_ids
-    ) or len(set(request_ids)) != len(request_ids):
+    if (
+        not isinstance(request_ids, list)
+        or not request_ids
+        or any(not isinstance(value, str) or not value.strip() for value in request_ids)
+        or len(set(request_ids)) != len(request_ids)
+    ):
         raise TaskError("validation", "outcome round context needs unique request ids", 2)
     visit = data.get("assessment_visit")
     if not isinstance(visit, str):
@@ -436,6 +443,12 @@ def is_significant_observer_event(
 
 
 _BATCH_CHUNK = 200
+_BATCH_COMMENT_CHUNK = 50
+_BATCH_WRITE_CHUNK = 50
+# Bound both dimensions of one JSON-RPC document.  Count protects Kanboard's
+# dispatcher; bytes protect the web server and make a pathological comment fail
+# before an unbounded request is allocated on the wire.
+_BATCH_BYTES = 1_048_576
 
 
 def _rpc_request(identifier: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -478,25 +491,53 @@ class KanboardClient:
         """
         calls = list(calls)
         results: list[Any] = [None] * len(calls)
-        for start in range(0, len(calls), _BATCH_CHUNK):
-            chunk = calls[start : start + _BATCH_CHUNK]
-            document = self._post(
-                [
-                    _rpc_request(start + offset, method, params)
-                    for offset, (method, params) in enumerate(chunk)
-                ]
-            )
+        start = 0
+        while start < len(calls):
+            requests: list[dict[str, Any]] = []
+            request_bytes = 2  # JSON array brackets; commas are added below.
+            comment_reads = 0
+            comment_writes = 0
+            while start + len(requests) < len(calls) and len(requests) < _BATCH_CHUNK:
+                index = start + len(requests)
+                method, params = calls[index]
+                next_reads = comment_reads + (method == "getAllComments")
+                next_writes = comment_writes + (method == "createComment")
+                if next_reads > _BATCH_COMMENT_CHUNK or next_writes > _BATCH_WRITE_CHUNK:
+                    break
+                request = _rpc_request(index, method, params)
+                encoded_size = len(json.dumps(request, separators=(",", ":")).encode("utf-8"))
+                next_bytes = request_bytes + encoded_size + bool(requests)
+                if next_bytes > _BATCH_BYTES:
+                    if not requests:
+                        raise TaskError("validation", "one Kanboard batch call exceeds the byte limit", 2)
+                    break
+                requests.append(request)
+                request_bytes = next_bytes
+                comment_reads = next_reads
+                comment_writes = next_writes
+            document = self._post(requests)
             if not isinstance(document, list):
-                raise TaskError("backend_error", "Kanboard rejected the read request", 1)
-            answers: dict[Any, Any] = {}
+                raise TaskError("backend_error", "Kanboard rejected the batch request", 1)
+            answers: dict[int, Any] = {}
+            expected = set(range(start, start + len(requests)))
             for entry in document:
-                if not isinstance(entry, dict) or "error" in entry:
-                    raise TaskError("backend_error", "Kanboard rejected the read request", 1)
-                answers[entry.get("id")] = entry.get("result")
-            for offset in range(len(chunk)):
-                if start + offset not in answers:
-                    raise TaskError("backend_error", "Kanboard rejected the read request", 1)
-                results[start + offset] = answers[start + offset]
+                if (
+                    not isinstance(entry, dict)
+                    or entry.get("jsonrpc") != "2.0"
+                    or not isinstance(entry.get("id"), int)
+                    or isinstance(entry.get("id"), bool)
+                    or entry.get("id") not in expected
+                    or entry.get("id") in answers
+                    or ("result" in entry) == ("error" in entry)
+                    or "error" in entry
+                ):
+                    raise TaskError("backend_error", "Kanboard returned an invalid batch answer", 1)
+                answers[entry["id"]] = entry["result"]
+            if set(answers) != expected:
+                raise TaskError("backend_error", "Kanboard returned an incomplete batch answer", 1)
+            for index in expected:
+                results[index] = answers[index]
+            start += len(requests)
         return results
 
     def _post(self, payload: Any) -> Any:
@@ -784,6 +825,38 @@ class TaskReader:
             )
         return result
 
+    def restore_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Read every active or archived card as a normalized, authoritative snapshot.
+
+        Recovery uses this after its setup writes and again for final parity.  The
+        board rows are one read and metadata/comments share bounded JSON-RPC posts;
+        unlike ``show`` this never grows a pair of HTTP reads per card.
+        """
+        project_id, columns, swimlanes = self._board()
+        rows = [row for row in all_project_cards(self.client, project_id) if isinstance(row, dict)]
+        task_ids = [_task_number(row) for row in rows]
+        answers = self.client.call_batch(
+            (method, {"task_id": task_id})
+            for task_id in task_ids
+            for method in ("getTaskMetadata", "getAllComments")
+        )
+        result: dict[str, dict[str, Any]] = {}
+        for index, row in enumerate(rows):
+            raw_comments = answers[index * 2 + 1] or []
+            if not isinstance(raw_comments, list):
+                raise TaskError("backend_error", "Kanboard returned invalid task comments", 1)
+            card = self._normalize(
+                row,
+                columns,
+                swimlanes,
+                _task_metadata(answers[index * 2]),
+                comments=[_normalize_comment(value) for value in raw_comments if isinstance(value, dict)],
+            )
+            previous = result.get(card["ref"])
+            if previous is None or (not card.get("closed") and previous.get("closed")):
+                result[card["ref"]] = card
+        return result
+
     def show(self, reference: str) -> dict[str, Any]:
         project_id, columns, swimlanes = self._board()
         card = project_card_by_reference(self.client, project_id, reference)
@@ -1033,6 +1106,42 @@ class TaskAudit:
                 ):
                     return candidate
         return None
+
+    def pending_marker_owners(self, candidates: Iterable[tuple[str, str, str]]) -> dict[str, str]:
+        """Resolve many per-Card marker reservations in one pending-journal scan.
+
+        Callers hold every candidate's marker lock.  One restore wave can then
+        retain the same cross-process exclusion without reopening every pending
+        file once per occurrence.
+        """
+        from secretary.board.events import render_marker_comment
+
+        wanted = {(reference, content): request_id for reference, content, request_id in candidates}
+        owners: dict[str, str] = {}
+        with self._locked_audit():
+            for record in self.pending_events():
+                candidate = str(record.get("request_id") or "")
+                identity: tuple[str, str] | None = None
+                if record.get("record_type") == self._PROTOCOL_EVENT_RECORD_TYPE:
+                    try:
+                        event = Event.from_record(record)
+                        if event.entity_kind is EntityKind.CARD:
+                            identity = (event.ref, render_marker_comment(event))
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    payload = record.get("payload")
+                    if (
+                        record.get("kind") == "restored_comment"
+                        and isinstance(record.get("ref"), str)
+                        and isinstance(payload, dict)
+                        and isinstance(payload.get("restore_body"), str)
+                    ):
+                        identity = (record["ref"], payload["restore_body"])
+                request_id = wanted.get(identity) if identity is not None else None
+                if request_id is not None and candidate != request_id:
+                    owners[request_id] = candidate
+        return owners
 
     @classmethod
     def _is_protocol_event(cls, event: dict[str, Any]) -> bool:
@@ -1840,7 +1949,7 @@ class TaskWriter:
             raise
         try:
             task = self.reader.show(created_ref)
-        except Exception:
+        except Exception:  # noqa: BLE001 - any post-create read failure is an ambiguous commit.
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
         event["task_id"] = task["id"]
         event["ref"] = created_ref
@@ -2066,9 +2175,8 @@ class TaskWriter:
                 "blocked reports require --classification, one of " + ", ".join(_BLOCK_CLASSIFICATIONS),
                 2,
             )
-        if kind == "done":
-            if classification:
-                raise TaskError("validation", "a done report carries no classification", 2)
+        if kind == "done" and classification:
+            raise TaskError("validation", "a done report carries no classification", 2)
         request_id = request_id or str(uuid.uuid4())
         # Resolve immutable ownership before either fresh admission or a card
         # read.  A replay must stay a pure replay, including when its worker
@@ -2078,9 +2186,10 @@ class TaskWriter:
             owned = self.board_host.canon.event(request_id)
         except ValueError:
             owned = None
-            legacy_owned = self.audit.committed_event(request_id) is not None or self.audit.pending_event(
-                request_id
-            ) is not None
+            legacy_owned = (
+                self.audit.committed_event(request_id) is not None
+                or self.audit.pending_event(request_id) is not None
+            )
             if not legacy_owned:
                 raise
         marker_data = owned.data if owned is not None else {}
@@ -3485,9 +3594,7 @@ class TaskWriter:
         try:
             self.board_host.canon.commit(refusal_request_id, event)
         except (OSError, ValueError) as exc:
-            raise TaskError(
-                "audit_pending", "artifact ownership refusal requires audit repair", 4
-            ) from exc
+            raise TaskError("audit_pending", "artifact ownership refusal requires audit repair", 4) from exc
         raise ArtifactOwnershipTaskError(violation)
 
     def archive(
@@ -3826,7 +3933,7 @@ class TaskWriter:
             raise
         try:
             task = self.reader.show(reference)
-        except Exception:
+        except Exception:  # noqa: BLE001 - any post-write read failure is an ambiguous commit.
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
         event["backend"]["revision"] = _revision(task)
         self.audit.stage(request_id, event)
@@ -3836,11 +3943,13 @@ class TaskWriter:
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
         return {"action": kind, "task": task, "event_id": event_id, "replayed": False}
 
-    def reconcile(self) -> tuple[int, int]:
+    def reconcile(self, *, defer_restore_comments: bool = False) -> tuple[int, int]:
         repaired = 0
         unresolved = 0
         for event in self.audit.pending_events():
             try:
+                if defer_restore_comments and event.get("kind") == "restored_comment":
+                    continue
                 if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
                     subject = event.get("subject") if isinstance(event.get("subject"), dict) else {}
                     if str(event.get("kind") or "") in _MARKER_EVENT_ACTIONS:
@@ -3861,7 +3970,11 @@ class TaskWriter:
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
-                if event.get("kind") in {"sprint_guard_denied", "sprint_guard_override", "outcome_round_context"}:
+                if event.get("kind") in {
+                    "sprint_guard_denied",
+                    "sprint_guard_override",
+                    "outcome_round_context",
+                }:
                     # A guard decision records itself, not a backend row: there is nothing to
                     # re-read, and the decision it names was made whether or not the operation
                     # it authorized went on to succeed.
@@ -3880,6 +3993,15 @@ class TaskWriter:
                     # Product/Issue writes have ordered backend cleanup.  Only their supported
                     # command, retried with the original request id, can prove that cleanup.
                     unresolved += 1
+                    continue
+                if event.get("kind") == "restored_comment":
+                    from secretary.task_restore import finish_pending_restore_comment
+
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    finish_pending_restore_comment(self, event, payload)
+                    self.audit.stage(str(event["request_id"]), event)
+                    self.audit.append(str(event["request_id"]), event)
+                    repaired += 1
                     continue
                 if str(event.get("ref") or "").startswith("sprint:"):
                     from secretary.sprints import SprintWriter

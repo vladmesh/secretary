@@ -543,7 +543,8 @@ needed and it does not race the tick writer.
 - Recovery's project boundary catches only one binding's provisioning failure. Core/configuration failures
   and operator interruption remain outside it. A non-secret input digest and phase ledger let a retry skip
   completed board and memory work; the digest includes deterministic memory-fact canon. One
-  `ProjectAvailability` value carries failed checkout ids from recovery into host desired-state planning and
+  `ProjectAvailability` value carries unavailable checkout ids for every configured binding, enabled or
+  disabled, from recovery into host desired-state planning and
   is recomputed from the same filesystem rule at a project-consuming dispatch boundary. A task project id is
   first resolved to its enabled binding; only then is that binding's checkout allowed to gate its worker
   worktree, worker process or reviewer process. Unknown ids, registered inventory-only projects and unavailable
@@ -551,9 +552,24 @@ needed and it does not race the tick writer.
   sprint's canonical repository roots or project-id reservations, so project availability never gates observer
   creation. Desired unavailable bindings stay in the host plan, preserving matching registrations and reporting
   absent or drifted registrations as deferred. The aggregate installation state remains degraded until every
-  enabled binding is available.
+  configured binding is available.
 - Task audit and pending writes are fail-closed: an unfinished board mutation blocks a consistent
   export and the recovery checkpoint.
+- Normalized recovery owns a narrow bulk-comment transaction boundary shared by Card and Sprint restore.
+  It reuses the ordinary `TaskAudit` journal and stable restore request identities, but does not enter either
+  interactive writer's per-comment full-entity read cycle. Intended occurrences are durable before bounded
+  JSON-RPC writes. One ordered wave contains no more than one occurrence for an entity because Kanboard batches
+  are not database transactions and do not promise member execution order. Missing, duplicate, malformed or
+  mismatched answers invalidate the aggregate result; fresh batched histories then reconcile each occurrence.
+  The transport caps a document at 200 general calls and 1 MiB, with separate 50-call caps for comment reads
+  and writes, splits before any bound, and never relies on response order. Pinned Kanboard v1.2.46 returns
+  comments by `(date_creation, id) ASC`, making the id the stable creation-order tie-break within one second;
+  the source and disposable-backend evidence are recorded in
+  [the comment contract canary](evidence/kanboard-comment-contract-v1.2.46.md). Final parity is a new
+  authoritative bounded snapshot, not the cache used to plan writes. A comment-read response contains at most
+  50 histories, but one history and the aggregate response bytes have no smaller product limit. A single long
+  history is transferred again for every ordered wave, so its row transfer is quadratic in that entity's
+  comment count; the 30-second transport timeout fails such a read closed rather than weakening reconciliation.
 
 Command contracts are in [Protocols](PROTOCOLS.md), runbooks in [Operations](OPERATIONS.md), and the
 product goal in [Vision](VISION.md).

@@ -359,6 +359,21 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    issues or its reservations comes back without those metadata keys rather than with empty ones. Parity
    compares whether each of the three fields is there at all, not only what it holds: a restored entity
    that gained an empty `product` its export never carried is a lossy write and fails the check.
+   Card and sprint comment history has a restore-only bulk boundary. Recovery reads normalized history in
+   bounded batches and writes ordered waves with at most one next occurrence per entity in a JSON-RPC batch;
+   ordinary interactive comment commands retain their read-before/read-after protocol. Every occurrence is
+   staged under its stable restore request id before a write. A mixed result, lost aggregate response or
+   interruption leaves only the affected occurrences pending; a fresh bounded history read proves applied
+   occurrences before audit append and only unproved occurrences may be retried. Identical bodies retain their
+   exported multiplicity and order through the body digest plus duplicate-occurrence ordinal. Pending evidence
+   carries the body only while the backend outcome is ambiguous; committed audit does not. Restore progress is
+   complete only after fresh authoritative card and sprint snapshots prove full content and order parity. The
+   pinned backend's `(date_creation, id) ASC` producer order, positive-integer `createComment` result and
+   disposable timeout canary are recorded in
+   [Kanboard comment contract evidence](evidence/kanboard-comment-contract-v1.2.46.md). Comment reads and writes
+   use separate 50-call caps inside the general 200-call/1 MiB batch policy. Reads cap the number of histories,
+   not the bytes or length of one history; a very long single history is reread once per ordered wave and may
+   fail the 30-second transport timeout closed with its exact pending obligations intact.
 5. Attempts every missing project checkout from the registry and creates the non-secret managed
    runtime-home files for the agent CLIs. Each clone uses the same remote-execution boundary as the
    private instance checkout. GitHub HTTPS uses the supplied bootstrap capability when present,

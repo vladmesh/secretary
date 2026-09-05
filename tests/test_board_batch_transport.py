@@ -187,15 +187,93 @@ class CallBatchTransportTests(unittest.TestCase):
                     _client().call_batch([("a", {}), ("b", {})])
                 self.assertEqual(raised.exception.code, "backend_error")
 
+    def test_duplicate_mismatched_and_malformed_answers_are_refused(self) -> None:
+        malformed = (
+            [
+                {"jsonrpc": "2.0", "id": 0, "result": "a"},
+                {"jsonrpc": "2.0", "id": 0, "result": "duplicate"},
+            ],
+            [
+                {"jsonrpc": "2.0", "id": 0, "result": "a"},
+                {"jsonrpc": "2.0", "id": 9, "result": "foreign"},
+            ],
+            [
+                {"jsonrpc": "1.0", "id": 0, "result": "a"},
+                {"jsonrpc": "2.0", "id": 1, "result": "b"},
+            ],
+            [
+                {"jsonrpc": "2.0", "id": 0},
+                {"jsonrpc": "2.0", "id": 1, "result": "b"},
+            ],
+        )
+        for answer in malformed:
+            with (
+                self.subTest(answer=answer),
+                mock.patch.object(KanboardClient, "_post", lambda _self, _payload, answer=answer: answer),
+                self.assertRaises(TaskError),
+            ):
+                _client().call_batch([("a", {}), ("b", {})])
+
+    def test_batch_byte_limit_splits_documents_and_rejects_one_oversized_call(self) -> None:
+        posts = []
+
+        def post(payload):
+            posts.append(payload)
+            return [{"jsonrpc": "2.0", "id": request["id"], "result": request["id"]} for request in payload]
+
+        with (
+            mock.patch("secretary.tasks._BATCH_BYTES", 125),
+            mock.patch.object(KanboardClient, "_post", lambda _self, payload: post(payload)),
+        ):
+            self.assertEqual(_client().call_batch([("m", {"v": "x" * 20})] * 2), [0, 1])
+            self.assertEqual(len(posts), 2)
+            with self.assertRaisesRegex(TaskError, "byte limit"):
+                _client().call_batch([("m", {"v": "x" * 200})])
+
+    def test_comment_reads_and_writes_use_their_smaller_timeout_safe_bound(self) -> None:
+        posts = []
+
+        def post(payload):
+            posts.append(payload)
+            return [
+                {"jsonrpc": "2.0", "id": request["id"], "result": request["id"] + 1} for request in payload
+            ]
+
+        calls = [("createComment", {"task_id": index, "content": "x"}) for index in range(120)]
+        with mock.patch.object(KanboardClient, "_post", lambda _self, payload: post(payload)):
+            self.assertEqual(len(_client().call_batch(calls)), 120)
+        self.assertEqual([len(payload) for payload in posts], [50, 50, 20])
+
+        posts.clear()
+        calls = [("getAllComments", {"task_id": index}) for index in range(120)]
+        with mock.patch.object(KanboardClient, "_post", lambda _self, payload: post(payload)):
+            self.assertEqual(len(_client().call_batch(calls)), 120)
+        self.assertEqual([len(payload) for payload in posts], [50, 50, 20])
+
+    def test_byte_accounting_serializes_each_request_once(self) -> None:
+        def post(payload):
+            return [{"jsonrpc": "2.0", "id": request["id"], "result": request["id"]} for request in payload]
+
+        with (
+            mock.patch.object(KanboardClient, "_post", lambda _self, payload: post(payload)),
+            mock.patch("secretary.tasks.json.dumps", wraps=json.dumps) as dumps,
+        ):
+            self.assertEqual(
+                _client().call_batch([("m", {"i": index}) for index in range(20)]), list(range(20))
+            )
+        self.assertEqual(dumps.call_count, 20)
+
 
 class MassStatusTransportTests(unittest.TestCase):
     """The baseline this change exists to hold: posts do not grow with the sprints."""
 
     def _posts(self, *, sprints: int, cards: int) -> list[list[str]]:
         board = _Board(sprints=sprints, cards=cards)
-        with tempfile.TemporaryDirectory() as data_dir:
-            with mock.patch.object(KanboardClient, "_post", lambda _self, payload: board.post(payload)):
-                statuses = SprintReader(_client(), data_dir=data_dir).statuses()
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            mock.patch.object(KanboardClient, "_post", lambda _self, payload: board.post(payload)),
+        ):
+            statuses = SprintReader(_client(), data_dir=data_dir).statuses()
         self.assertEqual(len(statuses), sprints)
         return board.posts
 

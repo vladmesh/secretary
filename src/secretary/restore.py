@@ -7,7 +7,6 @@ import subprocess
 import tarfile
 import tempfile
 import uuid
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,9 +25,9 @@ from secretary.backup_policy import (
     should_skip_data_entry,
 )
 from secretary.backup_verify import _verify_plain_tar
+from secretary.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
 from secretary.config import DataDirError, instance_data_dir, validate_instance
 from secretary.data import init_layout
-from secretary.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
 from secretary.product_issues import (
     ensure_swimlane,
     registered_projects,
@@ -117,7 +116,7 @@ def import_normalized_board(
                 client = KanboardClient.for_instance(instance)
             reader = TaskReader(client)
             writer = TaskWriter(client, data_dir=data_dir)
-            _, unresolved = writer.reconcile()
+            _, unresolved = writer.reconcile(defer_restore_comments=True)
             if unresolved:
                 raise RestoreError("board audit repair is required before restore")
             existing = _existing_board_cards(reader)
@@ -127,7 +126,9 @@ def import_normalized_board(
             # Read once before writes for idempotency and backend-audit binding.
             existing_sprints = _existing_sprints(data_dir, client, sprints)
             prefix = _restore_request_prefix(data_dir, writer.audit, set(existing) | set(existing_sprints))
-            for card in sorted(cards, key=_restore_card_order):
+            _validate_deferred_restore_comments(writer.audit, cards, sprints, prefix)
+            ordered_cards = sorted(cards, key=_restore_card_order)
+            for card in ordered_cards:
                 current = existing.get(card["reference"])
                 if current is None:
                     _create_restored_card(writer, card, prefix)
@@ -140,28 +141,16 @@ def import_normalized_board(
                     swimlane=str(card.get("swimlane") or ""),
                     request_id=f"{prefix}card:{card['reference']}",
                 )
-                live_comments = Counter(
-                    str(comment.get("body") or "")
-                    for comment in reader.show(card["reference"]).get("comments", [])
-                )
-                occurrences: dict[str, int] = {}
-                for index, comment in enumerate(_restore_comments(card)):
-                    occurrence = occurrences.get(comment, 0)
-                    occurrences[comment] = occurrence + 1
-                    if live_comments[comment] > occurrence:
-                        continue
-                    writer.restore_comment(
-                        reference=card["reference"],
-                        body=comment,
-                        occurrence=occurrence,
-                        request_id=f"{prefix}comment:{card['reference']}:{index}",
-                    )
-                if card.get("closed"):
-                    restored = reader.show(card["reference"])
-                    task_id = int(restored["id"].removeprefix("task_kanboard_"))
+            setup = reader.restore_snapshot()
+            _require_card_snapshot(data_dir, cards, setup)
+            _restore_card_comments_batched(writer, ordered_cards, setup, prefix)
+            for card in ordered_cards:
+                if card.get("closed") and not setup[card["reference"]].get("closed"):
+                    task_id = int(setup[card["reference"]]["id"].removeprefix("task_kanboard_"))
                     if client.call("closeTask", task_id=task_id) is not True:
                         raise RestoreError("could not close restored card")
-            actual = {card["reference"]: reader.show(card["reference"]) for card in cards}
+            actual = reader.restore_snapshot()
+            _require_card_snapshot(data_dir, cards, actual)
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed")
@@ -169,6 +158,11 @@ def import_normalized_board(
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed: restored card order")
             _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
+            pending_comments = [
+                event for event in writer.audit.pending_events() if event.get("kind") == "restored_comment"
+            ]
+            if pending_comments:
+                raise RestoreError("board comment audit repair is required before restore can complete")
         except TaskError as exc:
             raise RestoreError(exc.message) from None
         _update_restore_state(
@@ -210,6 +204,93 @@ def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _restore_card_comments_batched(
+    writer: TaskWriter,
+    cards: list[dict[str, Any]],
+    live: dict[str, dict[str, Any]],
+    prefix: str,
+) -> None:
+    from secretary.task_restore import RestoreCommentOccurrence, restore_comments_batched
+
+    intended: list[RestoreCommentOccurrence] = []
+    for card in cards:
+        reference = card["reference"]
+        current = live.get(reference)
+        if current is None:
+            raise RestoreError(f"restored card disappeared before comment recovery: {reference}")
+        task_id = int(str(current["id"]).removeprefix("task_kanboard_"))
+        occurrences: dict[str, int] = {}
+        for index, body in enumerate(_restore_comments(card)):
+            occurrence = occurrences.get(body, 0)
+            occurrences[body] = occurrence + 1
+            intended.append(
+                RestoreCommentOccurrence(
+                    reference,
+                    task_id,
+                    body,
+                    occurrence,
+                    f"{prefix}comment:{reference}:{index}",
+                )
+            )
+    restore_comments_batched(writer, intended)
+
+
+def _require_card_snapshot(
+    data_dir: Path, cards: list[dict[str, Any]], snapshot: dict[str, dict[str, Any]]
+) -> None:
+    """Translate a vanished restored reference into the public parity failure."""
+    if any(card["reference"] not in snapshot for card in cards):
+        _update_restore_state(data_dir, board="failed", board_parity="failed")
+        raise RestoreError("board parity check failed: restored card is missing")
+
+
+def _validate_deferred_restore_comments(
+    audit: TaskAudit,
+    cards: list[dict[str, Any]],
+    sprints: list[dict[str, Any]],
+    prefix: str,
+) -> None:
+    """Fail before board writes unless every deferred event belongs to this canon."""
+    from secretary.tasks import _digest
+
+    expected: dict[str, tuple[str, str, int]] = {}
+    for subject, bodies, label in (
+        *(
+            (card["reference"], _restore_comments(card), "comment")
+            for card in sorted(cards, key=_restore_card_order)
+        ),
+        *(
+            (
+                sprint["reference"],
+                [str(entry["text"]) for entry in sprint["comments"]],
+                "sprint-comment",
+            )
+            for sprint in sprints
+        ),
+    ):
+        seen: dict[str, int] = {}
+        for index, body in enumerate(bodies):
+            occurrence = seen.get(body, 0)
+            seen[body] = occurrence + 1
+            expected[f"{prefix}{label}:{subject}:{index}"] = (subject, _digest(body), occurrence)
+    pending = audit.pending_events()
+    if audit.status()["pending"] != len(pending):
+        raise RestoreError("board audit repair is required before restore")
+    for event in pending:
+        request_id = str(event.get("request_id") or "")
+        payload = event.get("payload")
+        identity = expected.get(request_id)
+        if (
+            event.get("kind") != "restored_comment"
+            or identity is None
+            or event.get("ref") != identity[0]
+            or not isinstance(payload, dict)
+            or payload.get("body_sha256") != identity[1]
+            or payload.get("restore_occurrence") != identity[2]
+        ):
+            raise RestoreError("board audit repair is required before restore")
+
+
 def _import_sprints(
     data_dir: Path,
     client: KanboardClient,
@@ -248,25 +329,44 @@ def _import_sprints(
             values=_restore_sprint_metadata(sprint),
             request_id=f"{prefix}sprint:{reference}",
         )
-        live_comments = Counter(
-            str(comment.get("body") or "") for comment in existing.get(reference, {}).get("comments", [])
-        )
-        occurrences: dict[str, int] = {}
-        for index, comment in enumerate(str(entry["text"]) for entry in sprint["comments"]):
-            occurrence = occurrences.get(comment, 0)
-            occurrences[comment] = occurrence + 1
-            if live_comments[comment] > occurrence:
-                continue
-            writer.restore_comment(
-                reference=reference,
-                body=comment,
-                occurrence=occurrence,
-                request_id=f"{prefix}sprint-comment:{reference}:{index}",
-            )
+    setup = {entity["ref"]: entity for entity in reader.export()}
+    _restore_sprint_comments_batched(writer, sprints, setup, prefix)
     live = {entity["reference"]: entity for entity in map(normalize_sprint_entity, reader.export())}
     if any(_sprint_core(live.get(sprint["reference"], {})) != _sprint_core(sprint) for sprint in sprints):
         _update_restore_state(data_dir, sprints="failed", sprint_parity="failed")
         raise RestoreError("sprint parity check failed")
+
+
+def _restore_sprint_comments_batched(
+    writer: Any,
+    sprints: list[dict[str, Any]],
+    live: dict[str, dict[str, Any]],
+    prefix: str,
+) -> None:
+    from secretary.task_restore import RestoreCommentOccurrence, restore_comments_batched
+
+    intended: list[RestoreCommentOccurrence] = []
+    for sprint in sprints:
+        reference = sprint["reference"]
+        current = live.get(reference)
+        if current is None:
+            raise RestoreError(f"restored sprint disappeared before comment recovery: {reference}")
+        task_id = int(str(current["id"]).removeprefix("sprint_kanboard_"))
+        occurrences: dict[str, int] = {}
+        for index, body in enumerate(str(entry["text"]) for entry in sprint["comments"]):
+            occurrence = occurrences.get(body, 0)
+            occurrences[body] = occurrence + 1
+            intended.append(
+                RestoreCommentOccurrence(
+                    reference,
+                    task_id,
+                    body,
+                    occurrence,
+                    f"{prefix}sprint-comment:{reference}:{index}",
+                    entity="sprint",
+                )
+            )
+    restore_comments_batched(writer, intended)
 
 
 SPRINT_PARITY_FIELDS = (
@@ -367,9 +467,7 @@ _ABSENT = object()
 
 def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
     """The exported sprint contract, without what a rewrite cannot reproduce."""
-    core: dict[str, Any] = {
-        field: sprint[field] if field in sprint else _ABSENT for field in SPRINT_PARITY_FIELDS
-    }
+    core: dict[str, Any] = {field: sprint.get(field, _ABSENT) for field in SPRINT_PARITY_FIELDS}
     core["comments"] = [
         str(comment.get("text") or "") for comment in sprint.get("comments", []) if isinstance(comment, dict)
     ]

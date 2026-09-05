@@ -166,3 +166,30 @@ base=$(git merge-base main HEAD)
 
 Use both commands whenever the set contains Python files. The `xargs -r` guard leaves an empty set
 as a no-op, rather than making Ruff choose a repository-wide default.
+
+## Normalized board bulk recovery
+
+`tests.test_bulk_comment_restore` exercises the restore-specific Card/Sprint comment boundary against the real
+`KanboardClient.call_batch` encoder and response validator with an in-process wire peer. Deterministic cases cover
+pre-existing prefixes, identical bodies, repeat import, first/middle/last lost replies, mixed per-call rejection
+and audit append failure, including pending Sprint comments through the public task reconciliation path. The
+routine production-shape transport microbenchmark constructs 1,429 cards with 14,174 comments and 93 sprints
+with 1,987 comments, counts logical RPCs and actual transport posts, and labels its time `durability=excluded`:
+its in-memory audit exists only to isolate transport scaling and is not product wall time. A smaller routine
+sample uses real `TaskAudit` pending files, locks, append and fsync and reports per-occurrence durable cost.
+
+The full real-audit benchmark is opt-in because it performs 16,161 durable occurrences:
+
+```console
+SECRETARY_FULL_BULK_BENCHMARK=1 PYTHONPATH=src python3 -m unittest -v \
+  tests.test_bulk_comment_restore.DurableAuditBenchmark.test_full_production_shape_real_audit
+```
+
+On 2026-09-05 it measured 14,174 Card comments in 144.787s over 576 posts and 28,348 logical RPCs,
+then 1,987 Sprint comments in 20.578s over 86 posts and 3,974 logical RPCs. The same routine test's
+transport-only phases measured 1.211s and 0.157s respectively; those numbers explicitly exclude durability.
+Interpret all times as hermetic receipts, not a live SLO. The structural assertion is that posts follow bounded
+50-comment entity waves/chunks while logical creates remain one per exported occurrence. The comparison baseline
+is the measured legacy Card path at 13–15 logical RPCs and HTTP posts per comment. The supported backend ordering,
+result shape and disposable timeout canary live in
+[the Kanboard comment contract evidence](evidence/kanboard-comment-contract-v1.2.46.md).

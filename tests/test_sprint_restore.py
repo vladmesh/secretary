@@ -89,6 +89,9 @@ class SprintRestoreTests(unittest.TestCase):
         self.ref = self._seed_closed_sprint()
         self._export()
 
+    def test_sprint_comments_have_only_the_shared_restore_representation(self) -> None:
+        self.assertFalse(hasattr(SprintWriter, "restore_comment"))
+
     def _seed_closed_sprint(self) -> str:
         writer = SprintWriter(  # type: ignore[arg-type]
             self.source,
@@ -555,11 +558,11 @@ class SprintRestoreTests(unittest.TestCase):
         publish = restore_module._import_sprints
 
         def checked(*args: object, **kwargs: object) -> object:
-            blocked.append("check:%s" % contender_blocked())
+            blocked.append(f"check:{contender_blocked()}")
             return check(*args, **kwargs)  # type: ignore[arg-type]
 
         def published(*args: object, **kwargs: object) -> object:
-            blocked.append("publish:%s" % contender_blocked())
+            blocked.append(f"publish:{contender_blocked()}")
             return publish(*args, **kwargs)  # type: ignore[arg-type]
 
         with (
@@ -675,9 +678,11 @@ class SprintRestoreTests(unittest.TestCase):
                 return original(method, task_id=params["task_id"], values=values)
             return original(method, **params)
 
-        with mock.patch.object(client, "call", side_effect=gains_empty_ownership):
-            with self.assertRaisesRegex(RestoreError, "sprint parity check failed"):
-                import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
+        with (
+            mock.patch.object(client, "call", side_effect=gains_empty_ownership),
+            self.assertRaisesRegex(RestoreError, "sprint parity check failed"),
+        ):
+            import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
 
         state = restore_state(self.target_data)
         self.assertEqual(state["sprint_parity"], "failed")
@@ -769,9 +774,11 @@ class SprintRestoreTests(unittest.TestCase):
                 return original(method, task_id=params["task_id"], values=values)
             return original(method, **params)
 
-        with mock.patch.object(client, "call", side_effect=lossy):
-            with self.assertRaisesRegex(RestoreError, "sprint parity check failed"):
-                import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
+        with (
+            mock.patch.object(client, "call", side_effect=lossy),
+            self.assertRaisesRegex(RestoreError, "sprint parity check failed"),
+        ):
+            import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
 
         state = restore_state(self.target_data)
         self.assertEqual(state["sprint_parity"], "failed")
@@ -782,9 +789,11 @@ class SprintRestoreTests(unittest.TestCase):
         # Doctor treats a restore state with no sprint key as one that predates sprint
         # entities. A recovery that started under this build records the step from the
         # first live write, so an interruption cannot be read as nothing left to do.
-        with mock.patch("secretary.restore._import_sprints", side_effect=RestoreError("stopped")):
-            with self.assertRaisesRegex(RestoreError, "stopped"):
-                import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
+        with (
+            mock.patch("secretary.restore._import_sprints", side_effect=RestoreError("stopped")),
+            self.assertRaisesRegex(RestoreError, "stopped"),
+        ):
+            import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
 
         self.assertEqual(restore_state(self.target_data)["sprints"], "pending")
         self.assertIn("sprint restore is incomplete", restore_findings(self.target_data))

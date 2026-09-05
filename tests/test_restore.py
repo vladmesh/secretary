@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 import secretary.restore as restore_module
@@ -127,11 +128,65 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
             self.assertEqual(len(client.tasks), 1)
 
+    def test_import_never_enters_the_interactive_comment_writers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card()
+            card["comments"] = [
+                {"ts": "1", "text": "first"},
+                {"ts": "2", "text": "second"},
+            ]
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+            with (
+                mock.patch(
+                    "secretary.tasks.TaskWriter.restore_comment",
+                    side_effect=AssertionError("interactive Card writer entered"),
+                ),
+            ):
+                self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertEqual([comment["comment"] for comment in client.comments[12]], ["first", "second"])
+
+    def test_missing_card_from_fresh_snapshot_is_a_recorded_parity_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+            original = TaskReader.restore_snapshot
+            reads = 0
+
+            def disappearing(reader):
+                nonlocal reads
+                reads += 1
+                snapshot = original(reader)
+                return snapshot if reads == 1 else {}
+
+            with (
+                mock.patch.object(TaskReader, "restore_snapshot", disappearing),
+                self.assertRaisesRegex(RestoreError, "board parity check failed"),
+            ):
+                import_normalized_board(data_dir, client=client)
+            self.assertEqual(restore_state(data_dir)["board"], "failed")
+            self.assertEqual(restore_state(data_dir)["board_parity"], "failed")
+
     def test_duplicate_export_is_rejected_before_replacing_the_prior_good_pair(self):
         card = {
-            "id": 193, "reference": "secretary-784", "title": "Original", "description": "",
-            "column": "Done", "swimlane": "Secretary", "position": 1, "closed": True,
-            "task_type": "code", "project": "secretary",
+            "id": 193,
+            "reference": "secretary-784",
+            "title": "Original",
+            "description": "",
+            "column": "Done",
+            "swimlane": "Secretary",
+            "position": 1,
+            "closed": True,
+            "task_type": "code",
+            "project": "secretary",
             "metadata": {"record_type": "task", "project": "secretary", "task_type": "code"},
             "comments": [],
         }
@@ -148,7 +203,8 @@ class RestoreTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "duplicate references secretary-784"):
                 export_board(
-                    data_dir, instance_dir=Path(tmpdir),
+                    data_dir,
+                    instance_dir=Path(tmpdir),
                     reader=mock.Mock(export=mock.Mock(return_value=[card, duplicate])),
                     sprint_client=SprintKanboard(),
                 )
@@ -623,7 +679,7 @@ class RestoreTests(unittest.TestCase):
             def run_restore() -> None:
                 try:
                     results.append(("ok", import_normalized_board(data_dir, client=client)))
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - the thread returns any restore failure.
                     results.append(("error", exc))
 
             with mock.patch("secretary.restore._create_restored_card", side_effect=paused_create):
@@ -692,16 +748,18 @@ class RestoreTests(unittest.TestCase):
             script.write_text("", encoding="utf-8")
             script.chmod(0o755)
             completed = subprocess.CompletedProcess([], 1, '{"ok":false,"error":"index parity failed"}', "")
-            with mock.patch("secretary.restore.subprocess.run", return_value=completed):
-                with self.assertRaisesRegex(RestoreError, "index parity failed"):
-                    rebuild_memory_index(
-                        data_dir,
-                        instance,
-                        python=Path(sys.executable),
-                        script=script,
-                        model="test",
-                        dim=4,
-                    )
+            with (
+                mock.patch("secretary.restore.subprocess.run", return_value=completed),
+                self.assertRaisesRegex(RestoreError, "index parity failed"),
+            ):
+                rebuild_memory_index(
+                    data_dir,
+                    instance,
+                    python=Path(sys.executable),
+                    script=script,
+                    model="test",
+                    dim=4,
+                )
 
     def test_reindex_timeout_is_a_restore_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -713,16 +771,18 @@ class RestoreTests(unittest.TestCase):
             script = Path(tmpdir) / "reindex.py"
             script.write_text("", encoding="utf-8")
             script.chmod(0o755)
-            with mock.patch("secretary.restore.subprocess.run", side_effect=subprocess.TimeoutExpired([], 1)):
-                with self.assertRaisesRegex(RestoreError, "could not rebuild memory index"):
-                    rebuild_memory_index(
-                        data_dir,
-                        instance,
-                        python=Path(sys.executable),
-                        script=script,
-                        model="test",
-                        dim=4,
-                    )
+            with (
+                mock.patch("secretary.restore.subprocess.run", side_effect=subprocess.TimeoutExpired([], 1)),
+                self.assertRaisesRegex(RestoreError, "could not rebuild memory index"),
+            ):
+                rebuild_memory_index(
+                    data_dir,
+                    instance,
+                    python=Path(sys.executable),
+                    script=script,
+                    model="test",
+                    dim=4,
+                )
 
     def test_restore_board_wraps_missing_backend_configuration(self):
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(os.environ, {}, clear=True):
@@ -843,7 +903,7 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
     моделируется явно.
     """
 
-    COLUMNS = [
+    COLUMNS: ClassVar[list[dict[str, object]]] = [
         {"id": 1, "title": "Issues"},
         {"id": 2, "title": "Ready"},
         {"id": 3, "title": "In progress"},
