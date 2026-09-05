@@ -1416,6 +1416,14 @@ boundary and bounded added objects; repeat once unchanged for idempotence. Then 
 memory, project, host-finalization and checkpoint push validation. Credentials, recovery phrases, helper
 arguments and private remote details do not belong in the evidence.
 
+If that retry reports `reconciled retained head-registry checkpoint`, record the before/after local SHA, fetched
+upstream SHA, bounded local-only count and two-parent graph. This is the recovery-only result for an earlier
+product checkpoint retained by degraded publication, not a general local-change merge. Checkout reuse performs
+no push. An unchanged retry must keep the same SHA; a later upstream advance may create one more recognized
+merge. If recovery instead reports unsupported local divergence, no trustworthy merge base, a contract mismatch
+or conflict cleanup, preserve the checkout and stop. Do not deepen it, resolve with `ours`/`theirs`, reset, rebase,
+delete, or publish from the protected recovery copy.
+
 Root recovery hands the restored instance and data roots to `--installation-user` at the named recovery
 ownership barrier, before a restored mode-`0600` installation key reaches that user's Git or remote child.
 Record only root/child numeric identities, ownership and file type/mode, never key material. The real
@@ -1429,8 +1437,9 @@ If checkpoint publication is disabled, unavailable or divergent, recovery report
 `checkpoint-publication` as degraded, exits non-zero, and retains the named local commit while completing safe
 host, pipeline-state, reconciliation and ownership work. This is not permission to call the push or recovery
 healthy. Repair only the destination or credential, then rerun the same recovery command. A compatible remote
-fast-forwards to the retained commit; an independently advanced remote remains divergent, with both histories
-preserved. Do not reset, rebase, force-push, delete progress, create an empty replacement commit or use an
+fast-forwards to the retained commit. When the independent advance is fetched during supported recovery, only the
+proved head-registry recovery lineage may be reconciled locally as described above; every other divergence remains
+preserved and refused. Do not reset, rebase, force-push, delete progress, create an empty replacement commit or use an
 ambient credential helper. `secretary upgrade`, dispatcher checkpointing and explicit checkpoint operations
 remain publication-mandatory and fail closed.
 

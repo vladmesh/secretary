@@ -124,6 +124,14 @@ class ProjectProvisionResult:
     retryable: bool
 
 
+@dataclass(frozen=True)
+class RecoveryReconciliationPreflight:
+    head: str
+    upstream: str
+    tree: str
+    local_count: int
+
+
 @dataclass
 class InstallResult:
     steps: list[InstallStep] = field(default_factory=list)
@@ -341,6 +349,8 @@ def _clone_or_reuse(
             target, ["merge", "--ff-only", "@{u}"], label="fast-forward instance checkout"
         )
         if merge.returncode:
+            if recovery:
+                return _reconcile_recovery_head_registry(target)
             detail = (merge.stderr or merge.stdout or "").strip().splitlines()
             raise InstallError(
                 f"fast-forward instance checkout: {detail[-1] if detail else f'exited {merge.returncode}'}"
@@ -348,6 +358,268 @@ def _clone_or_reuse(
     except CredentialError as exc:
         raise InstallError(str(exc)) from None
     return "reused checkpoint checkout"
+
+
+def _reconcile_recovery_head_registry(target: Path) -> str:
+    """Merge fetched upstream into one narrowly proved retained recovery lineage.
+
+    Fetching is deliberately complete before this function starts.  The state-repository
+    lock then excludes checkpoint writers while eligibility is proved and Git performs the
+    local-only merge.  Nothing in this boundary contacts or publishes to the remote.
+    """
+    try:
+        with state_repo.state_repo_lock(target):
+            before = _recovery_reconciliation_preflight(target)
+            identity = state_repo.commit_identity(target)
+            try:
+                merged = state_repo.run_git(
+                    target,
+                    [
+                        *identity,
+                        "-c",
+                        "commit.gpgSign=false",
+                        "merge",
+                        "--no-ff",
+                        "--no-edit",
+                        "--message",
+                        state_repo.RECOVERY_RECONCILIATION_MESSAGE,
+                        before.upstream,
+                    ],
+                    label="reconcile retained recovery checkpoint",
+                )
+            except BaseException:
+                _abort_recovery_reconciliation(target, before)
+                raise
+            if merged.returncode:
+                _abort_recovery_reconciliation(target, before)
+                raise InstallError(
+                    "reconcile retained recovery checkpoint: merge conflict or Git failure; "
+                    f"restored local {before.head} and preserved upstream {before.upstream}"
+                )
+            _verify_recovery_reconciliation(target, before)
+    except state_repo.StateRepoError as exc:
+        raise InstallError(f"unsupported local instance divergence: {exc}") from None
+    return (
+        "reconciled retained head-registry checkpoint "
+        f"local={before.head} upstream={before.upstream} "
+        f"local-only={before.local_count}"
+    )
+
+
+def _recovery_reconciliation_preflight(target: Path) -> RecoveryReconciliationPreflight:
+    """Return bounded reconciliation evidence or refuse without changing the checkout."""
+    dirty = state_repo.git(
+        target,
+        ["status", "--porcelain", "--untracked-files=all"],
+        label="recheck recovery checkout",
+    )
+    if dirty:
+        raise state_repo.StateRepoError("checkout changed while recovery was inspecting it")
+    branch = state_repo.git(
+        target, ["symbolic-ref", "--quiet", "--short", "HEAD"], label="inspect recovery branch"
+    ).strip()
+    upstream_name = state_repo.git(
+        target,
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        label="inspect recovery upstream",
+    ).strip()
+    if not branch or upstream_name != f"origin/{branch}":
+        raise state_repo.StateRepoError("checked-out branch must track its matching origin branch")
+    head = state_repo.git(target, ["rev-parse", "HEAD"], label="inspect recovery head").strip()
+    upstream = state_repo.git(
+        target, ["rev-parse", "@{u}"], label="inspect fetched recovery upstream"
+    ).strip()
+    base_result = state_repo.run_git(
+        target,
+        ["merge-base", "--all", head, upstream],
+        label="inspect recovery merge base",
+    )
+    bases = base_result.stdout.splitlines() if base_result.returncode == 0 else []
+    if len(bases) != 1:
+        raise state_repo.StateRepoError(
+            "no single trustworthy merge base is available; preserve the shallow checkout and stop"
+        )
+    local_all = state_repo.git(
+        target,
+        ["rev-list", head, "--not", upstream],
+        label="inspect local-only recovery history",
+    ).splitlines()
+    local_first_parent = state_repo.git(
+        target,
+        ["rev-list", "--first-parent", head, "--not", upstream],
+        label="inspect recovery first-parent lineage",
+    ).splitlines()
+    if not local_all or set(local_all) != set(local_first_parent):
+        raise state_repo.StateRepoError(
+            "local-only history is empty or contains history outside the recovery first-parent lineage"
+        )
+    expected_identity = _expected_recovery_commit_identity(target)
+    local_set = set(local_all)
+    for commit in reversed(local_first_parent):
+        _verify_recovery_lineage_commit(target, commit, upstream, local_set, expected_identity)
+    return RecoveryReconciliationPreflight(
+        head=head,
+        upstream=upstream,
+        tree=state_repo.git(target, ["rev-parse", "HEAD^{tree}"], label="snapshot recovery index").strip(),
+        local_count=len(local_all),
+    )
+
+
+def _expected_recovery_commit_identity(target: Path) -> tuple[str, str]:
+    configured: list[str] = []
+    for key in ("user.name", "user.email"):
+        try:
+            value = state_repo.git(target, ["config", "--get", key], label="inspect commit identity").strip()
+        except state_repo.StateRepoError:
+            value = ""
+        configured.append(value)
+    if not all(configured):
+        return state_repo.FALLBACK_IDENTITY
+    return configured[0], configured[1]
+
+
+def _verify_recovery_lineage_commit(
+    target: Path,
+    commit: str,
+    upstream: str,
+    local_set: set[str],
+    expected_identity: tuple[str, str],
+) -> None:
+    parents = state_repo.git(
+        target, ["rev-list", "--parents", "-n", "1", commit], label="inspect recovery lineage"
+    ).split()
+    metadata = (
+        state_repo.git(
+            target,
+            ["show", "--no-patch", "--format=%an%x00%ae%x00%cn%x00%ce", commit],
+            label="inspect recovery commit contract",
+        )
+        .rstrip("\n")
+        .split("\0", 3)
+    )
+    if len(metadata) != 4:
+        raise state_repo.StateRepoError(f"local commit {commit} has malformed identity metadata")
+    author_name, author_email, committer_name, committer_email = metadata
+    if (author_name, author_email) != expected_identity or (
+        committer_name,
+        committer_email,
+    ) != expected_identity:
+        raise state_repo.StateRepoError(f"local commit {commit} has an unsupported identity")
+    message = _recovery_commit_message(target, commit)
+    parent_ids = parents[1:]
+    if len(parent_ids) == 1 and message == state_repo.HEADS_CHECKPOINT_MESSAGE + "\n":
+        changed = set(
+            filter(
+                None,
+                state_repo.git(
+                    target,
+                    ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", commit],
+                    label="inspect recovery checkpoint paths",
+                ).split("\0"),
+            )
+        )
+        if not changed or not changed.issubset(set(state_repo.HEADS_PATHSPEC)):
+            raise state_repo.StateRepoError(
+                f"local checkpoint {commit} changes paths outside the installed head registry"
+            )
+        return
+    if len(parent_ids) == 2 and message == state_repo.RECOVERY_RECONCILIATION_MESSAGE + "\n":
+        first, second = parent_ids
+        if first not in local_set:
+            raise state_repo.StateRepoError(
+                f"recovery merge {commit} does not continue the retained local first-parent lineage"
+            )
+        second_is_upstream = state_repo.run_git(
+            target,
+            ["merge-base", "--is-ancestor", second, upstream],
+            label="verify prior fetched upstream",
+        )
+        prior_bases = state_repo.git(
+            target,
+            ["merge-base", "--all", first, second],
+            label="inspect prior recovery merge base",
+        ).splitlines()
+        if second_is_upstream.returncode or len(prior_bases) != 1:
+            raise state_repo.StateRepoError(
+                f"recovery merge {commit} does not link the local lineage to upstream ancestry"
+            )
+        return
+    raise state_repo.StateRepoError(
+        f"local commit {commit} is not a supported head-registry recovery checkpoint or reconciliation"
+    )
+
+
+def _abort_recovery_reconciliation(target: Path, before: RecoveryReconciliationPreflight) -> None:
+    """Use Git's merge abort, then prove the exact clean logical checkout was restored."""
+    state_repo.run_git(target, ["merge", "--abort"], label="abort recovery reconciliation")
+    head = state_repo.git(target, ["rev-parse", "HEAD"], label="verify restored recovery head").strip()
+    tree = state_repo.git(target, ["write-tree"], label="verify restored recovery index").strip()
+    dirty = state_repo.git(
+        target,
+        ["status", "--porcelain", "--untracked-files=all"],
+        label="verify restored recovery checkout",
+    )
+    if head != before.head or tree != before.tree or dirty or _recovery_merge_state_present(target):
+        raise state_repo.StateRepoError(
+            "recovery merge cleanup could not prove the original clean checkout; preserve it and stop"
+        )
+
+
+def _verify_recovery_reconciliation(target: Path, before: RecoveryReconciliationPreflight) -> None:
+    after = state_repo.git(
+        target, ["rev-list", "--parents", "-n", "1", "HEAD"], label="verify recovery merge"
+    ).split()
+    dirty = state_repo.git(
+        target,
+        ["status", "--porcelain", "--untracked-files=all"],
+        label="verify reconciled recovery checkout",
+    )
+    metadata = (
+        state_repo.git(
+            target,
+            ["show", "--no-patch", "--format=%an%x00%ae%x00%cn%x00%ce", "HEAD"],
+            label="verify recovery merge contract",
+        )
+        .rstrip("\n")
+        .split("\0", 3)
+    )
+    expected_identity = _expected_recovery_commit_identity(target)
+    contract_matches = len(metadata) == 4 and _recovery_commit_message(target, "HEAD") == (
+        state_repo.RECOVERY_RECONCILIATION_MESSAGE + "\n"
+    )
+    if contract_matches:
+        contract_matches = (
+            tuple(metadata[:2]) == expected_identity and tuple(metadata[2:4]) == expected_identity
+        )
+    if (
+        len(after) != 3
+        or after[1:] != [before.head, before.upstream]
+        or dirty
+        or not contract_matches
+        or _recovery_merge_state_present(target)
+    ):
+        raise state_repo.StateRepoError(
+            "recovery reconciliation did not produce the expected clean two-parent merge; preserve it and stop"
+        )
+
+
+def _recovery_merge_state_present(target: Path) -> bool:
+    git_dir = Path(
+        state_repo.git(
+            target, ["rev-parse", "--absolute-git-dir"], label="inspect recovery operation state"
+        ).strip()
+    )
+    return any((git_dir / name).exists() for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE"))
+
+
+def _recovery_commit_message(target: Path, commit: str) -> str:
+    raw = state_repo.git(
+        target, ["cat-file", "commit", commit], label="inspect exact recovery commit message"
+    )
+    _, separator, message = raw.partition("\n\n")
+    if not separator:
+        raise state_repo.StateRepoError(f"local commit {commit} has malformed commit metadata")
+    return message
 
 
 def _clone_instance(

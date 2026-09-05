@@ -475,8 +475,11 @@ is committed before the managed push. A disabled or unavailable destination, cre
 divergence leaves the command non-zero and reports the retained local commit while safe later materializer,
 pipeline-state, ownership and reconcile steps complete. The push and full recovery are never labelled healthy.
 With an unchanged compatible remote, rerunning recovery publishes that same commit fast-forward and clears the
-publication degradation without an empty duplicate commit. If the remote advanced independently, retry preserves
-both tips and reports divergence; recovery never resets, rebases, deletes, or force-pushes either history.
+publication degradation without an empty duplicate commit. If upstream advanced after recovery retained a local
+installed-head checkpoint, checkout reuse first tries its normal fast-forward and then recognizes only the
+product-authored local lineage described below. It locally merges the fetched tip without publishing. The later
+recovery checkpoint publisher remains degraded when publication is disabled or unavailable, while safe
+materialization continues. Recovery never resets, rebases, deletes, or force-pushes either history.
 
 Running `secretary recover` again is safe: the checkout is fast-forward only, completed board import and
 memory indexing are skipped when the board, run, memory-fact and binding identity still matches, successful checkouts
@@ -496,11 +499,23 @@ diagnostic intentionally returns a non-zero `degraded` result while any configur
 does not mark reconcile complete. Repair the checkout by rerunning the supported recovery command; do not edit
 the progress or managed-state files.
 
+A retained head-registry lineage is eligible only when the checkout is clean, the current branch tracks its
+matching `origin` branch, exactly one trustworthy merge base is present in the shallow history, and all local-only
+history lies on one first-parent chain. A one-parent node must match the configured product Git identity, the exact
+head-registry checkpoint message, and change no path outside the two installed-head files. A recognized earlier
+reconciliation has the same identity, the exact product reconciliation message and two parents: prior local
+lineage first, an ancestor of the currently fetched upstream second. This lets another upstream advance add one
+new merge while an unchanged retry adds nothing. Missing shallow ancestry, an octopus or arbitrary merge, a
+manual/config/state/secret commit, a wrong identity/message/path, untracked content, or a content conflict is an
+actionable refusal. Preserve the checkout and both tips and stop. Conflict or interruption invokes Git's merge
+abort and verifies the original HEAD, index tree, clean worktree and absent merge head before returning.
+
 A non-empty target that is not a valid instance repository may be debris from a pre-fix interrupted
 clone. Recovery will not infer that it is healthy or overwrite it. Inspect and preserve it if needed,
 then remove that failed partial target outside Secretary or select a fresh `--instance-dir` and rerun
-the same supported command. A dirty checkout, different origin, invalid repository or non-fast-forward
-relationship is likewise left untouched and reported as a refusal.
+the same supported command. A dirty checkout, different origin, invalid repository or unsupported non-fast-forward
+relationship is likewise left untouched and reported as a refusal. A clean tree alone never establishes product
+ownership.
 
 A checkpoint taken before sprint entities entered the export still restores: it has no sprints file, which
 reads as an installation without sprints, and `doctor` stays green on a completed restore. Terminals,
