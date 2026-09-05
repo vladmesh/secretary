@@ -1429,6 +1429,12 @@ not a cleanup instruction: preserve that evidence and investigate the named refe
 initialization; archived closure follows comment proof; post-close active-order reconciliation and a fresh final
 parity snapshot remain the completion gates.
 
+An error naming an oversized `create`, `metadata/state` or `closure` payload is a pre-write validation refusal,
+not an uncertain batch. Reduce or repair the named normalized record before retrying; the refusal has staged no
+new card obligation. Likewise, a named backend rejection is definite for the member fresh evidence still shows
+absent or incomplete. Preserve any proved sibling rows and their audit records. Only the explicit `uncertain`
+result calls for the ordinary ambiguity-safe rerun above.
+
 Recovery prints a structured row for every configured project. `failed` rows make the aggregate status
 `degraded` and the command exits non-zero, but board, memory, run-state, safe host finalization and ownership
 handoff still complete. The host contract preserves an unavailable project's existing managed registration

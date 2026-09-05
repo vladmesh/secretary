@@ -116,6 +116,7 @@ def import_normalized_board(
             _, unresolved = writer.reconcile(defer_restore_comments=True, defer_bulk_restore=True)
             if unresolved:
                 raise RestoreError("board audit repair is required before restore")
+            _set_restore_phase(client, "inventory")
             board_id, columns, swimlanes = reader._board()
             existing = _existing_board_cards(client, board_id)
             unexpected = set(existing) - {card["reference"] for card in cards}
@@ -140,18 +141,23 @@ def import_normalized_board(
                 existing=existing,
                 request_prefix=prefix,
             )
+            _set_restore_phase(client, "proof")
             setup = reader.restore_snapshot()
             _require_card_snapshot(data_dir, cards, setup)
             from secretary.task_restore import commit_restored_cards
 
             commit_restored_cards(writer, ordered_cards, setup, request_prefix=prefix)
+            _set_restore_phase(client, "proof")
             _restore_card_comments_batched(writer, ordered_cards, setup, prefix)
             from secretary.task_restore import close_restored_cards_batched
 
             close_restored_cards_batched(client, ordered_cards, setup, board_id=board_id)
+            _set_restore_phase(client, "closure")
             post_close = reader.restore_snapshot()
             _require_card_snapshot(data_dir, cards, post_close)
+            _set_restore_phase(client, "order")
             _reconcile_restored_order(writer, cards, post_close, prefix)
+            _set_restore_phase(client, "final_parity")
             actual = reader.restore_snapshot()
             _require_card_snapshot(data_dir, cards, actual)
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
@@ -178,6 +184,13 @@ def import_normalized_board(
             sprint_count=len(sprints),
         )
         return len(cards)
+
+
+def _set_restore_phase(client: Any, phase: str) -> None:
+    """Mark a restore boundary when a diagnostic client provides a phase observer."""
+    hook = getattr(client, "set_restore_phase", None)
+    if callable(hook):
+        hook(phase)
 
 
 def _existing_sprints(

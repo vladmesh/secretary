@@ -384,6 +384,12 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    absent or incomplete obligations. Duplicate references, a conflicting title/description or a committed card
    that no longer matches fail closed. Released per-card create/restore events remain valid resume evidence, and
    recovery never clears audit/progress or rotates a namespace still bound to the target.
+   Before staging any card, recovery serializes every possible single create, metadata/state and closure payload
+   against the same 1 MiB call limit used by the batch transport. An oversized payload therefore names its
+   reference and phase without leaving a pending occurrence. A valid JSON-RPC error member or invalid mutation
+   result is a definite backend rejection; fresh evidence identifies applied siblings, but an absent or incomplete
+   rejected member reports the rejection rather than generic uncertainty. Lost transport replies and malformed or
+   incomplete aggregate documents remain ambiguous and retain their pending obligations for retry.
    Card and sprint comment history has a restore-only bulk boundary. Recovery reads normalized history in
    bounded batches and writes ordered waves with at most one next occurrence per entity in a JSON-RPC batch;
    ordinary interactive comment commands retain their read-before/read-after protocol. Every occurrence is

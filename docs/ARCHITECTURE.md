@@ -571,8 +571,12 @@ needed and it does not race the tick writer.
   the ordinary `TaskAudit` journal before any create. Native creates carry final title, description, reference,
   column and swimlane; metadata and exported placement use bounded follow-up batches. A fresh whole-board
   inventory plus batched metadata proves each row independently, so a mixed rejection, malformed response or
-  lost aggregate reply never makes the batch atomic. Duplicate references and conflicting existing content fail
-  closed. A retry keeps the local restore namespace, accepts released `create`/`restored` evidence, creates only
+  lost aggregate reply never makes the batch atomic. Every possible single create, metadata/state and closure
+  call is serialized and checked against the 1 MiB wire limit before obligations are staged. A structurally valid
+  per-call backend error is a definite rejection and is reported with its card and phase; only transport loss or
+  malformed/incomplete aggregate evidence enters uncertainty reconciliation. Exact swimlane names take priority
+  when legacy normalized aliases collide. Duplicate references and conflicting existing content fail closed. A
+  retry keeps the local restore namespace, accepts released `create`/`restored` evidence, creates only
   absent rows, initializes only incomplete obligations, and publishes each new occurrence only after its exact
   row and initialized state are proved. A complete replay performs no card mutation.
 
