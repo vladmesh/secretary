@@ -232,18 +232,24 @@ def _clone_or_reuse(
     recovery: bool,
     dry_run: bool,
     bootstrap_credential: Path | None = None,
+    installation_user: str | None = None,
 ) -> str:
     empty_target = target.is_dir() and not any(target.iterdir())
     if not target.exists() or empty_target:
         if dry_run:
             return "would clone private instance remote"
         target.parent.mkdir(parents=True, exist_ok=True)
-        _clone_instance(remote, target, bootstrap_credential=bootstrap_credential)
+        _clone_instance(
+            remote,
+            target,
+            bootstrap_credential=bootstrap_credential,
+            installation_user=installation_user,
+        )
         return "cloned private instance remote"
     if not target.is_dir() or not (target / ".git").exists():
         raise InstallError(
-            f"target {target} is not empty; choose --recover for the same instance or use the "
-            "separate adopt workflow, no files were overwritten"
+            f"target {target} is not a valid instance checkout; remove a failed partial target "
+            "or choose a fresh --instance-dir, no files were overwritten"
         )
     # This checkout belongs to the runtime user.  Do not make a root Git process trust it: Git
     # loads repository configuration before every command, including executable fsmonitor hooks.
@@ -252,8 +258,11 @@ def _clone_or_reuse(
         origin = state_repo.git(
             target, ["remote", "get-url", "origin"], label="inspect instance remote"
         ).strip()
-    except state_repo.StateRepoError as exc:
-        raise InstallError(str(exc)) from None
+    except state_repo.StateRepoError:
+        raise InstallError(
+            f"existing target {target} is not a usable instance checkout; preserve and inspect it, "
+            "then remove a failed partial target or choose a fresh --instance-dir, no files were overwritten"
+        ) from None
     if origin != remote:
         raise InstallError("existing target belongs to a different instance remote")
     # Only a checkout explicitly prepared by `bootstrap` may continue into its
@@ -275,7 +284,11 @@ def _clone_or_reuse(
         remote, "recovery-reuse", instance_dir=target, bootstrap_file=bootstrap_credential
     )
     try:
-        fetch = remote_git.run_instance(target, ["fetch", "--quiet", "origin"], label="fetch instance remote")
+        fetch = remote_git.run_instance(
+            target,
+            ["fetch", "--quiet", "--no-tags", "origin"],
+            label="fetch instance remote",
+        )
         if fetch.returncode:
             detail = (fetch.stderr or fetch.stdout or "").strip().splitlines()
             raise InstallError(
@@ -294,13 +307,79 @@ def _clone_or_reuse(
     return "reused checkpoint checkout"
 
 
-def _clone_instance(remote: str, target: Path, *, bootstrap_credential: Path | None) -> None:
+def _clone_instance(
+    remote: str,
+    target: Path,
+    *,
+    bootstrap_credential: Path | None,
+    installation_user: str | None = None,
+) -> None:
+    temporary: Path | None = None
+    claimed_target = False
     try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.clone-", dir=target.parent))
+        staging = temporary / "checkout"
         RemoteExecution(remote, "initial-clone", bootstrap_file=bootstrap_credential).run_clone(
-            target, label="clone instance remote", timeout=300
+            staging,
+            label="clone instance remote",
+            timeout=300,
+            clone_args=["--depth=1", "--single-branch", "--no-tags", "--no-local"],
         )
+        _validate_initial_clone(staging, remote)
+        _set_installation_owner(staging, installation_user)
+        if not target.exists():
+            target.mkdir(mode=0o700)
+            claimed_target = True
+        elif not target.is_dir() or any(target.iterdir()):
+            raise InstallError(
+                f"target {target} changed during clone; choose a fresh --instance-dir, "
+                "no files were overwritten"
+            )
+        os.replace(staging, target)
+        claimed_target = False
     except CredentialError as exc:
         raise InstallError(str(exc)) from None
+    except OSError as exc:
+        raise InstallError("adopt cloned instance checkout: atomic replacement failed") from exc
+    finally:
+        if claimed_target:
+            try:
+                target.rmdir()
+            except OSError:
+                pass
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
+
+
+def _validate_initial_clone(staging: Path, remote: str) -> None:
+    """Prove the bounded clone is the remote's checked-out branch tip before adoption."""
+
+    def inspect(args: list[str], label: str) -> str:
+        return _run(["git", "-C", str(staging), *args], label=label)
+
+    if inspect(["rev-parse", "--is-inside-work-tree"], "validate cloned repository") != "true":
+        raise InstallError("validate cloned repository: not a Git work tree")
+    if inspect(["remote", "get-url", "origin"], "validate cloned origin") != remote:
+        raise InstallError("validate cloned origin: remote identity mismatch")
+    branch = inspect(["symbolic-ref", "--quiet", "--short", "HEAD"], "validate cloned branch")
+    if not branch:
+        raise InstallError("validate cloned branch: remote default branch is unavailable")
+    try:
+        upstream = inspect(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            "validate cloned upstream",
+        )
+    except InstallError:
+        raise InstallError("validate cloned branch: remote default branch is unavailable") from None
+    if upstream != f"origin/{branch}":
+        raise InstallError("validate cloned upstream: tracking relationship mismatch")
+    head = inspect(["rev-parse", "HEAD"], "validate cloned revision")
+    upstream_head = inspect(["rev-parse", "@{u}"], "validate cloned upstream revision")
+    if head != upstream_head:
+        raise InstallError("validate cloned revision: checkout is not at the remote tip")
+    if inspect(["rev-parse", "--is-shallow-repository"], "validate shallow clone") != "true":
+        raise InstallError("validate shallow clone: bounded history was not established")
 
 
 def _bootstrap_credential(args: argparse.Namespace, target: Path) -> tuple[Path | None, Path | None]:
@@ -1214,14 +1293,13 @@ def install(args: argparse.Namespace) -> InstallResult:
             recovery=recovery,
             dry_run=args.dry_run,
             bootstrap_credential=bootstrap,
+            installation_user=args.installation_user,
         )
         result.add(
             "instance-checkout",
             "unchanged" if detail.startswith("reused") else ("would-change" if args.dry_run else "changed"),
             detail,
         )
-        if detail.startswith("cloned"):
-            _set_installation_owner(target, args.installation_user)
         if args.dry_run and not target.exists():
             result.add("secret-store", "skipped", "available only after clone")
             result.add("runtime-env", "skipped", "available only after clone")

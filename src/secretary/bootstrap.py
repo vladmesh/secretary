@@ -454,7 +454,13 @@ def bootstrap(args: argparse.Namespace) -> int:
             _host_supported()
         # Bootstrap may be safely rerun for an existing dedicated user.
         _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
-        clone_detail = _clone_or_reuse(args.instance_remote, target, recovery=True, dry_run=args.dry_run)
+        clone_detail = _clone_or_reuse(
+            args.instance_remote,
+            target,
+            recovery=True,
+            dry_run=args.dry_run,
+            installation_user=args.installation_user,
+        )
         try:
             values = read_runtime_env(target, require_ignored=False)
         except RuntimeEnvMissing:
