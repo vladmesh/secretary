@@ -1430,29 +1430,33 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self.context.publication_policy = "recovery-degraded"
         self._git(self.instance, "push", "--quiet", "origin", "main")
         self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
-        tail_calls: list[str] = []
-
-        def safe_tail(_context):
-            tail_calls.append("ran")
-            return upgrade.StepResult("safe-tail", "changed", "completed")
-
-        first = upgrade.run_steps(
-            self.context,
-            steps=(upgrade.step_head_registry, upgrade.step_publish_head_registry, safe_tail),
-        )
+        with mock.patch("secretary.upgrade.desired_role_worktrees", return_value=[]):
+            first = upgrade.run_steps(
+                self.context,
+                steps=(
+                    upgrade.step_head_registry,
+                    upgrade.step_publish_head_registry,
+                    upgrade.step_worktrees,
+                ),
+            )
         retained = self._git(self.instance, "rev-parse", "HEAD")
 
-        self.assertEqual([step.status for step in first.steps], ["changed", "degraded", "changed"])
-        self.assertEqual(tail_calls, ["ran"])
+        self.assertEqual([step.status for step in first.steps], ["changed", "degraded", "skipped"])
+        self.assertEqual(first.steps[2].name, "role-worktrees")
         self.assertIn(retained, first.steps[1].detail)
         self.assertNotEqual(retained, self._git(self.remote, "rev-parse", "main"))
 
         self._git(self.instance, "remote", "set-url", "origin", str(self.remote))
-        second = upgrade.run_steps(
-            self.context,
-            steps=(upgrade.step_head_registry, upgrade.step_publish_head_registry, safe_tail),
-        )
-        self.assertEqual([step.status for step in second.steps], ["unchanged", "unchanged", "changed"])
+        with mock.patch("secretary.upgrade.desired_role_worktrees", return_value=[]):
+            second = upgrade.run_steps(
+                self.context,
+                steps=(
+                    upgrade.step_head_registry,
+                    upgrade.step_publish_head_registry,
+                    upgrade.step_worktrees,
+                ),
+            )
+        self.assertEqual([step.status for step in second.steps], ["unchanged", "unchanged", "skipped"])
         self.assertEqual(self._git(self.instance, "rev-parse", "HEAD"), retained)
         self.assertEqual(self._git(self.remote, "rev-parse", "main"), retained)
 
@@ -1491,19 +1495,18 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
 
     def test_ordinary_publication_failure_still_stops_the_materializer(self):
         self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
-        tail_calls: list[str] = []
-
-        def forbidden_tail(_context):
-            tail_calls.append("ran")
-            return upgrade.StepResult("forbidden-tail", "changed")
-
-        result = upgrade.run_steps(
-            self.context,
-            steps=(upgrade.step_head_registry, upgrade.step_publish_head_registry, forbidden_tail),
-        )
+        with mock.patch("secretary.upgrade.desired_role_worktrees") as worktrees:
+            result = upgrade.run_steps(
+                self.context,
+                steps=(
+                    upgrade.step_head_registry,
+                    upgrade.step_publish_head_registry,
+                    upgrade.step_worktrees,
+                ),
+            )
 
         self.assertEqual([step.status for step in result.steps], ["changed", "failed"])
-        self.assertEqual(tail_calls, [])
+        worktrees.assert_not_called()
 
     def test_incomplete_or_stale_pair_fails_closed_before_routing(self):
         self._publish()

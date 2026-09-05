@@ -1421,6 +1421,9 @@ ownership barrier, before a restored mode-`0600` installation key reaches that u
 Record only root/child numeric identities, ownership and file type/mode, never key material. The real
 materializer must execute `head-registry` followed by `head-registry-checkpoint`. Prove its successful branch
 against an isolated disposable Git destination; never enable the protected drill copy's production push URL.
+The same barrier runs after restored pipeline state is written and on every partial or successful recovery
+exit, covering the instance Git lock, recovery progress and dispatcher run-state roots. If final ownership
+cleanup itself fails, report it separately while retaining the earlier actionable failure.
 
 If checkpoint publication is disabled, unavailable or divergent, recovery reports
 `checkpoint-publication` as degraded, exits non-zero, and retains the named local commit while completing safe

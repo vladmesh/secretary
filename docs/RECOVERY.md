@@ -447,6 +447,9 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    project-id reservations, so an unavailable reserved project does not leave a sprint headless. Automations
    are installation-global and do not schedule project work. Healthy projects continue normally. Heads are
    connected after bootstrap as a separate step.
+10. Re-enters the same recovery ownership barrier on every partial or successful exit. It hands root-created
+    instance Git locks, recovery progress and restored dispatcher run-state paths to the installation user.
+    A cleanup error is reported separately and does not replace an earlier actionable recovery failure.
 
 The ordering is intentional: recovery first reconstructs the normalized board and run exports,
 validates their NDJSON and counters, and only then rebuilds the board, pipeline journal and managed

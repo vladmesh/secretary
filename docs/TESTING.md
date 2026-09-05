@@ -173,7 +173,10 @@ as a no-op, rather than making Ruff choose a repository-wide default.
 `tests.test_github_credential` and `tests.test_checkpoint` jointly cover secret recovery, the root-to-runtime
 ownership handoff, real child identity, materializer order and checkpoint publication. The root fixture is
 platform-gated because it needs `runuser` and a usable non-root account; when available it loads the installation
-key and runs instance Git as the selected child while reporting only numeric uid/gid and mode evidence.
+key and runs instance Git as the selected child while reporting only numeric uid/gid and mode evidence. The
+fixture copies the required product packages beneath its child-traversable temporary root, so it does not depend
+on access to the worker checkout under a private home. A separate partial-finalization regression proves that
+the same named barrier covers secret, Git lock, progress and dispatcher run-state paths after a later failure.
 
 Head-registry tests use real local repositories. They prove local commit before a disabled push, continuation
 through a genuine later step only under the recovery publication policy, isolated successful publication,

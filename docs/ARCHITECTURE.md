@@ -555,6 +555,8 @@ needed and it does not race the tick writer.
   declared data roots to that account, then verifies that a restored installation key is a regular,
   non-symlink, mode-`0600` file owned by the account. An existing partial recovery crosses the same barrier
   before checkout reuse so its already-restored managed credential is readable by the selected Git child.
+  Recovery reaches that same named barrier again on successful and partial exits, including any restored
+  dispatcher run-state root, without replacing the original error when cleanup also fails.
 - Head-registry materialization always commits the generated snapshot and source pin locally before it tries
   managed, fast-forward-only publication. Ordinary upgrade and checkpoint callers require that publication
   and stop on failure. Supported recovery alone classifies a disabled, unavailable or divergent destination
