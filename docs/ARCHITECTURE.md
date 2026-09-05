@@ -561,8 +561,15 @@ needed and it does not race the tick writer.
   JSON-RPC writes. One ordered wave contains no more than one occurrence for an entity because Kanboard batches
   are not database transactions and do not promise member execution order. Missing, duplicate, malformed or
   mismatched answers invalidate the aggregate result; fresh batched histories then reconcile each occurrence.
-  The transport caps a document at 200 calls and 1 MiB, splits before either bound, and never relies on response
-  order. Final parity is a new authoritative bounded snapshot, not the cache used to plan writes.
+  The transport caps a document at 200 general calls and 1 MiB, with separate 50-call caps for comment reads
+  and writes, splits before any bound, and never relies on response order. Pinned Kanboard v1.2.46 returns
+  comments by `(date_creation, id) ASC`, making the id the stable creation-order tie-break within one second;
+  the source and disposable-backend evidence are recorded in
+  [the comment contract canary](evidence/kanboard-comment-contract-v1.2.46.md). Final parity is a new
+  authoritative bounded snapshot, not the cache used to plan writes. A comment-read response contains at most
+  50 histories, but one history and the aggregate response bytes have no smaller product limit. A single long
+  history is transferred again for every ordered wave, so its row transfer is quadratic in that entity's
+  comment count; the 30-second transport timeout fails such a read closed rather than weakening reconciliation.
 
 Command contracts are in [Protocols](PROTOCOLS.md), runbooks in [Operations](OPERATIONS.md), and the
 product goal in [Vision](VISION.md).

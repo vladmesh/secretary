@@ -146,13 +146,34 @@ class RestoreTests(unittest.TestCase):
                     "secretary.tasks.TaskWriter.restore_comment",
                     side_effect=AssertionError("interactive Card writer entered"),
                 ),
-                mock.patch(
-                    "secretary.sprints.SprintWriter.restore_comment",
-                    side_effect=AssertionError("interactive Sprint writer entered"),
-                ),
             ):
                 self.assertEqual(import_normalized_board(data_dir, client=client), 1)
             self.assertEqual([comment["comment"] for comment in client.comments[12]], ["first", "second"])
+
+    def test_missing_card_from_fresh_snapshot_is_a_recorded_parity_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+            original = TaskReader.restore_snapshot
+            reads = 0
+
+            def disappearing(reader):
+                nonlocal reads
+                reads += 1
+                snapshot = original(reader)
+                return snapshot if reads == 1 else {}
+
+            with (
+                mock.patch.object(TaskReader, "restore_snapshot", disappearing),
+                self.assertRaisesRegex(RestoreError, "board parity check failed"),
+            ):
+                import_normalized_board(data_dir, client=client)
+            self.assertEqual(restore_state(data_dir)["board"], "failed")
+            self.assertEqual(restore_state(data_dir)["board_parity"], "failed")
 
     def test_duplicate_export_is_rejected_before_replacing_the_prior_good_pair(self):
         card = {

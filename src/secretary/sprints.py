@@ -814,7 +814,7 @@ class SprintWriter:
                     supplement if (observer is not None or budget_by_type) else None,
                 )
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - the host adapter normalizes its public failures.
             raise self._host_error(exc) from None
 
     def create(
@@ -1923,7 +1923,7 @@ class SprintWriter:
             return
         sections = ("issues", "cards")
         offered = {
-            section: sorted(list(decisions.get(section) or []), key=lambda entry: entry.get("ref", ""))
+            section: sorted(decisions.get(section) or [], key=lambda entry: entry.get("ref", ""))
             for section in sections
         }
         current = {section: list(staged.get(section) or []) for section in sections}
@@ -2490,22 +2490,6 @@ class SprintWriter:
             "restored", "steward", "restore", reference, request_id, {"fields": sorted(values)}, mutation
         )
 
-    def restore_comment(
-        self, *, reference: str, body: str, occurrence: int, request_id: str | None = None
-    ) -> dict[str, Any]:
-        """Append one exported record back to the entity, verbatim."""
-        return self._write(
-            "restored_comment",
-            "steward",
-            "restore",
-            reference,
-            request_id,
-            {"body_sha256": _digest(body), "restore_occurrence": occurrence},
-            lambda sprint: self.client.call(
-                "createComment", task_id=_sprint_number(sprint), user_id=0, content=body
-            ),
-        )
-
     def _guard_observer_identity(self, *, role: str, actor: str, reference: str, request_id: str) -> None:
         """Refuse a sprint write of role `observer` that is not about the caller's own sprint.
 
@@ -2525,8 +2509,10 @@ class SprintWriter:
         code, message = (
             (
                 "observer_identity_unbound",
-                "this observer names no sprint, so its writes cannot be authenticated; "
-                "it has to be launched by the dispatcher for one sprint",
+                (
+                    "this observer names no sprint, so its writes cannot be authenticated; "
+                    "it has to be launched by the dispatcher for one sprint"
+                ),
             )
             if not declared
             else (
@@ -2789,7 +2775,7 @@ def _resume_lag_seconds(recorded_at: str, last_event_at: str) -> int | None:
 
 def _timestamp(value: str) -> datetime | None:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None

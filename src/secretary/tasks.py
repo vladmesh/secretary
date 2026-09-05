@@ -443,6 +443,8 @@ def is_significant_observer_event(
 
 
 _BATCH_CHUNK = 200
+_BATCH_COMMENT_CHUNK = 50
+_BATCH_WRITE_CHUNK = 50
 # Bound both dimensions of one JSON-RPC document.  Count protects Kanboard's
 # dispatcher; bytes protect the web server and make a pathological comment fail
 # before an unbounded request is allocated on the wire.
@@ -492,16 +494,27 @@ class KanboardClient:
         start = 0
         while start < len(calls):
             requests: list[dict[str, Any]] = []
+            request_bytes = 2  # JSON array brackets; commas are added below.
+            comment_reads = 0
+            comment_writes = 0
             while start + len(requests) < len(calls) and len(requests) < _BATCH_CHUNK:
                 index = start + len(requests)
                 method, params = calls[index]
-                candidate = requests + [_rpc_request(index, method, params)]
-                size = len(json.dumps(candidate, separators=(",", ":")).encode("utf-8"))
-                if size > _BATCH_BYTES:
+                next_reads = comment_reads + (method == "getAllComments")
+                next_writes = comment_writes + (method == "createComment")
+                if next_reads > _BATCH_COMMENT_CHUNK or next_writes > _BATCH_WRITE_CHUNK:
+                    break
+                request = _rpc_request(index, method, params)
+                encoded_size = len(json.dumps(request, separators=(",", ":")).encode("utf-8"))
+                next_bytes = request_bytes + encoded_size + bool(requests)
+                if next_bytes > _BATCH_BYTES:
                     if not requests:
                         raise TaskError("validation", "one Kanboard batch call exceeds the byte limit", 2)
                     break
-                requests = candidate
+                requests.append(request)
+                request_bytes = next_bytes
+                comment_reads = next_reads
+                comment_writes = next_writes
             document = self._post(requests)
             if not isinstance(document, list):
                 raise TaskError("backend_error", "Kanboard rejected the batch request", 1)
@@ -1093,6 +1106,42 @@ class TaskAudit:
                 ):
                     return candidate
         return None
+
+    def pending_marker_owners(self, candidates: Iterable[tuple[str, str, str]]) -> dict[str, str]:
+        """Resolve many per-Card marker reservations in one pending-journal scan.
+
+        Callers hold every candidate's marker lock.  One restore wave can then
+        retain the same cross-process exclusion without reopening every pending
+        file once per occurrence.
+        """
+        from secretary.board.events import render_marker_comment
+
+        wanted = {(reference, content): request_id for reference, content, request_id in candidates}
+        owners: dict[str, str] = {}
+        with self._locked_audit():
+            for record in self.pending_events():
+                candidate = str(record.get("request_id") or "")
+                identity: tuple[str, str] | None = None
+                if record.get("record_type") == self._PROTOCOL_EVENT_RECORD_TYPE:
+                    try:
+                        event = Event.from_record(record)
+                        if event.entity_kind is EntityKind.CARD:
+                            identity = (event.ref, render_marker_comment(event))
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    payload = record.get("payload")
+                    if (
+                        record.get("kind") == "restored_comment"
+                        and isinstance(record.get("ref"), str)
+                        and isinstance(payload, dict)
+                        and isinstance(payload.get("restore_body"), str)
+                    ):
+                        identity = (record["ref"], payload["restore_body"])
+                request_id = wanted.get(identity) if identity is not None else None
+                if request_id is not None and candidate != request_id:
+                    owners[request_id] = candidate
+        return owners
 
     @classmethod
     def _is_protocol_event(cls, event: dict[str, Any]) -> bool:
@@ -3944,6 +3993,15 @@ class TaskWriter:
                     # Product/Issue writes have ordered backend cleanup.  Only their supported
                     # command, retried with the original request id, can prove that cleanup.
                     unresolved += 1
+                    continue
+                if event.get("kind") == "restored_comment":
+                    from secretary.task_restore import finish_pending_restore_comment
+
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    finish_pending_restore_comment(self, event, payload)
+                    self.audit.stage(str(event["request_id"]), event)
+                    self.audit.append(str(event["request_id"]), event)
+                    repaired += 1
                     continue
                 if str(event.get("ref") or "").startswith("sprint:"):
                     from secretary.sprints import SprintWriter

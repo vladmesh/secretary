@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 import unittest
@@ -12,7 +13,7 @@ from unittest import mock
 
 from secretary.board_transport import BoardTransport
 from secretary.task_restore import RestoreCommentOccurrence, restore_comments_batched
-from secretary.tasks import KanboardClient, TaskAudit, TaskError
+from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskWriter
 
 
 class _WireBoard:
@@ -23,10 +24,15 @@ class _WireBoard:
         self.write_posts = 0
         self.lose_write: int | None = None
         self.reject_write: tuple[int, int] | None = None
+        self.lose_reconcile_read = False
+        self.unavailable_reads = 0
 
     def post(self, payload):
         requests = payload if isinstance(payload, list) else [payload]
         methods = [str(request["method"]) for request in requests]
+        if methods and methods[0] == "getAllComments" and self.unavailable_reads:
+            self.unavailable_reads -= 1
+            raise TaskError("backend_unavailable", "lost evidence read", 1)
         self.posts.append(methods)
         self.logical.extend(methods)
         writing = bool(methods and methods[0] == "createComment")
@@ -49,6 +55,8 @@ class _WireBoard:
                 raise AssertionError(method)
             answers.append({"jsonrpc": "2.0", "id": request["id"], "result": result})
         if writing and self.lose_write == self.write_posts:
+            if self.lose_reconcile_read:
+                self.unavailable_reads = 1
             raise TaskError("backend_unavailable", "lost aggregate reply", 1)
         return answers if isinstance(payload, list) else answers[0]
 
@@ -141,9 +149,11 @@ class BulkCommentRestoreTests(unittest.TestCase):
             pending = writer.audit.pending_event("restore:sprint:sprint:1:0")
             self.assertNotIn("restore_body", pending["payload"])
             writer.audit.append = original
-            restore_comments_batched(writer, _items(target, entity="sprint"))
+            self.assertEqual(TaskWriter(writer.client, data_dir=tmp).reconcile(), (1, 0))
             self.assertEqual([row["comment"] for row in board.comments[1]], ["record"])
             self.assertEqual(len(writer.audit.events("sprint:1", kind="restored_comment")), 1)
+            restore_comments_batched(writer, _items(target, entity="sprint"))
+            self.assertEqual([row["comment"] for row in board.comments[1]], ["record"])
 
     def test_staging_failure_precedes_every_backend_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,6 +176,48 @@ class BulkCommentRestoreTests(unittest.TestCase):
                 restore_comments_batched(writer, _items({"secretary-1": ["expected"]}))
             self.assertEqual(board.logical.count("createComment"), 0)
 
+    def test_task_reconcile_proves_absent_sprint_comment_before_commit_and_retry(self) -> None:
+        target = {"sprint:1": ["private sprint record"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            board = _WireBoard([1])
+            board.reject_write = (1, 0)
+            writer = self._writer(root, board)
+            with self.assertRaisesRegex(TaskError, "uncertain"):
+                restore_comments_batched(writer, _items(target, entity="sprint"))
+            self.assertEqual(board.comments[1], [])
+            self.assertIn("restore_body", writer.audit.pending_event("restore:sprint:sprint:1:0")["payload"])
+
+            board.reject_write = None
+            self.assertEqual(TaskWriter(writer.client, data_dir=root).reconcile(), (1, 0))
+            self.assertEqual([row["comment"] for row in board.comments[1]], target["sprint:1"])
+            event = writer.audit.committed_event("restore:sprint:sprint:1:0")
+            self.assertNotIn("restore_body", event["payload"])
+            self.assertNotIn("private sprint record", (root / "board" / "events.ndjson").read_text())
+
+            writes = board.logical.count("createComment")
+            restore_comments_batched(writer, _items(target, entity="sprint"))
+            self.assertEqual(board.logical.count("createComment"), writes)
+
+    def test_task_reconcile_scrubs_already_applied_sprint_comment_after_lost_reply(self) -> None:
+        target = {"sprint:1": ["private applied record"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            board = _WireBoard([1])
+            board.lose_write = 1
+            board.lose_reconcile_read = True
+            writer = self._writer(root, board)
+            with self.assertRaisesRegex(TaskError, "uncertain"):
+                restore_comments_batched(writer, _items(target, entity="sprint"))
+            self.assertEqual([row["comment"] for row in board.comments[1]], target["sprint:1"])
+
+            writes = board.logical.count("createComment")
+            self.assertEqual(TaskWriter(writer.client, data_dir=root).reconcile(), (1, 0))
+            self.assertEqual(board.logical.count("createComment"), writes)
+            event = writer.audit.committed_event("restore:sprint:sprint:1:0")
+            self.assertNotIn("restore_body", event["payload"])
+            self.assertNotIn("private applied record", (root / "board" / "events.ndjson").read_text())
+
 
 class _MemoryAudit:
     def __init__(self) -> None:
@@ -177,6 +229,9 @@ class _MemoryAudit:
 
     def pending_marker_owner(self, _reference, _body, *, request_id=None):
         return None
+
+    def pending_marker_owners(self, candidates):
+        return {}
 
     def committed_event(self, request_id):
         return self.committed.get(request_id)
@@ -227,17 +282,63 @@ class ProductionShapeBenchmark(unittest.TestCase):
         sprint_posts = len(sprint_board.posts)
         self.assertEqual(card_board.logical.count("createComment"), 14_174)
         self.assertEqual(sprint_board.logical.count("createComment"), 1_987)
-        self.assertLess(card_posts, 200)
-        self.assertLess(sprint_posts, 60)
+        self.assertLess(card_posts, 650)
+        self.assertLess(sprint_posts, 100)
         self.assertEqual(card_board.logical.count("getAllComments"), 14_174)
         self.assertEqual(sprint_board.logical.count("getAllComments"), 1_987)
         print(
-            "BULK_RESTORE_BENCHMARK "
+            "BULK_RESTORE_TRANSPORT_ONLY durability=excluded "
             f"cards=1429 card_comments=14174 card_posts={card_posts} "
             f"card_logical={len(card_board.logical)} card_seconds={card_seconds:.3f} "
             f"sprints=93 sprint_comments=1987 sprint_posts={sprint_posts} "
             f"sprint_logical={len(sprint_board.logical)} sprint_seconds={sprint_seconds:.3f} "
-            "batch_count=200 batch_bytes=1048576 legacy_card_posts=184262..212610"
+            "batch_count=200 comment_read_count=50 comment_write_count=50 "
+            "batch_bytes=1048576 legacy_card_posts=184262..212610"
+        )
+
+
+class DurableAuditBenchmark(unittest.TestCase):
+    _fixture = staticmethod(ProductionShapeBenchmark._fixture)
+
+    def _measure_durable(self, histories: dict[str, list[str]], entity: str):
+        board = _WireBoard(list(range(1, len(histories) + 1)))
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = SimpleNamespace(client=_client(board), audit=TaskAudit(tmp))
+            started = time.monotonic()
+            restore_comments_batched(writer, _items(histories, entity=entity))
+            duration = time.monotonic() - started
+            events = len(writer.audit.events(kind="restored_comment"))
+        return board, duration, events
+
+    def test_real_audit_cost_per_occurrence(self) -> None:
+        histories = self._fixture(40, 120, "secretary-")
+        board, duration, events = self._measure_durable(histories, "card")
+        self.assertEqual(events, 120)
+        self.assertEqual(board.logical.count("createComment"), 120)
+        print(
+            "BULK_RESTORE_DURABLE_SAMPLE durability=TaskAudit "
+            f"cards=40 comments=120 posts={len(board.posts)} logical={len(board.logical)} "
+            f"seconds={duration:.3f} per_occurrence_ms={duration / 120 * 1000:.3f}"
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("SECRETARY_FULL_BULK_BENCHMARK") == "1",
+        "full durable benchmark is an explicit receipt, not a routine shard cost",
+    )
+    def test_full_production_shape_real_audit(self) -> None:
+        cards = self._fixture(1_429, 14_174, "secretary-")
+        sprints = self._fixture(93, 1_987, "sprint:")
+        card_board, card_seconds, card_events = self._measure_durable(cards, "card")
+        sprint_board, sprint_seconds, sprint_events = self._measure_durable(sprints, "sprint")
+        self.assertEqual(card_events, 14_174)
+        self.assertEqual(sprint_events, 1_987)
+        print(
+            "BULK_RESTORE_DURABLE_FULL durability=TaskAudit "
+            f"cards=1429 card_comments=14174 card_posts={len(card_board.posts)} "
+            f"card_logical={len(card_board.logical)} card_seconds={card_seconds:.3f} "
+            f"sprints=93 sprint_comments=1987 sprint_posts={len(sprint_board.posts)} "
+            f"sprint_logical={len(sprint_board.logical)} sprint_seconds={sprint_seconds:.3f} "
+            "batch_count=200 comment_read_count=50 comment_write_count=50 batch_bytes=1048576"
         )
 
 

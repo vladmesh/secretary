@@ -230,6 +230,39 @@ class CallBatchTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(TaskError, "byte limit"):
                 _client().call_batch([("m", {"v": "x" * 200})])
 
+    def test_comment_reads_and_writes_use_their_smaller_timeout_safe_bound(self) -> None:
+        posts = []
+
+        def post(payload):
+            posts.append(payload)
+            return [
+                {"jsonrpc": "2.0", "id": request["id"], "result": request["id"] + 1} for request in payload
+            ]
+
+        calls = [("createComment", {"task_id": index, "content": "x"}) for index in range(120)]
+        with mock.patch.object(KanboardClient, "_post", lambda _self, payload: post(payload)):
+            self.assertEqual(len(_client().call_batch(calls)), 120)
+        self.assertEqual([len(payload) for payload in posts], [50, 50, 20])
+
+        posts.clear()
+        calls = [("getAllComments", {"task_id": index}) for index in range(120)]
+        with mock.patch.object(KanboardClient, "_post", lambda _self, payload: post(payload)):
+            self.assertEqual(len(_client().call_batch(calls)), 120)
+        self.assertEqual([len(payload) for payload in posts], [50, 50, 20])
+
+    def test_byte_accounting_serializes_each_request_once(self) -> None:
+        def post(payload):
+            return [{"jsonrpc": "2.0", "id": request["id"], "result": request["id"]} for request in payload]
+
+        with (
+            mock.patch.object(KanboardClient, "_post", lambda _self, payload: post(payload)),
+            mock.patch("secretary.tasks.json.dumps", wraps=json.dumps) as dumps,
+        ):
+            self.assertEqual(
+                _client().call_batch([("m", {"i": index}) for index in range(20)]), list(range(20))
+            )
+        self.assertEqual(dumps.call_count, 20)
+
 
 class MassStatusTransportTests(unittest.TestCase):
     """The baseline this change exists to hold: posts do not grow with the sprints."""

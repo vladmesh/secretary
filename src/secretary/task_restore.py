@@ -57,6 +57,7 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
                 )
                 writes: list[tuple[str, dict[str, Any]]] = []
                 staged: list[tuple[RestoreCommentOccurrence, dict[str, Any]]] = []
+                next_items: list[RestoreCommentOccurrence] = []
                 for reference in chunk_refs:
                     target = grouped[reference]
                     live = histories[reference]
@@ -77,7 +78,11 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
                     positions[reference] = len(live)
                     if positions[reference] == len(target):
                         continue
-                    item = target[positions[reference]]
+                    next_items.append(target[positions[reference]])
+                owners = writer.audit.pending_marker_owners(
+                    (item.reference, item.body, item.request_id) for item in next_items
+                )
+                for item in next_items:
                     event = _restore_comment_event(writer, item, _now)
                     if writer.audit.committed_event(
                         item.request_id
@@ -87,9 +92,7 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
                             f"committed restore comment is absent from {reference}",
                             1,
                         )
-                    owner = writer.audit.pending_marker_owner(
-                        reference, item.body, request_id=item.request_id
-                    )
+                    owner = owners.get(item.request_id)
                     if owner is not None:
                         raise TaskError(
                             "audit_pending",
@@ -123,6 +126,13 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
 
 
 def _read_comment_histories(client: Any, subjects: list[tuple[str, int]]) -> dict[str, list[str]]:
+    """Read histories in Kanboard's stable creation order.
+
+    Pinned Kanboard v1.2.46 orders CommentModel.getAll by
+    ``date_creation ASC, id ASC``.  The id tie-break is the durable creation
+    order when several restores share the same one-second timestamp; the
+    disposable backend contract canary is recorded in the recovery docs.
+    """
     from secretary.tasks import TaskError
 
     answers = client.call_batch(("getAllComments", {"task_id": task_id}) for _, task_id in subjects)
@@ -353,34 +363,59 @@ def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str
 
 
 def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: dict[str, Any]) -> None:
-    """Deduplicate an ambiguous comment write before closing its audit event."""
-    from secretary.tasks import TaskError, _digest, _task_number
+    """Prove or finish one ambiguous Card/Sprint comment before audit append."""
+    from secretary.tasks import TaskError, _digest, _positive_int
 
     ref = str(event.get("ref") or "")
     body = payload.get("restore_body")
+    digest = payload.get("body_sha256")
     occurrence = payload.get("restore_occurrence")
-    if not ref or not isinstance(body, str) or not isinstance(occurrence, int) or occurrence < 0:
+    backend = event.get("backend") if isinstance(event.get("backend"), dict) else {}
+    task_id = _positive_int(backend.get("task_id"))
+    if (
+        not ref
+        or task_id is None
+        or (body is not None and not isinstance(body, str))
+        or not isinstance(digest, str)
+        or not isinstance(occurrence, int)
+        or occurrence < 0
+    ):
         raise TaskError("backend_error", "pending restore comment is invalid", 1)
     with writer.audit.marker_comment_lock(ref):
-        owner = writer.audit.pending_marker_owner(ref, body, request_id=str(event.get("request_id") or ""))
-        if owner is not None:
-            raise TaskError(
-                "audit_pending",
-                f"an earlier identical Card marker occurrence is pending; reconcile request {owner} first",
-                4,
+        if isinstance(body, str):
+            owner = writer.audit.pending_marker_owner(
+                ref, body, request_id=str(event.get("request_id") or "")
             )
-        digest = payload.get("body_sha256")
-        matches = sum(
-            _digest(str(comment.get("body") or "")) == digest
-            for comment in writer.reader.show(ref).get("comments", [])
-        )
+            if owner is not None:
+                raise TaskError(
+                    "audit_pending",
+                    "an earlier identical Card/Sprint marker occurrence is pending; "
+                    f"reconcile request {owner} first",
+                    4,
+                )
+
+        def matching_count() -> int:
+            answers = writer.client.call_batch([("getAllComments", {"task_id": task_id})])
+            comments = answers[0]
+            if not isinstance(comments, list) or any(not isinstance(comment, dict) for comment in comments):
+                raise TaskError("backend_error", "Kanboard returned invalid task comments", 1)
+            return sum(_digest(str(comment.get("comment") or "")) == digest for comment in comments)
+
+        matches = matching_count()
         if matches <= occurrence:
-            writer.client.call(
-                "createComment", task_id=_task_number(writer.reader.show(ref)), user_id=0, content=body
-            )
-            matches += 1
+            if body is None:
+                raise TaskError(
+                    "audit_pending",
+                    "legacy Sprint restore comment is not present and cannot be retried without its body",
+                    4,
+                )
+            answer = writer.client.call("createComment", task_id=task_id, user_id=0, content=body)
+            if not isinstance(answer, int) or isinstance(answer, bool) or answer <= 0:
+                raise TaskError("backend_error", "Kanboard rejected the restored comment", 1)
+            matches = matching_count()
         if matches <= occurrence:
             raise TaskError("backend_error", "pending restore comment remains incomplete", 1)
+        event["backend"]["revision"] = f"comments:{matches}"
         payload.pop("restore_body", None)
 
 

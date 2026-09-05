@@ -142,6 +142,7 @@ def import_normalized_board(
                     request_id=f"{prefix}card:{card['reference']}",
                 )
             setup = reader.restore_snapshot()
+            _require_card_snapshot(data_dir, cards, setup)
             _restore_card_comments_batched(writer, ordered_cards, setup, prefix)
             for card in ordered_cards:
                 if card.get("closed") and not setup[card["reference"]].get("closed"):
@@ -149,6 +150,7 @@ def import_normalized_board(
                     if client.call("closeTask", task_id=task_id) is not True:
                         raise RestoreError("could not close restored card")
             actual = reader.restore_snapshot()
+            _require_card_snapshot(data_dir, cards, actual)
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed")
@@ -231,6 +233,15 @@ def _restore_card_comments_batched(
                 )
             )
     restore_comments_batched(writer, intended)
+
+
+def _require_card_snapshot(
+    data_dir: Path, cards: list[dict[str, Any]], snapshot: dict[str, dict[str, Any]]
+) -> None:
+    """Translate a vanished restored reference into the public parity failure."""
+    if any(card["reference"] not in snapshot for card in cards):
+        _update_restore_state(data_dir, board="failed", board_parity="failed")
+        raise RestoreError("board parity check failed: restored card is missing")
 
 
 def _validate_deferred_restore_comments(
