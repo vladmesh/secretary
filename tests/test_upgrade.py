@@ -13,6 +13,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
 
 from secretary import status, upgrade
@@ -50,6 +51,7 @@ from secretary.host import (
     strict_manifest,
 )
 from secretary.host_apply import ApplyInputs, apply_host
+from secretary.projects.availability import ProjectAvailability
 from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
 from triggered_agents.agents.pipeline import heads, health
 
@@ -238,6 +240,7 @@ class ApplyHostTests(unittest.TestCase):
         instance=None,
         bindings=(),
         runtime_user: str | None = None,
+        project_availability: ProjectAvailability | None = None,
     ) -> ApplyInputs:
         return ApplyInputs(
             instance=instance or instance_config(self.data),
@@ -247,6 +250,7 @@ class ApplyHostTests(unittest.TestCase):
             manifest_path=self.manifest,
             packaged=self.packaged,
             runtime_user=runtime_user,
+            project_availability=project_availability or ProjectAvailability(),
         )
 
     def test_empty_host_is_installed_enabled_and_recorded(self):
@@ -429,6 +433,40 @@ class ApplyHostTests(unittest.TestCase):
         self.assertTrue(any("no repo removal command" in error for error in result.errors), result.errors)
         recorded = {r.name for r in strict_manifest(self.manifest)[0]}
         self.assertIn("demo", recorded)
+
+    def test_failed_retry_preserves_registered_project_while_healthy_project_continues(self):
+        alpha = {"id": "alpha", "repo": "/srv/alpha", "orca_binding": "alpha", "enabled": True}
+        beta = {"id": "beta", "repo": "/srv/beta", "orca_binding": "beta", "enabled": True}
+        units, orca = FakeUnitInstaller(), FakeRegistrar()
+
+        apply_host(
+            self.inputs(HostInventory(), bindings=[alpha]),
+            units=units,
+            orca=orca,
+        )
+        managed, error = strict_manifest(self.manifest)
+        self.assertEqual(error, "")
+        inventory = HostInventory(units=set(units.files), orca_repos={"alpha"})
+
+        result = apply_host(
+            self.inputs(
+                inventory,
+                managed,
+                bindings=[alpha, beta],
+                project_availability=ProjectAvailability(frozenset({"alpha"})),
+            ),
+            units=units,
+            orca=orca,
+        )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(
+            [change.action for change in result.changes if change.logical_id == "orca:project:alpha"],
+            ["unchanged"],
+        )
+        self.assertIn(("beta", "/srv/beta"), orca.added)
+        recorded = {resource.name for resource in strict_manifest(self.manifest)[0]}
+        self.assertEqual(recorded & {"alpha", "beta"}, {"alpha", "beta"})
 
 
 class AutomationSpecTests(unittest.TestCase):
@@ -1778,10 +1816,13 @@ def _restore_mode(path: Path, mode: int = 0o644) -> None:
 class _Report:
     """The slice of an InstanceReport the host and memory steps read."""
 
-    host = {"unit_prefix": UNIT_PREFIX}
-    instance = {"host": {"unit_prefix": UNIT_PREFIX}, "data_dir": "/tmp/does-not-matter"}
+    host: ClassVar = {"unit_prefix": UNIT_PREFIX}
+    instance: ClassVar = {
+        "host": {"unit_prefix": UNIT_PREFIX},
+        "data_dir": "/tmp/does-not-matter",
+    }
     data_dir = Path("/tmp/does-not-matter")
-    bindings: list = []
+    bindings: ClassVar[list] = []
 
 
 if __name__ == "__main__":

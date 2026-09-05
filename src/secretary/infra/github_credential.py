@@ -247,7 +247,7 @@ class RemoteExecution:
             except FileNotFoundError:
                 raise CredentialError(f"{label}: command not found", code="command-not-found") from None
             except subprocess.TimeoutExpired:
-                raise CredentialError(f"{label}: command could not run", code="timeout") from None
+                raise CredentialError(f"{label}: command timed out", code="timeout") from None
             except (OSError, StateRepoError) as exc:
                 code = "timeout" if "timed out" in str(exc).lower() else "process"
                 message = "command timed out" if code == "timeout" else "command could not run"

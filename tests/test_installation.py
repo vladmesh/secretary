@@ -34,6 +34,7 @@ from secretary.installation import (
     provision_codex_home,
     provision_project_checkouts,
 )
+from secretary.projects.availability import ProjectAvailability
 from secretary.routing_journal import attempts
 from secretary.runtime_env import RuntimeEnvError
 from secretary.upgrade import UpgradeResult, step_host
@@ -494,7 +495,43 @@ class InstallationTests(unittest.TestCase):
                 {"version": 1, "identity": "identity-two"},
             )
 
-    def test_materializer_receives_only_available_project_bindings(self):
+    def test_recovery_identity_tracks_changed_added_and_removed_memory_facts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            _checkpoint(instance, root / "data")
+            facts = instance / "state" / "memory" / "facts"
+            original = facts / "fact.md"
+            progress = root / "recovery-progress.json"
+
+            baseline = installation._recovery_identity(instance, [])
+            self.assertEqual(installation._recovery_identity(instance, []), baseline)
+            installation._write_recovery_progress(progress, baseline, memory="complete")
+            self.assertEqual(
+                installation._read_recovery_progress(progress, baseline)["memory"],
+                "complete",
+            )
+
+            original.write_text("# changed fact\n", encoding="utf-8")
+            changed = installation._recovery_identity(instance, [])
+            self.assertNotEqual(changed, baseline)
+            self.assertNotIn("memory", installation._read_recovery_progress(progress, changed))
+            original.write_text("# recovered fact\n", encoding="utf-8")
+            self.assertEqual(installation._recovery_identity(instance, []), baseline)
+
+            added = facts / "nested" / "added.md"
+            added.parent.mkdir()
+            added.write_text("# added fact\n", encoding="utf-8")
+            self.assertNotEqual(installation._recovery_identity(instance, []), baseline)
+            added.unlink()
+            added.parent.rmdir()
+            self.assertEqual(installation._recovery_identity(instance, []), baseline)
+
+            original.unlink()
+            self.assertNotEqual(installation._recovery_identity(instance, []), baseline)
+
+    def test_materializer_preserves_desired_bindings_and_carries_availability(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             report = InstanceReport(
@@ -514,7 +551,8 @@ class InstallationTests(unittest.TestCase):
             )
 
             def run(context, *, steps=installation.STEPS):
-                self.assertEqual(context.report.bindings, [{"id": "ready"}])
+                self.assertEqual(context.report.bindings, [{"id": "ready"}, {"id": "missing"}])
+                self.assertEqual(context.project_availability.unavailable, frozenset({"missing"}))
                 return UpgradeResult()
 
             with (
@@ -527,7 +565,7 @@ class InstallationTests(unittest.TestCase):
                 installation.materialize_host(
                     root / "instance",
                     root / "product",
-                    available_projects={"ready"},
+                    project_availability=ProjectAvailability(frozenset({"missing"})),
                 )
 
     def test_degraded_recovery_finishes_host_pipeline_state_and_ownership(self):
@@ -616,7 +654,10 @@ class InstallationTests(unittest.TestCase):
 
             self.assertEqual(result.status, "degraded")
             self.assertEqual(result.projects[0].code, "unsupported-https")
-            self.assertEqual(materialize.call_args.kwargs["available_projects"], set())
+            self.assertEqual(
+                materialize.call_args.kwargs["project_availability"].unavailable,
+                frozenset({"missing"}),
+            )
             self.assertIn(mock.call(target, getpass.getuser()), owner.call_args_list)
 
     def test_fatal_board_failure_does_not_enter_project_or_host_boundary(self):

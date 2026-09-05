@@ -70,6 +70,7 @@ from secretary.host_apply import (
 from secretary.memory.client_config import ClientConfigError, reconcile_clients
 from secretary.memory.health import MemoryProbeError, probe_memory
 from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
+from secretary.projects.availability import ProjectAvailability
 from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from triggered_agents.runtime.paths import configured_product_root
 
@@ -114,6 +115,7 @@ class UpgradeContext:
     # Resolve home-relative artifacts from the installation owner, not the invoker.
     runtime_user: str | None = None
     runtime_home: Path | None = None
+    project_availability: ProjectAvailability = field(default_factory=ProjectAvailability)
 
 
 @dataclass
@@ -704,7 +706,7 @@ def step_host(context: UpgradeContext) -> StepResult:
         )
     except (DataDirError, HostCommandError, ValueError) as exc:
         return StepResult("host", "failed", str(exc))
-    expected = build_expectations(report.bindings, report.host)
+    expected = build_expectations(report.bindings, report.host, availability=context.project_availability)
     source = (
         FixtureHostSource(context.host_fixture)
         if context.host_fixture
@@ -726,12 +728,14 @@ def step_host(context: UpgradeContext) -> StepResult:
             manifest_path=manifest,
             packaged=packaged,
             runtime_user=context.runtime_user,
+            project_availability=context.project_availability,
         ),
         units=context.units,
         orca=context.orca,
         dry_run=context.dry_run,
     )
-    pending = [change for change in result.changes if change.action != "unchanged"]
+    pending = [change for change in result.changes if change.action not in {"unchanged", "deferred"}]
+    deferred = [change for change in result.changes if change.action == "deferred"]
     if result.conflicts:
         names = ", ".join(change.name for change in result.conflicts)
         return StepResult("host", "failed", f"unowned names in our namespace: {names}")
@@ -741,7 +745,10 @@ def step_host(context: UpgradeContext) -> StepResult:
         change.kind == "unit" and change.name.startswith(_memory_unit_prefix(report)) for change in pending
     )
     if not pending:
-        return StepResult("host", "unchanged", f"{len(result.changes)} resources reconciled")
+        detail = f"{len(result.changes)} resources reconciled"
+        if deferred:
+            detail += f"; {len(deferred)} unavailable project registrations deferred"
+        return StepResult("host", "unchanged", detail)
     detail = ", ".join(f"{change.action} {change.name}" for change in pending)
     return StepResult("host", "changed", detail)
 

@@ -1405,10 +1405,13 @@ commands remain diagnostic primitives, not the main runbook.
 
 Recovery prints a structured row for every configured project. `failed` rows make the aggregate status
 `degraded` and the command exits non-zero, but board, memory, run-state, safe host finalization and ownership
-handoff still complete. The host contract excludes unavailable projects from registration and launch. Fix
+handoff still complete. The host contract preserves an unavailable project's existing managed registration
+but defers checkout-dependent creation. Dispatch may inspect the binding, then refuses it before any worker,
+reviewer or observer process or project worktree starts; global automations do not schedule project work. Fix
 the reported external cause, then rerun the same `secretary recover` command: matching completed board and
 memory phases are not imported again, existing repositories remain untouched, and only missing projects and
-dependent host state are retried. Do not edit `recovery-progress.json`, project registry files or Git
+dependent host state are retried. Persisted project rows are diagnostic only; filesystem checkout truth
+drives retry. Do not edit `recovery-progress.json`, project registry files or Git
 credential files as a recovery procedure.
 
 ## Optional cold archive

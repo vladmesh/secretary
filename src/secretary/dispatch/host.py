@@ -20,6 +20,11 @@ import yaml
 
 from secretary import state_repo
 from secretary._fsutil import write_text_atomic
+from secretary.board.protocol_artifacts import (
+    ArtifactOwnershipViolation,
+    ProtocolArtifact,
+    validate_rework_prerequisites,
+)
 from secretary.codex_provider_events import (
     CodexProviderEventIngress,
 )
@@ -53,15 +58,10 @@ from secretary.dispatcher_helpers import (
     _decision_record_line,
     _last_gate_red_body,
     _legacy_worker_branch,
+    _protocol_prerequisites_record_line,
     _round_record_line,
     _tail,
     scrub_host_output,
-)
-from secretary.dispatcher_helpers import _protocol_prerequisites_record_line
-from secretary.board.protocol_artifacts import (
-    ArtifactOwnershipViolation,
-    ProtocolArtifact,
-    validate_rework_prerequisites,
 )
 from secretary.dispatcher_helpers import (
     safe_one_line as _safe_one_line,
@@ -187,6 +187,7 @@ from secretary.dispatcher_watchdog import (
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.memory import access as memory_access
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
+from secretary.projects.availability import ProjectAvailability
 from secretary.projects.contract import (
     ContractVerdict,
 )
@@ -951,6 +952,7 @@ class CommandHostRuntime:
         heartbeat_run_id: str = "",
     ) -> dict[str, Any]:
         project = task["project"]
+        self._require_project_available(project)
         base = self.catalog.integration_base(project, task.get("workspace", {}).get("base_branch"))
         seed = self.catalog.workspace_seed(project, task)
         workspace = self.restore_workspace(task, worker_id)
@@ -998,6 +1000,7 @@ class CommandHostRuntime:
         self, task: dict[str, Any], record: DispatcherRecord, *, heartbeat_run_id: str = ""
     ) -> LaunchedHead:
         """Launch rework in the existing workspace without recreating its branch."""
+        self._require_project_available(str(task.get("project") or ""))
         workspace = Path(record.workspace)
         if self.mode == "noop":
             workspace.mkdir(parents=True, exist_ok=True)
@@ -1148,6 +1151,9 @@ class CommandHostRuntime:
         heartbeat_run_id: str = "",
     ) -> dict[str, Any]:
         """Bring one observer head up on its own workspace and terminal."""
+        projects = {*(sprint.get("repositories") or []), *(sprint.get("reservations") or [])}
+        for project in projects:
+            self._require_project_available(str(project))
         reference = str(sprint.get("ref") or "")
         if self.mode == "noop":
             workspace = Path(self.observer_workspace(reference))
@@ -1283,7 +1289,7 @@ class CommandHostRuntime:
                         task=f"sprint:{reference}",
                         leaf=lifecycle_run.leaf,
                     )
-                except Exception as stop_exc:
+                except Exception as stop_exc:  # noqa: BLE001 - preserve cleanup failure evidence
                     # The pane is still up and this dict is the only pointer to it: reporting a plain
                     # bring-up failure would leave the sprint headless and open a second head beside it.
                     raise ObserverLaunchAborted(
@@ -1686,6 +1692,7 @@ class CommandHostRuntime:
         judges a checkout nothing else is still editing. What that pane is given is a nudge at a
         document written outside the checkout, not the review itself.
         """
+        self._require_project_available(str(task.get("project") or ""))
         if not record.workspace:
             raise HostError("review workspace is unavailable")
         workspace = Path(record.workspace)
@@ -1979,6 +1986,16 @@ class CommandHostRuntime:
             return name
         return str(self._orca_repo(project).get("displayName") or "")
 
+    def _require_project_available(self, project: str) -> None:
+        """Refuse before any project-dependent workspace or head activation."""
+        if self.mode == "noop":
+            return
+        binding = dict(self.catalog.binding(project))
+        binding["id"] = project
+        availability = ProjectAvailability.inspect([binding])
+        if not availability.allows(project):
+            raise HostError(f"project repo for {project!r} is unavailable")
+
     def _orca_repo(self, project: str) -> dict[str, Any]:
         """This project's Orca repo registration, resolved from the configured repo path."""
         repo = Path(str(self.catalog.binding(project)["repo"])).expanduser()
@@ -2016,9 +2033,7 @@ class CommandHostRuntime:
         # increment on a branch it was never validated against.
         self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:{base}"], "merge push")
         self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
-        self._run(
-            ["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward"
-        )
+        self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
 
     def _no_diff_research_delivery_is_complete(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         """Whether a dispatcher-dispatched research candidate has no delivery effect left.
@@ -2647,6 +2662,7 @@ class CommandHostRuntime:
             workspace = self.data_dir / "dispatcher" / "workspaces" / worker_id
             workspace.mkdir(parents=True, exist_ok=True)
             return str(workspace)
+        self._require_project_available(project)
         binding = self.catalog.binding(project)
         repo = Path(str(binding["repo"])).expanduser()
         if not repo.is_absolute() or not repo.is_dir():
@@ -2956,8 +2972,7 @@ class CommandHostRuntime:
         return head_ops.TaskRef.standing(role or "head", document=pointer)
 
     def _capture_launch_prompt_identity(
-        self,
-        run: head_ops.HeadRun, *, role: str, document: str
+        self, run: head_ops.HeadRun, *, role: str, document: str
     ) -> head_ops.HeadRun:
         """Attach the exact worker/reviewer document before a pane can observe it.
 
@@ -3824,8 +3839,10 @@ class CommandHostRuntime:
             "so a partial `git add` that misses your fix files will bounce the card.",
             "",
             "Report through the secretary task protocol only:",
-            f"This document is report generation {generation}. Every request id below ends in "
-            f"-{generation}, and so does the body file. A command carrying any other number belongs",
+            (
+                f"This document is report generation {generation}. Every request id below ends in "
+                f"-{generation}, and so does the body file. A command carrying any other number belongs"
+            ),
             "to a round that is over: that id already names that round's report, and its body file",
             "has been removed. Running it does not report this round. It either fails on the missing",
             "body or answers from the old round's record without writing anything to the card, and",
@@ -4040,10 +4057,12 @@ class CommandHostRuntime:
             sections[4:4] = [
                 "## Head failover",
                 "",
-                f"This branch was written by `{_safe_one_line(record.head)}`, not by the head this "
-                f"card asks for (`{_safe_one_line(record.preferred_head)}`): that head's resource "
-                "was red or spent when the card was claimed, so the claim walked the registry's "
-                "fallback chain onto another family.",
+                (
+                    f"This branch was written by `{_safe_one_line(record.head)}`, not by the head this "
+                    f"card asks for (`{_safe_one_line(record.preferred_head)}`): that head's resource "
+                    "was red or spent when the card was claimed, so the claim walked the registry's "
+                    "fallback chain onto another family."
+                ),
                 "Review the work on its merits. This is here because who wrote it is a fact you are",
                 "entitled to have, not an invitation to grade the head.",
                 "",
@@ -4109,7 +4128,9 @@ class CommandHostRuntime:
         self, args: list[str], label: str, *, cwd: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
         try:
-            completed = subprocess.run(args, cwd=cwd, text=True, capture_output=True, timeout=900)
+            completed = subprocess.run(
+                args, cwd=cwd, text=True, capture_output=True, timeout=900, check=False
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HostError(f"{label} failed: {exc}") from None
         if completed.returncode != 0:
@@ -4124,7 +4145,7 @@ class CommandHostRuntime:
         non-zero code as a red verdict, not a host failure). Still raises HostError when the process
         can't run at all."""
         try:
-            return subprocess.run(args, cwd=cwd, text=True, capture_output=True, timeout=900)
+            return subprocess.run(args, cwd=cwd, text=True, capture_output=True, timeout=900, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HostError(f"{label} failed: {exc}") from None
 

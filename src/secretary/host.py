@@ -25,6 +25,7 @@ from typing import Any
 
 from secretary import _proc
 from secretary.observer_root import observer_root_repo
+from secretary.projects.availability import ProjectAvailability
 from triggered_agents.runtime.paths import component_enabled, configured_product_root
 
 KINDS = ("projects", "units", "orca repos")
@@ -433,6 +434,7 @@ def plan_changes(
     managed: Iterable[PlannedResource],
     unit_prefix: str = "",
     declared_foreign: Iterable[str] = (),
+    project_availability: ProjectAvailability = ProjectAvailability(),
 ) -> list[PlanChange]:
     """Classify changes. A name match is a conflict unless exact state owns it."""
     declared_foreign = set(declared_foreign)
@@ -453,7 +455,12 @@ def plan_changes(
     for resource in desired_by_id.values():
         present = resource.name in actual_names[resource.kind]
         owned = managed_by_id.get(resource.logical_id)
-        if not present:
+        unavailable = project_availability.blocks_resource(resource.logical_id)
+        if unavailable and not present:
+            action = "deferred"
+        elif unavailable and owned and owned.kind == resource.kind and owned.name == resource.name:
+            action = "unchanged"
+        elif not present:
             action = "create"
         elif owned and owned.kind == resource.kind and owned.name == resource.name:
             action = "update" if owned.fingerprint != resource.fingerprint else "unchanged"
@@ -465,7 +472,11 @@ def plan_changes(
         renamed = desired_resource and (
             resource.kind != desired_resource.kind or resource.name != desired_resource.name
         )
-        if (desired_resource is None or renamed) and resource.name in actual_names.get(resource.kind, set()):
+        if (
+            not project_availability.blocks_resource(logical_id)
+            and (desired_resource is None or renamed)
+            and resource.name in actual_names.get(resource.kind, set())
+        ):
             changes.append(PlanChange(logical_id, resource.kind, resource.name, "delete"))
     known_units = {resource.name for resource in desired_by_id.values() if resource.kind == "unit"}
     known_units.update(resource.name for resource in managed_by_id.values() if resource.kind == "unit")
@@ -547,10 +558,21 @@ def _str_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item]
 
 
-def build_expectations(bindings: Iterable[dict[str, Any]], host: dict[str, Any]) -> Expectations:
+def build_expectations(
+    bindings: Iterable[dict[str, Any]],
+    host: dict[str, Any],
+    *,
+    availability: ProjectAvailability = ProjectAvailability(),
+) -> Expectations:
     """Derive expected resource names from bindings and the instance ``host`` block."""
     host = host if isinstance(host, dict) else {}
-    projects = {name for name in (_project_name(b) for b in bindings) if name}
+    projects = {
+        name
+        for binding in bindings
+        if availability.allows(str(binding.get("id") or ""))
+        for name in (_project_name(binding),)
+        if name
+    }
     return Expectations(
         projects=projects,
         units=set(_str_list(host.get("units"))),

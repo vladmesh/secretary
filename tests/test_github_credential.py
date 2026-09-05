@@ -660,7 +660,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             ),
             mock.patch("secretary.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
             self.assertRaisesRegex(
-                installation.InstallError, "clone instance remote: command could not run"
+                installation.InstallError, "clone instance remote: command timed out"
             ) as failure,
         ):
             installation._clone_instance(

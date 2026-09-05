@@ -370,10 +370,12 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    `--installation-user`, so the user services can read and update them.
 7. Rebuilds the pipeline worktree's live JSONL run source from the checkpointed normalized journal,
    after those worktrees and skills exist but before any dispatcher unit is installed or started.
-8. Applies host units and session-manager automations for available projects, performs any required
-   memory recovery, then verifies restore status. An unavailable checkout is omitted from host project
-   registration, so no worker, reviewer or project worktree can start against it. Heads are connected
-   after bootstrap as a separate step.
+8. Applies host units and session-manager automations, performs any required memory recovery, then
+   verifies restore status. A desired but unavailable project remains in the host plan: an existing
+   managed Orca registration is preserved and a missing registration is deferred. Dispatch may inspect
+   and reject that binding, but rejects it before creating a worker, reviewer or observer process or
+   project worktree. Automations are installation-global and do not schedule project work. Healthy
+   projects continue normally. Heads are connected after bootstrap as a separate step.
 
 The ordering is intentional: recovery first reconstructs the normalized board and run exports,
 validates their NDJSON and counters, and only then rebuilds the board, pipeline journal and managed
@@ -395,10 +397,11 @@ Invalid global installation configuration, board/sprint parity, memory corruptio
 materialization and operator interruption remain fatal boundaries and are not converted into project rows.
 
 Running `secretary recover` again is safe: the checkout is fast-forward only, completed board import and
-memory indexing are skipped when the checkpoint-plus-binding identity still matches, successful checkouts
+memory indexing are skipped when the board, run, memory-fact and binding identity still matches, successful checkouts
 are left untouched, and only missing/failed checkouts and their dependent host resources are retried. The
 non-secret `recovery-progress.json` in the data directory records that identity, completed core phases and
-sanitized project outcomes. It is derived state owned by recovery; do not edit it or registry bindings to
+sanitized project outcomes. Project rows are diagnostic, write-only history: filesystem checkout truth is
+the sole retry authority. It is derived state owned by recovery; do not edit it or registry bindings to
 force a retry. Re-run the same supported `secretary recover` command instead. A restored instance
 stays recoverable itself: its own audit records about the restore go into the next checkpoint, and a
 later recovery into another empty backend writes its events under a new namespace instead of counting

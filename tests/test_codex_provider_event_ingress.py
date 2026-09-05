@@ -1245,6 +1245,9 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         def project_default_branch(self, project: str) -> str:
             return "main"
 
+        def binding(self, project: str) -> dict[str, str]:
+            return {"repo": str(self.fixture.repo), "orca_binding": project}
+
         def integration_base(self, project: str, override: str | None) -> str:
             return resolve_integration_base(default_branch="main", declared=None, override=override)
 
@@ -1287,6 +1290,8 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
+        self.repo = self.root / "repo"
+        (self.repo / ".git").mkdir(parents=True)
         self.binary = self.root / "codex"
         self.binary.write_text("#!/bin/sh\nprintf 'codex 9.9.9\\n'\n", encoding="utf-8")
         self.binary.chmod(0o755)

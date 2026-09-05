@@ -8,6 +8,8 @@ plane failing on one side of the host call or the other, and asks the same two q
 head created that nobody can find, and did the recovery produce a second one.
 """
 
+# ruff: noqa: SIM117
+
 from __future__ import annotations
 
 import contextlib
@@ -20,13 +22,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
 from secretary import dispatcher as secretary_dispatcher
 from secretary import dispatcher_launch
-from secretary.dispatch import host as dispatcher_host_module
 from secretary._fsutil import file_lock
+from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatcher import (
     CommandHostRuntime,
     DispatcherRuntime,
@@ -37,16 +40,12 @@ from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_ide
 from secretary.dispatcher_launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
 from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_state import DispatcherRecord
-from secretary.projects.contract import (
-    ContractVerdict,
-    ModuleContract,
-)
 from secretary.dispatcher_tui import (
     TuiDeliveryError,
     claude_project_dir_name,
     provider_progress_for_run,
 )
-from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError
+from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError, ReviewLaunch
 from secretary.dispatcher_watchdog import (
     head_process_status,
     initial_output_stall_seconds,
@@ -55,6 +54,10 @@ from secretary.dispatcher_watchdog import (
 from secretary.dispatcher_worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
+)
+from secretary.projects.contract import (
+    ContractVerdict,
+    ModuleContract,
 )
 from secretary.projects.integration_base import resolve_integration_base
 from secretary.routing_journal import attempts as routing_attempts
@@ -2106,9 +2109,7 @@ class LaunchIntentTests(unittest.TestCase):
             refused = self.tick()
 
         self.assertEqual(refused["action"], "worker-launch-undelivered")
-        self.assertEqual(
-            identity_calls, [], "the refusal returned before adoption asked which head this is"
-        )
+        self.assertEqual(identity_calls, [], "the refusal returned before adoption asked which head this is")
         record = self.record()
         assert record is not None
         self.assertEqual(record.worker_head_run, {}, "no run was promoted onto the record")
@@ -2948,6 +2949,7 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         self.data_dir = Path(self.tmpdir.name)
         self.repo = self.data_dir / "projects" / "codegen_orchestrator"
         self.repo.mkdir(parents=True)
+        (self.repo / ".git").mkdir()
         # What Orca has registered, independent of what the binding points at: a binding whose repo
         # is not in this list is a project Orca does not know.
         self.orca_repo_path = str(self.repo)
@@ -3052,6 +3054,33 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
 
     def removed(self) -> list[str]:
         return [self.selector(call) for call in self.json_calls if call[1:3] == ["worktree", "rm"]]
+
+    def test_unavailable_project_is_rejected_before_any_workspace_or_head_activation(self) -> None:
+        (self.repo / ".git").rmdir()
+        task = {"ref": "secretary-1", "project": "codegen-orchestrator", "workspace": {}}
+        record = SimpleNamespace(workspace=str(self.workspaces / "existing"), review_head="reviewer")
+
+        with (
+            mock.patch.object(self.host, "_run_json") as orca,
+            mock.patch.object(self.host, "_launch") as launch,
+            mock.patch.object(self.host, "_create_observer_workspace") as observer_workspace,
+        ):
+            with self.assertRaisesRegex(HostError, "project repo.*unavailable"):
+                self.host.prepare_worker(task, "card-1", "worker")
+            with self.assertRaisesRegex(HostError, "project repo.*unavailable"):
+                self.host.start_review(task, record)
+            with self.assertRaisesRegex(HostError, "project repo.*unavailable"):
+                self.host.prepare_observer(
+                    {"ref": "sprint:1", "repositories": ["codegen-orchestrator"]},
+                    "observer",
+                    prompt="observe",
+                )
+            with self.assertRaisesRegex(HostError, "project repo.*unavailable"):
+                self.create()
+
+        orca.assert_not_called()
+        launch.assert_not_called()
+        observer_workspace.assert_not_called()
 
     # where the checkout lives ------------------------------------------------
 
@@ -3258,6 +3287,7 @@ class HostLaunchContourTests(unittest.TestCase):
         """
         repo = self.data_dir / "repo"
         repo.mkdir()
+        (repo / ".git").mkdir()
         self.host.catalog.binding = lambda project: {  # type: ignore[assignment]
             "repo": str(repo),
             "orca_binding": "repo",
@@ -4423,7 +4453,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.move_card("ready", "requeue during bring-up", "ready-with-live-intent")
         self.host.calls.clear()
 
-        result = self.tick()
+        self.tick()
 
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
         self.assertIn("stop_head:worker", self.host.calls)

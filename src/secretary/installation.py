@@ -30,7 +30,7 @@ import tempfile
 import tomllib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from secretary import _proc, state_repo
@@ -60,6 +60,7 @@ from secretary.infra.github_credential import (
     bootstrap_file_owner_is_allowed,
     validate_checkpoint_credential,
 )
+from secretary.projects.availability import ProjectAvailability
 from secretary.restore import (
     RestoreError,
     import_normalized_board,
@@ -716,7 +717,7 @@ def materialize_host(
     host_fixture: Path | None = None,
     installation_user: str | None = None,
     before_host: Callable[[UpgradeContext], None] | None = None,
-    available_projects: set[str] | None = None,
+    project_availability: ProjectAvailability | None = None,
 ):
     report = validate_instance(instance)
     if not report.ok:
@@ -725,11 +726,6 @@ def materialize_host(
         installation_user, runtime_home = resolve_runtime_owner(instance, installation_user)
     except ValueError as exc:
         raise InstallError(str(exc)) from None
-    if available_projects is not None:
-        report = replace(
-            report,
-            bindings=[binding for binding in report.bindings if binding.get("id") in available_projects],
-        )
     context = UpgradeContext(
         instance_path=instance,
         product_root=product_root,
@@ -743,6 +739,7 @@ def materialize_host(
         report=report,
         runtime_user=installation_user,
         runtime_home=runtime_home,
+        project_availability=project_availability or ProjectAvailability(),
     )
     # The steps resolve their own paths against `runtime_home`; HOME is exported for the
     # subprocesses they start, which read the environment and not this context.
@@ -823,8 +820,8 @@ def _provision_project_checkout(
         target = Path(raw_target).expanduser().resolve(strict=False)
     except (OSError, RuntimeError):
         return _project_failure(display_id, "invalid", "unknown", "invalid-target", False)
-    target_state = "existing" if target.exists() or target.is_symlink() else "missing"
-    if target.exists() or target.is_symlink():
+    target_state = "existing" if target.exists() else "missing"
+    if target.exists():
         if target.is_dir() and (target / ".git").exists():
             return ProjectProvisionResult(
                 display_id,
@@ -925,16 +922,35 @@ def _project_failure(
 
 def _recovery_identity(instance_dir: Path, bindings: list[dict[str, object]]) -> str:
     digest = hashlib.sha256()
-    for relative in (
-        "state/board/cards.ndjson",
-        "state/board/sprints.ndjson",
-        "state/board/export.json",
-        "state/runs/runs.ndjson",
-        "state/runs/export.json",
-    ):
+    checkpoint_inputs = [
+        *(f"state/board/{name}" for name in CHECKPOINT_BOARD),
+        *(f"state/runs/{name}" for name in CHECKPOINT_RUNS),
+    ]
+    for relative in checkpoint_inputs:
         path = instance_dir / relative
         digest.update(relative.encode())
         digest.update(path.read_bytes() if path.is_file() else b"<absent>")
+    facts = instance_dir / "state" / "memory" / "facts"
+    digest.update(b"state/memory/facts\0")
+    try:
+        entries = sorted(facts.rglob("*"), key=lambda path: path.relative_to(facts).as_posix())
+        for path in entries:
+            relative = path.relative_to(facts).as_posix().encode()
+            digest.update(relative)
+            digest.update(b"\0")
+            mode = path.lstat().st_mode
+            if stat.S_ISREG(mode):
+                digest.update(b"file\0")
+                digest.update(path.read_bytes())
+            elif stat.S_ISDIR(mode):
+                digest.update(b"dir\0")
+            elif stat.S_ISLNK(mode):
+                digest.update(b"symlink\0")
+                digest.update(os.fsencode(os.readlink(path)))
+            else:
+                digest.update(b"other\0")
+    except (OSError, RuntimeError) as exc:
+        raise InstallError("could not identify memory recovery canon") from exc
     safe_bindings = [
         {key: binding.get(key) for key in ("id", "repo", "remote", "default_branch")} for binding in bindings
     ]
@@ -1330,6 +1346,9 @@ def install(args: argparse.Namespace) -> InstallResult:
             seeded = provision_codex_home(product_root, args.installation_user)
             cloned = sum(project.outcome == "cloned" for project in project_results)
             failed = sum(project.outcome == "failed" for project in project_results)
+            project_availability = ProjectAvailability(
+                frozenset(project.project_id for project in project_results if project.outcome == "failed")
+            )
             result.add(
                 "runtime",
                 "degraded" if failed else ("changed" if cloned or seeded else "unchanged"),
@@ -1356,9 +1375,7 @@ def install(args: argparse.Namespace) -> InstallResult:
                 Path(args.host_fixture).expanduser().resolve() if args.host_fixture else None,
                 args.installation_user,
                 before_host=restore_pipeline_source,
-                available_projects={
-                    project.project_id for project in project_results if project.outcome != "failed"
-                },
+                project_availability=project_availability,
             )
             mark_reconcile_applied(data_dir)
             changed = sum(step.status == "changed" for step in host_result.steps)

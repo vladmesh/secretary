@@ -542,8 +542,11 @@ needed and it does not race the tick writer.
   HTTPS hosts are refused.
 - Recovery's project boundary catches only one binding's provisioning failure. Core/configuration failures
   and operator interruption remain outside it. A non-secret input digest and phase ledger let a retry skip
-  completed board and memory work; unavailable bindings are filtered from host project materialization, and
-  the aggregate installation state remains degraded until every binding is available.
+  completed board and memory work; the digest includes deterministic memory-fact canon. One
+  `ProjectAvailability` value carries failed checkout ids from recovery into host desired-state planning and
+  is recomputed from the same filesystem rule at dispatch activation. Desired unavailable bindings stay in
+  the host plan, preserving managed registrations while checkout-dependent creation and dispatch launch are
+  deferred. The aggregate installation state remains degraded until every binding is available.
 - Task audit and pending writes are fail-closed: an unfinished board mutation blocks a consistent
   export and the recovery checkpoint.
 
