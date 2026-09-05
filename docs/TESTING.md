@@ -166,3 +166,14 @@ base=$(git merge-base main HEAD)
 
 Use both commands whenever the set contains Python files. The `xargs -r` guard leaves an empty set
 as a no-op, rather than making Ruff choose a repository-wide default.
+
+## Normalized board bulk recovery
+
+`tests.test_bulk_comment_restore` exercises the restore-specific Card/Sprint comment boundary against the real
+`KanboardClient.call_batch` encoder and response validator with an in-process wire peer. Deterministic cases cover
+pre-existing prefixes, identical bodies, repeat import, first/middle/last lost replies, mixed per-call rejection
+and audit append failure. The production-shape regression constructs 1,429 cards with 14,174 comments and 93
+sprints with 1,987 comments, counts logical RPCs and actual transport posts, and prints measured phase times.
+Interpret its time as a hermetic regression measurement, not a live SLO. The scale assertion is structural:
+posts follow bounded cross-entity waves and chunks, while logical creates remain one per exported occurrence.
+The comparison baseline is the measured legacy Card path at 13–15 logical RPCs and HTTP posts per comment.
