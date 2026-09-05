@@ -35,6 +35,7 @@ from secretary.host import (
     _CmdResult as CmdResult,
 )
 from secretary.host_apply import resolve_packaged, resolve_systemd_layout
+from secretary.projects.availability import ProjectAvailability
 from tests.orca_fixtures import legacy_orca_runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -582,7 +583,9 @@ class ReconcilePlanTests(unittest.TestCase):
             ),
         ):
             findings = cli._production_host_findings(report, report.data_dir, collected)
-        self.assertEqual(findings, ["production dispatcher managed manifest unavailable: managed manifest is unreadable"])
+        self.assertEqual(
+            findings, ["production dispatcher managed manifest unavailable: managed manifest is unreadable"]
+        )
 
     def test_live_plan_does_not_write_instance_or_managed_manifest(self):
         import tempfile
@@ -711,6 +714,71 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(
             [(change.action, change.name) for change in changes],
             [("create", "new-worker.service"), ("delete", "old-worker.service")],
+        )
+
+    def test_unavailable_desired_project_preserves_its_registered_managed_resource(self):
+        binding = {
+            "id": "alpha",
+            "repo": "/srv/alpha",
+            "orca_binding": "alpha-repo",
+            "enabled": True,
+        }
+        managed = build_plan({}, [binding], packaged=[])
+        actual = HostInventory(orca_repos={"alpha-repo"})
+        unavailable = ProjectAvailability(frozenset({"alpha"}))
+
+        changes = plan_changes(
+            managed,
+            actual,
+            managed,
+            project_availability=unavailable,
+        )
+
+        self.assertEqual(
+            [(change.logical_id, change.action) for change in changes],
+            [("orca:project:alpha", "unchanged")],
+        )
+
+    def test_unavailable_desired_project_defers_replacement_without_deleting_old_registration(self):
+        old = {
+            "id": "alpha",
+            "repo": "/srv/alpha",
+            "orca_binding": "alpha-repo",
+            "enabled": True,
+        }
+        changed = {**old, "repo": "/srv/recovered-alpha", "orca_binding": "recovered-alpha"}
+
+        changes = plan_changes(
+            build_plan({}, [changed], packaged=[]),
+            HostInventory(orca_repos={"alpha-repo"}),
+            build_plan({}, [old], packaged=[]),
+            project_availability=ProjectAvailability(frozenset({"alpha"})),
+        )
+
+        self.assertEqual(
+            [(change.name, change.action) for change in changes],
+            [("recovered-alpha", "deferred")],
+        )
+
+    def test_unavailable_present_project_reports_same_name_drift_as_deferred(self):
+        old = {
+            "id": "alpha",
+            "repo": "/srv/alpha",
+            "orca_binding": "alpha-repo",
+            "enabled": True,
+        }
+        changed = {**old, "repo": "/srv/recovered-alpha"}
+
+        changes = plan_changes(
+            build_plan({}, [changed], packaged=[]),
+            HostInventory(orca_repos={"alpha-repo"}),
+            build_plan({}, [old], packaged=[]),
+            project_availability=ProjectAvailability(frozenset({"alpha"})),
+        )
+
+        self.assertEqual(
+            [(change.logical_id, change.action) for change in changes],
+            [("orca:project:alpha", "deferred")],
         )
 
     def test_plan_is_stable_and_name_match_without_manifest_is_conflict(self):
@@ -1077,7 +1145,7 @@ class ReconcileAdoptTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            instance, repo = self._instance(root)
+            instance, _repo = self._instance(root)
             base = [
                 "reconcile",
                 "adopt",

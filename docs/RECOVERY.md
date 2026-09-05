@@ -359,15 +359,27 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    issues or its reservations comes back without those metadata keys rather than with empty ones. Parity
    compares whether each of the three fields is there at all, not only what it holds: a restored entity
    that gained an empty `product` its export never carried is a lossy write and fails the check.
-5. Clones missing project checkouts from the registry remotes and creates the non-secret managed
-   runtime-home files for the agent CLIs. Provider authentication stays manual.
+5. Attempts every missing project checkout from the registry and creates the non-secret managed
+   runtime-home files for the agent CLIs. Each clone uses the same remote-execution boundary as the
+   private instance checkout. GitHub HTTPS uses the supplied bootstrap capability when present,
+   otherwise the recovered managed-store credential; ambient helpers are disabled. Local/file and SSH
+   keep their declared semantics, while other HTTPS hosts are refused. Provider authentication stays
+   manual.
 6. Runs the pre-host materialiser: synchronizes role skills and recreates all role worktrees. When it
    runs under `sudo`, role worktrees and their Git administrative directories are assigned to
    `--installation-user`, so the user services can read and update them.
 7. Rebuilds the pipeline worktree's live JSONL run source from the checkpointed normalized journal,
    after those worktrees and skills exist but before any dispatcher unit is installed or started.
 8. Applies host units and session-manager automations, performs any required memory recovery, then
-   verifies restore status. Heads are connected after bootstrap as a separate step.
+   verifies restore status. A desired but unavailable project remains in the host plan: an existing
+   matching managed Orca registration is preserved and a missing or drifted registration is reported
+   deferred. At a project-consuming dispatch boundary, the task project id resolves to an enabled binding
+   before that exact checkout is inspected; an unavailable binding is rejected before its worker or reviewer
+   process or project worktree. Unknown ids and registered inventory-only projects remain distinct outcomes.
+   Observers consume the dedicated observer repository, not the sprint's canonical repository roots or
+   project-id reservations, so an unavailable reserved project does not leave a sprint headless. Automations
+   are installation-global and do not schedule project work. Healthy projects continue normally. Heads are
+   connected after bootstrap as a separate step.
 
 The ordering is intentional: recovery first reconstructs the normalized board and run exports,
 validates their NDJSON and counters, and only then rebuilds the board, pipeline journal and managed
@@ -381,12 +393,30 @@ leaves recovery unfinished and visible in `doctor` rather than silently counting
 successful. A live backend holding a sprint entity that is not in the export stops the restore instead of
 being overwritten.
 
-Running `secretary recover` again is safe: the checkout is fast-forward only, the board restore checks
-parity, the memory index is rebuilt, and the materialiser is a no-op on a second pass. A restored instance
+Project failures are isolated after board and memory recovery. Text and JSON output contain one row per
+binding with its project id, target state, transport classification, outcome (`cloned`, `unchanged` or
+`failed`), sanitized code/reason and retryability. If any row fails, recovery still performs safe host
+finalization and the installation-user ownership handoff, then exits non-zero with `status: degraded`.
+Invalid global installation configuration, board/sprint parity, memory corruption, unsafe host
+materialization and operator interruption remain fatal boundaries and are not converted into project rows.
+
+Running `secretary recover` again is safe: the checkout is fast-forward only, completed board import and
+memory indexing are skipped when the board, run, memory-fact and binding identity still matches, successful checkouts
+are left untouched, and only missing/failed checkouts and their dependent host resources are retried. The
+non-secret `recovery-progress.json` in the data directory records that identity, completed core phases and
+sanitized project outcomes. Project rows are diagnostic, write-only history: filesystem checkout truth is
+the sole retry authority. It is derived state owned by recovery; do not edit it or registry bindings to
+force a retry. Re-run the same supported `secretary recover` command instead. A restored instance
 stays recoverable itself: its own audit records about the restore go into the next checkpoint, and a
 later recovery into another empty backend writes its events under a new namespace instead of counting
 someone else's as already applied. That namespace lives in the restore state file, so retrying one
 recovery stays idempotent.
+
+The recovery identity length-delimits every canonical path, entry type and content value before hashing, so
+different fact-tree shapes cannot alias through adjacent byte sequences. The low-level `restore-reconcile`
+diagnostic intentionally returns a non-zero `degraded` result while any configured checkout is unavailable and
+does not mark reconcile complete. Repair the checkout by rerunning the supported recovery command; do not edit
+the progress or managed-state files.
 
 A checkpoint taken before sprint entities entered the export still restores: it has no sprints file, which
 reads as an installation without sprints, and `doctor` stays green on a completed restore. Terminals,
@@ -396,6 +426,14 @@ store or separate backup host is required.
 `secretary recover --dry-run` checks the checkout, credentials, runtime prerequisites and checkpoint
 integrity, then prints the steps as `would-change`. The preview writes no local data plane, does not touch
 the board, and runs neither the memory reindex nor the host materialiser.
+
+For the PO-only live drill, record the candidate SHA, run the dry-run with the same mode-0600 bootstrap and
+recovery-phrase inputs planned for the clean target, then run recovery once. Save its text and JSON output,
+verify all project rows and the core ownership/status result, repair only the external cause of any retryable
+project failure, and rerun the identical recovery command until it reaches `status: ok`. Confirm that the
+second run reports the board and memory unchanged and does not duplicate comments. Do not activate test
+workers, push from the recovered instance, edit credential files or recovery state, or reuse the shared
+recovery host/VPN. Bulk board-import performance remains separate work and is not validated by this drill.
 
 ## Repairing historical duplicate card references
 

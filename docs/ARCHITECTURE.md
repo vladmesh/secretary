@@ -530,14 +530,28 @@ needed and it does not race the tick writer.
   checkpoint; the raw installation key and the recovery phrase do not (see
   [Recovery](RECOVERY.md#secrets)). The host `runtime.env` is outside the store, and facts, exports and
   diagnostics carry no secrets.
-- Private instance-remote Git uses one product-owned remote-execution boundary. It classifies transport,
+- Private instance-remote and recovery project Git use one product-owned remote-execution boundary. It classifies transport,
   resolves the eventual Git-child identity, selects the phase source, creates and cleans an operation-scoped
   capability, then launches Git. Initial `https://github.com` clone requires explicit bootstrap input;
-  existing-checkout recovery uses supplied bootstrap input or the unlocked managed envelope; checkpoint
-  probes and pushes use only the managed envelope. Those HTTPS children clear ambient helpers, so a
+  existing-checkout recovery and project provisioning use supplied bootstrap input or the unlocked managed
+  envelope; checkpoint probes and pushes use only the managed envelope. Project clones are staged, run as
+  the installation Git child, assigned final ownership before atomic adoption, and produce sanitized
+  per-binding outcomes. Those HTTPS children clear ambient helpers, so a
   per-user credential file remains available to its other consumers but cannot silently authenticate
-  recovery or checkpoint. Local/file remotes are ordinary Git, SSH is explicit manual-bypass, and other
+  recovery, project provisioning or checkpoint. Local/file remotes are ordinary Git, SSH is explicit manual-bypass, and other
   HTTPS hosts are refused.
+- Recovery's project boundary catches only one binding's provisioning failure. Core/configuration failures
+  and operator interruption remain outside it. A non-secret input digest and phase ledger let a retry skip
+  completed board and memory work; the digest includes deterministic memory-fact canon. One
+  `ProjectAvailability` value carries failed checkout ids from recovery into host desired-state planning and
+  is recomputed from the same filesystem rule at a project-consuming dispatch boundary. A task project id is
+  first resolved to its enabled binding; only then is that binding's checkout allowed to gate its worker
+  worktree, worker process or reviewer process. Unknown ids, registered inventory-only projects and unavailable
+  enabled bindings remain distinct refusals. Observer heads consume the dedicated observer repository, not a
+  sprint's canonical repository roots or project-id reservations, so project availability never gates observer
+  creation. Desired unavailable bindings stay in the host plan, preserving matching registrations and reporting
+  absent or drifted registrations as deferred. The aggregate installation state remains degraded until every
+  enabled binding is available.
 - Task audit and pending writes are fail-closed: an unfinished board mutation blocks a consistent
   export and the recovery checkpoint.
 

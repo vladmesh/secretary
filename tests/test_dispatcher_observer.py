@@ -1,5 +1,7 @@
 """Observer-head lifecycle: the production tick against the sprint board (secretary-793)."""
 
+# ruff: noqa: SIM117
+
 from __future__ import annotations
 
 import json
@@ -12,9 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import dispatcher as dispatcher_module
-from secretary.dispatch import host as dispatcher_host_module
 from secretary import dispatcher_observer_fence
+from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatcher import (
     CommandHostRuntime,
     DispatcherRuntime,
@@ -6437,10 +6438,10 @@ class ObserverCodexTrustTests(unittest.TestCase):
         *,
         role: str,
         workspace: str,
-        task_ref: head_ops.TaskRef,
+        task_ref: TaskRef,
         pid_file: str,
         run_id: str,
-    ) -> head_ops.HeadRun:
+    ) -> HeadRun:
         ensure_codex_workspace_trusted(self.host.catalog.head_profile(head), workspace)
         return accepted_transport_run(
             head,
@@ -6459,7 +6460,8 @@ class ObserverCodexTrustTests(unittest.TestCase):
             raise HostError("orca worktree show failed: selector_not_found")
         if step == ["worktree", "create"]:
             repo = args[args.index("--repo") + 1].split(":", 1)[1]
-            workspace = self.host.observer_workspace("sprint:1")
+            name = args[args.index("--name") + 1]
+            workspace = str(Path(self.host.observer_workspace("sprint:1")).parent / name)
             # What `orca worktree create` leaves behind: a git worktree of that repo at that path.
             self.host._run(  # type: ignore[attr-defined]
                 ["git", "-C", repo, "worktree", "add", "--quiet", "--detach", workspace],
@@ -6484,6 +6486,18 @@ class ObserverCodexTrustTests(unittest.TestCase):
         self.assertIn(f"CODEX_HOME={self.codex_home} codex", command)
         self.assertNotIn("codex exec", command)
         self.assertIn("--role observer", command)
+
+    def test_sprint_project_declarations_do_not_gate_its_observer_repository(self) -> None:
+        sprint = {
+            "ref": "sprint:1425",
+            "repositories": [str((self.root / "projects" / "secretary").resolve())],
+            "reservations": ["unavailable-project"],
+        }
+
+        launched = self.host.prepare_observer(sprint, "codex-observer", prompt="# Sprint 1425\n")
+
+        self.assertEqual(launched["handle"], "term-obs")
+        self.assertEqual(len(self.commands), 1)
 
     def test_a_second_bring_up_leaves_the_recorded_trust_alone(self) -> None:
         self.host.prepare_observer({"ref": "sprint:1"}, "codex-observer", prompt="# Sprint\n")

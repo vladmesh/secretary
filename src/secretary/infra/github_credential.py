@@ -27,6 +27,10 @@ GITHUB_HOST = "github.com"
 class CredentialError(RuntimeError):
     """A managed credential cannot safely be used."""
 
+    def __init__(self, message: str, *, code: str = "credential") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def _remote_transport(remote: str) -> str:
     """Classify every transport before a remote Git child is started."""
@@ -116,9 +120,13 @@ def checkpoint_credential_readiness_for_child(
         state = str(payload["state"])
         reason = _safe_reason(str(payload.get("reason") or ""))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return CredentialReadiness("missing/unavailable", "managed credential readiness probe returned invalid metadata")
+        return CredentialReadiness(
+            "missing/unavailable", "managed credential readiness probe returned invalid metadata"
+        )
     if result.returncode or state not in {"managed-ready", "locked/unverifiable", "missing/unavailable"}:
-        return CredentialReadiness("missing/unavailable", reason or "managed credential readiness probe failed")
+        return CredentialReadiness(
+            "missing/unavailable", reason or "managed credential readiness probe failed"
+        )
     return CredentialReadiness(state, reason)
 
 
@@ -200,26 +208,53 @@ class RemoteExecution:
             return CredentialReadiness("missing/unavailable", _safe_reason(str(exc)))
         return checkpoint_credential_readiness_for_child(self.instance_dir, child)
 
-    def run_clone(self, target: Path, *, label: str, timeout: float) -> str:
-        """Clone through the same boundary before a checkout owner exists."""
-        child = GitChildIdentity(os.geteuid(), os.getegid())
+    def run_clone(
+        self,
+        target: Path,
+        *,
+        label: str,
+        timeout: float,
+        clone_args: list[str] | None = None,
+        child_target: Path | None = None,
+    ) -> str:
+        """Clone through this boundary, optionally as an existing checkout's owner."""
+        try:
+            child = (
+                self._child_identity(child_target)
+                if child_target is not None
+                else GitChildIdentity(os.geteuid(), os.getegid())
+            )
+        except StateRepoError as exc:
+            raise CredentialError(f"{label}: could not select the Git child", code="identity") from exc
         with self._authorized(child) as (prefix, environment, source):
             self.source = source
             child_environment = state_repo.git_env()
             child_environment.update(environment)
+            command = ["git", *prefix, "clone", *(clone_args or []), "--", self.remote, str(target)]
             try:
-                completed = _proc.run(
-                    ["git", *prefix, "clone", "--", self.remote, str(target)],
-                    timeout=timeout,
-                    env=child_environment,
-                )
+                if child_target is None:
+                    completed = _proc.run(command, timeout=timeout, env=child_environment)
+                else:
+                    completed = state_repo.run_as_git_child(
+                        child_target,
+                        command,
+                        label=label,
+                        timeout=timeout,
+                        extra_env=environment,
+                        child=child,
+                        isolated=True,
+                    )
             except FileNotFoundError:
-                raise CredentialError(f"{label}: command not found") from None
-            except (OSError, subprocess.TimeoutExpired):
-                raise CredentialError(f"{label}: command could not run") from None
+                raise CredentialError(f"{label}: command not found", code="command-not-found") from None
+            except subprocess.TimeoutExpired:
+                raise CredentialError(f"{label}: command timed out", code="timeout") from None
+            except (OSError, StateRepoError) as exc:
+                code = "timeout" if "timed out" in str(exc).lower() else "process"
+                message = "command timed out" if code == "timeout" else "command could not run"
+                raise CredentialError(f"{label}: {message}", code=code) from None
             if completed.returncode:
-                detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-                raise CredentialError(f"{label}: {detail[-1] if detail else f'exited {completed.returncode}'}")
+                code = _git_failure_code(completed.stderr or completed.stdout or "")
+                raise CredentialError(f"{label}: {_git_failure_reason(code)}", code=code)
             return (completed.stdout or "").strip()
 
     def run_instance(
@@ -254,15 +289,28 @@ class RemoteExecution:
     @contextmanager
     def _authorized(self, child: GitChildIdentity) -> Iterator[tuple[list[str], dict[str, str], str]]:
         transport = self.transport
+        try:
+            parsed = urlsplit(self.remote)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.scheme == "https" and (parsed.username or parsed.password):
+            raise CredentialError("credential-bearing HTTPS remote is refused", code="unsafe-remote")
         if transport == "https-unsupported":
-            raise CredentialError("private instance HTTPS remote is unsupported; only https://github.com is managed")
+            raise CredentialError(
+                "HTTPS remote is unsupported by GitHub credential management; only https://github.com is managed",
+                code="unsupported-https",
+            )
+        if transport == "unsupported":
+            raise CredentialError("remote transport is unsupported", code="unsupported-transport")
         if transport == "local":
             yield [], {}, "local"
             return
         if transport in {"ssh", "unmanaged"}:
             yield [], {}, "manual-bypass"
             return
-        selection = select_private_remote_auth(self.phase, instance_dir=self.instance_dir, bootstrap_file=self.bootstrap_file)
+        selection = select_private_remote_auth(
+            self.phase, instance_dir=self.instance_dir, bootstrap_file=self.bootstrap_file
+        )
         if selection.source == "managed-store":
             if self.instance_dir is None:
                 raise CredentialError("managed credential has no instance context")
@@ -284,7 +332,9 @@ class RemoteExecution:
 
 
 @contextmanager
-def _operation_capability(selection: RemoteAuthSelection, child: GitChildIdentity) -> Iterator[dict[str, str]]:
+def _operation_capability(
+    selection: RemoteAuthSelection, child: GitChildIdentity
+) -> Iterator[dict[str, str]]:
     """Give one resolved Git child a bootstrap file only for this operation."""
     if selection.source != "bootstrap":
         yield selection.environment
@@ -338,7 +388,7 @@ def select_private_remote_auth(
         if bootstrap_file is None:
             raise CredentialError("bootstrap credential is required to clone the private instance remote")
         return RemoteAuthSelection("bootstrap", helper_environment(bootstrap_file=bootstrap_file))
-    if phase == "recovery-reuse":
+    if phase in {"recovery-reuse", "project-provision"}:
         if bootstrap_file is not None:
             return RemoteAuthSelection("bootstrap", helper_environment(bootstrap_file=bootstrap_file))
         if instance_dir is None:
@@ -361,6 +411,32 @@ def bootstrap_file_owner_is_allowed(info: os.stat_result) -> bool:
 
 def _safe_reason(message: str) -> str:
     return " ".join(message.replace("\r", " ").replace("\n", " ").split())[:240]
+
+
+def _git_failure_code(detail: str) -> str:
+    """Classify Git output without returning any remote or credential-bearing text."""
+    lowered = detail.lower()
+    if any(
+        marker in lowered
+        for marker in ("authentication failed", "could not read username", "permission denied")
+    ):
+        return "authentication"
+    if any(marker in lowered for marker in ("remote branch", "not found in upstream", "invalid refspec")):
+        return "invalid-branch"
+    if any(
+        marker in lowered
+        for marker in ("could not resolve host", "failed to connect", "network is unreachable")
+    ):
+        return "network"
+    return "git"
+
+
+def _git_failure_reason(code: str) -> str:
+    return {
+        "authentication": "authentication failed",
+        "invalid-branch": "default branch is unavailable",
+        "network": "network access failed",
+    }.get(code, "Git operation failed")
 
 
 def _request() -> dict[str, str]:
@@ -419,7 +495,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("action", nargs="?", default="get")
     args = parser.parse_args(argv)
     if args.mode == "readiness":
-        readiness = checkpoint_credential_readiness(Path(os.environ.get("SECRETARY_CHECKPOINT_INSTANCE", ".")))
+        readiness = checkpoint_credential_readiness(
+            Path(os.environ.get("SECRETARY_CHECKPOINT_INSTANCE", "."))
+        )
         print(json.dumps({"state": readiness.state, "reason": readiness.reason}, sort_keys=True))
         return 0
     return run_helper(args.action)

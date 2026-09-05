@@ -13,6 +13,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
 
 from secretary import status, upgrade
@@ -39,6 +40,7 @@ from secretary.head_registry import (
     snapshot_path,
 )
 from secretary.host import (
+    CollectResult,
     HostInventory,
     SystemdLayout,
     build_plan,
@@ -50,6 +52,7 @@ from secretary.host import (
     strict_manifest,
 )
 from secretary.host_apply import ApplyInputs, apply_host
+from secretary.projects.availability import ProjectAvailability
 from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
 from triggered_agents.agents.pipeline import heads, health
 
@@ -238,6 +241,7 @@ class ApplyHostTests(unittest.TestCase):
         instance=None,
         bindings=(),
         runtime_user: str | None = None,
+        project_availability: ProjectAvailability | None = None,
     ) -> ApplyInputs:
         return ApplyInputs(
             instance=instance or instance_config(self.data),
@@ -247,6 +251,7 @@ class ApplyHostTests(unittest.TestCase):
             manifest_path=self.manifest,
             packaged=self.packaged,
             runtime_user=runtime_user,
+            project_availability=project_availability or ProjectAvailability(),
         )
 
     def test_empty_host_is_installed_enabled_and_recorded(self):
@@ -430,6 +435,40 @@ class ApplyHostTests(unittest.TestCase):
         recorded = {r.name for r in strict_manifest(self.manifest)[0]}
         self.assertIn("demo", recorded)
 
+    def test_failed_retry_preserves_registered_project_while_healthy_project_continues(self):
+        alpha = {"id": "alpha", "repo": "/srv/alpha", "orca_binding": "alpha", "enabled": True}
+        beta = {"id": "beta", "repo": "/srv/beta", "orca_binding": "beta", "enabled": True}
+        units, orca = FakeUnitInstaller(), FakeRegistrar()
+
+        apply_host(
+            self.inputs(HostInventory(), bindings=[alpha]),
+            units=units,
+            orca=orca,
+        )
+        managed, error = strict_manifest(self.manifest)
+        self.assertEqual(error, "")
+        inventory = HostInventory(units=set(units.files), orca_repos={"alpha"})
+
+        result = apply_host(
+            self.inputs(
+                inventory,
+                managed,
+                bindings=[alpha, beta],
+                project_availability=ProjectAvailability(frozenset({"alpha"})),
+            ),
+            units=units,
+            orca=orca,
+        )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(
+            [change.action for change in result.changes if change.logical_id == "orca:project:alpha"],
+            ["unchanged"],
+        )
+        self.assertIn(("beta", "/srv/beta"), orca.added)
+        recorded = {resource.name for resource in strict_manifest(self.manifest)[0]}
+        self.assertEqual(recorded & {"alpha", "beta"}, {"alpha", "beta"})
+
 
 class AutomationSpecTests(unittest.TestCase):
     def spec(self, **overrides) -> AutomationSpec:
@@ -587,6 +626,48 @@ class UpgradeStepTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertIn("invalid instance data_dir", result.detail)
+
+    def test_host_step_counts_present_unavailable_registration_drift_as_deferred(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            old = {
+                "id": "alpha",
+                "repo": "/srv/alpha",
+                "orca_binding": "alpha-repo",
+                "enabled": True,
+            }
+            changed = {**old, "repo": "/srv/recovered-alpha"}
+            managed = build_plan({}, [old], packaged=[])
+            (data_dir / "host-managed.json").write_text(
+                json.dumps({"version": 1, "resources": [resource.__dict__ for resource in managed]}),
+                encoding="utf-8",
+            )
+            report = SimpleNamespace(
+                data_dir=data_dir,
+                instance={},
+                bindings=[changed],
+                host={},
+                instance_path=root / "instance" / "instance.yaml",
+            )
+            source = mock.Mock()
+            source.collect.return_value = CollectResult(inventory=HostInventory(orca_repos={"alpha-repo"}))
+            context = self.context(
+                FakeUnitInstaller(),
+                instance_path=report.instance_path.parent,
+                report=report,
+                project_availability=ProjectAvailability(frozenset({"alpha"})),
+            )
+
+            with (
+                mock.patch("secretary.upgrade.resolve_packaged", return_value=[]),
+                mock.patch("secretary.upgrade.LiveHostSource", return_value=source),
+            ):
+                result = upgrade.step_host(context)
+
+        self.assertEqual(result.status, "unchanged")
+        self.assertIn("1 unavailable project registrations deferred", result.detail)
 
     def test_board_transport_step_imports_retires_and_reports_every_action(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1778,10 +1859,13 @@ def _restore_mode(path: Path, mode: int = 0o644) -> None:
 class _Report:
     """The slice of an InstanceReport the host and memory steps read."""
 
-    host = {"unit_prefix": UNIT_PREFIX}
-    instance = {"host": {"unit_prefix": UNIT_PREFIX}, "data_dir": "/tmp/does-not-matter"}
+    host: ClassVar = {"unit_prefix": UNIT_PREFIX}
+    instance: ClassVar = {
+        "host": {"unit_prefix": UNIT_PREFIX},
+        "data_dir": "/tmp/does-not-matter",
+    }
     data_dir = Path("/tmp/does-not-matter")
-    bindings: list = []
+    bindings: ClassVar[list] = []
 
 
 if __name__ == "__main__":

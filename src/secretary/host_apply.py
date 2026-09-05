@@ -52,6 +52,7 @@ from secretary.host import (
     plan_input_errors,
     strict_manifest,
 )
+from secretary.projects.availability import ProjectAvailability
 
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 
@@ -234,6 +235,7 @@ class ApplyInputs:
     manifest_path: Path
     packaged: list[PackagedUnit]
     runtime_user: str | None = None
+    project_availability: ProjectAvailability = field(default_factory=ProjectAvailability)
 
 
 def resolve_packaged(
@@ -393,6 +395,7 @@ def apply_host(
         inputs.managed,
         prefix if isinstance(prefix, str) else "",
         foreign_units(host),
+        inputs.project_availability,
     )
     result = ApplyResult(changes=changes, dry_run=dry_run)
     result.conflicts = [change for change in changes if change.action == "conflict"]
@@ -423,7 +426,7 @@ def apply_host(
     reload_needed = False
 
     for change in changes:
-        if change.action == "unchanged":
+        if change.action in {"unchanged", "deferred"}:
             continue
         try:
             touched_units = _apply_change(

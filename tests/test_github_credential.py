@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import io
+import json
 import os
 import pwd
 import secrets
@@ -261,7 +262,9 @@ class ManagedGithubCredentialTests(unittest.TestCase):
 
         # Selection does not inspect the caller's filesystem identity. The
         # RemoteExecution boundary resolves and checks the eventual Git child.
-        unavailable = github_credential.select_private_remote_auth("recovery-reuse", instance_dir=self.instance)
+        unavailable = github_credential.select_private_remote_auth(
+            "recovery-reuse", instance_dir=self.instance
+        )
         self.assertEqual(unavailable.source, "managed-store")
         self.set_token()
         managed = github_credential.select_private_remote_auth("recovery-reuse", instance_dir=self.instance)
@@ -269,6 +272,81 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertEqual(managed.environment["SECRETARY_CHECKPOINT_INSTANCE"], str(self.instance))
         checkpoint = github_credential.select_private_remote_auth("checkpoint", instance_dir=self.instance)
         self.assertEqual(checkpoint.source, "managed-store")
+        project_managed = github_credential.select_private_remote_auth(
+            "project-provision", instance_dir=self.instance
+        )
+        project_bootstrap = github_credential.select_private_remote_auth(
+            "project-provision", instance_dir=self.instance, bootstrap_file=bootstrap
+        )
+        self.assertEqual(project_managed.source, "managed-store")
+        self.assertEqual(project_bootstrap.source, "bootstrap")
+
+    def test_project_clone_uses_bootstrap_then_managed_capabilities_without_secret_argv(self) -> None:
+        remote = "https://github.com/example/private.git"
+        bootstrap = Path(self.temporary.name) / "project-bootstrap"
+        token = "fixture-" + secrets.token_hex(16)
+        bootstrap.write_text(token + "\n", encoding="utf-8")
+        bootstrap.chmod(0o600)
+        calls: list[tuple[list[str], dict[str, str]]] = []
+
+        def run(_instance, argv, **kwargs):
+            calls.append((argv, kwargs["extra_env"]))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch("secretary.infra.github_credential.state_repo.run_as_git_child", side_effect=run):
+            execution = github_credential.RemoteExecution(
+                remote,
+                "project-provision",
+                instance_dir=self.instance,
+                bootstrap_file=bootstrap,
+            )
+            execution.run_clone(
+                self.instance / "staged-bootstrap",
+                label="project clone",
+                timeout=1,
+                child_target=self.instance,
+            )
+        bootstrap_argv, bootstrap_env = calls.pop()
+        self.assertEqual(execution.source, "bootstrap")
+        self.assertNotIn(token, " ".join(bootstrap_argv))
+        self.assertNotEqual(bootstrap_env["SECRETARY_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
+        self.assertFalse(Path(bootstrap_env["SECRETARY_GITHUB_BOOTSTRAP_FILE"]).exists())
+
+        self.set_token()
+        with mock.patch("secretary.infra.github_credential.state_repo.run_as_git_child", side_effect=run):
+            execution = github_credential.RemoteExecution(
+                remote, "project-provision", instance_dir=self.instance
+            )
+            execution.run_clone(
+                self.instance / "staged-managed",
+                label="project clone",
+                timeout=1,
+                child_target=self.instance,
+            )
+        managed_argv, managed_env = calls.pop()
+        self.assertEqual(execution.source, "managed-store")
+        self.assertEqual(managed_argv[:3], ["git", "-c", "credential.helper="])
+        self.assertEqual(managed_env["SECRETARY_CHECKPOINT_INSTANCE"], str(self.instance))
+        self.assertNotIn(token, " ".join(managed_argv) + json.dumps(managed_env))
+
+    def test_project_clone_refuses_credential_bearing_url_before_launch(self) -> None:
+        token = "secret-in-url"
+        remote = github_credential.RemoteExecution(
+            f"https://user:{token}@github.com/example/private.git",
+            "project-provision",
+            instance_dir=self.instance,
+        )
+        with (
+            mock.patch("secretary.infra.github_credential.state_repo.run_as_git_child") as run,
+            self.assertRaisesRegex(github_credential.CredentialError, "credential-bearing"),
+        ):
+            remote.run_clone(
+                self.instance / "staged",
+                label="project clone",
+                timeout=1,
+                child_target=self.instance,
+            )
+        run.assert_not_called()
 
     def test_recovery_reuse_selects_bootstrap_or_managed_auth_and_never_ambient(self) -> None:
         remote = "https://github.com/example/private.git"
@@ -347,16 +425,34 @@ class ManagedGithubCredentialTests(unittest.TestCase):
                 ["status", "--porcelain"],
             ],
         )
-        self.assertEqual([call.args[1] for call in remote_git.call_args_list], [
-            ["fetch", "--quiet", "origin"],
-            ["merge", "--ff-only", "@{u}"],
-        ])
+        self.assertEqual(
+            [call.args[1] for call in remote_git.call_args_list],
+            [
+                ["fetch", "--quiet", "origin"],
+                ["merge", "--ff-only", "@{u}"],
+            ],
+        )
 
     def test_remote_execution_classifies_every_transport_before_launch(self) -> None:
-        self.assertEqual(github_credential.RemoteExecution("https://github.com/example/private.git", "checkpoint").transport, "github-https")
-        self.assertEqual(github_credential.RemoteExecution("git@github.com:example/private.git", "checkpoint").transport, "ssh")
-        self.assertEqual(github_credential.RemoteExecution("https://github.com.example/private.git", "checkpoint").transport, "https-unsupported")
-        self.assertEqual(github_credential.RemoteExecution("file:///fixture/instance.git", "checkpoint").transport, "local")
+        self.assertEqual(
+            github_credential.RemoteExecution(
+                "https://github.com/example/private.git", "checkpoint"
+            ).transport,
+            "github-https",
+        )
+        self.assertEqual(
+            github_credential.RemoteExecution("git@github.com:example/private.git", "checkpoint").transport,
+            "ssh",
+        )
+        self.assertEqual(
+            github_credential.RemoteExecution(
+                "https://github.com.example/private.git", "checkpoint"
+            ).transport,
+            "https-unsupported",
+        )
+        self.assertEqual(
+            github_credential.RemoteExecution("file:///fixture/instance.git", "checkpoint").transport, "local"
+        )
 
     def test_ssh_is_manual_bypass_and_other_https_is_refused_before_git(self) -> None:
         ssh = github_credential.RemoteExecution("git@github.com:example/private.git", "checkpoint")
@@ -368,7 +464,9 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertEqual(ssh.source, "manual-bypass")
         self.assertNotIn("credential.helper", " ".join(run.call_args.args[1]))
 
-        unsupported = github_credential.RemoteExecution("https://github.com.example/private.git", "checkpoint")
+        unsupported = github_credential.RemoteExecution(
+            "https://github.com.example/private.git", "checkpoint"
+        )
         with (
             mock.patch("secretary.infra.github_credential.state_repo.run_git") as run,
             self.assertRaisesRegex(github_credential.CredentialError, "unsupported"),
@@ -402,7 +500,10 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         )
         self.assertEqual(managed.credential_state.state, "managed-ready")
         self.assertEqual(_credential_snapshot(self.instance, {}, 1_700_000_000)["state"], "managed-ready")
-        self.assertEqual(CheckpointPusher(self.instance)._remote_execution(managed.remote).credential_state.state, "managed-ready")
+        self.assertEqual(
+            CheckpointPusher(self.instance)._remote_execution(managed.remote).credential_state.state,
+            "managed-ready",
+        )
 
         recovery = github_credential.RemoteExecution(
             "https://github.com/example/private.git", "recovery-reuse", instance_dir=self.instance
@@ -418,7 +519,9 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertEqual(self.digest(managed_reply.get("password", "")), self.digest("github-test-token"))
 
         remote = github_credential.RemoteExecution(
-            "https://github.com/example/private.git", "recovery-reuse", instance_dir=self.instance,
+            "https://github.com/example/private.git",
+            "recovery-reuse",
+            instance_dir=self.instance,
             bootstrap_file=bootstrap,
         )
         restricted_tmp = Path(tempfile.mkdtemp(prefix="secretary-restricted-tmp-", dir="/tmp"))
@@ -445,7 +548,9 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         reply = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         self.assertEqual(self.digest(reply.get("password", "")), self.digest(token))
-        self.assertNotIn(str(bootstrap), result.args if isinstance(result.args, str) else " ".join(result.args))
+        self.assertNotIn(
+            str(bootstrap), result.args if isinstance(result.args, str) else " ".join(result.args)
+        )
         self.assertEqual(len(capability_directories), 1)
         self.assertFalse(capability_directories[0].exists())
 
@@ -554,10 +659,14 @@ class ManagedGithubCredentialTests(unittest.TestCase):
                 side_effect=subprocess.TimeoutExpired(["git", "clone"], 300),
             ),
             mock.patch("secretary.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
-            self.assertRaisesRegex(installation.InstallError, "clone instance remote: command could not run") as failure,
+            self.assertRaisesRegex(
+                installation.InstallError, "clone instance remote: command timed out"
+            ) as failure,
         ):
             installation._clone_instance(
-                "https://github.com/example/private.git", self.instance / "clone", bootstrap_credential=bootstrap
+                "https://github.com/example/private.git",
+                self.instance / "clone",
+                bootstrap_credential=bootstrap,
             )
         self.assertNotIn("fixture-bootstrap", str(failure.exception))
         self.assertEqual(len(capability_directories), 1)
@@ -571,8 +680,9 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             "https://gitlab.com/example/private.git": ("missing/unavailable", "available"),
         }
         for remote, expected in transports.items():
-            with self.subTest(remote=remote), mock.patch(
-                "secretary.checkpoint.state_repo.git", return_value=remote
+            with (
+                self.subTest(remote=remote),
+                mock.patch("secretary.checkpoint.state_repo.git", return_value=remote),
             ):
                 snapshot = _credential_snapshot(self.instance, {}, 1_700_000_000)
             self.assertEqual((snapshot["state"], snapshot["store"]), expected)

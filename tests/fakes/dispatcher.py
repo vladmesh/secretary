@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from secretary.checkpoint import CheckpointResult
 from secretary.dispatcher import (
@@ -31,6 +31,7 @@ from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch
 from secretary.dispatcher_watchdog import head_run_process_status as _head_run_process_status
 from secretary.dispatcher_watchdog import pid_file_path
 from secretary.dispatcher_worker_lifecycle import head_run_binding
+from secretary.projects.availability import ProjectAvailability
 from secretary.projects.contract import (
     ContractVerdict,
     ModuleContract,
@@ -327,7 +328,7 @@ class FakeKanboard(BatchedCalls):
 # The head snapshot the sprint entity resolves a declared observer against. It is the
 # installation's own registry, not the dispatcher's catalog, and a sprint may not be opened on a
 # profile that is missing from it.
-SPRINT_HEAD_SNAPSHOT = "\n".join(
+SPRINT_HEAD_SNAPSHOT = "\n".join(  # noqa: FLY002 - this fixture is deliberately line-oriented
     [
         "resources:",
         "  openai-sub:",
@@ -368,7 +369,7 @@ class TwoOpenSprintAdmission:
     SECOND = "sprint:2"
     # Two reserved projects each, so either sprint still has a card to claim once its first one
     # is in flight.
-    RESERVATIONS = {FIRST: ["secretary", "fourth"], SECOND: ["other", "third"]}
+    RESERVATIONS: ClassVar = {FIRST: ["secretary", "fourth"], SECOND: ["other", "third"]}
 
     def sprint_instance(self) -> Path:
         """The installation directory the sprint entity validates and reads its limit from."""
@@ -735,6 +736,10 @@ class FakeCatalog:
         if self._default_branch:
             binding["default_branch"] = self._default_branch
         return binding
+
+    def project_availability(self, _project: str) -> ProjectAvailability:
+        """The fake's declared projects are available unless a test supplies a stricter catalog."""
+        return ProjectAvailability()
 
 
 class FakeHost:
