@@ -185,6 +185,13 @@ reset/rebase/force-push. Ordinary materializer and checkpoint tests retain manda
 semantics. Combined recovery/project tests require safe host and pipeline-state finalization to execute while
 project rows and checkpoint durability remain truthfully degraded.
 
+Installation recovery tests also use a genuine depth-1 checkout and installation-user Git child. They build the
+witnessed one-local/many-remote graph, prove the retained local SHA and fetched upstream are the merge parents,
+observe both trees' non-conflicting state, verify no checkout-reuse push, repeat unchanged, advance upstream and
+repeat again. Negative fixtures cover overlap conflicts, interruption cleanup, non-head paths, wrong identity and
+message, arbitrary merges and ordinary non-recovery refusal. Cleanup evidence is the unchanged HEAD and index
+tree, a clean worktree, no `MERGE_HEAD`, and retained fetched remote ref; no automatic side selection is used.
+
 ## Normalized board bulk recovery
 
 `tests.test_bulk_card_restore` drives the restore-specific card planner through the real

@@ -98,8 +98,15 @@ checkout is therefore a depth-1, single-branch, no-tags snapshot of the remote d
 validated in a private sibling stage and atomically adopted only when origin, branch, upstream, revision
 and shallow identity agree. Its Git child and helpers share an isolated process group so cancellation
 cannot leave a pack process or partial adopted repository behind. Subsequent recovery fetches only the
-tracked branch's new history and advances fast-forward only, retaining the shallow boundary; checkpoint
-commits and pushes remain normal descendants of the fetched tip.
+tracked branch's new history and first attempts the ordinary fast-forward, retaining the shallow boundary.
+One recovery-only exception preserves a product-owned head-registry checkpoint retained by an earlier degraded
+recovery: after complete ancestry preflight, Git merges the fetched upstream tip into that local first-parent
+lineage. Every ordinary local-only commit must have the product checkpoint identity and exact
+`checkpoint(heads): publish installed head registry` message, have one parent, and change only
+`heads/heads.yaml` or `heads/source.yaml`. The only other accepted node is the product's exact two-parent
+reconciliation merge, whose first parent continues that lineage and whose second parent belongs to fetched
+upstream ancestry. Arbitrary clean local history is not recoverable. The merge runs as the installation user
+under the instance-repository lock and does not push; checkpoint publication remains a later boundary.
 
 The Git-backed checkpoint is described in [Recovery](RECOVERY.md). A manual cold archive remains an
 optional tool for raw material and compatibility, and takes no part in recovery readiness.

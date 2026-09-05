@@ -51,6 +51,307 @@ from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _g
 # an install materializes the configured checkout or `~/secretary`, and neither exists on a machine
 # that only checked this branch out somewhere.
 class InstallationTests(unittest.TestCase):
+    def _recovery_divergence_fixture(
+        self, root: Path, *, remote_commits: int = 3, conflict: bool = False
+    ) -> tuple[Path, Path, Path, str, str]:
+        source = root / "source"
+        remote = root / "instance.git"
+        target = root / "instance"
+        source.mkdir()
+        _git(source, "init", "-b", "main")
+        _git(source, "config", "user.name", "Upstream fixture")
+        _git(source, "config", "user.email", "upstream@example.invalid")
+        (source / "heads").mkdir()
+        (source / "heads" / "heads.yaml").write_text("heads: []\n", encoding="utf-8")
+        (source / "heads" / "source.yaml").write_text("revision: base\n", encoding="utf-8")
+        (source / "upstream.txt").write_text("base\n", encoding="utf-8")
+        _git(source, "add", ".")
+        _git(source, "commit", "-m", "initial checkpoint")
+        subprocess.run(
+            ["git", "clone", "--bare", str(source), str(remote)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        remote_url = remote.as_uri()
+        self.assertEqual(
+            _clone_or_reuse(remote_url, target, recovery=True, dry_run=False),
+            "cloned private instance remote",
+        )
+        _git(target, "config", "user.name", state_repo.FALLBACK_IDENTITY[0])
+        _git(target, "config", "user.email", state_repo.FALLBACK_IDENTITY[1])
+        (target / "heads" / "source.yaml").write_text("revision: retained\n", encoding="utf-8")
+        with state_repo.state_repo_lock(target):
+            local = state_repo.commit(target, state_repo.HEADS_PATHSPEC, state_repo.HEADS_CHECKPOINT_MESSAGE)
+        assert local is not None
+        for revision in range(remote_commits):
+            (source / "upstream.txt").write_text(f"upstream {revision}\n", encoding="utf-8")
+            _git(source, "add", "upstream.txt")
+            _git(source, "commit", "-m", f"upstream checkpoint {revision}")
+        if conflict:
+            (source / "heads" / "source.yaml").write_text("revision: upstream\n", encoding="utf-8")
+            _git(source, "add", "heads/source.yaml")
+            _git(source, "commit", "-m", "upstream head registry")
+        _git(source, "push", str(remote), "main")
+        upstream = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", "main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        return source, remote, target, local, upstream
+
+    def test_recovery_reconciles_supported_shallow_local_lineage_without_push(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, remote, target, local, upstream = self._recovery_divergence_fixture(
+                Path(temporary), remote_commits=56
+            )
+            detail = _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False)
+            merged = state_repo.head(target)
+            assert merged is not None
+
+            self.assertIn("reconciled retained head-registry checkpoint", detail)
+            self.assertIn(f"local={local}", detail)
+            self.assertIn(f"upstream={upstream}", detail)
+            self.assertEqual(
+                state_repo.git(target, ["rev-list", "--parents", "-n", "1", merged], label="parents").split(),
+                [merged, local, upstream],
+            )
+            self.assertEqual(
+                (target / "heads" / "source.yaml").read_text(encoding="utf-8"),
+                "revision: retained\n",
+            )
+            self.assertEqual((target / "upstream.txt").read_text(encoding="utf-8"), "upstream 55\n")
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "--git-dir", str(remote), "rev-parse", "main"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                upstream,
+            )
+            self.assertEqual(
+                _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False),
+                "reused checkpoint checkout",
+            )
+            self.assertEqual(state_repo.head(target), merged)
+
+            (source / "upstream.txt").write_text("upstream again\n", encoding="utf-8")
+            _git(source, "add", "upstream.txt")
+            _git(source, "commit", "-m", "another upstream checkpoint")
+            _git(source, "push", str(remote), "main")
+            advanced = subprocess.run(
+                ["git", "--git-dir", str(remote), "rev-parse", "main"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertIn(
+                "reconciled retained head-registry checkpoint",
+                _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False),
+            )
+            second_merge = state_repo.head(target)
+            assert second_merge is not None
+            self.assertEqual(
+                state_repo.git(
+                    target, ["rev-list", "--parents", "-n", "1", second_merge], label="parents"
+                ).split(),
+                [second_merge, merged, advanced],
+            )
+            self.assertEqual(
+                _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False),
+                "reused checkpoint checkout",
+            )
+            self.assertEqual(state_repo.head(target), second_merge)
+            print(
+                "recovery graph evidence: shallow=true remote_commits=56 "
+                f"local={local} first_merge={merged} second_merge={second_merge} upstream={advanced}"
+            )
+
+    def test_recovery_conflict_restores_exact_clean_checkout_and_merge_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, remote, target, local, upstream = self._recovery_divergence_fixture(
+                Path(temporary), conflict=True
+            )
+            before_tree = state_repo.git(target, ["write-tree"], label="tree").strip()
+            with self.assertRaisesRegex(InstallError, "merge conflict or Git failure.*restored local"):
+                _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False)
+            self.assertEqual(state_repo.head(target), local)
+            self.assertEqual(state_repo.git(target, ["write-tree"], label="tree").strip(), before_tree)
+            self.assertEqual(state_repo.git(target, ["status", "--porcelain"], label="status"), "")
+            for operation_state in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE"):
+                self.assertFalse((target / ".git" / operation_state).exists())
+            self.assertNotEqual(
+                state_repo.run_git(
+                    target, ["rev-parse", "--verify", "MERGE_HEAD"], label="merge state"
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                state_repo.git(target, ["rev-parse", "origin/main"], label="upstream").strip(),
+                upstream,
+            )
+
+    def test_recovery_interruption_aborts_conflicted_merge(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, remote, target, local, _ = self._recovery_divergence_fixture(Path(temporary), conflict=True)
+            before_tree = state_repo.git(target, ["write-tree"], label="tree").strip()
+            real_run_git = state_repo.run_git
+
+            def interrupt_after_merge(instance, args, **kwargs):
+                result = real_run_git(instance, args, **kwargs)
+                if "merge" in args and "--no-ff" in args:
+                    raise KeyboardInterrupt
+                return result
+
+            with (
+                mock.patch("secretary.installation.state_repo.run_git", side_effect=interrupt_after_merge),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False)
+            self.assertEqual(state_repo.head(target), local)
+            self.assertEqual(state_repo.git(target, ["write-tree"], label="tree").strip(), before_tree)
+            self.assertEqual(state_repo.git(target, ["status", "--porcelain"], label="status"), "")
+            for operation_state in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE"):
+                self.assertFalse((target / ".git" / operation_state).exists())
+
+    def test_recovery_refuses_non_head_path_and_wrong_checkpoint_contract_without_mutation(self):
+        cases = ("path", "identity", "message")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                _, remote, target, _, upstream = self._recovery_divergence_fixture(Path(temporary))
+                if case == "path":
+                    (target / "manual.txt").write_text("manual\n", encoding="utf-8")
+                    _git(target, "add", "manual.txt")
+                    _git(
+                        target,
+                        "-c",
+                        f"user.name={state_repo.FALLBACK_IDENTITY[0]}",
+                        "-c",
+                        f"user.email={state_repo.FALLBACK_IDENTITY[1]}",
+                        "commit",
+                        "-m",
+                        state_repo.HEADS_CHECKPOINT_MESSAGE,
+                    )
+                    expected = "outside the installed head registry"
+                else:
+                    (target / "heads" / "source.yaml").write_text(f"revision: {case}\n", encoding="utf-8")
+                    _git(target, "add", "heads/source.yaml")
+                    name, email = state_repo.FALLBACK_IDENTITY
+                    message = state_repo.HEADS_CHECKPOINT_MESSAGE
+                    if case == "identity":
+                        name, email = "Manual author", "manual@example.invalid"
+                        expected = "unsupported identity"
+                    else:
+                        message = "manual head update"
+                        expected = "not a supported head-registry recovery checkpoint"
+                    _git(
+                        target,
+                        "-c",
+                        f"user.name={name}",
+                        "-c",
+                        f"user.email={email}",
+                        "commit",
+                        "-m",
+                        message,
+                    )
+                before = state_repo.head(target)
+                before_tree = state_repo.git(target, ["write-tree"], label="tree").strip()
+                with self.assertRaisesRegex(InstallError, expected):
+                    _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False)
+                self.assertEqual(state_repo.head(target), before)
+                self.assertEqual(state_repo.git(target, ["write-tree"], label="tree").strip(), before_tree)
+                self.assertEqual(
+                    state_repo.git(target, ["rev-parse", "origin/main"], label="upstream").strip(),
+                    upstream,
+                )
+
+    def test_recovery_refuses_arbitrary_merge_and_non_recovery_stays_fast_forward_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, remote, target, _, _ = self._recovery_divergence_fixture(Path(temporary))
+            _git(target, "fetch", "origin")
+            _git(
+                target,
+                "-c",
+                f"user.name={state_repo.FALLBACK_IDENTITY[0]}",
+                "-c",
+                f"user.email={state_repo.FALLBACK_IDENTITY[1]}",
+                "merge",
+                "--no-ff",
+                "-m",
+                "manual merge",
+                "origin/main",
+            )
+            (source / "upstream.txt").write_text("after manual merge\n", encoding="utf-8")
+            _git(source, "add", "upstream.txt")
+            _git(source, "commit", "-m", "advance after manual merge")
+            _git(source, "push", str(remote), "main")
+            before = state_repo.head(target)
+            with self.assertRaisesRegex(
+                InstallError, "not a supported head-registry recovery checkpoint or reconciliation"
+            ):
+                _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False)
+            self.assertEqual(state_repo.head(target), before)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            _, remote, target, local, _ = self._recovery_divergence_fixture(Path(temporary))
+            (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
+            (target / ".git" / "info" / "exclude").write_text(".secretary-bootstrap\n", encoding="utf-8")
+            with self.assertRaisesRegex(InstallError, "fast-forward instance checkout"):
+                _clone_or_reuse(remote.as_uri(), target, recovery=False, dry_run=False)
+            self.assertEqual(state_repo.head(target), local)
+
+    def test_recovery_refuses_wrong_tracking_branch_and_missing_shallow_merge_base(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, remote, target, local, upstream = self._recovery_divergence_fixture(Path(temporary))
+            _git(target, "fetch", "origin")
+            _git(target, "update-ref", "refs/remotes/origin/other", upstream)
+            _git(target, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+            _git(target, "config", "branch.main.merge", "refs/heads/other")
+            with self.assertRaisesRegex(InstallError, "must track its matching origin branch"):
+                _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False)
+            self.assertEqual(state_repo.head(target), local)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, remote, target, local, _ = self._recovery_divergence_fixture(root)
+            unrelated = root / "unrelated"
+            unrelated.mkdir()
+            _git(unrelated, "init", "-b", "main")
+            _git(unrelated, "config", "user.name", "Unrelated")
+            _git(unrelated, "config", "user.email", "unrelated@example.invalid")
+            (unrelated / "replacement").write_text("replacement\n", encoding="utf-8")
+            _git(unrelated, "add", "replacement")
+            _git(unrelated, "commit", "-m", "unrelated root")
+            _git(unrelated, "push", "--force", str(remote), "main")
+            with self.assertRaisesRegex(InstallError, "no single trustworthy merge base"):
+                _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False)
+            self.assertEqual(state_repo.head(target), local)
+
+    @unittest.skipUnless(os.geteuid() == 0, "requires a real root-to-runtime-user recovery fixture")
+    def test_root_reconciliation_runs_as_the_installation_user(self):
+        try:
+            account = pwd.getpwnam("nobody")
+        except KeyError:
+            self.skipTest("fixture has no nobody user")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            _, remote, target, local, upstream = self._recovery_divergence_fixture(root)
+            for path in (target, *target.rglob("*")):
+                os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
+            detail = _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False)
+            identity = state_repo.git_child_identity(target)
+            self.assertEqual((identity.uid, identity.gid), (account.pw_uid, account.pw_gid))
+            self.assertIn(f"local={local}", detail)
+            merged = state_repo.head(target)
+            assert merged is not None
+            self.assertEqual(
+                state_repo.git(target, ["rev-list", "--parents", "-n", "1", merged], label="parents").split(),
+                [merged, local, upstream],
+            )
+
     def test_recovery_ownership_barrier_precedes_reused_checkpoint_git(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"

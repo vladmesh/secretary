@@ -39,6 +39,8 @@ GITIGNORE_PATHSPEC = (".gitignore",)
 # one writer's deliberately narrow ownership: no checkpoint or configuration
 # writer may pick either one up by accident.
 HEADS_PATHSPEC = ("heads/heads.yaml", "heads/source.yaml")
+HEADS_CHECKPOINT_MESSAGE = "checkpoint(heads): publish installed head registry"
+RECOVERY_RECONCILIATION_MESSAGE = "recovery(instance): reconcile retained head registry checkpoint"
 
 # Variables with which the caller's environment selects a *different* repository than
 # the one named on the command line.  Git honours them ahead of `-C`, so an inherited

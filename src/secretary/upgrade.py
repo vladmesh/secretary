@@ -492,7 +492,7 @@ def step_publish_head_registry(context: UpgradeContext) -> StepResult:
             commit = state_repo.commit(
                 instance,
                 state_repo.HEADS_PATHSPEC,
-                "checkpoint(heads): publish installed head registry",
+                state_repo.HEADS_CHECKPOINT_MESSAGE,
             )
             tracked = state_repo.git(
                 instance,
