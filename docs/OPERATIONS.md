@@ -1421,6 +1421,14 @@ commands remain diagnostic primitives, not the main runbook. `restore-reconcile`
 with `status: degraded` while a configured project checkout is unavailable and does not mark reconcile complete;
 repair the checkout through `recover`, then rerun the diagnostic if it is needed.
 
+`restore-board` holds the restore lock while it stages and batches normalized card obligations. If it reports an
+uncertain card batch, rerun the same supported command without deleting backend rows, pending audit, restore state
+or the request namespace. The rerun reconciles the current Task/Product/Issue inventory and metadata, skips every
+proved row, and retries only absent or incomplete work. A duplicate reference or conflicting existing content is
+not a cleanup instruction: preserve that evidence and investigate the named reference. Comments follow card
+initialization; archived closure follows comment proof; post-close active-order reconciliation and a fresh final
+parity snapshot remain the completion gates.
+
 Recovery prints a structured row for every configured project. `failed` rows make the aggregate status
 `degraded` and the command exits non-zero, but board, memory, run-state, safe host finalization and ownership
 handoff still complete. The host contract preserves an unavailable project's existing managed registration

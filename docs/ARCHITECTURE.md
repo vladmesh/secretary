@@ -565,8 +565,18 @@ needed and it does not race the tick writer.
   configured binding is available.
 - Task audit and pending writes are fail-closed: an unfinished board mutation blocks a consistent
   export and the recovery checkpoint.
-- Normalized recovery owns a narrow bulk-comment transaction boundary shared by Card and Sprint restore.
-  It reuses the ordinary `TaskAudit` journal and stable restore request identities, but does not enter either
+- Normalized recovery owns restore-only bulk boundaries for card initialization and Card/Sprint comments. Card
+  planning validates Task, Product and Issue rows together under the restore lock, then reuses one board schema,
+  swimlane map and reference inventory for that phase. Each card has one `restored_bulk` obligation staged in
+  the ordinary `TaskAudit` journal before any create. Native creates carry final title, description, reference,
+  column and swimlane; metadata and exported placement use bounded follow-up batches. A fresh whole-board
+  inventory plus batched metadata proves each row independently, so a mixed rejection, malformed response or
+  lost aggregate reply never makes the batch atomic. Duplicate references and conflicting existing content fail
+  closed. A retry keeps the local restore namespace, accepts released `create`/`restored` evidence, creates only
+  absent rows, initializes only incomplete obligations, and publishes each new occurrence only after its exact
+  row and initialized state are proved. A complete replay performs no card mutation.
+
+  Comment restore reuses the same audit and stable restore request identities, but does not enter either
   interactive writer's per-comment full-entity read cycle. Intended occurrences are durable before bounded
   JSON-RPC writes. One ordered wave contains no more than one occurrence for an entity because Kanboard batches
   are not database transactions and do not promise member execution order. Missing, duplicate, malformed or
@@ -580,6 +590,8 @@ needed and it does not race the tick writer.
   50 histories, but one history and the aggregate response bytes have no smaller product limit. A single long
   history is transferred again for every ordered wave, so its row transfer is quadratic in that entity's
   comment count; the 30-second transport timeout fails such a read closed rather than weakening reconciliation.
+  Archived-card closure is also bounded and follows comment proof. The existing post-close active-order repair
+  then reconciles only mismatched `(column, swimlane)` groups before final content and order parity.
 
 Command contracts are in [Protocols](PROTOCOLS.md), runbooks in [Operations](OPERATIONS.md), and the
 product goal in [Vision](VISION.md).

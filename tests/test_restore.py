@@ -213,6 +213,23 @@ class RestoreTests(unittest.TestCase):
                 self.assertEqual(import_normalized_board(data_dir, client=client), 1)
             self.assertEqual([comment["comment"] for comment in client.comments[12]], ["first", "second"])
 
+    def test_import_never_enters_interactive_card_create_or_full_card_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
+            )
+            client = _EmptyWriteKanboard()
+            forbidden = AssertionError("interactive card path entered")
+            with (
+                mock.patch.object(TaskWriter, "create", side_effect=forbidden),
+                mock.patch.object(TaskWriter, "restore_card", side_effect=forbidden),
+                mock.patch.object(TaskReader, "show", side_effect=forbidden),
+                mock.patch.object(TaskReader, "show_id", side_effect=forbidden),
+            ):
+                self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+
     def test_missing_card_from_fresh_snapshot_is_a_recorded_parity_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
@@ -942,8 +959,15 @@ class RestoreTests(unittest.TestCase):
             for group in fixture["groups"]:
                 self.assertEqual(len(group["expected"]), group["active_count"])
                 self.assertEqual(len(group["failed_order"]), group["active_count"])
+                self.assertEqual(len(group["actual_positions"]), group["active_count"])
+                self.assertTrue(
+                    all(
+                        right - left > 1
+                        for left, right in zip(group["actual_positions"], group["actual_positions"][1:])
+                    )
+                )
                 self.assertEqual(set(group["expected"]), set(group["failed_order"]))
-                for position, reference in enumerate(group["failed_order"], 1):
+                for position, reference in zip(group["actual_positions"], group["failed_order"], strict=True):
                     task_id = client.next_task_id
                     client.next_task_id += 1
                     row = {
@@ -961,7 +985,7 @@ class RestoreTests(unittest.TestCase):
                     client.metadata[task_id] = {}
                     client.comments[task_id] = []
                     actual[reference] = {"position": position}
-                for position, reference in enumerate(group["expected"], 1):
+                for position, reference in zip(group["actual_positions"], group["expected"], strict=True):
                     cards.append(
                         {
                             "reference": reference,
@@ -1052,12 +1076,14 @@ class RestoreTests(unittest.TestCase):
             client = _EmptyWriteKanboard()
             entered, release = threading.Event(), threading.Event()
             results: list[tuple[str, object]] = []
-            original = restore_module._create_restored_card
+            from secretary import task_restore
 
-            def paused_create(writer, card, prefix):
+            original = task_restore.restore_cards_batched
+
+            def paused_create(*args, **kwargs):
                 entered.set()
                 self.assertTrue(release.wait(timeout=5))
-                original(writer, card, prefix)
+                original(*args, **kwargs)
 
             def run_restore() -> None:
                 try:
@@ -1065,7 +1091,7 @@ class RestoreTests(unittest.TestCase):
                 except Exception as exc:  # noqa: BLE001 - the thread returns any restore failure.
                     results.append(("error", exc))
 
-            with mock.patch("secretary.restore._create_restored_card", side_effect=paused_create):
+            with mock.patch("secretary.task_restore.restore_cards_batched", side_effect=paused_create):
                 first = threading.Thread(target=run_restore)
                 first.start()
                 self.assertTrue(entered.wait(timeout=5))

@@ -3956,12 +3956,21 @@ class TaskWriter:
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
         return {"action": kind, "task": task, "event_id": event_id, "replayed": False}
 
-    def reconcile(self, *, defer_restore_comments: bool = False) -> tuple[int, int]:
+    def reconcile(
+        self, *, defer_restore_comments: bool = False, defer_bulk_restore: bool = False
+    ) -> tuple[int, int]:
         repaired = 0
         unresolved = 0
         for event in self.audit.pending_events():
             try:
                 if defer_restore_comments and event.get("kind") == "restored_comment":
+                    continue
+                if defer_bulk_restore and event.get("kind") == "restored_bulk":
+                    continue
+                if event.get("kind") == "restored_bulk":
+                    # Normalized restore owns the canon and the whole-board evidence needed to
+                    # finish this obligation. Generic per-card reconciliation must not publish it.
+                    unresolved += 1
                     continue
                 if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
                     subject = event.get("subject") if isinstance(event.get("subject"), dict) else {}

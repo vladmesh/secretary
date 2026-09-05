@@ -169,6 +169,22 @@ as a no-op, rather than making Ruff choose a repository-wide default.
 
 ## Normalized board bulk recovery
 
+`tests.test_bulk_card_restore` drives the restore-specific card planner through the real
+`KanboardClient.call_batch` encoder/decoder and an in-process JSON-RPC peer. It covers Task, Product and Issue
+records, durable staging before mutation, lost create prefixes, lost and malformed initialization replies,
+duplicate/conflicting rows, audit append failure and mutation-free replay. Its deterministic 1,440-card fixture
+uses 1,110 Tasks, 316 Issues and 14 Products with sanitized sparse `actual_position` values. The routine benchmark
+reports logical RPCs and transport posts separately for inventory, create, metadata/state and proof; order and
+final parity are explicitly labelled deferred rather than being counted as card initialization. A simulated
+0.1 ms post latency compares the old minimum seven-post interactive cycle with the bounded bulk transport, and
+is labelled `durability=excluded`. A separate 40-card sample runs real `TaskAudit` staging, locking, append-ready
+pending files and fsync. These hermetic timings are structural evidence, not a live recovery SLO or durable
+product wall time.
+
+The general batch policy is at most 200 calls and 1 MiB per JSON document. Comment reads and writes retain their
+separate 50-call caps. Tests assert that the clean card path makes no interactive `TaskWriter.create`, generic
+`restore_card`, full `TaskReader.show/show_id`, comment read or per-card HTTP post.
+
 `tests.test_bulk_comment_restore` exercises the restore-specific Card/Sprint comment boundary against the real
 `KanboardClient.call_batch` encoder and response validator with an in-process wire peer. Deterministic cases cover
 pre-existing prefixes, identical bodies, repeat import, first/middle/last lost replies, mixed per-call rejection
@@ -198,7 +214,8 @@ result shape and disposable timeout canary live in
 minimal `A active position 1 / B archived historical position 1 / C active position 2` regression, mixed Task,
 Product and Issue rows, retry of an already populated parity-failed target, and the full 151-, 156-, 9- and
 12-row active sequences from all four sanitized production mismatch groups. The fixture covers near-total
-reversal, a correct prefix with a long disordered tail, localized disorder and full reversal; it requires exactly
+reversal, a correct prefix with a long disordered tail, localized disorder and a near-reversal with a displaced
+pair; it requires exactly
 131 moves before two placement-free passes. Lost reads, malformed move results and interruption after the group
 effect but before audit append are covered separately. The cases assert exact active relative order, retained
 archived comments and duplicate occurrences, no duplicate references and no unrelated retry writes:
