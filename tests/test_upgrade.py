@@ -1426,6 +1426,88 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
             self._git(self.instance, "rev-parse", "HEAD"), self._git(self.remote, "rev-parse", "main")
         )
 
+    def test_recovery_retains_failed_publication_continues_and_retries_same_commit(self):
+        self.context.publication_policy = "recovery-degraded"
+        self._git(self.instance, "push", "--quiet", "origin", "main")
+        self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
+        with mock.patch("secretary.upgrade.desired_role_worktrees", return_value=[]):
+            first = upgrade.run_steps(
+                self.context,
+                steps=(
+                    upgrade.step_head_registry,
+                    upgrade.step_publish_head_registry,
+                    upgrade.step_worktrees,
+                ),
+            )
+        retained = self._git(self.instance, "rev-parse", "HEAD")
+
+        self.assertEqual([step.status for step in first.steps], ["changed", "degraded", "skipped"])
+        self.assertEqual(first.steps[2].name, "role-worktrees")
+        self.assertIn(retained, first.steps[1].detail)
+        self.assertNotEqual(retained, self._git(self.remote, "rev-parse", "main"))
+
+        self._git(self.instance, "remote", "set-url", "origin", str(self.remote))
+        with mock.patch("secretary.upgrade.desired_role_worktrees", return_value=[]):
+            second = upgrade.run_steps(
+                self.context,
+                steps=(
+                    upgrade.step_head_registry,
+                    upgrade.step_publish_head_registry,
+                    upgrade.step_worktrees,
+                ),
+            )
+        self.assertEqual([step.status for step in second.steps], ["unchanged", "unchanged", "skipped"])
+        self.assertEqual(self._git(self.instance, "rev-parse", "HEAD"), retained)
+        self.assertEqual(self._git(self.remote, "rev-parse", "main"), retained)
+
+        third = upgrade.run_steps(
+            self.context,
+            steps=(upgrade.step_head_registry, upgrade.step_publish_head_registry),
+        )
+        self.assertEqual([step.status for step in third.steps], ["unchanged", "unchanged"])
+        self.assertEqual(self._git(self.instance, "rev-parse", "HEAD"), retained)
+
+    def test_recovery_divergence_preserves_local_and_remote_history(self):
+        self.context.publication_policy = "recovery-degraded"
+        self._git(self.instance, "push", "--quiet", "origin", "main")
+        self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
+        generated, publication = self._publish()
+        local = self._git(self.instance, "rev-parse", "HEAD")
+        self.assertEqual((generated.status, publication.status), ("changed", "degraded"))
+
+        other = self.root / "other"
+        self._git(self.root, "clone", "--quiet", str(self.remote), str(other))
+        self._git(other, "config", "user.name", "other operator")
+        self._git(other, "config", "user.email", "other@example.invalid")
+        (other / "remote-note").write_text("advanced independently\n", encoding="utf-8")
+        self._git(other, "add", "remote-note")
+        self._git(other, "commit", "--quiet", "-m", "remote advance")
+        self._git(other, "push", "--quiet", "origin", "main")
+        remote = self._git(self.remote, "rev-parse", "main")
+
+        self._git(self.instance, "remote", "set-url", "origin", str(self.remote))
+        retry = upgrade.step_publish_head_registry(self.context)
+
+        self.assertEqual(retry.status, "degraded")
+        self.assertIn("diverged", retry.detail)
+        self.assertEqual(self._git(self.instance, "rev-parse", "HEAD"), local)
+        self.assertEqual(self._git(self.remote, "rev-parse", "main"), remote)
+
+    def test_ordinary_publication_failure_still_stops_the_materializer(self):
+        self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
+        with mock.patch("secretary.upgrade.desired_role_worktrees") as worktrees:
+            result = upgrade.run_steps(
+                self.context,
+                steps=(
+                    upgrade.step_head_registry,
+                    upgrade.step_publish_head_registry,
+                    upgrade.step_worktrees,
+                ),
+            )
+
+        self.assertEqual([step.status for step in result.steps], ["changed", "failed"])
+        worktrees.assert_not_called()
+
     def test_incomplete_or_stale_pair_fails_closed_before_routing(self):
         self._publish()
         source = self.instance / "heads" / "source.yaml"

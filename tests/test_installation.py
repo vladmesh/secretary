@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import _proc, installation, restore_commands
+from secretary import _proc, installation, restore_commands, secret_store, state_repo
 from secretary.board_transport import DEFAULT_TRANSPORT
 from secretary.checkpoint import CheckpointPusher
 from secretary.cli import main
@@ -42,6 +42,7 @@ from secretary.installation import (
 from secretary.projects.availability import ProjectAvailability
 from secretary.routing_journal import attempts
 from secretary.runtime_env import RuntimeEnvError
+from secretary.secret_words import RECOVERY_WORDS
 from secretary.upgrade import UpgradeResult, step_host
 from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git
 
@@ -50,6 +51,157 @@ from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _g
 # an install materializes the configured checkout or `~/secretary`, and neither exists on a machine
 # that only checked this branch out somewhere.
 class InstallationTests(unittest.TestCase):
+    def test_recovery_ownership_barrier_precedes_reused_checkpoint_git(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            data = Path(temporary) / "data"
+            key = secret_store.key_path(target)
+            key.parent.mkdir(parents=True)
+            key.write_text("not-secret-fixture-material\n", encoding="utf-8")
+            key.chmod(0o600)
+            report = SimpleNamespace(data_dir=data)
+            events: list[str] = []
+            args = SimpleNamespace(
+                instance_dir=str(target),
+                instance_remote="remote",
+                installation_user=getpass.getuser(),
+                recover=True,
+                adopt=False,
+                dry_run=False,
+                runtime_env=None,
+                product_root=str(PRODUCT_ROOT),
+                bootstrap_credential_file=None,
+                bootstrap_credential_stdin=False,
+                recovery_phrase_file=None,
+                recovery_phrase_stdin=False,
+            )
+
+            def barrier(*_args, **_kwargs):
+                events.append("ownership")
+                if events == ["ownership", "git", "ownership"]:
+                    raise InstallError("cleanup ownership failed")
+
+            def reuse(*_args, **_kwargs):
+                events.append("git")
+                raise InstallError("stop after ordering proof")
+
+            with (
+                mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch("secretary.installation._validated_instance", return_value=report),
+                mock.patch(
+                    "secretary.installation._establish_recovery_ownership_barrier",
+                    side_effect=barrier,
+                ),
+                mock.patch("secretary.installation._clone_or_reuse", side_effect=reuse),
+            ):
+                result = installation.install(args)
+
+            self.assertEqual(events, ["ownership", "git", "ownership"])
+            self.assertEqual(result.status, "failed")
+            self.assertIn("stop after ordering proof", result.steps[-2].detail)
+            self.assertIn("original failure is retained above", result.steps[-1].detail)
+
+    def test_recovery_ownership_barrier_refuses_unsafe_key_shape_or_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            data = root / "data"
+            key = secret_store.key_path(instance)
+            key.parent.mkdir(parents=True)
+            key.write_text("fixture\n", encoding="utf-8")
+            key.chmod(0o640)
+            with self.assertRaisesRegex(InstallError, "mode 0600"):
+                installation._establish_recovery_ownership_barrier(instance, data, None)
+            key.unlink()
+            target = root / "elsewhere"
+            target.write_text("fixture\n", encoding="utf-8")
+            key.symlink_to(target)
+            with self.assertRaisesRegex(InstallError, "regular non-symlink"):
+                installation._establish_recovery_ownership_barrier(instance, data, None)
+
+    @unittest.skipUnless(os.geteuid() == 0, "requires a real root-to-runtime-user recovery fixture")
+    def test_recovery_barrier_enables_real_child_git_and_key_loading(self):
+        try:
+            account = pwd.getpwnam("nobody")
+        except KeyError:
+            self.skipTest("fixture has no nobody user")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            instance = root / "instance"
+            data = root / "data"
+            instance.mkdir()
+            data.mkdir()
+            _git(instance, "init", "-b", "main")
+            _git(instance, "config", "user.name", "Test")
+            _git(instance, "config", "user.email", "test@example.invalid")
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            _git(instance, "add", "instance.yaml")
+            _git(instance, "commit", "-m", "fixture")
+            phrase = " ".join(RECOVERY_WORDS[:16])
+            secret_store.initialize_store(instance, phrase=phrase, actor="fixture")
+            key = secret_store.key_path(instance)
+            lock = state_repo._lock_path(instance)
+            progress = data / installation.RECOVERY_PROGRESS_FILE
+            progress.write_text('{"identity":"fixture"}\n', encoding="utf-8")
+            run_state = root / "runtime" / "state"
+            run_state.mkdir(parents=True)
+            (run_state / "attempts.jsonl").write_text("{}\n", encoding="utf-8")
+            os.chown(key, 0, 0)
+
+            installation._establish_recovery_ownership_barrier(
+                instance,
+                data,
+                account.pw_name,
+                additional_paths=(run_state,),
+            )
+
+            identity = state_repo.git_child_identity(instance)
+            self.assertEqual((identity.uid, identity.gid), (account.pw_uid, account.pw_gid))
+            self.assertEqual(
+                state_repo.git(
+                    instance,
+                    ["rev-parse", "--is-inside-work-tree"],
+                    label="verify recovery child Git identity",
+                ),
+                "true\n",
+            )
+            child_source = root / "child-source"
+            shutil.copytree(Path.cwd() / "src" / "secretary", child_source / "secretary")
+            shutil.copytree(Path.cwd() / "src" / "triggered_agents", child_source / "triggered_agents")
+            for staged in (child_source, *child_source.rglob("*")):
+                mode = staged.stat().st_mode & 0o777
+                staged.chmod(mode | (0o055 if staged.is_dir() else 0o044))
+            completed = subprocess.run(
+                [
+                    "runuser",
+                    "--user",
+                    account.pw_name,
+                    "--",
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,sys; from secretary.secret_store import load_installation_key; "
+                        "load_installation_key(sys.argv[1]); print(os.geteuid())"
+                    ),
+                    str(instance),
+                ],
+                cwd="/",
+                env={**os.environ, "PYTHONPATH": str(child_source)},
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.stdout.strip(), str(account.pw_uid))
+            info = key.lstat()
+            self.assertEqual(
+                (info.st_uid, info.st_gid, info.st_mode & 0o777),
+                (account.pw_uid, account.pw_gid, 0o600),
+            )
+            for owned in (lock, progress, run_state, run_state / "attempts.jsonl"):
+                info = owned.lstat()
+                self.assertEqual((info.st_uid, info.st_gid), (account.pw_uid, account.pw_gid))
+
     def test_isolated_git_timeout_reaps_its_descendant_process(self):
         with tempfile.TemporaryDirectory() as temporary:
             pid_file = Path(temporary) / "child.pid"
@@ -967,7 +1119,16 @@ class InstallationTests(unittest.TestCase):
                 changed=False,
                 render=lambda **_kwargs: "unchanged",
             )
-            host_result = SimpleNamespace(steps=[SimpleNamespace(status="changed")])
+            host_result = SimpleNamespace(
+                steps=[
+                    SimpleNamespace(
+                        name="head-registry-checkpoint",
+                        status="degraded",
+                        detail="head registry checkpoint failed; local checkpoint deadbeef",
+                    ),
+                    SimpleNamespace(name="host", status="changed", detail="completed"),
+                ]
+            )
 
             def host(*_args, before_host=None, **_kwargs):
                 before_host(SimpleNamespace(runtime_home=root / "home"))
@@ -1004,10 +1165,118 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(result.status, "degraded")
             self.assertEqual(result.projects[0].code, "unsupported-https")
             self.assertEqual(
+                [step.name for step in result.steps if step.status == "degraded"],
+                ["runtime", "checkpoint-publication", "status"],
+            )
+            self.assertTrue(any(step.name == "pipeline-state" for step in result.steps))
+            self.assertEqual(
                 materialize.call_args.kwargs["project_availability"].unavailable,
                 frozenset({"missing"}),
             )
             self.assertIn(mock.call(target, getpass.getuser()), owner.call_args_list)
+
+    def test_partial_materializer_failure_reaches_final_ownership_barrier(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "instance"
+            data = root / "data"
+            run_state = root / "runtime" / "state"
+            target.mkdir()
+            (target / ".git").mkdir()
+            (target / ".git" / state_repo.STATE_LOCK_NAME).write_text("", encoding="utf-8")
+            key = secret_store.key_path(target)
+            key.parent.mkdir(parents=True)
+            key.write_text("fixture-key-bytes\n", encoding="utf-8")
+            key.chmod(0o600)
+            _checkpoint(target, data)
+            report = InstanceReport(
+                instance_path=target / "instance.yaml",
+                name="test",
+                projects=0,
+                adapters=0,
+                adapter_drafts=0,
+                has_manifest=True,
+                manifest_path=data / "data-manifest.json",
+                errors=[],
+                warnings=[],
+                bindings=[],
+                host={},
+                instance={},
+                data_dir=data,
+            )
+            args = SimpleNamespace(
+                instance_dir=str(target),
+                instance_remote="file:///instance.git",
+                installation_user=getpass.getuser(),
+                recover=True,
+                adopt=False,
+                dry_run=False,
+                runtime_env=None,
+                product_root=str(PRODUCT_ROOT),
+                bootstrap_credential_file=None,
+                bootstrap_credential_stdin=False,
+                recovery_phrase_file=None,
+                recovery_phrase_stdin=False,
+                host_fixture=None,
+            )
+            transport = SimpleNamespace(
+                transport=DEFAULT_TRANSPORT,
+                changed=False,
+                render=lambda **_kwargs: "unchanged",
+            )
+
+            def restore_runs(*_args, **_kwargs):
+                run_state.mkdir(parents=True)
+                (run_state / "attempts.jsonl").write_text("{}\n", encoding="utf-8")
+                return installation.PipelineStateMaterialization(1, True)
+
+            def fail_after_pipeline_state(*_args, before_host=None, **_kwargs):
+                before_host(SimpleNamespace(runtime_home=root / "home"))
+                raise InstallError("safe materializer tail failed")
+
+            with (
+                mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch(
+                    "secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"
+                ),
+                mock.patch(
+                    "secretary.installation._open_secret_store",
+                    return_value=installation.SecretRecovery(store_present=True, unlocked=True),
+                ),
+                mock.patch("secretary.installation.read_runtime_env", return_value={}),
+                mock.patch("secretary.installation.ensure_from_runtime_values", return_value=transport),
+                mock.patch("secretary.installation.check_prerequisites"),
+                mock.patch("secretary.installation._validated_instance", return_value=report),
+                mock.patch("secretary.bootstrap.ensure_pipeline_board"),
+                mock.patch("secretary.installation.import_normalized_board", return_value=0),
+                mock.patch("secretary.installation.rebuild_memory_index", return_value=0),
+                mock.patch("secretary.installation.provision_project_checkouts", return_value=[]),
+                mock.patch("secretary.installation.provision_codex_home", return_value=0),
+                mock.patch("secretary.installation.pipeline_state_path", return_value=run_state),
+                mock.patch("secretary.installation.materialize_pipeline_state", side_effect=restore_runs),
+                mock.patch("secretary.installation.materialize_host", side_effect=fail_after_pipeline_state),
+                mock.patch("secretary.installation._set_installation_owner") as owner,
+                mock.patch(
+                    "secretary.installation._establish_recovery_ownership_barrier",
+                    wraps=installation._establish_recovery_ownership_barrier,
+                ) as barrier,
+            ):
+                result = installation.install(args)
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn("safe materializer tail failed", result.steps[-1].detail)
+            self.assertEqual(
+                owner.call_args_list[-3:],
+                [
+                    mock.call(target, getpass.getuser()),
+                    mock.call(data, getpass.getuser()),
+                    mock.call(run_state.parent, getpass.getuser()),
+                ],
+            )
+            self.assertEqual(barrier.call_args_list[-1].kwargs["additional_paths"], (run_state.parent,))
+            self.assertTrue((data / installation.RECOVERY_PROGRESS_FILE).is_file())
+            self.assertTrue((target / ".git" / state_repo.STATE_LOCK_NAME).is_file())
+            self.assertTrue((run_state / "attempts.jsonl").is_file())
 
     def test_fatal_board_failure_does_not_enter_project_or_host_boundary(self):
         with tempfile.TemporaryDirectory() as temporary:
