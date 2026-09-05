@@ -146,6 +146,14 @@ class RecoveryInventoryTests(unittest.TestCase):
         self.assertFalse(row["supported"])
         self.assertTrue(row["supported_next_action"])
 
+    def test_local_checkpoint_remote_is_not_an_authentication_bypass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance, report = self.fixture(Path(tmp))
+            git(instance, "remote", "set-url", "origin", str(Path(tmp) / "checkpoint.git"))
+            snapshot = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
+
+        self.assertFalse(any(row.get("kind") == "manual-transport" for row in snapshot["bypasses"]))
+
     def test_instead_of_bypass_does_not_replace_managed_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance, _ = self.fixture(Path(tmp))

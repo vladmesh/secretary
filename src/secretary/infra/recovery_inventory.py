@@ -349,12 +349,17 @@ def _git_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
         transport = RemoteExecution(remote, "checkpoint", instance_dir=instance_dir).transport
     except state_repo.StateRepoError:
         return rows
-    if transport in {"ssh", "local", "unmanaged", "https-unsupported"}:
+    if transport == "local":
+        return rows
+    # A local/file remote is the supported hermetic checkpoint transport. It needs no
+    # authentication and therefore is not an authentication bypass. SSH and other unmanaged
+    # transports can consume ambient/manual authentication and remain actionable bypass rows.
+    if transport in {"ssh", "unmanaged", "https-unsupported"}:
         rows.append(
             {
                 "capability": "checkpoint-git-authentication",
                 "kind": "manual-transport",
-                "state": "manual-only" if transport in {"ssh", "local", "unmanaged"} else "broken",
+                "state": "manual-only" if transport in {"ssh", "unmanaged"} else "broken",
                 "supported": False,
                 "reason": f"checkpoint remote uses {transport} transport",
                 "supported_next_action": "configure an HTTPS github.com origin to use the managed checkpoint credential",
