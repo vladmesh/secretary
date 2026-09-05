@@ -149,6 +149,9 @@ def import_normalized_board(
                     task_id = int(setup[card["reference"]]["id"].removeprefix("task_kanboard_"))
                     if client.call("closeTask", task_id=task_id) is not True:
                         raise RestoreError("could not close restored card")
+            post_close = reader.restore_snapshot()
+            _require_card_snapshot(data_dir, cards, post_close)
+            _reconcile_restored_order(writer, cards, post_close, prefix)
             actual = reader.restore_snapshot()
             _require_card_snapshot(data_dir, cards, actual)
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
@@ -865,6 +868,36 @@ def _restored_order_mismatch(cards: list[dict[str, Any]], actual: dict[str, dict
         if expected != [card["reference"] for card in live]:
             return True
     return False
+
+
+def _reconcile_restored_order(
+    writer: TaskWriter,
+    cards: list[dict[str, Any]],
+    actual: dict[str, dict[str, Any]],
+    prefix: str,
+) -> None:
+    """Repair only active groups whose post-close relative order differs."""
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for card in cards:
+        if not card.get("closed"):
+            groups.setdefault((str(card["column"]), str(card.get("swimlane") or "")), []).append(card)
+    for index, ((column, swimlane), group) in enumerate(sorted(groups.items())):
+        expected = [card["reference"] for card in sorted(group, key=_restore_card_order)]
+        live = sorted(
+            expected,
+            key=lambda reference: (
+                _positive_int(actual[reference].get("position")) or 0,
+                reference,
+            ),
+        )
+        if live == expected:
+            continue
+        writer.reconcile_restore_order(
+            column=column,
+            swimlane=swimlane,
+            references=expected,
+            request_id=f"{prefix}order:{index}",
+        )
 
 
 def _restore_card_order(card: dict[str, Any]) -> tuple[str, str, int, str]:

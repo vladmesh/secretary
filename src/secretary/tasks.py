@@ -1304,10 +1304,11 @@ class TaskAudit:
                 with open(path, encoding="utf-8") as source:
                     event = json.load(source)
                 request_id = str(event["request_id"])
-                # Retention's close has an ambiguous-response recovery rule:
-                # only TaskWriter can re-read the exact Done episode and prove
-                # it.  The generic journal repairer must leave that evidence.
-                if event.get("kind") == "retired":
+                # These effects have operation-specific proof rules. Only
+                # TaskWriter can re-read the exact Done episode or active
+                # restore group before publishing success; the generic journal
+                # repairer must leave that evidence pending.
+                if event.get("kind") in {"retired", "restored_order"}:
                     unresolved += 1
                     continue
                 with self._locked_audit():
@@ -3776,6 +3777,18 @@ class TaskWriter:
 
         return restore_comment(self, reference, body, occurrence, request_id)
 
+    def reconcile_restore_order(
+        self,
+        *,
+        column: str,
+        swimlane: str,
+        references: list[str],
+        request_id: str,
+    ) -> None:
+        from secretary.task_restore import reconcile_restore_order
+
+        reconcile_restore_order(self, column, swimlane, references, request_id)
+
     def _move_raw(self, task: dict[str, Any], target: str, *, position: int = 1, swimlane_id: int) -> None:
         board_id, columns, _ = self.reader._board()
         column_id = _target_column_id(columns, target)
@@ -3999,6 +4012,16 @@ class TaskWriter:
 
                     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                     finish_pending_restore_comment(self, event, payload)
+                    self.audit.stage(str(event["request_id"]), event)
+                    self.audit.append(str(event["request_id"]), event)
+                    repaired += 1
+                    continue
+                if event.get("kind") == "restored_order":
+                    from secretary.task_restore import finish_pending_restore_order
+
+                    finish_pending_restore_order(self, event)
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    event["backend"]["revision"] = f"order:{payload.get('references_sha256', '')}"
                     self.audit.stage(str(event["request_id"]), event)
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1

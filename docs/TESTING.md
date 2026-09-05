@@ -193,3 +193,21 @@ Interpret all times as hermetic receipts, not a live SLO. The structural asserti
 is the measured legacy Card path at 13–15 logical RPCs and HTTP posts per comment. The supported backend ordering,
 result shape and disposable timeout canary live in
 [the Kanboard comment contract evidence](evidence/kanboard-comment-contract-v1.2.46.md).
+
+`tests.test_restore` also models Kanboard's post-close position behavior. Its focused order cases cover the
+minimal `A active position 1 / B archived historical position 1 / C active position 2` regression, mixed Task,
+Product and Issue rows, retry of an already populated parity-failed target, and the full 151-, 156-, 9- and
+12-row active sequences from all four sanitized production mismatch groups. The fixture covers near-total
+reversal, a correct prefix with a long disordered tail, localized disorder and full reversal; it requires exactly
+131 moves before two placement-free passes. Lost reads, malformed move results and interruption after the group
+effect but before audit append are covered separately. The cases assert exact active relative order, retained
+archived comments and duplicate occurrences, no duplicate references and no unrelated retry writes:
+
+```console
+PYTHONPATH=src python3 -m unittest -v \
+  tests.test_restore.RestoreTests.test_post_close_reconciliation_preserves_task_product_and_issue_order \
+  tests.test_restore.RestoreTests.test_failed_populated_restore_retries_only_order_and_third_run_moves_nothing \
+  tests.test_restore.RestoreTests.test_interrupted_and_malformed_order_moves_are_proven_before_commit \
+  tests.test_restore.RestoreTests.test_interruption_after_group_effect_resumes_without_another_move \
+  tests.test_restore.RestoreTests.test_sanitized_four_group_failed_state_is_reconciled_once
+```
