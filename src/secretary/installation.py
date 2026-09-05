@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import pwd
+import re
 import shutil
 import stat
 import subprocess
@@ -28,7 +30,7 @@ import tempfile
 import tomllib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from secretary import _proc, state_repo
@@ -64,6 +66,7 @@ from secretary.restore import (
     mark_reconcile_applied,
     rebuild_memory_index,
     restore_findings,
+    restore_state,
 )
 from secretary.runtime_env import (
     RuntimeEnvError,
@@ -108,13 +111,33 @@ class InstallStep:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class ProjectProvisionResult:
+    project_id: str
+    target: str
+    transport: str
+    outcome: str
+    code: str
+    reason: str
+    retryable: bool
+
+
 @dataclass
 class InstallResult:
     steps: list[InstallStep] = field(default_factory=list)
+    projects: list[ProjectProvisionResult] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not any(step.status == "failed" for step in self.steps)
+        return self.status == "ok"
+
+    @property
+    def status(self) -> str:
+        if any(step.status == "failed" for step in self.steps):
+            return "failed"
+        if any(project.outcome == "failed" for project in self.projects):
+            return "degraded"
+        return "ok"
 
     def add(self, name: str, status: str, detail: str = "") -> None:
         self.steps.append(InstallStep(name, status, detail))
@@ -124,7 +147,16 @@ class InstallResult:
         for step in self.steps:
             suffix = f": {step.detail}" if step.detail else ""
             lines.append(f"  {step.status:9} {step.name}{suffix}")
-        lines.append("status: " + ("ok" if self.ok else "failed"))
+        if self.projects:
+            lines.append("projects:")
+            for project in self.projects:
+                lines.append(
+                    f"  {project.outcome:9} {project.project_id} "
+                    f"target={project.target} transport={project.transport} "
+                    f"code={project.code} retryable={'yes' if project.retryable else 'no'}: "
+                    f"{project.reason}"
+                )
+        lines.append("status: " + self.status)
         return "\n".join(lines)
 
 
@@ -132,6 +164,9 @@ class InstallResult:
 class PipelineStateMaterialization:
     records: int
     changed: bool
+
+
+RECOVERY_PROGRESS_FILE = "recovery-progress.json"
 
 
 def _run(
@@ -241,7 +276,9 @@ def _clone_or_reuse(
         fetch = remote_git.run_instance(target, ["fetch", "--quiet", "origin"], label="fetch instance remote")
         if fetch.returncode:
             detail = (fetch.stderr or fetch.stdout or "").strip().splitlines()
-            raise InstallError(f"fetch instance remote: {detail[-1] if detail else f'exited {fetch.returncode}'}")
+            raise InstallError(
+                f"fetch instance remote: {detail[-1] if detail else f'exited {fetch.returncode}'}"
+            )
         merge = remote_git.run_instance(
             target, ["merge", "--ff-only", "@{u}"], label="fast-forward instance checkout"
         )
@@ -679,6 +716,7 @@ def materialize_host(
     host_fixture: Path | None = None,
     installation_user: str | None = None,
     before_host: Callable[[UpgradeContext], None] | None = None,
+    available_projects: set[str] | None = None,
 ):
     report = validate_instance(instance)
     if not report.ok:
@@ -687,6 +725,11 @@ def materialize_host(
         installation_user, runtime_home = resolve_runtime_owner(instance, installation_user)
     except ValueError as exc:
         raise InstallError(str(exc)) from None
+    if available_projects is not None:
+        report = replace(
+            report,
+            bindings=[binding for binding in report.bindings if binding.get("id") in available_projects],
+        )
     context = UpgradeContext(
         instance_path=instance,
         product_root=product_root,
@@ -724,45 +767,199 @@ def materialize_host(
 def provision_project_checkouts(
     bindings: list[dict[str, object]],
     installation_user: str | None,
-) -> int:
-    """Clone missing registered checkouts without touching an existing path."""
-    cloned = 0
-    for binding in bindings:
-        raw_target = binding.get("repo")
-        if not isinstance(raw_target, str) or not raw_target:
-            raise InstallError("project registry entry has no checkout path")
-        target = Path(raw_target).expanduser()
-        if target.exists():
-            if not target.is_dir() or not (target / ".git").exists():
-                raise InstallError(f"project checkout target is not a Git repository: {target}")
-            continue
-        remote = binding.get("remote")
-        if not isinstance(remote, str) or not remote:
-            raise InstallError(f"project {binding.get('id')!s} is missing its recovery remote")
-        branch = binding.get("default_branch")
-        if not isinstance(branch, str) or not branch:
-            raise InstallError("project registry entry has no default branch")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=f".{target.name}.clone-", dir=target.parent) as temporary:
-            staging = Path(temporary) / "checkout"
-            _run(
-                [
-                    "git",
-                    "clone",
-                    "--branch",
-                    branch,
-                    "--single-branch",
-                    "--",
-                    remote,
-                    str(staging),
-                ],
-                label=f"clone project {binding.get('id')!s}",
-                timeout=600,
+    *,
+    instance_dir: Path | None = None,
+    bootstrap_credential: Path | None = None,
+    timeout: float = 600,
+    progress_path: Path | None = None,
+    recovery_identity: str = "",
+) -> list[ProjectProvisionResult]:
+    """Attempt every registered checkout through the credential and atomic-adoption boundary."""
+    results: list[ProjectProvisionResult] = []
+    persisted: list[dict[str, object]] = []
+    for index, binding in enumerate(bindings):
+        result = _provision_project_checkout(
+            binding,
+            index=index,
+            installation_user=installation_user,
+            instance_dir=instance_dir,
+            bootstrap_credential=bootstrap_credential,
+            timeout=timeout,
+        )
+        results.append(result)
+        persisted.append(
+            {
+                "project_id": result.project_id,
+                "transport": result.transport,
+                "outcome": result.outcome,
+                "code": result.code,
+                "retryable": result.retryable,
+            }
+        )
+        if progress_path is not None:
+            _write_recovery_progress(progress_path, recovery_identity, projects=persisted)
+    return results
+
+
+def _provision_project_checkout(
+    binding: dict[str, object],
+    *,
+    index: int,
+    installation_user: str | None,
+    instance_dir: Path | None,
+    bootstrap_credential: Path | None,
+    timeout: float,
+) -> ProjectProvisionResult:
+    project_id = binding.get("id")
+    display_id = (
+        project_id
+        if isinstance(project_id, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*", project_id)
+        else f"binding-{index + 1}"
+    )
+    raw_target = binding.get("repo")
+    if not isinstance(raw_target, str) or not raw_target:
+        return _project_failure(display_id, "invalid", "unknown", "invalid-binding", False)
+    try:
+        target = Path(raw_target).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return _project_failure(display_id, "invalid", "unknown", "invalid-target", False)
+    target_state = "existing" if target.exists() or target.is_symlink() else "missing"
+    if target.exists() or target.is_symlink():
+        if target.is_dir() and (target / ".git").exists():
+            return ProjectProvisionResult(
+                display_id,
+                "existing",
+                "not-contacted",
+                "unchanged",
+                "existing",
+                "valid checkout left unchanged",
+                False,
             )
-            os.replace(staging, target)
-        _set_installation_owner(target, installation_user)
-        cloned += 1
-    return cloned
+        return _project_failure(display_id, target_state, "not-contacted", "target-collision", False)
+    remote = binding.get("remote")
+    branch = binding.get("default_branch")
+    if not isinstance(remote, str) or not remote or not isinstance(branch, str) or not branch:
+        return _project_failure(display_id, target_state, "unknown", "invalid-binding", False)
+    execution = RemoteExecution(
+        remote,
+        "project-provision",
+        instance_dir=instance_dir,
+        bootstrap_file=bootstrap_credential,
+    )
+    transport = execution.transport
+    if instance_dir is None:
+        return _project_failure(display_id, target_state, transport, "invalid-context", False)
+    temporary: Path | None = None
+    claimed_target = False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.clone-", dir=target.parent))
+        _set_installation_owner(temporary, installation_user)
+        staging = temporary / "checkout"
+        execution.run_clone(
+            staging,
+            label=f"clone project {display_id}",
+            timeout=timeout,
+            clone_args=["--branch", branch, "--single-branch"],
+            child_target=instance_dir,
+        )
+        _set_installation_owner(staging, installation_user)
+        # Claim the final name without overwriting a path created since the
+        # initial inspection. Replacing our own empty directory is atomic.
+        target.mkdir()
+        claimed_target = True
+        os.replace(staging, target)
+        claimed_target = False
+    except KeyboardInterrupt:
+        raise
+    except CredentialError as exc:
+        return _project_failure(
+            display_id,
+            target_state,
+            transport,
+            exc.code,
+            exc.code not in {"unsupported-https", "invalid-branch"},
+        )
+    except InstallError:
+        return _project_failure(display_id, target_state, transport, "ownership", True)
+    except OSError:
+        return _project_failure(display_id, target_state, transport, "atomic-replace", True)
+    finally:
+        if claimed_target:
+            try:
+                target.rmdir()
+            except OSError:
+                pass
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
+    return ProjectProvisionResult(
+        display_id, "adopted", transport, "cloned", "cloned", "checkout cloned atomically", False
+    )
+
+
+def _project_failure(
+    project_id: str, target: str, transport: str, code: str, retryable: bool
+) -> ProjectProvisionResult:
+    reason = {
+        "invalid-binding": "project binding is incomplete",
+        "invalid-target": "checkout target is invalid",
+        "target-collision": "checkout target exists and is not a Git repository",
+        "invalid-context": "installation context is unavailable",
+        "unsupported-https": "HTTPS host is outside the managed credential boundary",
+        "unsupported-transport": "remote transport is unsupported",
+        "unsafe-remote": "credential-bearing remote URLs are refused",
+        "authentication": "remote authentication failed",
+        "network": "remote network access failed",
+        "timeout": "Git clone timed out and staging was removed",
+        "invalid-branch": "configured default branch is unavailable",
+        "command-not-found": "Git is unavailable",
+        "process": "Git process could not run",
+        "git": "Git clone failed",
+        "identity": "Git child identity could not be resolved",
+        "ownership": "staged checkout ownership could not be finalized",
+        "atomic-replace": "staged checkout could not be adopted",
+        "credential": "managed credential is unavailable",
+    }.get(code, "project checkout provisioning failed")
+    return ProjectProvisionResult(project_id, target, transport, "failed", code, reason, retryable)
+
+
+def _recovery_identity(instance_dir: Path, bindings: list[dict[str, object]]) -> str:
+    digest = hashlib.sha256()
+    for relative in (
+        "state/board/cards.ndjson",
+        "state/board/sprints.ndjson",
+        "state/board/export.json",
+        "state/runs/runs.ndjson",
+        "state/runs/export.json",
+    ):
+        path = instance_dir / relative
+        digest.update(relative.encode())
+        digest.update(path.read_bytes() if path.is_file() else b"<absent>")
+    safe_bindings = [
+        {key: binding.get(key) for key in ("id", "repo", "remote", "default_branch")} for binding in bindings
+    ]
+    digest.update(json.dumps(safe_bindings, sort_keys=True, separators=(",", ":")).encode())
+    return digest.hexdigest()
+
+
+def _read_recovery_progress(path: Path, identity: str) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"version": 1, "identity": identity}
+    if not isinstance(payload, dict) or payload.get("identity") != identity:
+        return {"version": 1, "identity": identity}
+    return payload
+
+
+def _write_recovery_progress(path: Path, identity: str, **changes: object) -> None:
+    payload = _read_recovery_progress(path, identity)
+    payload.update(changes)
+    payload.update(version=1, identity=identity)
+    try:
+        write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    except RuntimeError as exc:
+        raise InstallError(f"could not record recovery progress: {exc}") from None
 
 
 def provision_codex_home(product_root: Path, installation_user: str | None) -> int:
@@ -865,7 +1062,12 @@ def _product_root(args: argparse.Namespace) -> Path:
     return root
 
 
-def _restore_without_credentials(args: argparse.Namespace, target: Path, result: InstallResult) -> None:
+def _restore_without_credentials(
+    args: argparse.Namespace,
+    target: Path,
+    result: InstallResult,
+    bootstrap_credential: Path | None,
+) -> None:
     """Recover everything that does not go through Kanboard.
 
     A locked store costs the operator their credentials, not their installation. What is left undone
@@ -875,7 +1077,11 @@ def _restore_without_credentials(args: argparse.Namespace, target: Path, result:
     report = _validated_instance(target)
     assert report.data_dir is not None
     data_dir = report.data_dir
-    cards, runs = materialize_checkpoint(target, data_dir, dry_run=args.dry_run)
+    identity = _recovery_identity(target, report.bindings)
+    progress_path = data_dir / RECOVERY_PROGRESS_FILE
+    progress = _read_recovery_progress(progress_path, identity)
+    checkpoint_complete = progress.get("checkpoint") == "complete"
+    cards, runs = materialize_checkpoint(target, data_dir, dry_run=args.dry_run or checkpoint_complete)
     if args.dry_run:
         result.add(
             "checkpoint",
@@ -884,17 +1090,39 @@ def _restore_without_credentials(args: argparse.Namespace, target: Path, result:
         )
         return
     _set_installation_owner(data_dir, args.installation_user)
-    result.add("checkpoint", "changed", f"{cards} board card(s), {runs} run record(s)")
+    result.add(
+        "checkpoint",
+        "unchanged" if checkpoint_complete else "changed",
+        f"{cards} board card(s), {runs} run record(s) verified"
+        if checkpoint_complete
+        else f"{cards} board card(s), {runs} run record(s)",
+    )
+    _write_recovery_progress(progress_path, identity, checkpoint="complete")
     host = report.host if isinstance(report.host, dict) else {}
     threads = host.get("memory_threads", 1)
-    count = rebuild_memory_index(data_dir, target, threads=threads if isinstance(threads, int) else None)
-    result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
-    cloned = provision_project_checkouts(report.bindings, args.installation_user)
+    if progress.get("memory") == "complete" and (data_dir / "memory" / "index.sqlite").is_file():
+        result.add("memory", "unchanged", "checkpoint index already rebuilt")
+    else:
+        _write_recovery_progress(progress_path, identity, memory="started")
+        count = rebuild_memory_index(data_dir, target, threads=threads if isinstance(threads, int) else None)
+        result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
+        _write_recovery_progress(progress_path, identity, memory="complete")
+    project_results = provision_project_checkouts(
+        report.bindings,
+        args.installation_user,
+        instance_dir=target,
+        bootstrap_credential=bootstrap_credential,
+        progress_path=progress_path,
+        recovery_identity=identity,
+    )
+    result.projects.extend(project_results)
     seeded = provision_codex_home(_product_root(args), args.installation_user)
+    cloned = sum(project.outcome == "cloned" for project in project_results)
+    failed = sum(project.outcome == "failed" for project in project_results)
     result.add(
         "runtime",
-        "changed" if cloned or seeded else "unchanged",
-        f"{cloned} project checkout(s) cloned, {seeded} CODEX_HOME file(s) seeded",
+        "degraded" if failed else ("changed" if cloned or seeded else "unchanged"),
+        f"{cloned} project checkout(s) cloned, {failed} unavailable, {seeded} CODEX_HOME file(s) seeded",
     )
     result.add("board", "skipped", "requires an available board backend after locked secret recovery")
     result.add("host", "skipped", "requires full recovery before host materialization")
@@ -904,6 +1132,8 @@ def install(args: argparse.Namespace) -> InstallResult:
     result = InstallResult()
     target = Path(args.instance_dir).expanduser().resolve()
     recovery = bool(args.recover)
+    disposable_bootstrap: Path | None = None
+    bootstrap: Path | None = None
     if args.adopt:
         result.add("mode", "failed", "full live-host adoption is not supported by this flow")
         return result
@@ -928,25 +1158,19 @@ def install(args: argparse.Namespace) -> InstallResult:
         # checkout too, so consume it only when this non-dry-run invocation
         # will execute one of those remote paths.
         needs_clone = not target.exists() or (target.is_dir() and not any(target.iterdir()))
-        bootstrap: Path | None = None
-        disposable_bootstrap: Path | None = None
         if not args.dry_run and (
             needs_clone
             or getattr(args, "bootstrap_credential_file", None)
             or getattr(args, "bootstrap_credential_stdin", False)
         ):
             bootstrap, disposable_bootstrap = _bootstrap_credential(args, target)
-        try:
-            detail = _clone_or_reuse(
-                args.instance_remote,
-                target,
-                recovery=recovery,
-                dry_run=args.dry_run,
-                bootstrap_credential=bootstrap,
-            )
-        finally:
-            if disposable_bootstrap is not None:
-                disposable_bootstrap.unlink(missing_ok=True)
+        detail = _clone_or_reuse(
+            args.instance_remote,
+            target,
+            recovery=recovery,
+            dry_run=args.dry_run,
+            bootstrap_credential=bootstrap,
+        )
         result.add(
             "instance-checkout",
             "unchanged" if detail.startswith("reused") else ("would-change" if args.dry_run else "changed"),
@@ -983,7 +1207,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             if not runtime_required:
                 values = {}
             else:
-                _restore_without_credentials(args, target, result)
+                _restore_without_credentials(args, target, result, bootstrap)
                 raise _blocked_by_secrets(exc, secrets, runtime_env) from None
         except RuntimeEnvError as exc:
             raise InstallError(str(exc)) from None
@@ -1028,7 +1252,13 @@ def install(args: argparse.Namespace) -> InstallResult:
             report = _validated_instance(target)
             assert report.data_dir is not None
             data_dir = report.data_dir
-            cards, runs = materialize_checkpoint(target, data_dir, dry_run=args.dry_run)
+            identity = _recovery_identity(target, report.bindings)
+            progress_path = data_dir / RECOVERY_PROGRESS_FILE
+            progress = _read_recovery_progress(progress_path, identity)
+            checkpoint_complete = progress.get("checkpoint") == "complete"
+            cards, runs = materialize_checkpoint(
+                target, data_dir, dry_run=args.dry_run or checkpoint_complete
+            )
             if args.dry_run:
                 result.add(
                     "checkpoint",
@@ -1041,27 +1271,69 @@ def install(args: argparse.Namespace) -> InstallResult:
                 result.add("status", "skipped", "preview made no recovery changes")
                 return result
             _set_installation_owner(data_dir, args.installation_user)
-            result.add("checkpoint", "changed", f"{cards} board card(s), {runs} run record(s)")
+            result.add(
+                "checkpoint",
+                "unchanged" if checkpoint_complete else "changed",
+                f"{cards} board card(s), {runs} run record(s) verified"
+                if checkpoint_complete
+                else f"{cards} board card(s), {runs} run record(s)",
+            )
+            _write_recovery_progress(progress_path, identity, checkpoint="complete")
             # The checkpoint only contains cards. The board itself is derived host
             # state and must exist before restore can prove card parity.
             from secretary.bootstrap import ensure_pipeline_board
 
             ensure_pipeline_board(target)
-            restored = import_normalized_board(data_dir, instance=target)
-            result.add("board", "changed", f"{restored} card(s) at parity")
+            recovered_board_completion = (
+                progress.get("board") == "started"
+                and restore_state(data_dir).get("board_parity") == "complete"
+            )
+            if progress.get("board") == "complete" or recovered_board_completion:
+                result.add("board", "unchanged", f"{cards} card(s) already restored at parity")
+                if recovered_board_completion:
+                    _write_recovery_progress(progress_path, identity, board="complete")
+            else:
+                _write_recovery_progress(progress_path, identity, board="started")
+                restored = import_normalized_board(data_dir, instance=target)
+                result.add("board", "changed", f"{restored} card(s) at parity")
+                _write_recovery_progress(progress_path, identity, board="complete")
             host = report.host if isinstance(report.host, dict) else {}
             threads = host.get("memory_threads", 1)
-            count = rebuild_memory_index(
-                data_dir, target, threads=threads if isinstance(threads, int) else None
+            recovered_memory_completion = (
+                progress.get("memory") == "started"
+                and restore_state(data_dir).get("memory_index") == "complete"
+                and (data_dir / "memory" / "index.sqlite").is_file()
             )
-            result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
+            if (
+                progress.get("memory") == "complete" and (data_dir / "memory" / "index.sqlite").is_file()
+            ) or recovered_memory_completion:
+                result.add("memory", "unchanged", "checkpoint index already rebuilt")
+                if recovered_memory_completion:
+                    _write_recovery_progress(progress_path, identity, memory="complete")
+            else:
+                _write_recovery_progress(progress_path, identity, memory="started")
+                count = rebuild_memory_index(
+                    data_dir, target, threads=threads if isinstance(threads, int) else None
+                )
+                result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
+                _write_recovery_progress(progress_path, identity, memory="complete")
             product_root = _product_root(args)
-            cloned = provision_project_checkouts(report.bindings, args.installation_user)
+            project_results = provision_project_checkouts(
+                report.bindings,
+                args.installation_user,
+                instance_dir=target,
+                bootstrap_credential=bootstrap,
+                progress_path=progress_path,
+                recovery_identity=identity,
+            )
+            result.projects.extend(project_results)
             seeded = provision_codex_home(product_root, args.installation_user)
+            cloned = sum(project.outcome == "cloned" for project in project_results)
+            failed = sum(project.outcome == "failed" for project in project_results)
             result.add(
                 "runtime",
-                "changed" if cloned or seeded else "unchanged",
-                f"{cloned} project checkout(s) cloned, {seeded} CODEX_HOME file(s) seeded",
+                "degraded" if failed else ("changed" if cloned or seeded else "unchanged"),
+                f"{cloned} project checkout(s) cloned, {failed} unavailable, {seeded} CODEX_HOME file(s) seeded",
             )
             restored_runs = 0
             pipeline_state_changed = False
@@ -1084,6 +1356,9 @@ def install(args: argparse.Namespace) -> InstallResult:
                 Path(args.host_fixture).expanduser().resolve() if args.host_fixture else None,
                 args.installation_user,
                 before_host=restore_pipeline_source,
+                available_projects={
+                    project.project_id for project in project_results if project.outcome != "failed"
+                },
             )
             mark_reconcile_applied(data_dir)
             changed = sum(step.status == "changed" for step in host_result.steps)
@@ -1104,8 +1379,10 @@ def install(args: argparse.Namespace) -> InstallResult:
                 (target / ".secretary-bootstrap").unlink(missing_ok=True)
             result.add(
                 "status",
-                "unchanged",
-                "board, memory and operational configuration are ready"
+                "degraded" if failed else "unchanged",
+                f"core ready; {failed} project checkout(s) unavailable; rerun secretary recover with the same inputs"
+                if failed
+                else "board, memory and operational configuration are ready"
                 if secrets.complete
                 else f"board and memory are ready, but {secrets.summary()}",
             )
@@ -1113,6 +1390,9 @@ def install(args: argparse.Namespace) -> InstallResult:
             _set_installation_owner(target, args.installation_user)
     except (InstallError, RestoreError, RuntimeError) as exc:
         result.add("install", "failed", str(exc))
+    finally:
+        if disposable_bootstrap is not None:
+            disposable_bootstrap.unlink(missing_ok=True)
     return result
 
 
@@ -1135,8 +1415,9 @@ def run_install(args: argparse.Namespace) -> int:
         print(
             json.dumps(
                 {
-                    "status": "ok" if result.ok else "failed",
+                    "status": result.status,
                     "steps": [step.__dict__ for step in result.steps],
+                    "projects": [project.__dict__ for project in result.projects],
                 },
                 indent=2,
                 sort_keys=True,

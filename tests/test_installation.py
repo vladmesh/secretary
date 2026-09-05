@@ -8,15 +8,18 @@ import os
 import pwd
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import installation
+from secretary import _proc, installation
 from secretary.board_transport import DEFAULT_TRANSPORT
 from secretary.cli import main
+from secretary.config import InstanceReport
 from secretary.data import export_runs
 from secretary.installation import (
     InstallError,
@@ -41,6 +44,23 @@ from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _g
 # an install materializes the configured checkout or `~/secretary`, and neither exists on a machine
 # that only checked this branch out somewhere.
 class InstallationTests(unittest.TestCase):
+    def test_isolated_git_timeout_reaps_its_descendant_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "child.pid"
+            script = (
+                "import pathlib,subprocess,sys; "
+                "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid)); child.wait()"
+            )
+            with self.assertRaises(subprocess.TimeoutExpired):
+                _proc.run_isolated([sys.executable, "-c", script], timeout=0.2)
+            child_pid = int(pid_file.read_text(encoding="utf-8"))
+            for _ in range(100):
+                if not Path(f"/proc/{child_pid}").exists():
+                    break
+                time.sleep(0.01)
+            self.assertFalse(Path(f"/proc/{child_pid}").exists(), "timed-out clone descendant survived")
+
     def test_prerequisite_probe_accepts_the_planned_transport_before_it_exists_on_disk(self):
         with tempfile.TemporaryDirectory() as tmp:
             transport = DEFAULT_TRANSPORT
@@ -229,9 +249,443 @@ class InstallationTests(unittest.TestCase):
                 "default_branch": "main",
             }
 
-            self.assertEqual(provision_project_checkouts([binding], None), 1)
-            self.assertEqual(provision_project_checkouts([binding], None), 0)
+            first = provision_project_checkouts([binding], None, instance_dir=source)
+            second = provision_project_checkouts([binding], None, instance_dir=source)
+            self.assertEqual([row.outcome for row in first], ["cloned"])
+            self.assertEqual([row.outcome for row in second], ["unchanged"])
             self.assertEqual((target / "README.md").read_text(encoding="utf-8"), "demo\n")
+
+    def test_project_failures_are_isolated_and_rows_are_sanitized(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            bindings = [
+                {
+                    "id": "first",
+                    "repo": str(root / "first"),
+                    "remote": "https://example.invalid/a",
+                    "default_branch": "main",
+                },
+                {
+                    "id": "middle",
+                    "repo": str(root / "middle"),
+                    "remote": "https://github.example/b",
+                    "default_branch": "main",
+                },
+                {
+                    "id": "healthy",
+                    "repo": str(root / "healthy"),
+                    "remote": str(root / "healthy.git"),
+                    "default_branch": "main",
+                },
+            ]
+            source = root / "source"
+            source.mkdir()
+            _git(source, "init", "-b", "main")
+            _git(source, "config", "user.name", "Test")
+            _git(source, "config", "user.email", "test@example.invalid")
+            (source / "README").write_text("ok", encoding="utf-8")
+            _git(source, "add", ".")
+            _git(source, "commit", "-m", "initial")
+            subprocess.run(
+                ["git", "clone", "--bare", str(source), str(root / "healthy.git")],
+                check=True,
+                capture_output=True,
+            )
+
+            rows = provision_project_checkouts(bindings, None, instance_dir=instance)
+
+            self.assertEqual([row.outcome for row in rows], ["failed", "failed", "cloned"])
+            self.assertEqual([row.code for row in rows], ["unsupported-https", "unsupported-https", "cloned"])
+            rendered = json.dumps([row.__dict__ for row in rows])
+            self.assertNotIn("example.invalid/a", rendered)
+            self.assertTrue((root / "healthy" / ".git").exists())
+
+    def test_invalid_binding_target_and_collision_are_project_scoped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            collision = root / "collision"
+            collision.write_text("leave untouched", encoding="utf-8")
+            loop = root / "loop"
+            loop.symlink_to(loop)
+            rows = provision_project_checkouts(
+                [
+                    {"id": "binding"},
+                    {
+                        "id": "target",
+                        "repo": str(loop / "checkout"),
+                        "remote": str(root / "remote"),
+                        "default_branch": "main",
+                    },
+                    {
+                        "id": "collision",
+                        "repo": str(collision),
+                        "remote": str(root / "remote"),
+                        "default_branch": "main",
+                    },
+                ],
+                None,
+                instance_dir=instance,
+            )
+            self.assertEqual(
+                [row.code for row in rows], ["invalid-binding", "invalid-target", "target-collision"]
+            )
+            self.assertEqual(collision.read_text(encoding="utf-8"), "leave untouched")
+
+    def test_project_timeout_removes_staging_and_propagates_operator_interrupt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            binding = {
+                "id": "slow",
+                "repo": str(root / "slow"),
+                "remote": str(root / "remote"),
+                "default_branch": "main",
+            }
+            timeout = installation.CredentialError("clone: command timed out", code="timeout")
+            with mock.patch("secretary.installation.RemoteExecution.run_clone", side_effect=timeout):
+                rows = provision_project_checkouts([binding], None, instance_dir=instance)
+            self.assertEqual((rows[0].code, rows[0].retryable), ("timeout", True))
+            self.assertFalse((root / "slow").exists())
+            self.assertEqual(list(root.glob(".slow.clone-*")), [])
+            with (
+                mock.patch("secretary.installation.RemoteExecution.run_clone", side_effect=KeyboardInterrupt),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                provision_project_checkouts([binding], None, instance_dir=instance)
+
+    def test_project_remote_failures_keep_typed_sanitized_codes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            for code, retryable in (
+                ("authentication", True),
+                ("network", True),
+                ("process", True),
+                ("invalid-branch", False),
+            ):
+                binding = {
+                    "id": code,
+                    "repo": str(root / code),
+                    "remote": "https://github.com/example/private.git",
+                    "default_branch": "main",
+                }
+                failure = installation.CredentialError("contains-secret-value", code=code)
+                with mock.patch("secretary.installation.RemoteExecution.run_clone", side_effect=failure):
+                    row = provision_project_checkouts([binding], None, instance_dir=instance)[0]
+                self.assertEqual((row.code, row.retryable), (code, retryable))
+                self.assertNotIn("contains-secret-value", row.reason)
+                self.assertFalse((root / code).exists())
+
+    def test_project_retry_only_clones_the_previous_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            bindings = [
+                {
+                    "id": name,
+                    "repo": str(root / name),
+                    "remote": str(root / f"{name}.git"),
+                    "default_branch": "main",
+                }
+                for name in ("one", "two", "three")
+            ]
+            calls: list[str] = []
+
+            def clone(execution, target, **_kwargs):
+                calls.append(target.parent.name)
+                if target.parent.name.endswith("two.clone-fixture"):
+                    raise installation.CredentialError("failed", code="network")
+                target.mkdir()
+                (target / ".git").mkdir()
+
+            # Use deterministic staging names so the injected middle failure is clear.
+            counter = iter(("one", "two", "three"))
+
+            def staging(*_args, dir=None, **_kwargs):
+                path = Path(dir) / f".{next(counter)}.clone-fixture"
+                path.mkdir()
+                return str(path)
+
+            with (
+                mock.patch("secretary.installation.tempfile.mkdtemp", side_effect=staging),
+                mock.patch(
+                    "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                ),
+            ):
+                first = provision_project_checkouts(bindings, None, instance_dir=instance)
+            self.assertEqual([row.outcome for row in first], ["cloned", "failed", "cloned"])
+
+            def repaired(execution, target, **_kwargs):
+                calls.append(target.parent.name)
+                target.mkdir()
+                (target / ".git").mkdir()
+
+            with mock.patch(
+                "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=repaired
+            ):
+                second = provision_project_checkouts(bindings, None, instance_dir=instance)
+            self.assertEqual([row.outcome for row in second], ["unchanged", "cloned", "unchanged"])
+
+    def test_degraded_project_results_are_truthful_in_text_and_json(self):
+        result = installation.InstallResult(
+            projects=[
+                installation.ProjectProvisionResult(
+                    "missing",
+                    "missing",
+                    "github-https",
+                    "failed",
+                    "authentication",
+                    "remote authentication failed",
+                    True,
+                )
+            ]
+        )
+        result.add("status", "degraded", "core ready; rerun secretary recover with the same inputs")
+        self.assertEqual(result.status, "degraded")
+        self.assertIn("status: degraded", result.render())
+        args = SimpleNamespace(
+            bootstrap_credential_stdin=False,
+            recovery_phrase_stdin=False,
+            json=True,
+        )
+        output = io.StringIO()
+        with (
+            mock.patch("secretary.installation.install", return_value=result),
+            contextlib.redirect_stdout(output),
+        ):
+            code = installation.run_install(args)
+        payload = json.loads(output.getvalue())
+        self.assertEqual((code, payload["status"]), (1, "degraded"))
+        self.assertEqual(payload["projects"][0]["project_id"], "missing")
+
+    def test_project_progress_persists_only_non_secret_outcomes_and_is_identity_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.mkdir()
+            progress = root / "recovery-progress.json"
+            secret = "credential-material"
+            binding = {
+                "id": "demo",
+                "repo": str(root / "demo"),
+                "remote": f"https://user:{secret}@github.com/example/private.git",
+                "default_branch": "main",
+            }
+            rows = provision_project_checkouts(
+                [binding],
+                None,
+                instance_dir=instance,
+                progress_path=progress,
+                recovery_identity="identity-one",
+            )
+            self.assertEqual(rows[0].code, "unsafe-remote")
+            stored = progress.read_text(encoding="utf-8")
+            self.assertNotIn(secret, stored)
+            self.assertNotIn(str(root / "demo"), stored)
+            self.assertEqual(
+                installation._read_recovery_progress(progress, "identity-two"),
+                {"version": 1, "identity": "identity-two"},
+            )
+
+    def test_materializer_receives_only_available_project_bindings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = InstanceReport(
+                instance_path=root / "instance" / "instance.yaml",
+                name="test",
+                projects=2,
+                adapters=0,
+                adapter_drafts=0,
+                has_manifest=True,
+                manifest_path=root / "manifest",
+                errors=[],
+                warnings=[],
+                bindings=[{"id": "ready"}, {"id": "missing"}],
+                host={},
+                instance={},
+                data_dir=root / "data",
+            )
+
+            def run(context, *, steps=installation.STEPS):
+                self.assertEqual(context.report.bindings, [{"id": "ready"}])
+                return UpgradeResult()
+
+            with (
+                mock.patch("secretary.installation.validate_instance", return_value=report),
+                mock.patch(
+                    "secretary.installation.resolve_runtime_owner", return_value=(None, root / "home")
+                ),
+                mock.patch("secretary.installation.run_steps", side_effect=run),
+            ):
+                installation.materialize_host(
+                    root / "instance",
+                    root / "product",
+                    available_projects={"ready"},
+                )
+
+    def test_degraded_recovery_finishes_host_pipeline_state_and_ownership(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "instance"
+            data = root / "data"
+            target.mkdir()
+            (target / ".git").mkdir()
+            _checkpoint(target, data)
+            report = InstanceReport(
+                instance_path=target / "instance.yaml",
+                name="test",
+                projects=1,
+                adapters=0,
+                adapter_drafts=0,
+                has_manifest=True,
+                manifest_path=data / "data-manifest.json",
+                errors=[],
+                warnings=[],
+                bindings=[
+                    {
+                        "id": "missing",
+                        "repo": str(root / "missing"),
+                        "remote": "https://example.invalid/private.git",
+                        "default_branch": "main",
+                    }
+                ],
+                host={},
+                instance={},
+                data_dir=data,
+            )
+            args = SimpleNamespace(
+                instance_dir=str(target),
+                instance_remote="file:///instance.git",
+                installation_user=getpass.getuser(),
+                recover=True,
+                adopt=False,
+                dry_run=False,
+                runtime_env=None,
+                product_root=str(PRODUCT_ROOT),
+                bootstrap_credential_file=None,
+                bootstrap_credential_stdin=False,
+                recovery_phrase_file=None,
+                recovery_phrase_stdin=False,
+                host_fixture=None,
+            )
+            transport = SimpleNamespace(
+                transport=DEFAULT_TRANSPORT,
+                changed=False,
+                render=lambda **_kwargs: "unchanged",
+            )
+            host_result = SimpleNamespace(steps=[SimpleNamespace(status="changed")])
+
+            def host(*_args, before_host=None, **_kwargs):
+                before_host(SimpleNamespace(runtime_home=root / "home"))
+                return host_result
+
+            with (
+                mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch(
+                    "secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"
+                ),
+                mock.patch(
+                    "secretary.installation._open_secret_store",
+                    return_value=installation.SecretRecovery(store_present=True, unlocked=True),
+                ),
+                mock.patch("secretary.installation.read_runtime_env", return_value={}),
+                mock.patch("secretary.installation.ensure_from_runtime_values", return_value=transport),
+                mock.patch("secretary.installation.check_prerequisites"),
+                mock.patch("secretary.installation._validated_instance", return_value=report),
+                mock.patch("secretary.bootstrap.ensure_pipeline_board"),
+                mock.patch("secretary.installation.import_normalized_board", return_value=1),
+                mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
+                mock.patch("secretary.installation.provision_codex_home", return_value=0),
+                mock.patch(
+                    "secretary.installation.materialize_pipeline_state",
+                    return_value=installation.PipelineStateMaterialization(0, True),
+                ),
+                mock.patch("secretary.installation.materialize_host", side_effect=host) as materialize,
+                mock.patch("secretary.installation.mark_reconcile_applied"),
+                mock.patch("secretary.installation.restore_findings", return_value=[]),
+                mock.patch("secretary.installation._set_installation_owner") as owner,
+            ):
+                result = installation.install(args)
+
+            self.assertEqual(result.status, "degraded")
+            self.assertEqual(result.projects[0].code, "unsupported-https")
+            self.assertEqual(materialize.call_args.kwargs["available_projects"], set())
+            self.assertIn(mock.call(target, getpass.getuser()), owner.call_args_list)
+
+    def test_fatal_board_failure_does_not_enter_project_or_host_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "instance"
+            data = root / "data"
+            target.mkdir()
+            (target / ".git").mkdir()
+            _checkpoint(target, data)
+            report = InstanceReport(
+                target / "instance.yaml",
+                "test",
+                0,
+                0,
+                0,
+                True,
+                data / "data-manifest.json",
+                [],
+                [],
+                [],
+                {},
+                {},
+                data,
+            )
+            args = SimpleNamespace(
+                instance_dir=str(target),
+                instance_remote="file:///instance.git",
+                installation_user=getpass.getuser(),
+                recover=True,
+                adopt=False,
+                dry_run=False,
+                runtime_env=None,
+                product_root=str(PRODUCT_ROOT),
+                bootstrap_credential_file=None,
+                bootstrap_credential_stdin=False,
+                recovery_phrase_file=None,
+                recovery_phrase_stdin=False,
+                host_fixture=None,
+            )
+            transport = SimpleNamespace(
+                transport=DEFAULT_TRANSPORT, changed=False, render=lambda **_kwargs: "unchanged"
+            )
+            with (
+                mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch(
+                    "secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"
+                ),
+                mock.patch(
+                    "secretary.installation._open_secret_store",
+                    return_value=installation.SecretRecovery(True, True),
+                ),
+                mock.patch("secretary.installation.read_runtime_env", return_value={}),
+                mock.patch("secretary.installation.ensure_from_runtime_values", return_value=transport),
+                mock.patch("secretary.installation.check_prerequisites"),
+                mock.patch("secretary.installation._validated_instance", return_value=report),
+                mock.patch("secretary.bootstrap.ensure_pipeline_board"),
+                mock.patch(
+                    "secretary.installation.import_normalized_board",
+                    side_effect=installation.RestoreError("parity failed"),
+                ),
+                mock.patch("secretary.installation.provision_project_checkouts") as projects,
+                mock.patch("secretary.installation.materialize_host") as host,
+                mock.patch("secretary.installation._set_installation_owner"),
+            ):
+                result = installation.install(args)
+            self.assertEqual(result.status, "failed")
+            projects.assert_not_called()
+            host.assert_not_called()
 
     def test_codex_home_seeds_only_missing_non_secret_files(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -584,7 +1038,7 @@ class InstallationTests(unittest.TestCase):
             )
             with (
                 patches[0],
-                patches[1],
+                patches[1] as board_restore,
                 patches[2],
                 patches[3],
                 patches[4],
@@ -609,6 +1063,8 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(second_code, 0, second_output)
             self.assertEqual(third_code, 0, third_output)
             self.assertIn("status: ok", second_output)
+            board_restore.assert_called_once_with(data, instance=target)
+            self.assertIn("unchanged board", third_output)
             self.assertEqual(
                 json.loads((data / "board" / "cards.json").read_text(encoding="utf-8"))["cards"],
                 [CARD],

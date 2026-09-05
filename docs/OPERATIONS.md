@@ -117,8 +117,9 @@ missing/unavailable, or ambient/manual-bypass state.
 On a clean recovery, provide `--bootstrap-credential-file` (or `--bootstrap-credential-stdin`) for the
 initial clone, and use `--recovery-phrase-file` separately to restore the installation key. Repeating
 that command after an interrupted recovery uses the supplied bootstrap input for the existing checkout's
-fetch; without it, recovery uses the unlocked managed store credential and otherwise fails closed before
-remote contact. Ambient Git helpers are never a recovery or checkpoint fallback. Under `sudo`, a
+fetch and every missing GitHub project checkout; without it, both use the unlocked managed store credential
+and otherwise fail closed before remote contact. Ambient Git helpers are never a recovery or checkpoint
+fallback. Under `sudo`, a
 mode-0600 bootstrap file may be owned by the sudo caller or root; Secretary creates a temporary mode-0600
 copy owned by the installation-user Git child and removes it in the same operation. Local/file remotes
 need no GitHub credential, SSH is reported as manual-bypass, and non-GitHub HTTPS remotes are refused.
@@ -1401,6 +1402,14 @@ sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --instal
 
 The low-level `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` and `restore-reconcile`
 commands remain diagnostic primitives, not the main runbook.
+
+Recovery prints a structured row for every configured project. `failed` rows make the aggregate status
+`degraded` and the command exits non-zero, but board, memory, run-state, safe host finalization and ownership
+handoff still complete. The host contract excludes unavailable projects from registration and launch. Fix
+the reported external cause, then rerun the same `secretary recover` command: matching completed board and
+memory phases are not imported again, existing repositories remain untouched, and only missing projects and
+dependent host state are retried. Do not edit `recovery-progress.json`, project registry files or Git
+credential files as a recovery procedure.
 
 ## Optional cold archive
 

@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from secretary import _proc
 from secretary._fsutil import file_lock, write_text_atomic
 
 STATE_LOCK_NAME = "secretary-state-writer.lock"
@@ -256,6 +257,7 @@ def run_as_git_child(
     timeout: float = 120,
     extra_env: dict[str, str] | None = None,
     child: GitChildIdentity | None = None,
+    isolated: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a non-Git consumer under the identity selected for instance Git.
 
@@ -284,14 +286,9 @@ def run_as_git_child(
             *command,
         ]
     try:
-        return subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            env=env,
-        )
+        if isolated:
+            return _proc.run_isolated(command, timeout=timeout, env=env)
+        return subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise StateRepoError(f"{label} failed: {exc}") from None
 

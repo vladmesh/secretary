@@ -530,14 +530,20 @@ needed and it does not race the tick writer.
   checkpoint; the raw installation key and the recovery phrase do not (see
   [Recovery](RECOVERY.md#secrets)). The host `runtime.env` is outside the store, and facts, exports and
   diagnostics carry no secrets.
-- Private instance-remote Git uses one product-owned remote-execution boundary. It classifies transport,
+- Private instance-remote and recovery project Git use one product-owned remote-execution boundary. It classifies transport,
   resolves the eventual Git-child identity, selects the phase source, creates and cleans an operation-scoped
   capability, then launches Git. Initial `https://github.com` clone requires explicit bootstrap input;
-  existing-checkout recovery uses supplied bootstrap input or the unlocked managed envelope; checkpoint
-  probes and pushes use only the managed envelope. Those HTTPS children clear ambient helpers, so a
+  existing-checkout recovery and project provisioning use supplied bootstrap input or the unlocked managed
+  envelope; checkpoint probes and pushes use only the managed envelope. Project clones are staged, run as
+  the installation Git child, assigned final ownership before atomic adoption, and produce sanitized
+  per-binding outcomes. Those HTTPS children clear ambient helpers, so a
   per-user credential file remains available to its other consumers but cannot silently authenticate
-  recovery or checkpoint. Local/file remotes are ordinary Git, SSH is explicit manual-bypass, and other
+  recovery, project provisioning or checkpoint. Local/file remotes are ordinary Git, SSH is explicit manual-bypass, and other
   HTTPS hosts are refused.
+- Recovery's project boundary catches only one binding's provisioning failure. Core/configuration failures
+  and operator interruption remain outside it. A non-secret input digest and phase ledger let a retry skip
+  completed board and memory work; unavailable bindings are filtered from host project materialization, and
+  the aggregate installation state remains degraded until every binding is available.
 - Task audit and pending writes are fail-closed: an unfinished board mutation blocks a consistent
   export and the recovery checkpoint.
 
