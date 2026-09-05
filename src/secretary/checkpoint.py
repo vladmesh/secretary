@@ -727,7 +727,9 @@ class CheckpointPusher:
                     "reason": "private instance HTTPS remote is unsupported; only https://github.com is managed",
                     "source": "none",
                 }
-                raise _GitFailure("private instance HTTPS remote is unsupported; only https://github.com is managed")
+                raise _GitFailure(
+                    "private instance HTTPS remote is unsupported; only https://github.com is managed"
+                )
             self._credential = {
                 "state": "ambient/manual-bypass",
                 "reason": "checkpoint remote is not HTTPS github.com",
@@ -829,11 +831,26 @@ def checkpoint_snapshot(
     commit, commit_at = _last_commit(Path(instance_dir))
     pushed = str(push.get("last_push_commit") or "")
     lag_commits, oldest_at = _unpushed(Path(instance_dir), pushed)
+    attempted_at = str(push.get("attempted_at") or "")
+    attempted_epoch = _float_field(push, "attempted_epoch")
+    attempt_age = (
+        max(0, int((stamp - attempted_epoch) // 60))
+        if attempted_epoch > 0
+        else (_age_minutes(attempted_at, stamp) if attempted_at else None)
+    )
     return {
         "last_commit": commit,
         "last_commit_at": commit_at,
         "last_push_at": str(push.get("last_push_at") or ""),
         "last_push_commit": pushed,
+        "push_attempted_at": attempted_at,
+        "push_attempted_epoch": attempted_epoch,
+        "push_attempt_age_minutes": attempt_age,
+        "push_attempt_freshness": (
+            "unknown"
+            if attempt_age is None
+            else ("fresh" if attempt_age * 60 < PUSH_INTERVAL_SECONDS else "stale")
+        ),
         "lag_commits": lag_commits,
         # The RPO exposure is the age of the oldest change the remote lacks, not
         # the time since the last push: a quiet instance with nothing to push is
@@ -861,8 +878,13 @@ def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: floa
     reason = current.reason
     transport = "unknown"
     try:
+        # Read the declared URL, not `git remote get-url`: the latter applies url.*.insteadOf
+        # rewrites and would collapse a separately reported ambient bypass into current managed
+        # credential readiness.
         remote = state_repo.git(
-            instance_dir, ["remote", "get-url", DEFAULT_REMOTE], label="inspect checkpoint remote"
+            instance_dir,
+            ["config", "--get", f"remote.{DEFAULT_REMOTE}.url"],
+            label="inspect checkpoint remote",
         ).strip()
         remote_git = RemoteExecution(remote, "checkpoint", instance_dir=instance_dir)
         transport = remote_git.transport
@@ -906,6 +928,12 @@ def render_checkpoint_lines(snapshot: dict[str, Any]) -> list[str]:
         f"last commit: {snapshot.get('last_commit') or '(none)'} "
         f"{snapshot.get('last_commit_at') or ''}".strip(),
         f"last push: {snapshot.get('last_push_at') or '(never)'}",
+        f"last push attempt: {snapshot.get('push_attempted_at') or '(never)'}"
+        + (
+            f" ({snapshot['push_attempt_age_minutes']} min ago, {snapshot.get('push_attempt_freshness')})"
+            if snapshot.get("push_attempt_age_minutes") is not None
+            else ""
+        ),
         f"lag: {lag}",
         f"push: {snapshot.get('push_status') or 'pending'}",
     ]

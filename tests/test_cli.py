@@ -263,8 +263,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("broken-probe: probe_broken (recorded)", output)
         self.assertIn("No module named triggered_agents", output)
         self.assertIn("resource broken-probe probe cannot run", output)
-        # Offline cannot answer for the other resource at all, and says nothing rather than green.
-        self.assertNotIn("green-probe", output)
+        # secretary-1549: installed resources are an inventory, not merely a list of observations.
+        # Offline cannot answer for the other resource, so it stays visible and explicitly unknown.
+        self.assertIn("green-probe: unknown", output)
+        self.assertIn("source=unavailable", output)
 
     def test_doctor_says_nothing_about_probes_without_an_installed_registry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -356,6 +358,32 @@ class CliTests(unittest.TestCase):
         self.assertIn("checkpoint findings:", output)
         self.assertIn("remote diverged: remote origin/main is at deadbeef0000", output)
         self.assertIn("status: findings", output)
+
+    def test_doctor_keeps_failed_attempt_separate_from_last_successful_push(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(
+                Path(tmpdir),
+                {
+                    "version": 1,
+                    "checkpoint_push": {
+                        "status": "failed",
+                        "reason": "earlier credential was missing",
+                        "attempted_at": "2026-07-20T11:00:00Z",
+                        "attempted_epoch": 1784545200,
+                        "last_push_at": "2026-07-20T10:00:00Z",
+                        "last_push_commit": "deadbeef",
+                    },
+                },
+            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("last push: 2026-07-20T10:00:00Z", output)
+        self.assertIn("last push attempt: 2026-07-20T11:00:00Z", output)
+        self.assertIn(
+            "checkpoint push failed at 2026-07-20T11:00:00Z: earlier credential was missing",
+            output,
+        )
 
     def test_doctor_reports_a_blocked_checkpoint_gate_as_a_finding(self):
         with tempfile.TemporaryDirectory() as tmpdir:

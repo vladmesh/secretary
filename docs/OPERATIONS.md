@@ -317,8 +317,31 @@ altering scheduling or runtime behavior.
 
 ## Status and doctor
 
-`secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe to poll:
-it reports managed services and timers, projects and configured heads, active dispatcher attempts, their
+`secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe to poll.
+The `recovery` object is the recovery-readiness inventory shared with text and JSON doctor. Its
+`resources` array contains every resource in the installed head registry, including resources no head
+has selected recently. `source` distinguishes a fresh `dispatcher-cache` verdict from a
+`live-read-only-probe` and an unavailable observation; `freshness`, `observed_at`, `age_seconds`, and
+`observed_state` make a stale cached success visibly different from current readiness. Offline reads
+never probe and represent absent evidence as `unknown` and expired evidence as `stale`. Status always
+uses that metadata-only resource view so it remains safe to poll; doctor performs the bounded live
+read-only probes unless `--offline` is selected. Neither command writes the dispatcher probe cache.
+
+`recovery.credential_consumers` inventories the managed checkpoint GitHub consumer separately from
+provider CLI logins. The latter remain intentionally unmanaged. Consumer readiness and verification
+time do not borrow the checkpoint pusher's last outcome: an older failed `checkpoint.push_status` can
+coexist with a currently `managed-ready` credential. A locked store is `locked/unverifiable`, never a
+claim that stored and materialized values match.
+
+The remaining arrays are metadata-only. `paths` compares environment selections only when the
+environment is bound to the inspected installation; a matching declared override is supported.
+`materializations` reports declared target, presence, kind, mode, and count without reading values.
+`catalog_envelope_divergences` names open-metadata mismatches. `bypasses` reports applicable Git URL
+rewrites, ambient helpers/files, SSH or manual transport, and retired Kanboard catalog entries. Every
+unsupported row carries `supported_next_action`. A bypass finding does not make a managed credential
+missing, and legacy Kanboard entries never override `board-transport.env`.
+
+It reports managed services and timers, projects and configured heads, active dispatcher attempts, their
 workspace, watchdog pane, progress and respawn state, sprint observer heads, pause state, checkpoint
 freshness, memory index state, and host disk, memory and load. A live invocation uses the dispatcher's own
 pane probe for watchdog liveness; `--offline` deliberately reports that liveness as unprobed.
