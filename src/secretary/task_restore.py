@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -264,6 +266,176 @@ def restore_card(
         mutation,
         identity=payload,
     )
+
+
+def reconcile_restore_order(
+    writer: Any,
+    column: str,
+    swimlane: str,
+    references: list[str],
+    request_id: str,
+) -> None:
+    """Repair one active restore group under its own resumable audit boundary."""
+    from secretary.tasks import TaskError, _now, _positive_int
+
+    if not column or not references or any(not reference for reference in references):
+        raise TaskError("validation", "restore order identity is invalid", 2)
+    digest = _restore_order_digest(references)
+    identity = {
+        "column": column,
+        "swimlane": swimlane,
+        "references_sha256": digest,
+    }
+    committed = writer.audit.committed_event(request_id)
+    if committed is not None:
+        writer.audit.require_claim(
+            committed,
+            kind="restored_order",
+            reference=references[0],
+            identity=identity,
+        )
+        if _live_restore_group(writer, column, swimlane)[0] != references:
+            raise TaskError("backend_error", "committed restore order no longer matches the board", 1)
+        return
+    pending = writer.audit.pending_event(request_id)
+    if pending is not None:
+        writer.audit.require_claim(
+            pending,
+            kind="restored_order",
+            reference=references[0],
+            identity=identity,
+        )
+        payload = pending.get("payload")
+        if not isinstance(payload, dict) or payload.get("references") != references:
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
+        event = pending
+    else:
+        live, rows = _live_restore_group(writer, column, swimlane)
+        if live == references:
+            return
+        if set(live) != set(references):
+            raise TaskError("backend_error", "restore order group does not match normalized records", 1)
+        task_id = _positive_int(rows[references[0]].get("id"))
+        if task_id is None:
+            raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+        event = {
+            "event_id": "evt_" + uuid.uuid4().hex,
+            "schema_version": 1,
+            "occurred_at": _now(),
+            "actor": {"role": "steward", "id": "restore"},
+            "kind": "restored_order",
+            "outcome": "success",
+            "task_id": f"task_kanboard_{task_id}",
+            "ref": references[0],
+            "backend": {"kind": "kanboard", "task_id": task_id, "revision": "pending"},
+            "request_id": request_id,
+            "payload": {**identity, "references": references},
+        }
+        writer.audit.stage(request_id, event)
+    try:
+        finish_pending_restore_order(writer, event)
+        event["backend"]["revision"] = f"order:{digest}"
+        writer.audit.stage(request_id, event)
+        writer.audit.append(request_id, event)
+    except (TaskError, OSError, KeyError, TypeError, ValueError):
+        raise TaskError("audit_pending", "restore order repair is pending", 4) from None
+
+
+def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
+    """Resume a staged group, proving every uncertain move from live state."""
+    from secretary.tasks import TaskError, _positive_int
+
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        raise TaskError("backend_error", "pending restore order is invalid", 1)
+    column = payload.get("column")
+    swimlane = payload.get("swimlane")
+    references = payload.get("references")
+    if (
+        not isinstance(column, str)
+        or not column
+        or not isinstance(swimlane, str)
+        or not isinstance(references, list)
+        or not references
+        or any(not isinstance(reference, str) or not reference for reference in references)
+        or payload.get("references_sha256") != _restore_order_digest(references)
+    ):
+        raise TaskError("backend_error", "pending restore order is invalid", 1)
+
+    live, rows = _live_restore_group(writer, column, swimlane)
+    while live != references:
+        if set(live) != set(references):
+            raise TaskError("backend_error", "restore order group does not match normalized records", 1)
+        mismatch = next(index for index, reference in enumerate(references) if live[index] != reference)
+        reference = references[mismatch]
+        task_id = _positive_int(rows[reference].get("id"))
+        if task_id is None:
+            raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
+        board_id, columns, swimlanes = writer.reader._board()
+        column_id = next((identifier for identifier, title in columns.items() if title == column), None)
+        swimlane_id = next(
+            (identifier for identifier, name in swimlanes.items() if name == swimlane),
+            0,
+        )
+        if column_id is None or (swimlane and not swimlane_id):
+            raise TaskError("backend_error", "restored order group is unavailable", 1)
+        try:
+            answer = writer.client.call(
+                "moveTaskPosition",
+                project_id=board_id,
+                task_id=task_id,
+                column_id=column_id,
+                position=mismatch + 1,
+                swimlane_id=swimlane_id,
+            )
+        except Exception:  # noqa: BLE001 - a lost move reply is reconciled below.
+            answer = None
+        if answer is True:
+            live.remove(reference)
+            live.insert(mismatch, reference)
+            continue
+        live, rows = _live_restore_group(writer, column, swimlane)
+        if live[: mismatch + 1] != references[: mismatch + 1]:
+            raise TaskError("backend_error", "Kanboard move result is uncertain", 1)
+    proven, _ = _live_restore_group(writer, column, swimlane)
+    if proven != references:
+        raise TaskError("backend_error", "restored order repair could not be verified", 1)
+
+
+def _live_restore_group(
+    writer: Any, column: str, swimlane: str
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    """Read one active group directly from the authoritative board rows."""
+    from secretary.tasks import TaskError, _positive_int, _task_is_active, all_project_cards
+
+    board_id, columns, swimlanes = writer.reader._board()
+    column_id = next((identifier for identifier, title in columns.items() if title == column), None)
+    swimlane_id = next((identifier for identifier, name in swimlanes.items() if name == swimlane), 0)
+    if column_id is None or (swimlane and not swimlane_id):
+        raise TaskError("backend_error", "restored order group is unavailable", 1)
+    rows: dict[str, dict[str, Any]] = {}
+    for row in all_project_cards(writer.client, board_id):
+        if (
+            not isinstance(row, dict)
+            or not _task_is_active(row)
+            or _positive_int(row.get("column_id")) != column_id
+            or (_positive_int(row.get("swimlane_id")) or 0) != swimlane_id
+        ):
+            continue
+        reference = row.get("reference")
+        if not isinstance(reference, str) or not reference or reference in rows:
+            raise TaskError("backend_error", "restore order group has an invalid reference", 1)
+        rows[reference] = row
+    ordered = sorted(
+        rows,
+        key=lambda reference: (_positive_int(rows[reference].get("position")) or 0, reference),
+    )
+    return ordered, rows
+
+
+def _restore_order_digest(references: list[str]) -> str:
+    encoded = json.dumps(references, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _without_retired_launch_mode(metadata: dict[str, str]) -> dict[str, str]:

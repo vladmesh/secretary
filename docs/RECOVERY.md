@@ -389,6 +389,18 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    use separate 50-call caps inside the general 200-call/1 MiB batch policy. Reads cap the number of histories,
    not the bytes or length of one history; a very long single history is reread once per ordered wave and may
    fail the 30-second transport timeout closed with its exact pending obligations intact.
+   Archived rows may carry historical positions that overlap active rows. Recovery therefore closes every
+   archived row only after its comments are proven, then takes an authoritative board snapshot and reconciles
+   the relative order of active rows in each `(column, swimlane)` group against normalized
+   `(position, reference)` order. Only mismatched groups move. Each group owns one deterministic
+   `restored_order` request and pending audit record; a retry re-reads the group, resumes at its first mismatch
+   and commits only after a final authoritative read proves the complete order. Replaying the earlier
+   per-card `restored` request is not placement proof because that request may already be committed and return
+   without executing a move. This separate post-close boundary repairs a preserved `board_parity=failed`
+   target without clearing progress, recreating rows or comments, or repeating unrelated writes. A malformed
+   or lost move response is reconciled from the live group before any success is recorded, and an already
+   repaired third run performs no placement mutation. The existing final content and order parity checks remain
+   the fail-closed completion gate; absolute positions of archived rows are deliberately not compared.
 5. Attempts every missing project checkout from the registry and creates the non-secret managed
    runtime-home files for the agent CLIs. Each clone uses the same remote-execution boundary as the
    private instance checkout. GitHub HTTPS uses the supplied bootstrap capability when present,

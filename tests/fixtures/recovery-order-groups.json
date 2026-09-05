@@ -1,0 +1,29 @@
+{
+  "source": "sanitized recovery-order-20260905/order-mismatch.json",
+  "groups": [
+    {
+      "column": "Issues",
+      "swimlane": "Secretary",
+      "expected": ["secretary-1522", "secretary-1521"],
+      "failed_order": ["secretary-1521", "secretary-1522"]
+    },
+    {
+      "column": "Issues",
+      "swimlane": "codegen",
+      "expected": ["issue:1cd34abe7201c773603c", "issue:f8d665f870213ad225cb"],
+      "failed_order": ["issue:f8d665f870213ad225cb", "issue:1cd34abe7201c773603c"]
+    },
+    {
+      "column": "Issues",
+      "swimlane": "butler",
+      "expected": ["issue:01598f6e6fb5bf5669b1", "issue:bb01d43ad5e696b9fa46"],
+      "failed_order": ["issue:bb01d43ad5e696b9fa46", "issue:01598f6e6fb5bf5669b1"]
+    },
+    {
+      "column": "Done",
+      "swimlane": "Secretary",
+      "expected": ["secretary-1555", "secretary-1554"],
+      "failed_order": ["secretary-1554", "secretary-1555"]
+    }
+  ]
+}

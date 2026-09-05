@@ -37,7 +37,7 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
-from secretary.tasks import TaskReader
+from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 from tests.fakes.sprints import SprintKanboard
 from tests.orca_fixtures import legacy_orca_runtime
 from tests.restore_fixtures import (
@@ -48,6 +48,69 @@ from tests.restore_fixtures import (
 )
 
 _UNSET = object()
+
+
+class _PostCloseOrderKanboard(_EmptyWriteKanboard):
+    """Model Kanboard's active-only position moves after archived rows leave a group."""
+
+    malformed_move_result = False
+
+    def call(self, method: str, **params: object) -> object:
+        if method == "createTask":
+            self.calls.append((method, params))
+            task_id = self.next_task_id
+            self.next_task_id += 1
+            siblings = [
+                task
+                for task in self.tasks
+                if int(task.get("is_active", 1) or 0) != 0
+                and task["column_id"] == params["column_id"]
+                and task["swimlane_id"] == (params.get("swimlane_id") or 0)
+            ]
+            self.tasks.append(
+                {
+                    "id": task_id,
+                    "reference": params.get("reference", ""),
+                    "title": params["title"],
+                    "description": params.get("description", ""),
+                    "column_id": params["column_id"],
+                    "position": len(siblings) + 1,
+                    "swimlane_id": params.get("swimlane_id") or 0,
+                    "date_creation": "1720000200",
+                    "date_modification": "1720000200",
+                }
+            )
+            self.metadata[task_id] = {}
+            self.comments[task_id] = []
+            return task_id
+        if method != "moveTaskPosition":
+            return super().call(method, **params)
+        self.calls.append((method, params))
+        task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
+        task_index = self.tasks.index(task)
+        self.tasks.remove(task)
+        siblings = sorted(
+            (
+                candidate
+                for candidate in self.tasks
+                if int(candidate.get("is_active", 1) or 0) != 0
+                and candidate["column_id"] == params["column_id"]
+                and candidate["swimlane_id"] == params["swimlane_id"]
+            ),
+            key=lambda candidate: int(candidate.get("position") or 0),
+        )
+        position = min(max(1, int(params["position"])), len(siblings) + 1)
+        task["column_id"] = params["column_id"]
+        task["swimlane_id"] = params["swimlane_id"]
+        siblings.insert(position - 1, task)
+        for index, candidate in enumerate(siblings, 1):
+            candidate["position"] = index
+        self.tasks.insert(task_index, task)
+        task["date_modification"] = "1720000400"
+        if self.fail_read_after_move:
+            self._unavailable_next_call = True
+            self.fail_read_after_move = False
+        return False if self.malformed_move_result else True
 
 
 def main(argv: list[str], *, orca_executable: Path | object = _UNSET) -> int:
@@ -628,6 +691,267 @@ class RestoreTests(unittest.TestCase):
                 ["secretary-c", "secretary-a", "secretary-b"],
             )
             self.assertEqual([task["position"] for task in restored], [1, 2, 3])
+
+    @staticmethod
+    def _overlapping_order_cards() -> list[dict[str, object]]:
+        cards = [
+            _restore_card(
+                reference="secretary-a",
+                title="A",
+                position=1,
+                comments=[{"text": "same"}, {"text": "same"}],
+            ),
+            _restore_card(
+                reference="secretary-b",
+                title="B archived",
+                position=1,
+                comments=[{"text": "archived history"}],
+            ),
+            _restore_card(reference="secretary-c", title="C", position=2),
+        ]
+        cards[1]["closed"] = True
+        active_issue = _restore_card(reference="issue:0-active", column="Issues", position=1)
+        active_issue["fields"].update({"task_type": "", "project": ""})
+        active_issue["metadata"] = {
+            "record_type": "issue",
+            "issue_product": "secretary",
+            "issue_kind": "bug",
+            "issue_priority": "P1",
+        }
+        archived_issue = _restore_card(reference="issue:1-archived", column="Issues", position=1)
+        archived_issue["closed"] = True
+        archived_issue["fields"].update({"task_type": "", "project": ""})
+        archived_issue["metadata"] = {
+            "record_type": "issue",
+            "issue_product": "secretary",
+            "issue_kind": "bug",
+            "issue_priority": "P1",
+            "issue_closed_reason": "resolved",
+        }
+        product = RestoreTests._product_card()
+        product["position"] = 2
+        return [*cards, active_issue, archived_issue, product]
+
+    @staticmethod
+    def _write_restore_cards(data_dir: Path, cards: list[dict[str, object]]) -> None:
+        (data_dir / "board" / "cards.json").write_text(
+            json.dumps({"version": 1, "cards": cards}), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _active_group(client: _PostCloseOrderKanboard, column_id: int) -> list[str]:
+        return [
+            str(task["reference"])
+            for task in sorted(
+                (
+                    task
+                    for task in client.tasks
+                    if int(task.get("is_active", 1) or 0) != 0 and int(task["column_id"]) == column_id
+                ),
+                key=lambda task: (int(task["position"]), str(task["reference"])),
+            )
+        ]
+
+    def test_post_close_reconciliation_preserves_task_product_and_issue_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            self._write_restore_cards(data_dir, self._overlapping_order_cards())
+            client = _PostCloseOrderKanboard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 6)
+
+            self.assertEqual(self._active_group(client, 2), ["secretary-a", "secretary-c"])
+            self.assertEqual(self._active_group(client, 1), ["issue:0-active", "product:secretary"])
+            archived = next(task for task in client.tasks if task["reference"] == "secretary-b")
+            self.assertEqual(int(archived["is_active"]), 0)
+            self.assertEqual(
+                [comment["comment"] for comment in client.comments[int(archived["id"])]],
+                ["archived history"],
+            )
+            self.assertEqual(
+                [
+                    event["kind"]
+                    for event in TaskAudit(data_dir).events()
+                    if event["kind"] == "restored_order"
+                ],
+                ["restored_order", "restored_order"],
+            )
+
+    def test_failed_populated_restore_retries_only_order_and_third_run_moves_nothing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            cards = self._overlapping_order_cards()
+            self._write_restore_cards(data_dir, cards)
+            client = _PostCloseOrderKanboard()
+            with (
+                mock.patch("secretary.restore._reconcile_restored_order"),
+                self.assertRaisesRegex(RestoreError, "restored card order"),
+            ):
+                import_normalized_board(data_dir, client=client)
+            before_retry = len(client.calls)
+            before_comments = {
+                task_id: [comment["comment"] for comment in comments]
+                for task_id, comments in client.comments.items()
+            }
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 6)
+            retry_calls = client.calls[before_retry:]
+            self.assertTrue(any(method == "moveTaskPosition" for method, _ in retry_calls))
+            self.assertFalse(
+                any(
+                    method in {"createTask", "createComment", "saveTaskMetadata", "closeTask"}
+                    for method, _ in retry_calls
+                )
+            )
+            self.assertEqual(
+                before_comments,
+                {
+                    task_id: [comment["comment"] for comment in comments]
+                    for task_id, comments in client.comments.items()
+                },
+            )
+            moves = len([call for call in client.calls if call[0] == "moveTaskPosition"])
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 6)
+            self.assertEqual(
+                moves,
+                len([call for call in client.calls if call[0] == "moveTaskPosition"]),
+            )
+            self.assertEqual(len(client.tasks), 6)
+            self.assertEqual(len({task["reference"] for task in client.tasks}), 6)
+
+    def test_interrupted_and_malformed_order_moves_are_proven_before_commit(self):
+        for fault in ("lost_read", "malformed"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmpdir:
+                data_dir = Path(tmpdir) / "secretary-data"
+                init_layout(data_dir)
+                self._write_restore_cards(data_dir, self._overlapping_order_cards()[:3])
+                client = _PostCloseOrderKanboard()
+                with (
+                    mock.patch("secretary.restore._reconcile_restored_order"),
+                    self.assertRaisesRegex(RestoreError, "restored card order"),
+                ):
+                    import_normalized_board(data_dir, client=client)
+                if fault == "lost_read":
+                    client.fail_read_after_move = True
+                    with self.assertRaisesRegex(RestoreError, "restore order repair is pending"):
+                        import_normalized_board(data_dir, client=client)
+                    self.assertEqual(
+                        [event["kind"] for event in TaskAudit(data_dir).pending_events()],
+                        ["restored_order"],
+                    )
+                    self.assertEqual(TaskAudit(data_dir).reconcile(), (0, 1))
+                    self.assertEqual(import_normalized_board(data_dir, client=client), 3)
+                else:
+                    client.malformed_move_result = True
+                    self.assertEqual(import_normalized_board(data_dir, client=client), 3)
+                self.assertEqual(self._active_group(client, 2), ["secretary-a", "secretary-c"])
+                self.assertEqual(TaskAudit(data_dir).pending_events(), [])
+
+    def test_interruption_after_group_effect_resumes_without_another_move(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            self._write_restore_cards(data_dir, self._overlapping_order_cards()[:3])
+            client = _PostCloseOrderKanboard()
+            with (
+                mock.patch("secretary.restore._reconcile_restored_order"),
+                self.assertRaisesRegex(RestoreError, "restored card order"),
+            ):
+                import_normalized_board(data_dir, client=client)
+
+            original_append = TaskAudit.append
+            dropped = False
+
+            def lose_order_append(audit, request_id, event):
+                nonlocal dropped
+                if event.get("kind") == "restored_order" and not dropped:
+                    dropped = True
+                    raise OSError("interrupted after effect")
+                return original_append(audit, request_id, event)
+
+            with (
+                mock.patch.object(TaskAudit, "append", lose_order_append),
+                self.assertRaisesRegex(RestoreError, "restore order repair is pending"),
+            ):
+                import_normalized_board(data_dir, client=client)
+            moves = len([call for call in client.calls if call[0] == "moveTaskPosition"])
+            self.assertEqual(self._active_group(client, 2), ["secretary-a", "secretary-c"])
+            self.assertEqual(
+                [event["kind"] for event in TaskAudit(data_dir).pending_events()],
+                ["restored_order"],
+            )
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 3)
+            self.assertEqual(
+                moves,
+                len([call for call in client.calls if call[0] == "moveTaskPosition"]),
+            )
+
+    def test_sanitized_four_group_failed_state_is_reconciled_once(self):
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "recovery-order-groups.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            client = _PostCloseOrderKanboard()
+            client.swimlanes.extend(
+                [
+                    {"id": 5, "name": "codegen", "position": 2},
+                    {"id": 6, "name": "butler", "position": 3},
+                ]
+            )
+            column_ids = {"Issues": 1, "Done": 6}
+            lane_ids = {"Secretary": 4, "codegen": 5, "butler": 6}
+            cards: list[dict[str, object]] = []
+            actual: dict[str, dict[str, object]] = {}
+            for group in fixture["groups"]:
+                for position, reference in enumerate(group["failed_order"], 1):
+                    task_id = client.next_task_id
+                    client.next_task_id += 1
+                    row = {
+                        "id": task_id,
+                        "reference": reference,
+                        "title": reference,
+                        "description": "",
+                        "column_id": column_ids[group["column"]],
+                        "swimlane_id": lane_ids[group["swimlane"]],
+                        "position": position,
+                        "date_creation": "1720000200",
+                        "date_modification": "1720000200",
+                    }
+                    client.tasks.append(row)
+                    client.metadata[task_id] = {}
+                    client.comments[task_id] = []
+                    actual[reference] = {"position": position}
+                for position, reference in enumerate(group["expected"], 1):
+                    cards.append(
+                        {
+                            "reference": reference,
+                            "column": group["column"],
+                            "swimlane": group["swimlane"],
+                            "position": position,
+                            "closed": False,
+                        }
+                    )
+            writer = TaskWriter(client, data_dir=data_dir)
+            restore_module._reconcile_restored_order(writer, cards, actual, "restore:evidence:")
+            first_moves = len([call for call in client.calls if call[0] == "moveTaskPosition"])
+            fresh = TaskReader(client).restore_snapshot()
+            self.assertFalse(_restored_order_mismatch(cards, fresh))
+            self.assertEqual(
+                len(TaskAudit(data_dir).events(kind="restored_order")),
+                4,
+            )
+
+            restore_module._reconcile_restored_order(writer, cards, fresh, "restore:evidence:")
+            self.assertEqual(
+                first_moves,
+                len([call for call in client.calls if call[0] == "moveTaskPosition"]),
+            )
 
     def test_board_restore_moves_empty_swimlane_to_default_lane(self):
         with tempfile.TemporaryDirectory() as tmpdir:
