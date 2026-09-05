@@ -21,12 +21,14 @@ from secretary.board.done_retention import close_old_done
 from secretary.board.host import TransitionRequest
 from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
+from secretary.board.reference_repair import apply_reference_repair, preview_reference_repair
 from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.board_transport import BoardTransport
 from secretary.cli import main
 from secretary.data import export_board
 from secretary.dispatcher_state import claim_mismatch
+from secretary.restore import import_normalized_board
 from secretary.routing_journal import (
     HeadRun,
     attempts,
@@ -36,8 +38,8 @@ from secretary.routing_journal import (
 )
 from secretary.sprints import refresh_active_sprint_projects
 from secretary.tasks import (
-    ArtifactOwnershipTaskError,
     _STATE_BY_COLUMN,
+    ArtifactOwnershipTaskError,
     KanboardClient,
     TaskAudit,
     TaskError,
@@ -47,9 +49,12 @@ from secretary.tasks import (
     specification_revision,
     standing_decision,
 )
+from tests.fakes.sprints import SprintKanboard
 from tests.fakes.tasks import FakeKanboard, WriteKanboard
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
-from triggered_agents.runtime.head import HeadRun as LifecycleHeadRun, HeadSpec, TaskRef
+from tests.restore_fixtures import _EmptyWriteKanboard
+from triggered_agents.runtime.head import HeadRun as LifecycleHeadRun
+from triggered_agents.runtime.head import HeadSpec, TaskRef
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 
@@ -477,6 +482,289 @@ class TaskWriterTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
+
+    def _duplicate_reference_fixture(self) -> None:
+        for task_id, reference, title, created in (
+            (193, "secretary-784", "Original historical task", "1700000000"),
+            (784, "secretary-784", "Later colliding task", "1800000000"),
+            (197, "secretary-793", "Other original task", "1700000100"),
+            (793, "secretary-793", "Other colliding task", "1800000100"),
+        ):
+            self.client.tasks.append(
+                {
+                    "id": task_id, "reference": reference, "title": title,
+                    "description": f"body-{task_id}", "column_id": 6, "position": task_id,
+                    "swimlane_id": 4, "is_active": 0, "date_creation": created,
+                    "date_modification": created,
+                }
+            )
+            self.client.metadata[task_id] = {
+                "record_type": "task", "project": "secretary", "task_type": "code"
+            }
+            self.client.comments[task_id] = [
+                {"date_creation": created, "comment": f"history-{task_id}"}
+            ]
+        for task_id, reference in ((784, "secretary-784"), (793, "secretary-793")):
+            request_id = f"created-{task_id}"
+            event = {
+                "event_id": f"evt_created_{task_id}", "schema_version": 1,
+                "occurred_at": "2026-08-18T00:00:00Z",
+                "actor": {"role": "po", "id": "operator"}, "kind": "created",
+                "outcome": "success", "task_id": f"task_kanboard_{task_id}",
+                "ref": reference,
+                "backend": {"kind": "kanboard", "task_id": task_id, "revision": "created"},
+                "request_id": request_id, "payload": {},
+            }
+            self.writer.audit.stage(request_id, event)
+            self.writer.audit.append(request_id, event)
+
+    def _interrupt_repair_then_claim_pending_target(self) -> tuple[dict[str, object], dict[str, object]]:
+        self._duplicate_reference_fixture()
+        plan = preview_reference_repair(self.writer)
+        self.client.fail_metadata = True
+        with (
+            mock.patch("secretary.secret_store.redaction_values", return_value=()),
+            self.assertRaisesRegex(TaskError, "Kanboard rejected"),
+        ):
+            apply_reference_repair(
+                self.writer,
+                plan_id=str(plan["plan_id"]),
+                task_ids=[784, 793],
+                reason="interrupted repair",
+                request_id="repair-target-stolen",
+            )
+        self.client.fail_metadata = False
+        with mock.patch("secretary.secret_store.redaction_values", return_value=()):
+            created = self.writer.create(
+                role="worker",
+                actor="reviewer-probe",
+                project="secretary",
+                task_type="research",
+                title="Intervening proposal",
+                target="issues",
+                request_id="intervening-create",
+            )
+        self.assertEqual(created["task"]["ref"], "secretary-795")
+        self.assertEqual(
+            next(row for row in self.client.tasks if row["id"] == 793)["reference"],
+            "secretary-793",
+        )
+        return plan, created["task"]
+
+    def _assert_stolen_target_recovery(self, created: dict[str, object]) -> None:
+        references = {int(row["id"]): row["reference"] for row in self.client.tasks}
+        self.assertEqual(references[784], "secretary-794")
+        self.assertEqual(references[793], "secretary-796")
+        self.assertEqual(references[int(str(created["id"]).removeprefix("task_kanboard_"))], "secretary-795")
+        events = self.writer.audit.events(kind="reference_repaired")
+        repaired = next(event for event in events if event["backend"]["task_id"] == 793)
+        self.assertEqual(repaired["ref"], "secretary-796")
+        self.assertEqual(repaired["payload"]["new_reference"], "secretary-796")
+        self.assertEqual(repaired["payload"]["superseded_allocations"], ["secretary-795"])
+        provenance = json.loads(self.client.metadata[793]["reference_repair"])
+        self.assertEqual(provenance["new_reference"], "secretary-796")
+        self.assertEqual(provenance["superseded_allocations"], ["secretary-795"])
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.client.metadata[12]["record_type"] = "task"
+        self.client.metadata[13].update(
+            {"record_type": "task", "project": "legacy", "task_type": "research"}
+        )
+        exported = export_board(
+            Path(self.tmpdir.name),
+            instance_dir=Path(self.tmpdir.name),
+            reader=TaskReader(self.client),
+            sprint_client=SprintKanboard(),
+        )
+        self.assertEqual(exported.count, 7)
+
+    def test_duplicate_reference_preview_and_apply_use_exact_producer_evidence(self) -> None:
+        self._duplicate_reference_fixture()
+        with self.assertRaisesRegex(RuntimeError, "secretary-784, secretary-793"):
+            export_board(
+                Path(self.tmpdir.name),
+                instance_dir=Path(self.tmpdir.name),
+                reader=TaskReader(self.client),
+                sprint_client=SprintKanboard(),
+            )
+        plan = preview_reference_repair(self.writer)
+
+        self.assertEqual(plan["duplicate_count"], 2)
+        self.assertEqual(
+            [(item["retain_backend_id"], item["reassign_backend_id"]) for item in plan["duplicates"]],
+            [(193, 784), (197, 793)],
+        )
+        self.assertTrue(all(item["applicable"] for item in plan["duplicates"]))
+        before = {
+            task_id: (dict(next(row for row in self.client.tasks if int(row["id"]) == task_id)),
+                      list(self.client.comments[task_id]))
+            for task_id in (193, 784, 197, 793)
+        }
+        with mock.patch("secretary.secret_store.redaction_values", return_value=()):
+            result = apply_reference_repair(
+                self.writer, plan_id=plan["plan_id"], task_ids=[784, 793],
+                reason="repair released row-id collision", request_id="repair-two-pairs",
+            )
+            replay = apply_reference_repair(
+                self.writer, plan_id=plan["plan_id"], task_ids=[784, 793],
+                reason="repair released row-id collision", request_id="repair-two-pairs",
+            )
+
+        self.assertEqual(result, replay)
+        self.assertEqual([row["reference"] for row in self.client.tasks if int(row["id"]) in (193, 197)],
+                         ["secretary-784", "secretary-793"])
+        self.assertEqual([row["reference"] for row in self.client.tasks if int(row["id"]) in (784, 793)],
+                         ["secretary-794", "secretary-795"])
+        for task_id in (193, 784, 197, 793):
+            after = next(row for row in self.client.tasks if int(row["id"]) == task_id)
+            self.assertEqual(after["title"], before[task_id][0]["title"])
+            self.assertEqual(after["description"], before[task_id][0]["description"])
+            self.assertEqual(self.client.comments[task_id], before[task_id][1])
+        self.assertEqual(len(self.writer.audit.events(kind="reference_repaired")), 2)
+
+        # The supported durability route now accepts the repaired board and restore preserves
+        # each exact row's body and comment history. Repeating both operations is harmless.
+        self.client.metadata[12]["record_type"] = "task"
+        self.client.metadata[13].update(
+            {"record_type": "task", "project": "legacy", "task_type": "research"}
+        )
+        exported = export_board(
+            Path(self.tmpdir.name), instance_dir=Path(self.tmpdir.name),
+            reader=TaskReader(self.client), sprint_client=SprintKanboard(),
+        )
+        self.assertEqual(exported.count, 6)
+        destination = _EmptyWriteKanboard()
+        self.assertEqual(import_normalized_board(Path(self.tmpdir.name), client=destination), 6)
+        self.assertEqual(import_normalized_board(Path(self.tmpdir.name), client=destination), 6)
+        restored = TaskReader(destination)
+        for reference, title, comment in (
+            ("secretary-784", "Original historical task", "history-193"),
+            ("secretary-794", "Later colliding task", "history-784"),
+            ("secretary-793", "Other original task", "history-197"),
+            ("secretary-795", "Other colliding task", "history-793"),
+        ):
+            card = restored.show(reference)
+            self.assertEqual(card["title"], title)
+            self.assertEqual(card["comments"][0]["body"], comment)
+
+    def test_duplicate_reference_repair_refuses_missing_evidence_and_dependent_state(self) -> None:
+        self._duplicate_reference_fixture()
+        self.writer.audit.events_path = str(Path(self.tmpdir.name) / "board" / "missing-events.ndjson")
+        plan = preview_reference_repair(self.writer)
+        self.assertIn("collision row has no exact creation-audit binding", plan["duplicates"][0]["refusals"])
+
+        self.writer.audit.events_path = str(Path(self.tmpdir.name) / "board" / "events.ndjson")
+        self.client.metadata[12]["blocked_by"] = "secretary-784"
+        plan = preview_reference_repair(self.writer)
+        self.assertIn("task metadata blocked_by on backend ID 12", plan["duplicates"][0]["refusals"])
+
+        self.client.metadata[12].pop("blocked_by")
+        self.client.metadata[784]["record_type"] = "issue"
+        plan = preview_reference_repair(self.writer)
+        self.assertIn("mixed or non-task record types", plan["duplicates"][0]["refusals"])
+
+        self.client.metadata[784]["record_type"] = "task"
+        self.client.tasks[-3]["is_active"] = 1  # backend ID 784
+        self.client.tasks[-3]["column_id"] = 3
+        plan = preview_reference_repair(self.writer)
+        self.assertIn("duplicate contains active work", plan["duplicates"][0]["refusals"])
+
+    def test_duplicate_reference_repair_refuses_missing_metadata(self) -> None:
+        self._duplicate_reference_fixture()
+        self.client.metadata[784].pop("project")
+
+        plan = preview_reference_repair(self.writer)
+
+        self.assertIn("required task metadata is missing", plan["duplicates"][0]["refusals"])
+        with (
+            mock.patch("secretary.secret_store.redaction_values", return_value=()),
+            self.assertRaisesRegex(TaskError, "unresolved evidence") as raised,
+        ):
+            apply_reference_repair(
+                self.writer,
+                plan_id=plan["plan_id"],
+                task_ids=[784, 793],
+                reason="missing metadata must fail closed",
+                request_id="repair-missing-metadata",
+            )
+        self.assertEqual(raised.exception.code, "repair_refused")
+        self.assertFalse(any(method == "updateTask" for method, _params in self.client.calls))
+
+    def test_duplicate_reference_preview_refuses_unrecognized_active_column(self) -> None:
+        self._duplicate_reference_fixture()
+        row = next(row for row in self.client.tasks if row["id"] == 784)
+        row["is_active"] = 1
+        row["column_id"] = 99
+
+        plan = preview_reference_repair(self.writer)
+
+        self.assertIn("duplicate contains active work", plan["duplicates"][0]["refusals"])
+
+    def test_duplicate_reference_retry_reallocates_a_stolen_pending_target(self) -> None:
+        plan, created = self._interrupt_repair_then_claim_pending_target()
+
+        with mock.patch("secretary.secret_store.redaction_values", return_value=()):
+            result = apply_reference_repair(
+                self.writer,
+                plan_id=str(plan["plan_id"]),
+                task_ids=[784, 793],
+                reason="interrupted repair",
+                request_id="repair-target-stolen",
+            )
+
+        self.assertEqual(
+            result["repaired"],
+            [
+                {"backend_id": 784, "reference": "secretary-794"},
+                {"backend_id": 793, "reference": "secretary-796"},
+            ],
+        )
+        self._assert_stolen_target_recovery(created)
+
+    def test_reconcile_audit_reallocates_a_stolen_pending_target(self) -> None:
+        _plan, created = self._interrupt_repair_then_claim_pending_target()
+        output, errors = io.StringIO(), io.StringIO()
+
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(["task", "reconcile-audit", "--data-dir", self.tmpdir.name])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(json.loads(output.getvalue()), {"repaired": 2, "unresolved": 0})
+        self._assert_stolen_target_recovery(created)
+
+    def test_duplicate_reference_repair_resumes_after_reference_write(self) -> None:
+        self._duplicate_reference_fixture()
+        plan = preview_reference_repair(self.writer)
+        self.client.fail_metadata = True
+        with (
+            mock.patch("secretary.secret_store.redaction_values", return_value=()),
+            self.assertRaisesRegex(TaskError, "Kanboard rejected"),
+        ):
+            apply_reference_repair(
+                self.writer,
+                plan_id=plan["plan_id"],
+                task_ids=[784, 793],
+                reason="interrupted repair",
+                request_id="repair-interrupted",
+            )
+        self.assertEqual(next(row for row in self.client.tasks if row["id"] == 784)["reference"], "secretary-794")
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 2})
+
+        self.client.fail_metadata = False
+        with mock.patch("secretary.secret_store.redaction_values", return_value=()):
+            result = apply_reference_repair(
+                self.writer,
+                plan_id=plan["plan_id"],
+                task_ids=[784, 793],
+                reason="interrupted repair",
+                request_id="repair-interrupted",
+            )
+        self.assertEqual(len(result["repaired"]), 2)
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_forbidden_role_does_not_write(self) -> None:
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:

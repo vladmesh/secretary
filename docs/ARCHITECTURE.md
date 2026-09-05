@@ -120,6 +120,12 @@ write goes through `secretary task` or `secretary sprint`, which apply role guar
 append-only audit. The dispatcher resolves routing, drives the worker and reviewer lifecycle, and
 checks board, workspace, report and review state before each transition.
 
+Card references are unique recovery identities, not backend row identities. Export and restore share one
+restorable-board validator, including JSON/NDJSON parity and uniqueness, so a producer cannot publish canon a
+consumer refuses. The exceptional historical collision repair addresses a row by exact backend ID under the
+normal allocation and audit locks; its plan hash fences the inspected complete board from the applied board,
+while append-only repair provenance preserves the old reference and history boundary.
+
 The standing-agent gate keeps curator on its generic triggered-agent entrypoint. Steward and retro
 enter `secretary.dispatch.standing_agent`, the composition root that supplies canonical task-backed
 ports for steward signals/report cards and retro Done retention. The generic runtime owns only the

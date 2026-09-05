@@ -28,11 +28,10 @@ from secretary.backup_policy import (
 from secretary.backup_verify import _verify_plain_tar
 from secretary.config import DataDirError, instance_data_dir, validate_instance
 from secretary.data import init_layout
+from secretary.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
 from secretary.product_issues import (
-    ProductIssueValidationError,
     ensure_swimlane,
     registered_projects,
-    validate_product_issue_records,
 )
 from secretary.sprint_observer import (
     ObserverMetadataError,
@@ -546,15 +545,16 @@ def _normalized_cards(
     data_dir: Path, *, registered_project_ids: set[str] | None = None
 ) -> list[dict[str, Any]]:
     try:
-        payload = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
-        cards = payload["cards"]
-    except (OSError, ValueError, KeyError, TypeError):
-        raise RestoreError("normalized board export is unavailable") from None
-    if not isinstance(cards, list) or any(not isinstance(card, dict) for card in cards):
-        raise RestoreError("normalized board export is invalid")
-    refs = [card.get("reference") for card in cards]
-    if any(not isinstance(ref, str) or not ref for ref in refs) or len(set(refs)) != len(refs):
-        raise RestoreError("normalized board export has invalid references")
+        # Released materializers before the paired export left only cards.json in the local
+        # restore directory. Preserve that demonstrated input; every current producer requires
+        # the pair, and a present NDJSON file must still match exactly.
+        cards = validated_normalized_cards(
+            data_dir / "board",
+            registered_project_ids=registered_project_ids,
+            require_ndjson=False,
+        )
+    except NormalizedBoardError as exc:
+        raise RestoreError(str(exc)) from None
     for card in cards:
         if not isinstance(card.get("column"), str) or _state_for_column(card["column"]) is None:
             raise RestoreError("normalized board export has an invalid column")
@@ -571,10 +571,6 @@ def _normalized_cards(
             for comment in card.get("comments", [])
         ):
             raise RestoreError("normalized board export has invalid comments")
-    try:
-        validate_product_issue_records(cards, registered_project_ids=registered_project_ids)
-    except ProductIssueValidationError as exc:
-        raise RestoreError(f"normalized Product/Issue record is invalid: {exc}") from None
     return sorted(cards, key=lambda card: str(card["reference"]))
 
 

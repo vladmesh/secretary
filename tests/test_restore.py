@@ -127,6 +127,47 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
             self.assertEqual(len(client.tasks), 1)
 
+    def test_duplicate_export_is_rejected_before_replacing_the_prior_good_pair(self):
+        card = {
+            "id": 193, "reference": "secretary-784", "title": "Original", "description": "",
+            "column": "Done", "swimlane": "Secretary", "position": 1, "closed": True,
+            "task_type": "code", "project": "secretary",
+            "metadata": {"record_type": "task", "project": "secretary", "task_type": "code"},
+            "comments": [],
+        }
+        duplicate = {**card, "id": 784, "title": "Collision", "position": 2}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": []}) + "\n", encoding="utf-8"
+            )
+            (data_dir / "board" / "cards.ndjson").write_text("", encoding="utf-8")
+            good_json = (data_dir / "board" / "cards.json").read_bytes()
+            good_ndjson = (data_dir / "board" / "cards.ndjson").read_bytes()
+
+            with self.assertRaisesRegex(RuntimeError, "duplicate references secretary-784"):
+                export_board(
+                    data_dir, instance_dir=Path(tmpdir),
+                    reader=mock.Mock(export=mock.Mock(return_value=[card, duplicate])),
+                    sprint_client=SprintKanboard(),
+                )
+
+            self.assertEqual((data_dir / "board" / "cards.json").read_bytes(), good_json)
+            self.assertEqual((data_dir / "board" / "cards.ndjson").read_bytes(), good_ndjson)
+
+    def test_restore_rejects_json_ndjson_parity_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            card = _restore_card()
+            (data_dir / "board" / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            (data_dir / "board" / "cards.ndjson").write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(RestoreError, "parity mismatch"):
+                import_normalized_board(data_dir, client=_EmptyWriteKanboard())
+
     def test_restore_refuses_a_card_without_a_record_type(self):
         """A card with no kind cannot be placed, so the export is refused by reference."""
         with tempfile.TemporaryDirectory() as tmpdir:

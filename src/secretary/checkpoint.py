@@ -55,7 +55,6 @@ from secretary.product_issues import (
     ProductIssueTransaction,
     ProductIssueValidationError,
     registered_projects,
-    validate_product_issue_records,
 )
 from secretary.state_repo import BOARD_RUNS_PATHSPEC
 from secretary.tasks import TaskAudit, TaskError
@@ -397,6 +396,18 @@ class CheckpointWriter:
                 self.data_dir,
                 instance_dir=self.instance_dir,
             )
+            # Export validates before publishing its local pair. Re-read that freshly published
+            # pair here so a substituted producer cannot reach staging or Git.
+            from secretary.board.normalized_checkpoint import (
+                NormalizedBoardError,
+                validated_normalized_cards,
+            )
+
+            if board.path.name == "cards.json":
+                try:
+                    validated_normalized_cards(self.data_dir / "board")
+                except NormalizedBoardError as exc:
+                    raise RuntimeError(f"board export is not restorable: {exc}") from None
             runs = export_runs(self.data_dir, state_dir=self.state_dir)
         except RuntimeError as exc:
             raise CheckpointBlocked(str(exc)) from None
@@ -1071,9 +1082,11 @@ def _validate_board(
                 registered_project_ids = registered_projects(instance)
             except TaskError as exc:
                 raise CheckpointBlocked(f"cannot validate Product projects: {exc.message}") from None
-        validate_product_issue_records(cards, registered_project_ids=registered_project_ids)
-    except ProductIssueValidationError as exc:
-        raise CheckpointBlocked(f"invalid Product/Issue board record: {exc}") from None
+        from secretary.board.normalized_checkpoint import NormalizedBoardError, validate_card_records
+
+        validate_card_records(cards, registered_project_ids=registered_project_ids)
+    except (ProductIssueValidationError, NormalizedBoardError) as exc:
+        raise CheckpointBlocked(f"invalid restorable board record: {exc}") from None
     declared_sprints = _int_field(summary, "sprint_count", "board export.json")
     actual_sprints = _count_lines(staging / "sprints.ndjson", "board sprints.ndjson")
     if declared_sprints != actual_sprints:

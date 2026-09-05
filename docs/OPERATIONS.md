@@ -1333,6 +1333,15 @@ pending events and likewise refuses them as `live_write`; retry the listed reque
 that is already outside the released journal comes back with `secretary product transaction adopt --path FILE`,
 which files it under its own request id and removes the copy, after which `retry` and `discard` see it again.
 
+### A checkpoint blocked by duplicate card references
+
+`board export is not restorable: ... duplicate references` means publication stopped before replacing the
+prior good normalized pair or touching the checkpoint Git index. Use the supported preview and exact-ID apply
+commands in [Recovery](RECOVERY.md#repairing-historical-duplicate-card-references). Do not use `task show` to
+choose a row: its compatibility rule intentionally selects one live row when an archived duplicate exists.
+Do not edit normalized files or Kanboard storage. After apply, retry the normal managed checkpoint, verify its
+remote SHA, and only then repeat the isolated recovery drill.
+
 ## Board column schema
 
 Install creates the Pipeline columns and then refuses to reshape a board that already holds cards:

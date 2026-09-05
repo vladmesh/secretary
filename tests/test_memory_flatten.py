@@ -220,7 +220,12 @@ class TwoWriterTests(unittest.TestCase):
 
     def seed_board_and_runs(self) -> None:
         board = self.data_dir / "board"
-        (board / "cards.ndjson").write_text('{"id": 1}\n', encoding="utf-8")
+        # This fixture reaches the checkpoint validator even though these tests exercise the
+        # memory writer. Keep it a valid normalized board row under the publication contract:
+        # a checkpoint card always has a non-empty, unique recovery reference.
+        (board / "cards.ndjson").write_text(
+            '{"id": 1, "reference": "secretary-1"}\n', encoding="utf-8"
+        )
         (board / "sprints.ndjson").write_text("", encoding="utf-8")
         (board / "export.json").write_text('{"card_count": 1, "sprint_count": 0}\n', encoding="utf-8")
         runs = self.data_dir / "runs"
