@@ -372,7 +372,9 @@ class InstanceCatalog:
             registered = getattr(self, "registered_bindings", self.bindings)
             if any(name in registered for name in candidates):
                 raise HostError(f"project {project!r} is registered but not enabled for workloads")
-            raise HostError(f"project {project!r} is not registered in the instance")
+            raise HostError(
+                f"project {project!r} is not registered in the instance and is not enabled for workloads"
+            )
         repo = binding.get("repo")
         if not isinstance(repo, str) or not repo:
             raise HostError(f"project {project!r} has no repo path")
