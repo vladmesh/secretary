@@ -33,6 +33,7 @@ from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatcher import (
     CommandHostRuntime,
     DispatcherRuntime,
+    InstanceCatalog,
     LaunchedHead,
 )
 from secretary.dispatcher_gate import GateResult
@@ -3081,6 +3082,14 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         orca.assert_not_called()
         launch.assert_not_called()
         observer_workspace.assert_not_called()
+
+    def test_instance_catalog_uses_filesystem_truth_for_project_availability(self) -> None:
+        catalog = object.__new__(InstanceCatalog)
+        catalog.bindings = {"codegen-orchestrator": {"id": "codegen-orchestrator", "repo": str(self.repo)}}
+
+        self.assertTrue(catalog.project_availability("codegen-orchestrator").allows("codegen-orchestrator"))
+        (self.repo / ".git").rmdir()
+        self.assertFalse(catalog.project_availability("codegen-orchestrator").allows("codegen-orchestrator"))
 
     # where the checkout lives ------------------------------------------------
 

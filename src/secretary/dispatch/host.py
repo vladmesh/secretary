@@ -369,6 +369,12 @@ class InstanceCatalog:
             raise HostError(f"project {project!r} has no repo path")
         return binding
 
+    def project_availability(self, project: str) -> ProjectAvailability:
+        """Inspect one enabled binding using the recovery checkout rule."""
+        binding = dict(self.binding(project))
+        binding["id"] = project
+        return ProjectAvailability.inspect([binding])
+
     def adapter(self, project: str) -> dict[str, Any]:
         binding = self.binding(project)
         adapter = binding.get("adapter")
@@ -1990,9 +1996,15 @@ class CommandHostRuntime:
         """Refuse before any project-dependent workspace or head activation."""
         if self.mode == "noop":
             return
-        binding = dict(self.catalog.binding(project))
-        binding["id"] = project
-        availability = ProjectAvailability.inspect([binding])
+        availability_probe = getattr(self.catalog, "project_availability", None)
+        if callable(availability_probe):
+            availability = availability_probe(project)
+        else:
+            binding = dict(self.catalog.binding(project))
+            binding["id"] = project
+            availability = ProjectAvailability.inspect([binding])
+        if not isinstance(availability, ProjectAvailability):
+            raise HostError(f"project availability for {project!r} is invalid")
         if not availability.allows(project):
             raise HostError(f"project repo for {project!r} is unavailable")
 
