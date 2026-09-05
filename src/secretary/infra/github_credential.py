@@ -233,7 +233,7 @@ class RemoteExecution:
             command = ["git", *prefix, "clone", *(clone_args or []), "--", self.remote, str(target)]
             try:
                 if child_target is None:
-                    completed = _proc.run(command, timeout=timeout, env=child_environment)
+                    completed = _proc.run_isolated(command, timeout=timeout, env=child_environment)
                 else:
                     completed = state_repo.run_as_git_child(
                         child_target,

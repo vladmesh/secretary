@@ -37,7 +37,7 @@ def run_isolated(
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a child in its own process group and reap the whole group on timeout."""
+    """Run a child in its own process group and reap that group on abnormal exit."""
     process = subprocess.Popen(
         argv,
         env=env,
@@ -49,10 +49,18 @@ def run_isolated(
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stdout, stderr = process.communicate()
+        stdout, stderr = _kill_and_reap(process)
         raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
+    except BaseException:
+        _kill_and_reap(process)
+        raise
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def _kill_and_reap(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Kill an isolated child's complete process group, then reap its leader."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return process.communicate()

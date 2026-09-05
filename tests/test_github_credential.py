@@ -428,7 +428,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertEqual(
             [call.args[1] for call in remote_git.call_args_list],
             [
-                ["fetch", "--quiet", "origin"],
+                ["fetch", "--quiet", "--no-tags", "origin"],
                 ["merge", "--ff-only", "@{u}"],
             ],
         )
@@ -655,7 +655,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.infra.github_credential._proc.run",
+                "secretary.infra.github_credential._proc.run_isolated",
                 side_effect=subprocess.TimeoutExpired(["git", "clone"], 300),
             ),
             mock.patch("secretary.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
@@ -669,8 +669,12 @@ class ManagedGithubCredentialTests(unittest.TestCase):
                 bootstrap_credential=bootstrap,
             )
         self.assertNotIn("fixture-bootstrap", str(failure.exception))
-        self.assertEqual(len(capability_directories), 1)
-        self.assertFalse(capability_directories[0].exists())
+        self.assertEqual(len(capability_directories), 2)
+        self.assertTrue(
+            any(path.name.startswith("secretary-github-bootstrap-") for path in capability_directories)
+        )
+        self.assertTrue(all(not path.exists() for path in capability_directories))
+        self.assertEqual(list(self.instance.glob(".clone.clone-*")), [])
 
     def test_bypass_status_reports_the_managed_store_condition_independently(self) -> None:
         self.set_token()

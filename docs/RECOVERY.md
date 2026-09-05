@@ -331,6 +331,21 @@ sudo secretary install \
   --installation-user INSTALL_USER
 ```
 
+The supported command clones only the current default-branch checkpoint: depth 1, one branch and no
+tags. Recovery consumes the current canon tree, so historical objects are not an input to board,
+memory, project or host reconstruction. Git creates the clone in a private sibling staging directory,
+and recovery verifies its origin, checked-out branch, upstream, exact tip and shallow boundary before
+atomically adopting the requested path. A timeout or operator interruption kills and reaps the clone's
+complete process group, including pack helpers, removes its operation-scoped credential capability and
+staging directory, and leaves an absent or empty requested target as it began.
+
+Later recovery of that checkout fetches the tracked branch without tags and merges `@{u}` with
+`--ff-only`. Git obtains only the commits needed to connect the old shallow checkpoint to the new tip;
+the checkout remains shallow. An unchanged tip is idempotent. New local checkpoint commits remain
+ordinary descendants and `CheckpointPusher` can publish them fast-forward only without old remote
+history. Recovery never shallows, resets or replaces an existing checkout, and never silently
+unshallows one.
+
 `runtime.env` stays a gitignored ordinary file with mode `0600` when an installation needs it for
 other materialised secrets. `board-transport.env` is also gitignored, but its contents are non-secret
 and bootstrap recreates its default on a clean host. Neither file is added to a checkpoint commit.
@@ -432,6 +447,12 @@ different fact-tree shapes cannot alias through adjacent byte sequences. The low
 diagnostic intentionally returns a non-zero `degraded` result while any configured checkout is unavailable and
 does not mark reconcile complete. Repair the checkout by rerunning the supported recovery command; do not edit
 the progress or managed-state files.
+
+A non-empty target that is not a valid instance repository may be debris from a pre-fix interrupted
+clone. Recovery will not infer that it is healthy or overwrite it. Inspect and preserve it if needed,
+then remove that failed partial target outside Secretary or select a fresh `--instance-dir` and rerun
+the same supported command. A dirty checkout, different origin, invalid repository or non-fast-forward
+relationship is likewise left untouched and reported as a refusal.
 
 A checkpoint taken before sprint entities entered the export still restores: it has no sprints file, which
 reads as an installation without sprints, and `doctor` stays green on a completed restore. Terminals,

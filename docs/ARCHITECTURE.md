@@ -93,6 +93,14 @@ and knowledge documents. The data directory holds task audit, dispatcher state, 
 exports and indexes, search logs, raw dumps, transcripts and artifacts. The SQLite and vector index,
 worktrees, terminals and generated host resources are derived and stay out of the checkpoint.
 
+Clean-host recovery needs that current canon tree, not the commits that preceded it. A fresh instance
+checkout is therefore a depth-1, single-branch, no-tags snapshot of the remote default-branch tip. It is
+validated in a private sibling stage and atomically adopted only when origin, branch, upstream, revision
+and shallow identity agree. Its Git child and helpers share an isolated process group so cancellation
+cannot leave a pack process or partial adopted repository behind. Subsequent recovery fetches only the
+tracked branch's new history and advances fast-forward only, retaining the shallow boundary; checkpoint
+commits and pushes remain normal descendants of the fetched tip.
+
 The Git-backed checkpoint is described in [Recovery](RECOVERY.md). A manual cold archive remains an
 optional tool for raw material and compatibility, and takes no part in recovery readiness.
 
@@ -534,7 +542,9 @@ needed and it does not race the tick writer.
   resolves the eventual Git-child identity, selects the phase source, creates and cleans an operation-scoped
   capability, then launches Git. Initial `https://github.com` clone requires explicit bootstrap input;
   existing-checkout recovery and project provisioning use supplied bootstrap input or the unlocked managed
-  envelope; checkpoint probes and pushes use only the managed envelope. Project clones are staged, run as
+  envelope; checkpoint probes and pushes use only the managed envelope. Fresh instance clones request a
+  bounded current snapshot, run in an isolated process group, and are validated in a private sibling stage
+  before atomic adoption. Project clones are staged, run as
   the installation Git child, assigned final ownership before atomic adoption, and produce sanitized
   per-binding outcomes. Those HTTPS children clear ambient helpers, so a
   per-user credential file remains available to its other consumers but cannot silently authenticate

@@ -1400,6 +1400,22 @@ sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --instal
   --recovery-phrase-file PHRASE_FILE
 ```
 
+On an absent or empty target, these stock commands create a private sibling stage and request a
+depth-1, single-branch, no-tags clone of the remote's current default branch. They validate origin,
+branch/upstream and exact tip before atomic adoption. Timeout and interruption terminate the isolated
+Git process group and discard both stage and operation-scoped credential capability. Do not retry into
+a non-empty partial checkout left by an older release: inspect it, then remove that failed target or
+choose a fresh `--instance-dir`. Existing repositories, including dirty or mismatched ones, are never
+replaced or reset.
+
+The isolated PO recovery drill should record the candidate SHA and supported command, elapsed clone
+time, remote default branch and tip, local `HEAD` and `@{u}`, `--is-shallow-repository`, commit/object or
+transfer counts, and absence of clone descendants and staging after an injected timeout. After advancing
+the private remote, repeat the supported recovery and record the fast-forwarded tip, retained shallow
+boundary and bounded added objects; repeat once unchanged for idempotence. Then continue through board,
+memory, project, host-finalization and checkpoint push validation. Credentials, recovery phrases, helper
+arguments and private remote details do not belong in the evidence.
+
 The low-level `bootstrap --empty`, `restore-board`, `memory reindex`, `reconcile apply` and `restore-reconcile`
 commands remain diagnostic primitives, not the main runbook. `restore-reconcile` intentionally exits non-zero
 with `status: degraded` while a configured project checkout is unavailable and does not mark reconcile complete;

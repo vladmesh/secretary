@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import contextlib
 import getpass
+import hashlib
 import io
 import json
 import os
 import pwd
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -18,6 +21,7 @@ from unittest import mock
 
 from secretary import _proc, installation, restore_commands
 from secretary.board_transport import DEFAULT_TRANSPORT
+from secretary.checkpoint import CheckpointPusher
 from secretary.cli import main
 from secretary.config import InstanceReport
 from secretary.data import export_runs
@@ -62,6 +66,288 @@ class InstallationTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertFalse(Path(f"/proc/{child_pid}").exists(), "timed-out clone descendant survived")
+            print(f"timeout descendant cleanup: pid {child_pid} absent")
+
+    def test_isolated_git_interrupt_reaps_its_descendant_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "child.pid"
+            script = (
+                "import pathlib,subprocess,sys; "
+                "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid)); child.wait()"
+            )
+            interrupt = threading.Timer(0.2, os.kill, args=(os.getpid(), signal.SIGINT))
+            interrupt.start()
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    _proc.run_isolated([sys.executable, "-c", script], timeout=10)
+            finally:
+                interrupt.cancel()
+                interrupt.join()
+            child_pid = int(pid_file.read_text(encoding="utf-8"))
+            for _ in range(100):
+                if not Path(f"/proc/{child_pid}").exists():
+                    break
+                time.sleep(0.01)
+            self.assertFalse(Path(f"/proc/{child_pid}").exists(), "interrupted clone descendant survived")
+            print(f"interrupt descendant cleanup: pid {child_pid} absent")
+
+    def test_fresh_instance_clone_is_bounded_and_reuse_stays_shallow(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            remote = root / "instance.git"
+            target = root / "instance"
+            source.mkdir()
+            _git(source, "init", "-b", "main")
+            _git(source, "config", "user.name", "Test")
+            _git(source, "config", "user.email", "test@example.invalid")
+            payload = source / "historical.bin"
+            for revision in range(8):
+                payload.write_bytes(
+                    b"".join(hashlib.sha256(f"{revision}:{block}".encode()).digest() for block in range(8192))
+                )
+                _git(source, "add", "historical.bin")
+                _git(source, "commit", "-m", f"large history {revision}")
+            payload.unlink()
+            (source / "checkpoint").write_text("current\n", encoding="utf-8")
+            _git(source, "add", "-A")
+            _git(source, "commit", "-m", "current checkpoint")
+            subprocess.run(
+                ["git", "clone", "--bare", str(source), str(remote)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            _git(remote, "gc")
+            remote_bytes = sum(path.stat().st_size for path in (remote / "objects" / "pack").glob("*.pack"))
+            remote_url = remote.as_uri()
+
+            self.assertEqual(
+                _clone_or_reuse(remote_url, target, recovery=True, dry_run=False),
+                "cloned private instance remote",
+            )
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", "-C", str(target), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+            first = git("rev-parse", "HEAD")
+            self.assertEqual(git("rev-parse", "--is-shallow-repository"), "true")
+            self.assertEqual(git("rev-list", "--count", "HEAD"), "1")
+            self.assertEqual(git("rev-parse", "--abbrev-ref", "@{u}"), "origin/main")
+            clone_bytes = sum(
+                path.stat().st_size for path in (target / ".git" / "objects" / "pack").glob("*.pack")
+            )
+            self.assertLess(clone_bytes * 4, remote_bytes)
+
+            (source / "checkpoint").write_text("advanced\n", encoding="utf-8")
+            _git(source, "add", "checkpoint")
+            _git(source, "commit", "-m", "advance checkpoint")
+            _git(source, "push", str(remote), "main")
+            self.assertEqual(
+                _clone_or_reuse(remote_url, target, recovery=True, dry_run=False),
+                "reused checkpoint checkout",
+            )
+            second = git("rev-parse", "HEAD")
+            self.assertNotEqual(first, second)
+            self.assertEqual(git("rev-parse", "--is-shallow-repository"), "true")
+            self.assertEqual(git("rev-list", "--count", "HEAD"), "2")
+            object_bytes = sum(
+                path.stat().st_size for path in (target / ".git" / "objects").rglob("*") if path.is_file()
+            )
+
+            self.assertEqual(
+                _clone_or_reuse(remote_url, target, recovery=True, dry_run=False),
+                "reused checkpoint checkout",
+            )
+            self.assertEqual(git("rev-parse", "HEAD"), second)
+            self.assertEqual(
+                sum(
+                    path.stat().st_size for path in (target / ".git" / "objects").rglob("*") if path.is_file()
+                ),
+                object_bytes,
+            )
+            print(
+                "shallow recovery evidence: "
+                f"remote_pack={remote_bytes} fresh_pack={clone_bytes} "
+                f"fresh_commits=1 reused_commits=2 reused_objects={object_bytes} "
+                "unchanged_objects=" + str(object_bytes)
+            )
+
+            _git(target, "config", "user.name", "Test")
+            _git(target, "config", "user.email", "test@example.invalid")
+            (target / "checkpoint").write_text("locally checkpointed\n", encoding="utf-8")
+            _git(target, "add", "checkpoint")
+            _git(target, "commit", "-m", "local checkpoint")
+            pushed = CheckpointPusher(target, interval_seconds=0).push()
+            self.assertEqual(pushed["status"], "pushed")
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "--git-dir", str(remote), "rev-parse", "main"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                git("rev-parse", "HEAD"),
+            )
+
+    def test_initial_clone_stages_validates_and_adopts_an_empty_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "instance"
+            target.mkdir()
+
+            def clone(_execution, staging, **kwargs):
+                self.assertEqual(
+                    kwargs["clone_args"],
+                    ["--depth=1", "--single-branch", "--no-tags", "--no-local"],
+                )
+                self.assertEqual(staging.parent.stat().st_mode & 0o777, 0o700)
+                staging.mkdir()
+
+            with (
+                mock.patch(
+                    "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                ),
+                mock.patch("secretary.installation._validate_initial_clone") as validate,
+            ):
+                installation._clone_instance("remote", target, bootstrap_credential=None)
+
+            validate.assert_called_once()
+            self.assertTrue(target.is_dir())
+            self.assertEqual(list(root.glob(".instance.clone-*")), [])
+
+    def test_initial_clone_failures_preserve_target_and_remove_staging(self):
+        for failure in (InstallError("invalid clone"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                target = root / "instance"
+                target.mkdir()
+
+                def clone(_execution, staging, **_kwargs):
+                    staging.mkdir()
+
+                with (
+                    mock.patch(
+                        "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                    ),
+                    mock.patch("secretary.installation._validate_initial_clone", side_effect=failure),
+                    self.assertRaises(type(failure)),
+                ):
+                    installation._clone_instance("remote", target, bootstrap_credential=None)
+                self.assertTrue(target.is_dir())
+                self.assertEqual(list(target.iterdir()), [])
+                self.assertEqual(list(root.glob(".instance.clone-*")), [])
+
+    def test_initial_clone_atomic_adoption_failure_preserves_empty_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "instance"
+            target.mkdir()
+
+            def clone(_execution, staging, **_kwargs):
+                staging.mkdir()
+
+            with (
+                mock.patch(
+                    "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                ),
+                mock.patch("secretary.installation._validate_initial_clone"),
+                mock.patch("secretary.installation.os.replace", side_effect=OSError("fixture")),
+                self.assertRaisesRegex(InstallError, "atomic replacement failed"),
+            ):
+                installation._clone_instance("remote", target, bootstrap_credential=None)
+            self.assertTrue(target.is_dir())
+            self.assertEqual(list(target.iterdir()), [])
+            self.assertEqual(list(root.glob(".instance.clone-*")), [])
+
+    def test_initial_clone_ownership_failure_prevents_adoption(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "instance"
+
+            def clone(_execution, staging, **_kwargs):
+                staging.mkdir()
+
+            with (
+                mock.patch(
+                    "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                ),
+                mock.patch("secretary.installation._validate_initial_clone"),
+                mock.patch(
+                    "secretary.installation._set_installation_owner",
+                    side_effect=InstallError("ownership handoff failed"),
+                ),
+                self.assertRaisesRegex(InstallError, "ownership handoff failed"),
+            ):
+                installation._clone_instance(
+                    "remote", target, bootstrap_credential=None, installation_user="runtime"
+                )
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".instance.clone-*")), [])
+
+    def test_initial_clone_refuses_an_invalid_remote_default_branch_without_adoption(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            remote = root / "remote.git"
+            target = root / "instance"
+            source.mkdir()
+            _git(source, "init", "-b", "main")
+            _git(source, "config", "user.name", "Test")
+            _git(source, "config", "user.email", "test@example.invalid")
+            (source / "checkpoint").write_text("current\n", encoding="utf-8")
+            _git(source, "add", "checkpoint")
+            _git(source, "commit", "-m", "checkpoint")
+            subprocess.run(
+                ["git", "clone", "--bare", str(source), str(remote)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            _git(remote, "symbolic-ref", "HEAD", "refs/heads/missing")
+
+            with self.assertRaisesRegex(InstallError, "cloned branch"):
+                installation._clone_instance(remote.as_uri(), target, bootstrap_credential=None)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob(".instance.clone-*")), [])
+
+    def test_existing_invalid_remote_and_dirty_checkout_are_untouched(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            target.mkdir()
+            (target / ".git").mkdir()
+            with (
+                mock.patch("secretary.installation.state_repo.git", return_value="other\n"),
+                self.assertRaisesRegex(InstallError, "different instance remote"),
+            ):
+                _clone_or_reuse("expected", target, recovery=True, dry_run=False)
+            marker = target / "marker"
+            marker.write_text("untouched", encoding="utf-8")
+            with (
+                mock.patch(
+                    "secretary.installation.state_repo.git", side_effect=("expected\n", " M marker\n")
+                ),
+                self.assertRaisesRegex(InstallError, "local changes"),
+            ):
+                _clone_or_reuse("expected", target, recovery=True, dry_run=False)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "untouched")
+
+    def test_prefixed_partial_git_directory_gets_cleanup_or_fresh_target_guidance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "instance"
+            (target / ".git" / "objects").mkdir(parents=True)
+            marker = target / "partial-pack"
+            marker.write_text("preserve", encoding="utf-8")
+
+            with self.assertRaisesRegex(InstallError, "remove a failed partial target.*fresh"):
+                _clone_or_reuse("remote", target, recovery=True, dry_run=False)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
 
     def test_prerequisite_probe_accepts_the_planned_transport_before_it_exists_on_disk(self):
         with tempfile.TemporaryDirectory() as tmp:
