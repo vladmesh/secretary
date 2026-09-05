@@ -374,6 +374,22 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    issues or its reservations comes back without those metadata keys rather than with empty ones. Parity
    compares whether each of the three fields is there at all, not only what it holds: a restored entity
    that gained an empty `product` its export never carried is a lossy write and fails the check.
+   Card creation and initialization have one restore-only bulk transaction boundary for Task, Product and Issue
+   rows. Recovery validates the full normalized plan first and stages a deterministic per-card audit obligation
+   before the first backend mutation. One preloaded board schema, swimlane map and authoritative reference
+   inventory feed native `createTask` batches carrying final title, description, reference, column and swimlane;
+   bounded metadata and placement batches apply the remaining state. Kanboard batches are not transactions. A
+   mixed error, duplicate/missing/malformed response id, lost reply or interruption is reconciled against a fresh
+   whole-board inventory and batched metadata. Only exact individually proved rows commit, and a retry writes only
+   absent or incomplete obligations. Duplicate references, a conflicting title/description or a committed card
+   that no longer matches fail closed. Released per-card create/restore events remain valid resume evidence, and
+   recovery never clears audit/progress or rotates a namespace still bound to the target.
+   Before staging any card, recovery serializes every possible single create, metadata/state and closure payload
+   against the same 1 MiB call limit used by the batch transport. An oversized payload therefore names its
+   reference and phase without leaving a pending occurrence. A valid JSON-RPC error member or invalid mutation
+   result is a definite backend rejection; fresh evidence identifies applied siblings, but an absent or incomplete
+   rejected member reports the rejection rather than generic uncertainty. Lost transport replies and malformed or
+   incomplete aggregate documents remain ambiguous and retain their pending obligations for retry.
    Card and sprint comment history has a restore-only bulk boundary. Recovery reads normalized history in
    bounded batches and writes ordered waves with at most one next occurrence per entity in a JSON-RPC batch;
    ordinary interactive comment commands retain their read-before/read-after protocol. Every occurrence is
@@ -389,9 +405,9 @@ and bootstrap recreates its default on a clean host. Neither file is added to a 
    use separate 50-call caps inside the general 200-call/1 MiB batch policy. Reads cap the number of histories,
    not the bytes or length of one history; a very long single history is reread once per ordered wave and may
    fail the 30-second transport timeout closed with its exact pending obligations intact.
-   Archived rows may carry historical positions that overlap active rows. Recovery therefore closes every
-   archived row only after its comments are proven, then takes an authoritative board snapshot and reconciles
-   the relative order of active rows in each `(column, swimlane)` group against normalized
+   Archived rows may carry historical positions that overlap active rows. Recovery therefore closes archived
+   rows in bounded batches only after their comments are proven, then takes an authoritative board snapshot and
+   reconciles the relative order of active rows in each `(column, swimlane)` group against normalized
    `(position, reference)` order. Only mismatched groups move. Each group owns one deterministic
    `restored_order` request and pending audit record; a retry re-reads the group, resumes at its first mismatch
    and commits only after a final authoritative read proves the complete order. Replaying the earlier

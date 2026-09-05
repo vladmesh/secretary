@@ -29,7 +29,6 @@ from secretary.board.normalized_checkpoint import NormalizedBoardError, validate
 from secretary.config import DataDirError, instance_data_dir, validate_instance
 from secretary.data import init_layout
 from secretary.product_issues import (
-    ensure_swimlane,
     registered_projects,
 )
 from secretary.sprint_observer import (
@@ -47,9 +46,7 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
-    _matching_swimlane,
     _positive_int,
-    _task_is_active,
     all_project_cards,
 )
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
@@ -116,10 +113,12 @@ def import_normalized_board(
                 client = KanboardClient.for_instance(instance)
             reader = TaskReader(client)
             writer = TaskWriter(client, data_dir=data_dir)
-            _, unresolved = writer.reconcile(defer_restore_comments=True)
+            _, unresolved = writer.reconcile(defer_restore_comments=True, defer_bulk_restore=True)
             if unresolved:
                 raise RestoreError("board audit repair is required before restore")
-            existing = _existing_board_cards(reader)
+            _set_restore_phase(client, "inventory")
+            board_id, columns, swimlanes = reader._board()
+            existing = _existing_board_cards(client, board_id)
             unexpected = set(existing) - {card["reference"] for card in cards}
             if unexpected:
                 raise RestoreError("board is not empty or does not match normalized restore data")
@@ -128,30 +127,37 @@ def import_normalized_board(
             prefix = _restore_request_prefix(data_dir, writer.audit, set(existing) | set(existing_sprints))
             _validate_deferred_restore_comments(writer.audit, cards, sprints, prefix)
             ordered_cards = sorted(cards, key=_restore_card_order)
-            for card in ordered_cards:
-                current = existing.get(card["reference"])
-                if current is None:
-                    _create_restored_card(writer, card, prefix)
-                target = _state_for_column(card["column"])
-                writer.restore_card(
-                    reference=card["reference"],
-                    metadata=_restore_board_metadata(card),
-                    target=target or "",
-                    position=_restore_position(card),
-                    swimlane=str(card.get("swimlane") or ""),
-                    request_id=f"{prefix}card:{card['reference']}",
-                )
+            columns, swimlanes = _ensure_restore_swimlanes(
+                client, board_id, columns, swimlanes, ordered_cards
+            )
+            from secretary.task_restore import restore_cards_batched
+
+            restore_cards_batched(
+                writer,
+                ordered_cards,
+                board_id=board_id,
+                columns=columns,
+                swimlanes=swimlanes,
+                existing=existing,
+                request_prefix=prefix,
+            )
+            _set_restore_phase(client, "proof")
             setup = reader.restore_snapshot()
             _require_card_snapshot(data_dir, cards, setup)
+            from secretary.task_restore import commit_restored_cards
+
+            commit_restored_cards(writer, ordered_cards, setup, request_prefix=prefix)
+            _set_restore_phase(client, "proof")
             _restore_card_comments_batched(writer, ordered_cards, setup, prefix)
-            for card in ordered_cards:
-                if card.get("closed") and not setup[card["reference"]].get("closed"):
-                    task_id = int(setup[card["reference"]]["id"].removeprefix("task_kanboard_"))
-                    if client.call("closeTask", task_id=task_id) is not True:
-                        raise RestoreError("could not close restored card")
+            from secretary.task_restore import close_restored_cards_batched
+
+            close_restored_cards_batched(client, ordered_cards, setup, board_id=board_id)
+            _set_restore_phase(client, "closure")
             post_close = reader.restore_snapshot()
             _require_card_snapshot(data_dir, cards, post_close)
+            _set_restore_phase(client, "order")
             _reconcile_restored_order(writer, cards, post_close, prefix)
+            _set_restore_phase(client, "final_parity")
             actual = reader.restore_snapshot()
             _require_card_snapshot(data_dir, cards, actual)
             if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
@@ -180,6 +186,13 @@ def import_normalized_board(
         return len(cards)
 
 
+def _set_restore_phase(client: Any, phase: str) -> None:
+    """Mark a restore boundary when a diagnostic client provides a phase observer."""
+    hook = getattr(client, "set_restore_phase", None)
+    if callable(hook):
+        hook(phase)
+
+
 def _existing_sprints(
     data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
@@ -191,20 +204,56 @@ def _existing_sprints(
     return {sprint["ref"]: sprint for sprint in SprintReader(client, data_dir=data_dir).export()}
 
 
-def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
+def _existing_board_cards(client: KanboardClient, board_id: int) -> dict[str, dict[str, Any]]:
     """Read both active and closed Pipeline records before deciding a restore is empty."""
-    board_id, _, _ = reader._board()
-    raw_cards = all_project_cards(reader.client, board_id)
+    raw_cards = all_project_cards(client, board_id)
     result: dict[str, dict[str, Any]] = {}
     for card in raw_cards:
         if not isinstance(card, dict):
             continue
         reference = card.get("reference")
         if isinstance(reference, str) and reference:
-            previous = result.get(reference)
-            if previous is None or (_task_is_active(card) and not _task_is_active(previous)):
-                result[reference] = card
+            if reference in result:
+                raise RestoreError(f"board contains duplicate reference: {reference}")
+            result[reference] = card
     return result
+
+
+def _ensure_restore_swimlanes(
+    client: KanboardClient,
+    board_id: int,
+    columns: dict[int, str],
+    swimlanes: dict[int, str],
+    cards: list[dict[str, Any]],
+) -> tuple[dict[int, str], dict[int, str]]:
+    """Create all missing exported lanes in one bounded restore setup batch."""
+    present = {name.casefold() for name in swimlanes.values()}
+    missing = sorted(
+        {
+            str(card.get("swimlane") or "").strip()
+            for card in cards
+            if str(card.get("swimlane") or "").strip()
+            and str(card.get("swimlane") or "").strip().casefold() not in present
+        },
+        key=str.casefold,
+    )
+    if not missing:
+        return columns, swimlanes
+    try:
+        client.call_batch(("addSwimlane", {"project_id": board_id, "name": name}) for name in missing)
+    except TaskError:
+        # A lost aggregate answer can follow any applied subset.  The fresh map below is the proof.
+        pass
+    raw = client.call("getActiveSwimlanes", project_id=board_id) or []
+    refreshed = {
+        identifier: str(lane.get("name") or "")
+        for lane in raw
+        if isinstance(lane, dict) and (identifier := _positive_int(lane.get("id"))) is not None
+    }
+    absent = [name for name in missing if name.casefold() not in {v.casefold() for v in refreshed.values()}]
+    if absent:
+        raise RestoreError(f"could not create restored swimlane: {absent[0]}")
+    return columns, refreshed
 
 
 def _restore_card_comments_batched(
@@ -279,8 +328,16 @@ def _validate_deferred_restore_comments(
     pending = audit.pending_events()
     if audit.status()["pending"] != len(pending):
         raise RestoreError("board audit repair is required before restore")
+    card_refs = {str(card["reference"]) for card in cards}
     for event in pending:
         request_id = str(event.get("request_id") or "")
+        if (
+            event.get("kind") == "restored_bulk"
+            and event.get("ref") in card_refs
+            and request_id == f"{prefix}card:{event.get('ref')}"
+        ):
+            # The card transaction validates the complete content identity and resumes it below.
+            continue
         payload = event.get("payload")
         identity = expected.get(request_id)
         if (
@@ -764,66 +821,6 @@ def _namespace_is_local(audit: TaskAudit, token: str, live_refs: set[str]) -> bo
         for event in audit.events()
         if str(event.get("request_id") or "").startswith(prefix)
     )
-
-
-def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str) -> None:
-    fields = _restore_fields(card)
-    issue_column = _state_for_column(str(card.get("column") or "")) == "issues"
-    metadata = card.get("metadata")
-    record_type = metadata.get("record_type") if isinstance(metadata, dict) else None
-    if issue_column or record_type in {"issue", "product"}:
-        _create_restored_non_task(writer, card)
-        return
-    writer.create(
-        role="steward",
-        actor="restore",
-        project=fields["project"] or "product-backlog",
-        task_type=fields["task_type"] or "research",
-        target="ready",
-        restoring=True,
-        title=card["title"],
-        description=card["description"],
-        reference=card["reference"],
-        blocked_by=fields["blocked_by"],
-        head=fields["head"],
-        review_head=fields["review_head"],
-        slug=fields["slug"],
-        base_branch=fields["base_branch"],
-        seed_ref=fields["seed_ref"],
-        supersedes=fields["supersedes"],
-        complexity=fields["complexity"],
-        family_preference=fields["family_preference"],
-        codex_launch_mode=fields["codex_launch_mode"],
-        request_id=f"{prefix}create:{card['reference']}",
-    )
-
-
-def _create_restored_non_task(writer: TaskWriter, card: dict[str, Any]) -> None:
-    """Recreate a Product or an Issue in its own column, without classifying it."""
-    board_id, columns, swimlanes = writer.reader._board()
-    column = str(card.get("column") or "")
-    column_id = next((identifier for identifier, title in columns.items() if title == column), None)
-    if column_id is None:
-        raise RestoreError(f"restored card has an unknown column: {column}")
-    payload: dict[str, Any] = {
-        "project_id": board_id,
-        "title": card["title"],
-        "description": card["description"],
-        "column_id": column_id,
-    }
-    # Restore the exported lane; create named lanes and omit Kanboard-invalid id 0.
-    exported_lane = str(card.get("swimlane") or "")
-    swimlane_id = _matching_swimlane(swimlanes, exported_lane)
-    if swimlane_id is None and exported_lane.strip():
-        swimlane_id = ensure_swimlane(writer.client, board_id, exported_lane)
-    if swimlane_id is not None:
-        payload["swimlane_id"] = swimlane_id
-    # Reject bool: it is an int subclass but not a valid Kanboard id.
-    task_id = _positive_int(writer.client.call("createTask", **payload))
-    if task_id is None:
-        raise RestoreError("could not create restored Product or Issue record")
-    if writer.client.call("updateTask", id=task_id, reference=card["reference"]) is not True:
-        raise RestoreError("could not set restored Product or Issue reference")
 
 
 def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:

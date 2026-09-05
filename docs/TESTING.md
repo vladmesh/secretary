@@ -169,6 +169,32 @@ as a no-op, rather than making Ruff choose a repository-wide default.
 
 ## Normalized board bulk recovery
 
+`tests.test_bulk_card_restore` drives the restore-specific card planner through the real
+`KanboardClient.call_batch` encoder/decoder and an in-process JSON-RPC peer. It covers Task, Product and Issue
+records, durable staging before mutation, lost create prefixes, lost and malformed initialization replies,
+duplicate/conflicting rows, definite backend rejection, oversized-call preflight, audit append failure and
+mutation-free replay. Its committed fixture is a sanitized field projection of the real 1,440-row recovery shape:
+894 Tasks, 538 Issues, 8 Products, 341 active and 1,099 archived rows, retaining the source columns, 19 swimlane
+spellings and sparse `actual_position` values. It contains only shape fields, not source references or content.
+
+The routine benchmark executes a faithful driver for the released per-card create/restore call shape and the
+current full `import_normalized_board` path against separate instances of the same hermetic JSON-RPC peer. Both
+legs perform creation, metadata/state, archived closure, at least four post-close group repairs and final content
+and order parity. Every reported RPC, post and phase duration comes from the executed wire log and phase clock;
+pre-write inventory and post-write proof are separate. A 2026-09-05 run with simulated 0.05 ms post latency
+measured 33,743 logical RPCs / 25,190 posts before and 17,912 RPCs / 1,087 posts after. The after phase receipt was:
+inventory 25/7/0.111s, create 1,440/8/0.106s, metadata/state 4,320/23/0.935s, proof 4,331/48/0.454s,
+audit 0/0/0.021s, closure 3,984/40/1.042s, order 927/927/0.277s and final parity 2,885/34/0.102s, where each
+triple is logical RPCs/posts/wall time. The test asserts a greater than tenfold post reduction, fewer logical
+RPCs, archived closure, multi-group repair, full parity and a second import with zero mutations. Timing is
+explicitly `durability=excluded`; a separate 40-card sample runs real `TaskAudit` pending files, locking and
+fsync (about 2.6 ms/card on that run). These hermetic numbers are structural evidence, not a live recovery SLO or
+durable product wall time.
+
+The general batch policy is at most 200 calls and 1 MiB per JSON document. Comment reads and writes retain their
+separate 50-call caps. Tests assert that the clean card path makes no interactive `TaskWriter.create`, generic
+`restore_card`, full `TaskReader.show/show_id`, comment read or per-card HTTP post.
+
 `tests.test_bulk_comment_restore` exercises the restore-specific Card/Sprint comment boundary against the real
 `KanboardClient.call_batch` encoder and response validator with an in-process wire peer. Deterministic cases cover
 pre-existing prefixes, identical bodies, repeat import, first/middle/last lost replies, mixed per-call rejection
@@ -198,7 +224,8 @@ result shape and disposable timeout canary live in
 minimal `A active position 1 / B archived historical position 1 / C active position 2` regression, mixed Task,
 Product and Issue rows, retry of an already populated parity-failed target, and the full 151-, 156-, 9- and
 12-row active sequences from all four sanitized production mismatch groups. The fixture covers near-total
-reversal, a correct prefix with a long disordered tail, localized disorder and full reversal; it requires exactly
+reversal, a correct prefix with a long disordered tail, localized disorder and a near-reversal with a displaced
+pair; it requires exactly
 131 moves before two placement-free passes. Lost reads, malformed move results and interruption after the group
 effect but before audit append are covered separately. The cases assert exact active relative order, retained
 archived comments and duplicate occurrences, no duplicate references and no unrelated retry writes:

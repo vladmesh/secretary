@@ -22,6 +22,465 @@ class RestoreCommentOccurrence:
     entity: str = "card"
 
 
+@dataclass(frozen=True)
+class RestoreCardObligation:
+    """One normalized row owned by the restore-only bulk transaction."""
+
+    card: dict[str, Any]
+    metadata: dict[str, str]
+    request_id: str
+    column_id: int
+    swimlane_id: int
+    identity: dict[str, Any]
+
+
+def _set_restore_phase(client: Any, phase: str) -> None:
+    """Expose restore phase boundaries to an optional benchmark observer."""
+    hook = getattr(client, "set_restore_phase", None)
+    if callable(hook):
+        hook(phase)
+
+
+def _restore_create_payload(item: RestoreCardObligation, board_id: int) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "project_id": board_id,
+        "title": str(item.card["title"]),
+        "description": str(item.card.get("description") or ""),
+        "column_id": item.column_id,
+        "reference": str(item.card["reference"]),
+    }
+    if item.swimlane_id:
+        payload["swimlane_id"] = item.swimlane_id
+    return payload
+
+
+def _restore_payload_error(item: Any, phase: str, error: Exception) -> Exception:
+    from secretary.tasks import TaskError
+
+    card = item.card if isinstance(item, RestoreCardObligation) else item
+    reference = str(card.get("reference") or "<unknown>")
+    message = getattr(error, "message", str(error))
+    return TaskError("validation", f"restored-card {phase} payload for {reference}: {message}", 2)
+
+
+def _preflight_restore_entries(
+    client: Any, entries: list[tuple[Any, str, dict[str, Any]]], phase: str
+) -> None:
+    preflight = getattr(client, "preflight_call", None)
+    if not callable(preflight):
+        return
+    for index, (item, method, payload) in enumerate(entries):
+        try:
+            preflight(method, payload, identifier=index)
+        except Exception as exc:
+            from secretary.tasks import TaskError
+
+            if isinstance(exc, TaskError):
+                raise _restore_payload_error(item, phase, exc) from None
+            raise
+
+
+def _discard_pending_obligation(writer: Any, item: RestoreCardObligation) -> None:
+    event = writer.audit.pending_event(item.request_id)
+    if event is not None:
+        writer.audit.discard(item.request_id, event)
+
+
+def restore_cards_batched(
+    writer: Any,
+    cards: list[dict[str, Any]],
+    *,
+    board_id: int,
+    columns: dict[int, str],
+    swimlanes: dict[int, str],
+    existing: dict[str, dict[str, Any]],
+    request_prefix: str,
+) -> None:
+    """Create and initialize normalized cards without the interactive read cycle."""
+    from secretary.restore import _restore_board_metadata
+    from secretary.tasks import TaskError, _BatchCallRejected, _matching_swimlane, _now, _positive_int
+
+    column_ids = {title: identifier for identifier, title in columns.items()}
+    obligations: list[RestoreCardObligation] = []
+    for card in cards:
+        reference = str(card["reference"])
+        column = str(card.get("column") or "")
+        column_id = column_ids.get(column)
+        if column_id is None:
+            raise TaskError("backend_error", f"restored card has an unknown column: {column}", 1)
+        lane = str(card.get("swimlane") or "")
+        swimlane_id = _matching_swimlane(swimlanes, lane) or 0
+        metadata = _without_retired_launch_mode(_restore_board_metadata(card))
+        identity = _restore_card_identity(card, metadata)
+        request_id = f"{request_prefix}card:{reference}"
+        obligations.append(
+            RestoreCardObligation(card, metadata, request_id, column_id, swimlane_id, identity)
+        )
+
+    _validate_restore_inventory(existing, obligations)
+    missing = [item for item in obligations if str(item.card["reference"]) not in existing]
+    create_entries = [(item, "createTask", _restore_create_payload(item, board_id)) for item in missing]
+    # Use the largest possible signed backend id when sizing calls whose real id is not known yet.
+    # The exact calls are preflighted again by KanboardClient immediately before their first post.
+    placeholder_id = 9_223_372_036_854_775_807
+    initialization_entries: list[tuple[RestoreCardObligation, str, dict[str, Any]]] = []
+    for item in obligations:
+        if writer.audit.committed_event(item.request_id) is not None:
+            continue
+        initialization_entries.extend(
+            [
+                (item, "saveTaskMetadata", {"task_id": placeholder_id, "values": item.metadata}),
+                (
+                    item,
+                    "moveTaskPosition",
+                    {
+                        "project_id": board_id,
+                        "task_id": placeholder_id,
+                        "column_id": item.column_id,
+                        "position": max(1, int(item.card.get("position") or 1)),
+                        "swimlane_id": item.swimlane_id,
+                    },
+                ),
+            ]
+        )
+    _preflight_restore_entries(writer.client, create_entries, "create")
+    _preflight_restore_entries(writer.client, initialization_entries, "metadata/state")
+
+    _set_restore_phase(writer.client, "audit")
+    for item in obligations:
+        reference = str(item.card["reference"])
+        committed = writer.audit.committed_event(item.request_id)
+        if committed is not None:
+            if committed.get("kind") == "restored":
+                # Released restores used this same stable request id.  Final parity below remains
+                # their authoritative compatibility proof.
+                pass
+            else:
+                writer.audit.require_claim(
+                    committed, kind="restored_bulk", reference=reference, identity=item.identity
+                )
+        else:
+            pending = writer.audit.pending_event(item.request_id)
+            if pending is not None:
+                writer.audit.require_claim(
+                    pending, kind="restored_bulk", reference=reference, identity=item.identity
+                )
+            else:
+                writer.audit.stage(
+                    item.request_id,
+                    {
+                        "event_id": "evt_" + uuid.uuid4().hex,
+                        "schema_version": 1,
+                        "occurred_at": _now(),
+                        "actor": {"role": "steward", "id": "restore"},
+                        "kind": "restored_bulk",
+                        "outcome": "success",
+                        "task_id": "",
+                        "ref": reference,
+                        "backend": {"kind": "kanboard", "task_id": None, "revision": "pending"},
+                        "request_id": item.request_id,
+                        "payload": item.identity,
+                    },
+                )
+    if missing:
+        calls = [(method, payload) for _item, method, payload in create_entries]
+        definite_create_failure = False
+        _set_restore_phase(writer.client, "create")
+        try:
+            answers = writer.client.call_batch(calls)
+            if any(_positive_int(answer) is None for answer in answers):
+                definite_create_failure = True
+        except _BatchCallRejected:
+            definite_create_failure = True
+        except TaskError as exc:
+            if exc.code == "validation":
+                raise _restore_payload_error(missing[0], "create", exc) from None
+            # Transport loss or a malformed/incomplete aggregate answer is genuinely ambiguous.
+        _set_restore_phase(writer.client, "proof")
+        existing = _restore_inventory(writer.client, board_id)
+        _validate_restore_inventory(existing, obligations)
+        absent = [
+            str(item.card["reference"]) for item in missing if str(item.card["reference"]) not in existing
+        ]
+        if absent:
+            if definite_create_failure:
+                for item in missing:
+                    if str(item.card["reference"]) in absent:
+                        _discard_pending_obligation(writer, item)
+                absent_item = next(item for item in missing if str(item.card["reference"]) == absent[0])
+                record_type = str(absent_item.card.get("metadata", {}).get("record_type") or "")
+                if record_type in {"product", "issue"}:
+                    raise TaskError(
+                        "backend_error",
+                        "could not create restored Product or Issue record: "
+                        f"Kanboard rejected create for {absent[0]}",
+                        1,
+                    )
+                raise TaskError(
+                    "backend_error",
+                    f"Kanboard rejected restored-card create for {absent[0]}",
+                    1,
+                )
+            raise TaskError(
+                "audit_pending",
+                f"batched restored-card create is uncertain; retry absent reference {absent[0]}",
+                4,
+            )
+
+    task_ids = [_restore_task_id(existing, item) for item in obligations]
+    _set_restore_phase(writer.client, "metadata_state")
+    metadata_answers = writer.client.call_batch(
+        ("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids
+    )
+    live_metadata = [_metadata_map(answer) for answer in metadata_answers]
+    write_entries: list[tuple[RestoreCardObligation, str, dict[str, Any]]] = []
+    for item, task_id, metadata in zip(obligations, task_ids, live_metadata, strict=True):
+        committed = writer.audit.committed_event(item.request_id)
+        row = existing[str(item.card["reference"])]
+        if committed is not None:
+            if metadata != item.metadata or not _restore_placement_matches(row, item):
+                raise TaskError(
+                    "backend_error",
+                    f"committed restored card no longer matches normalized data: {item.card['reference']}",
+                    1,
+                )
+            continue
+        pending = writer.audit.pending_event(item.request_id)
+        initialized = bool(
+            isinstance(pending, dict)
+            and str(pending.get("backend", {}).get("revision") or "").startswith("initialized")
+        )
+        if metadata != item.metadata:
+            write_entries.append((item, "saveTaskMetadata", {"task_id": task_id, "values": item.metadata}))
+        # Kanboard cannot accept an initial position in createTask.  Run the exported placement
+        # once for every fresh obligation.  Overlapping archived positions are intentionally
+        # reconciled after closure, when the active-only order is knowable.
+        if not initialized or not _restore_placement_matches(row, item):
+            write_entries.append(
+                (
+                    item,
+                    "moveTaskPosition",
+                    {
+                        "project_id": board_id,
+                        "task_id": task_id,
+                        "column_id": item.column_id,
+                        "position": max(1, int(item.card.get("position") or 1)),
+                        "swimlane_id": item.swimlane_id,
+                    },
+                )
+            )
+    definite_initialization_failure = False
+    if write_entries:
+        _preflight_restore_entries(writer.client, write_entries, "metadata/state")
+        writes = [(method, payload) for _item, method, payload in write_entries]
+        try:
+            answers = writer.client.call_batch(writes)
+            if any(answer is not True for answer in answers):
+                definite_initialization_failure = True
+        except _BatchCallRejected:
+            definite_initialization_failure = True
+        except TaskError as exc:
+            if exc.code == "validation":
+                raise _restore_payload_error(write_entries[0][0], "metadata/state", exc) from None
+            # Reconcile genuinely uncertain aggregate outcomes from fresh evidence below.
+
+    _set_restore_phase(writer.client, "proof")
+    proved_rows = _restore_inventory(writer.client, board_id)
+    _validate_restore_inventory(proved_rows, obligations)
+    proved_ids = [_restore_task_id(proved_rows, item) for item in obligations]
+    proved_metadata = writer.client.call_batch(
+        ("getTaskMetadata", {"task_id": task_id}) for task_id in proved_ids
+    )
+    for item, task_id, answer in zip(obligations, proved_ids, proved_metadata, strict=True):
+        if _metadata_map(answer) != item.metadata or not _restore_placement_matches(
+            proved_rows[str(item.card["reference"])], item
+        ):
+            if definite_initialization_failure:
+                raise TaskError(
+                    "backend_error",
+                    f"Kanboard rejected restored-card metadata/state for {item.card['reference']}",
+                    1,
+                )
+            raise TaskError(
+                "audit_pending",
+                f"board parity check failed: restored-card initialization is incomplete for {item.card['reference']}",
+                4,
+            )
+        event = writer.audit.pending_event(item.request_id)
+        if event is not None:
+            event["task_id"] = f"task_kanboard_{task_id}"
+            event["backend"]["task_id"] = task_id
+            event["backend"]["revision"] = "initialized"
+            writer.audit.stage(item.request_id, event)
+
+
+def close_restored_cards_batched(
+    client: Any,
+    cards: list[dict[str, Any]],
+    live: dict[str, dict[str, Any]],
+    *,
+    board_id: int,
+) -> None:
+    """Close archived normalized rows in bounded calls after their comments are proved."""
+    from secretary.tasks import TaskError, _BatchCallRejected, _task_is_active
+
+    entries: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
+    for card in cards:
+        row = live[str(card["reference"])]
+        if card.get("closed") and not row.get("closed"):
+            task_id = int(str(row["id"]).removeprefix("task_kanboard_"))
+            entries.append((card, "closeTask", {"task_id": task_id}))
+    if not entries:
+        return
+    owed = [int(payload["task_id"]) for _card, _method, payload in entries]
+    _preflight_restore_entries(client, entries, "closure")
+    definite_failure = False
+    _set_restore_phase(client, "closure")
+    try:
+        answers = client.call_batch((method, payload) for _card, method, payload in entries)
+        if any(answer is not True for answer in answers):
+            definite_failure = True
+    except _BatchCallRejected:
+        definite_failure = True
+    except TaskError as exc:
+        if exc.code == "validation":
+            raise _restore_payload_error(entries[0][0], "closure", exc) from None
+        # Transport loss or an invalid aggregate answer needs an authoritative read.
+    _set_restore_phase(client, "proof")
+    rows = _restore_inventory(client, board_id)
+    active_ids = {
+        int(row["id"]) for row in rows.values() if _task_is_active(row) and str(row.get("id") or "").isdigit()
+    }
+    incomplete = [task_id for task_id in owed if task_id in active_ids]
+    if incomplete:
+        reference = next(
+            str(card["reference"])
+            for card in cards
+            if int(str(live[str(card["reference"])]["id"]).removeprefix("task_kanboard_")) == incomplete[0]
+        )
+        if definite_failure:
+            raise TaskError("backend_error", f"Kanboard rejected restored-card closure for {reference}", 1)
+        raise TaskError("audit_pending", "restored-card closure is uncertain; retry is required", 4)
+
+
+def commit_restored_cards(
+    writer: Any,
+    cards: list[dict[str, Any]],
+    live: dict[str, dict[str, Any]],
+    *,
+    request_prefix: str,
+) -> None:
+    """Publish one card obligation after its initialized row is authoritatively visible."""
+    _set_restore_phase(writer.client, "audit")
+    for card in cards:
+        reference = str(card["reference"])
+        request_id = f"{request_prefix}card:{reference}"
+        if writer.audit.committed_event(request_id) is not None:
+            continue
+        event = writer.audit.pending_event(request_id)
+        if event is None or event.get("kind") != "restored_bulk":
+            raise RuntimeError(f"restored card has no durable obligation: {reference}")
+        task_id = int(str(live[reference]["id"]).removeprefix("task_kanboard_"))
+        event["task_id"] = f"task_kanboard_{task_id}"
+        event["backend"]["task_id"] = task_id
+        event["backend"]["revision"] = "initialized:" + str(event["payload"]["content_sha256"])
+        writer.audit.stage(request_id, event)
+        try:
+            writer.audit.append(request_id, event)
+        except OSError:
+            from secretary.tasks import TaskError
+
+            raise TaskError("audit_pending", "restored card is proved; audit repair is required", 4) from None
+
+
+def _restore_card_identity(card: dict[str, Any], metadata: dict[str, str]) -> dict[str, Any]:
+    content = {
+        "title": str(card["title"]),
+        "description": str(card.get("description") or ""),
+        "column": str(card.get("column") or ""),
+        "swimlane": str(card.get("swimlane") or ""),
+        "position": int(card.get("position") or 0),
+        "closed": bool(card.get("closed")),
+        "metadata": metadata,
+    }
+    return {
+        "content_sha256": hashlib.sha256(
+            json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        "metadata_keys": sorted(metadata),
+        "column": content["column"],
+        "swimlane": content["swimlane"],
+        "closed": content["closed"],
+    }
+
+
+def _restore_inventory(client: Any, board_id: int) -> dict[str, dict[str, Any]]:
+    from secretary.tasks import TaskError, all_project_cards
+
+    result: dict[str, dict[str, Any]] = {}
+    for row in all_project_cards(client, board_id):
+        if not isinstance(row, dict) or not str(row.get("reference") or ""):
+            continue
+        reference = str(row["reference"])
+        if reference in result:
+            raise TaskError("backend_error", f"board contains duplicate reference: {reference}", 1)
+        result[reference] = row
+    return result
+
+
+def _validate_restore_inventory(
+    inventory: dict[str, dict[str, Any]], obligations: list[RestoreCardObligation]
+) -> None:
+    from secretary.tasks import TaskError
+
+    seen: set[str] = set()
+    for key, row in inventory.items():
+        reference = str(row.get("reference") or "")
+        if reference and (reference in seen or str(key) != reference):
+            raise TaskError("backend_error", f"board contains duplicate reference: {reference}", 1)
+        if reference:
+            seen.add(reference)
+    for item in obligations:
+        reference = str(item.card["reference"])
+        row = inventory.get(reference)
+        if row is None:
+            continue
+        if str(row.get("title") or "") != str(item.card["title"]) or str(row.get("description") or "") != str(
+            item.card.get("description") or ""
+        ):
+            raise TaskError(
+                "backend_error", f"existing restored reference has different content: {reference}", 1
+            )
+
+
+def _restore_task_id(inventory: dict[str, dict[str, Any]], item: RestoreCardObligation) -> int:
+    from secretary.tasks import TaskError, _positive_int
+
+    reference = str(item.card["reference"])
+    task_id = _positive_int(inventory.get(reference, {}).get("id"))
+    if task_id is None:
+        raise TaskError("backend_error", f"restored reference has an invalid backend row: {reference}", 1)
+    return task_id
+
+
+def _restore_placement_matches(row: dict[str, Any], item: RestoreCardObligation) -> bool:
+    try:
+        return (
+            int(row.get("column_id") or 0) == item.column_id
+            and int(row.get("swimlane_id") or 0) == item.swimlane_id
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _metadata_map(answer: Any) -> dict[str, str]:
+    from secretary.tasks import TaskError
+
+    if answer is not None and not isinstance(answer, dict):
+        raise TaskError("backend_error", "Kanboard returned invalid task metadata", 1)
+    return {str(key): str(value) for key, value in (answer or {}).items()}
+
+
 def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurrence]) -> None:
     """Restore ordered comment histories without the interactive writer read cycle.
 

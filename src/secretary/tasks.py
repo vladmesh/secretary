@@ -67,6 +67,14 @@ class TaskError(Exception):
         super().__init__(message)
 
 
+class _BatchCallRejected(TaskError):
+    """A structurally valid aggregate reply with definite rejected member ids."""
+
+    def __init__(self, failed_ids: set[int]) -> None:
+        self.failed_ids = frozenset(failed_ids)
+        super().__init__("backend_error", "Kanboard rejected one or more batch calls", 1)
+
+
 class ArtifactOwnershipTaskError(TaskError):
     """The task-protocol form of a registry-backed ownership violation."""
 
@@ -482,6 +490,34 @@ class KanboardClient:
             raise TaskError("backend_error", "Kanboard rejected the read request", 1)
         return document.get("result")
 
+    @staticmethod
+    def preflight_call(method: str, params: dict[str, Any], *, identifier: int = 0) -> int:
+        """Validate and size one call without posting it."""
+        try:
+            size = len(
+                json.dumps(_rpc_request(identifier, method, params), separators=(",", ":")).encode("utf-8")
+            )
+        except (TypeError, ValueError):
+            raise TaskError("validation", "Kanboard batch call is not JSON serializable", 2) from None
+        if size + 2 > _BATCH_BYTES:
+            raise TaskError("validation", "one Kanboard batch call exceeds the byte limit", 2)
+        return size
+
+    def _preflight_batch(
+        self, calls: Iterable[tuple[str, dict[str, Any]]]
+    ) -> tuple[list[tuple[str, dict[str, Any]]], list[int]]:
+        prepared = list(calls)
+        return prepared, [
+            self.preflight_call(method, params, identifier=index)
+            for index, (method, params) in enumerate(prepared)
+        ]
+
+    def preflight_batch(
+        self, calls: Iterable[tuple[str, dict[str, Any]]]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Prove every member fits the wire contract before a caller stages or mutates."""
+        return self._preflight_batch(calls)[0]
+
     def call_batch(self, calls: Iterable[tuple[str, dict[str, Any]]]) -> list[Any]:
         """Run `[(method, params), ...]` in one request each chunk; return results in call order.
 
@@ -489,7 +525,7 @@ class KanboardClient:
         otherwise pays one round trip per task. Requests go out in bounded chunks so a large board
         does not become one oversized request.
         """
-        calls = list(calls)
+        calls, encoded_sizes = self._preflight_batch(calls)
         results: list[Any] = [None] * len(calls)
         start = 0
         while start < len(calls):
@@ -505,7 +541,7 @@ class KanboardClient:
                 if next_reads > _BATCH_COMMENT_CHUNK or next_writes > _BATCH_WRITE_CHUNK:
                     break
                 request = _rpc_request(index, method, params)
-                encoded_size = len(json.dumps(request, separators=(",", ":")).encode("utf-8"))
+                encoded_size = encoded_sizes[index]
                 next_bytes = request_bytes + encoded_size + bool(requests)
                 if next_bytes > _BATCH_BYTES:
                     if not requests:
@@ -519,6 +555,7 @@ class KanboardClient:
             if not isinstance(document, list):
                 raise TaskError("backend_error", "Kanboard rejected the batch request", 1)
             answers: dict[int, Any] = {}
+            rejected: set[int] = set()
             expected = set(range(start, start + len(requests)))
             for entry in document:
                 if (
@@ -529,12 +566,16 @@ class KanboardClient:
                     or entry.get("id") not in expected
                     or entry.get("id") in answers
                     or ("result" in entry) == ("error" in entry)
-                    or "error" in entry
                 ):
                     raise TaskError("backend_error", "Kanboard returned an invalid batch answer", 1)
-                answers[entry["id"]] = entry["result"]
+                identifier = entry["id"]
+                answers[identifier] = entry.get("result")
+                if "error" in entry:
+                    rejected.add(identifier)
             if set(answers) != expected:
                 raise TaskError("backend_error", "Kanboard returned an incomplete batch answer", 1)
+            if rejected:
+                raise _BatchCallRejected(rejected)
             for index in expected:
                 results[index] = answers[index]
             start += len(requests)
@@ -3956,12 +3997,21 @@ class TaskWriter:
             raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
         return {"action": kind, "task": task, "event_id": event_id, "replayed": False}
 
-    def reconcile(self, *, defer_restore_comments: bool = False) -> tuple[int, int]:
+    def reconcile(
+        self, *, defer_restore_comments: bool = False, defer_bulk_restore: bool = False
+    ) -> tuple[int, int]:
         repaired = 0
         unresolved = 0
         for event in self.audit.pending_events():
             try:
                 if defer_restore_comments and event.get("kind") == "restored_comment":
+                    continue
+                if defer_bulk_restore and event.get("kind") == "restored_bulk":
+                    continue
+                if event.get("kind") == "restored_bulk":
+                    # Normalized restore owns the canon and the whole-board evidence needed to
+                    # finish this obligation. Generic per-card reconciliation must not publish it.
+                    unresolved += 1
                     continue
                 if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
                     subject = event.get("subject") if isinstance(event.get("subject"), dict) else {}
@@ -4549,6 +4599,10 @@ def _enum_or_none(value: Any, allowed: set[str]) -> str | None:
 
 
 def _matching_swimlane(swimlanes: dict[int, str], project: str) -> int | None:
+    exact = project.casefold()
+    for identifier, name in swimlanes.items():
+        if name.casefold() == exact:
+            return identifier
     wanted = re.sub(r"[^a-z0-9]+", "", project.lower())
     for identifier, name in swimlanes.items():
         candidate = re.sub(r"[^a-z0-9]+", "", name.lower())
