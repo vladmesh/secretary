@@ -337,7 +337,9 @@ def reconcile_restore_order(
         event["backend"]["revision"] = f"order:{digest}"
         writer.audit.stage(request_id, event)
         writer.audit.append(request_id, event)
-    except (TaskError, OSError, KeyError, TypeError, ValueError):
+    except TaskError as exc:
+        raise TaskError("audit_pending", f"restore order repair is pending: {exc.message}", 4) from None
+    except (OSError, KeyError, TypeError, ValueError):
         raise TaskError("audit_pending", "restore order repair is pending", 4) from None
 
 
@@ -405,7 +407,16 @@ def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
 def _live_restore_group(
     writer: Any, column: str, swimlane: str
 ) -> tuple[list[str], dict[str, dict[str, Any]]]:
-    """Read one active group directly from the authoritative board rows."""
+    """Read one active group directly from the authoritative board rows.
+
+    The restore creates every row before it closes any archived row, so each
+    placement is made while the group is dense and a later close can leave
+    holes, but cannot create an active-position tie. Reference is therefore
+    only the canonical deterministic tie-breaker for legacy/raw anomalies. If
+    restore timing ever changes and a backend tie has a different visible
+    order, the final authoritative proof and parity gate disagree and fail
+    closed instead of publishing this repair.
+    """
     from secretary.tasks import TaskError, _positive_int, _task_is_active, all_project_cards
 
     board_id, columns, swimlanes = writer.reader._board()

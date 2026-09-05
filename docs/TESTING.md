@@ -196,10 +196,12 @@ result shape and disposable timeout canary live in
 
 `tests.test_restore` also models Kanboard's post-close position behavior. Its focused order cases cover the
 minimal `A active position 1 / B archived historical position 1 / C active position 2` regression, mixed Task,
-Product and Issue rows, retry of an already populated parity-failed target, four mismatch groups sampled from
-the sanitized production-shaped evidence, lost reads, malformed move results and interruption after the group
-effect but before audit append. They assert exact active relative order, retained archived comments and duplicate
-occurrences, no duplicate references, no unrelated retry writes and a placement-free third run:
+Product and Issue rows, retry of an already populated parity-failed target, and the full 151-, 156-, 9- and
+12-row active sequences from all four sanitized production mismatch groups. The fixture covers near-total
+reversal, a correct prefix with a long disordered tail, localized disorder and full reversal; it requires exactly
+131 moves before two placement-free passes. Lost reads, malformed move results and interruption after the group
+effect but before audit append are covered separately. The cases assert exact active relative order, retained
+archived comments and duplicate occurrences, no duplicate references and no unrelated retry writes:
 
 ```console
 PYTHONPATH=src python3 -m unittest -v \

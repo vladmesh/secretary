@@ -37,7 +37,7 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
-from secretary.tasks import TaskAudit, TaskReader, TaskWriter
+from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.fakes.sprints import SprintKanboard
 from tests.orca_fixtures import legacy_orca_runtime
 from tests.restore_fixtures import (
@@ -842,6 +842,29 @@ class RestoreTests(unittest.TestCase):
                         [event["kind"] for event in TaskAudit(data_dir).pending_events()],
                         ["restored_order"],
                     )
+                    pending = TaskAudit(data_dir).pending_events()[0]
+                    unexpected = {
+                        "id": 999,
+                        "reference": "unexpected-active-row",
+                        "title": "Unexpected",
+                        "description": "",
+                        "column_id": 2,
+                        "swimlane_id": 4,
+                        "position": 3,
+                        "date_creation": "1720000200",
+                        "date_modification": "1720000200",
+                    }
+                    client.tasks.append(unexpected)
+                    with self.assertRaisesRegex(
+                        TaskError, "restore order group does not match normalized records"
+                    ):
+                        TaskWriter(client, data_dir=data_dir).reconcile_restore_order(
+                            column=str(pending["payload"]["column"]),
+                            swimlane=str(pending["payload"]["swimlane"]),
+                            references=list(pending["payload"]["references"]),
+                            request_id=str(pending["request_id"]),
+                        )
+                    client.tasks.remove(unexpected)
                     self.assertEqual(TaskAudit(data_dir).reconcile(), (0, 1))
                     self.assertEqual(import_normalized_board(data_dir, client=client), 3)
                 else:
@@ -898,17 +921,28 @@ class RestoreTests(unittest.TestCase):
             data_dir = Path(tmpdir) / "secretary-data"
             init_layout(data_dir)
             client = _PostCloseOrderKanboard()
-            client.swimlanes.extend(
+            client.swimlanes = [
+                {"id": 4, "name": "secretary", "position": 1},
+                {"id": 5, "name": "codegen", "position": 2},
+                {"id": 6, "name": "butler", "position": 3},
+            ]
+            self.assertEqual(
+                [(group["column"], group["swimlane"], group["active_count"]) for group in fixture["groups"]],
                 [
-                    {"id": 5, "name": "codegen", "position": 2},
-                    {"id": 6, "name": "butler", "position": 3},
-                ]
+                    ("Issues", "secretary", 151),
+                    ("Issues", "codegen", 156),
+                    ("Issues", "butler", 9),
+                    ("Done", "secretary", 12),
+                ],
             )
             column_ids = {"Issues": 1, "Done": 6}
-            lane_ids = {"Secretary": 4, "codegen": 5, "butler": 6}
+            lane_ids = {"secretary": 4, "codegen": 5, "butler": 6}
             cards: list[dict[str, object]] = []
             actual: dict[str, dict[str, object]] = {}
             for group in fixture["groups"]:
+                self.assertEqual(len(group["expected"]), group["active_count"])
+                self.assertEqual(len(group["failed_order"]), group["active_count"])
+                self.assertEqual(set(group["expected"]), set(group["failed_order"]))
                 for position, reference in enumerate(group["failed_order"], 1):
                     task_id = client.next_task_id
                     client.next_task_id += 1
@@ -940,14 +974,39 @@ class RestoreTests(unittest.TestCase):
             writer = TaskWriter(client, data_dir=data_dir)
             restore_module._reconcile_restored_order(writer, cards, actual, "restore:evidence:")
             first_moves = len([call for call in client.calls if call[0] == "moveTaskPosition"])
+            self.assertEqual(first_moves, 131)
+            moves_by_group: dict[tuple[int, int], int] = {}
+            for method, params in client.calls:
+                if method == "moveTaskPosition":
+                    key = (int(params["column_id"]), int(params["swimlane_id"]))
+                    moves_by_group[key] = moves_by_group.get(key, 0) + 1
+            self.assertGreater(moves_by_group[(1, 4)], 1)
+            self.assertGreater(moves_by_group[(1, 5)], 1)
             fresh = TaskReader(client).restore_snapshot()
             self.assertFalse(_restored_order_mismatch(cards, fresh))
+            for group in fixture["groups"]:
+                group_rows = [
+                    task
+                    for task in client.tasks
+                    if int(task["column_id"]) == column_ids[group["column"]]
+                    and int(task["swimlane_id"]) == lane_ids[group["swimlane"]]
+                ]
+                repaired = [
+                    str(task["reference"])
+                    for task in sorted(
+                        group_rows,
+                        key=lambda task: (int(task["position"]), str(task["reference"])),
+                    )
+                ]
+                self.assertEqual(repaired, group["expected"])
             self.assertEqual(
                 len(TaskAudit(data_dir).events(kind="restored_order")),
                 4,
             )
 
             restore_module._reconcile_restored_order(writer, cards, fresh, "restore:evidence:")
+            third = TaskReader(client).restore_snapshot()
+            restore_module._reconcile_restored_order(writer, cards, third, "restore:evidence:")
             self.assertEqual(
                 first_moves,
                 len([call for call in client.calls if call[0] == "moveTaskPosition"]),
