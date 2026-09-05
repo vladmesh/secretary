@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from secretary.tasks import (
+    _STATE_BY_COLUMN,
     ACTIVE_STATES,
     TaskError,
     TaskWriter,
@@ -148,16 +149,10 @@ def preview_reference_repair(writer: TaskWriter, *, _allow_repair_pending: bool 
         for row in group:
             task_id = _positive_int(row.get("id")) or -1
             column = columns.get(_positive_int(row.get("column_id")) or -1, "")
-            state = {
-                "Issues": "issues",
-                "Ready": "ready",
-                "In progress": "in_progress",
-                "Validate": "validate",
-                "Assessment": "assessment",
-                "Blocked": "blocked",
-                "Done": "done",
-            }.get(column, "unknown")
-            if _task_is_active(row) and (state in ACTIVE_STATES or metadata.get(task_id, {}).get("claim")):
+            state = _STATE_BY_COLUMN.get(column)
+            if _task_is_active(row) and (
+                state is None or state in ACTIVE_STATES or metadata.get(task_id, {}).get("claim")
+            ):
                 reasons.append("duplicate contains active work")
         evidence = _created_evidence(writer, reference, suffix) if suffix is not None else None
         if producer is not None and retained is not None:
@@ -301,14 +296,24 @@ def apply_reference_repair(
             if writer.audit.committed_event(str(event["request_id"])) is not None:
                 repaired.append({"backend_id": event["backend"]["task_id"], "reference": event["ref"]})
                 continue
-            finish_pending_reference_repair(writer, event)
+            finish_pending_reference_repair(writer, event, _allocation_locked=True)
             writer.audit.stage(str(event["request_id"]), event)
             writer.audit.append(str(event["request_id"]), event)
             repaired.append({"backend_id": event["backend"]["task_id"], "reference": event["ref"]})
         return {"action": "reference_repaired", "plan_id": plan_id, "repaired": repaired}
 
 
-def finish_pending_reference_repair(writer: TaskWriter, event: dict[str, Any]) -> None:
+def finish_pending_reference_repair(
+    writer: TaskWriter, event: dict[str, Any], *, _allocation_locked: bool = False
+) -> None:
+    if _allocation_locked:
+        _finish_pending_reference_repair_locked(writer, event)
+        return
+    with reference_allocation_lock(writer.data_dir):
+        _finish_pending_reference_repair_locked(writer, event)
+
+
+def _finish_pending_reference_repair_locked(writer: TaskWriter, event: dict[str, Any]) -> None:
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     task_id = _positive_int(event.get("backend", {}).get("task_id"))
     old_ref, new_ref = _text(payload.get("old_reference")), _text(payload.get("new_reference"))
@@ -325,7 +330,21 @@ def finish_pending_reference_repair(writer: TaskWriter, event: dict[str, Any]) -
         if _text(row.get("reference")) == new_ref and _positive_int(row.get("id")) != task_id
     ]
     if claimants:
-        raise TaskError("validation", f"target reference {new_ref} is already claimed", 2)
+        if _text(target.get("reference")) != old_ref:
+            raise TaskError("validation", f"target reference {new_ref} is already claimed", 2)
+        meta = _task_metadata(writer.client.call("getTaskMetadata", task_id=task_id))
+        project = meta.get("project", "")
+        if not project:
+            raise TaskError("backend_error", "pending reference repair target metadata is incomplete", 1)
+        replacement = next_reference(rows, f"{project}-")
+        superseded = payload.get("superseded_allocations")
+        history = list(superseded) if isinstance(superseded, list) else []
+        history.append(new_ref)
+        payload["new_reference"] = replacement
+        payload["superseded_allocations"] = history
+        event["ref"] = replacement
+        writer.audit.stage(str(event["request_id"]), event)
+        new_ref = replacement
     if _text(target.get("reference")) == old_ref and not writer.client.call(
         "updateTask", id=task_id, reference=new_ref
     ):
@@ -338,6 +357,7 @@ def finish_pending_reference_repair(writer: TaskWriter, event: dict[str, Any]) -
             "plan_id": payload.get("plan_id"),
             "reason": payload.get("reason"),
             "history_boundary_event_id": payload.get("history_boundary_event_id"),
+            "superseded_allocations": payload.get("superseded_allocations", []),
         },
         sort_keys=True,
         separators=(",", ":"),

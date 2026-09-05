@@ -21,13 +21,13 @@ from secretary.board.done_retention import close_old_done
 from secretary.board.host import TransitionRequest
 from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
+from secretary.board.reference_repair import apply_reference_repair, preview_reference_repair
 from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.board_transport import BoardTransport
 from secretary.cli import main
 from secretary.data import export_board
 from secretary.dispatcher_state import claim_mismatch
-from secretary.board.reference_repair import apply_reference_repair, preview_reference_repair
 from secretary.restore import import_normalized_board
 from secretary.routing_journal import (
     HeadRun,
@@ -518,6 +518,65 @@ class TaskWriterTests(unittest.TestCase):
             self.writer.audit.stage(request_id, event)
             self.writer.audit.append(request_id, event)
 
+    def _interrupt_repair_then_claim_pending_target(self) -> tuple[dict[str, object], dict[str, object]]:
+        self._duplicate_reference_fixture()
+        plan = preview_reference_repair(self.writer)
+        self.client.fail_metadata = True
+        with (
+            mock.patch("secretary.secret_store.redaction_values", return_value=()),
+            self.assertRaisesRegex(TaskError, "Kanboard rejected"),
+        ):
+            apply_reference_repair(
+                self.writer,
+                plan_id=str(plan["plan_id"]),
+                task_ids=[784, 793],
+                reason="interrupted repair",
+                request_id="repair-target-stolen",
+            )
+        self.client.fail_metadata = False
+        with mock.patch("secretary.secret_store.redaction_values", return_value=()):
+            created = self.writer.create(
+                role="worker",
+                actor="reviewer-probe",
+                project="secretary",
+                task_type="research",
+                title="Intervening proposal",
+                target="issues",
+                request_id="intervening-create",
+            )
+        self.assertEqual(created["task"]["ref"], "secretary-795")
+        self.assertEqual(
+            next(row for row in self.client.tasks if row["id"] == 793)["reference"],
+            "secretary-793",
+        )
+        return plan, created["task"]
+
+    def _assert_stolen_target_recovery(self, created: dict[str, object]) -> None:
+        references = {int(row["id"]): row["reference"] for row in self.client.tasks}
+        self.assertEqual(references[784], "secretary-794")
+        self.assertEqual(references[793], "secretary-796")
+        self.assertEqual(references[int(str(created["id"]).removeprefix("task_kanboard_"))], "secretary-795")
+        events = self.writer.audit.events(kind="reference_repaired")
+        repaired = next(event for event in events if event["backend"]["task_id"] == 793)
+        self.assertEqual(repaired["ref"], "secretary-796")
+        self.assertEqual(repaired["payload"]["new_reference"], "secretary-796")
+        self.assertEqual(repaired["payload"]["superseded_allocations"], ["secretary-795"])
+        provenance = json.loads(self.client.metadata[793]["reference_repair"])
+        self.assertEqual(provenance["new_reference"], "secretary-796")
+        self.assertEqual(provenance["superseded_allocations"], ["secretary-795"])
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.client.metadata[12]["record_type"] = "task"
+        self.client.metadata[13].update(
+            {"record_type": "task", "project": "legacy", "task_type": "research"}
+        )
+        exported = export_board(
+            Path(self.tmpdir.name),
+            instance_dir=Path(self.tmpdir.name),
+            reader=TaskReader(self.client),
+            sprint_client=SprintKanboard(),
+        )
+        self.assertEqual(exported.count, 7)
+
     def test_duplicate_reference_preview_and_apply_use_exact_producer_evidence(self) -> None:
         self._duplicate_reference_fixture()
         with self.assertRaisesRegex(RuntimeError, "secretary-784, secretary-793"):
@@ -608,6 +667,74 @@ class TaskWriterTests(unittest.TestCase):
         self.client.tasks[-3]["column_id"] = 3
         plan = preview_reference_repair(self.writer)
         self.assertIn("duplicate contains active work", plan["duplicates"][0]["refusals"])
+
+    def test_duplicate_reference_repair_refuses_missing_metadata(self) -> None:
+        self._duplicate_reference_fixture()
+        self.client.metadata[784].pop("project")
+
+        plan = preview_reference_repair(self.writer)
+
+        self.assertIn("required task metadata is missing", plan["duplicates"][0]["refusals"])
+        with (
+            mock.patch("secretary.secret_store.redaction_values", return_value=()),
+            self.assertRaisesRegex(TaskError, "unresolved evidence") as raised,
+        ):
+            apply_reference_repair(
+                self.writer,
+                plan_id=plan["plan_id"],
+                task_ids=[784, 793],
+                reason="missing metadata must fail closed",
+                request_id="repair-missing-metadata",
+            )
+        self.assertEqual(raised.exception.code, "repair_refused")
+        self.assertFalse(any(method == "updateTask" for method, _params in self.client.calls))
+
+    def test_duplicate_reference_preview_refuses_unrecognized_active_column(self) -> None:
+        self._duplicate_reference_fixture()
+        row = next(row for row in self.client.tasks if row["id"] == 784)
+        row["is_active"] = 1
+        row["column_id"] = 99
+
+        plan = preview_reference_repair(self.writer)
+
+        self.assertIn("duplicate contains active work", plan["duplicates"][0]["refusals"])
+
+    def test_duplicate_reference_retry_reallocates_a_stolen_pending_target(self) -> None:
+        plan, created = self._interrupt_repair_then_claim_pending_target()
+
+        with mock.patch("secretary.secret_store.redaction_values", return_value=()):
+            result = apply_reference_repair(
+                self.writer,
+                plan_id=str(plan["plan_id"]),
+                task_ids=[784, 793],
+                reason="interrupted repair",
+                request_id="repair-target-stolen",
+            )
+
+        self.assertEqual(
+            result["repaired"],
+            [
+                {"backend_id": 784, "reference": "secretary-794"},
+                {"backend_id": 793, "reference": "secretary-796"},
+            ],
+        )
+        self._assert_stolen_target_recovery(created)
+
+    def test_reconcile_audit_reallocates_a_stolen_pending_target(self) -> None:
+        _plan, created = self._interrupt_repair_then_claim_pending_target()
+        output, errors = io.StringIO(), io.StringIO()
+
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(["task", "reconcile-audit", "--data-dir", self.tmpdir.name])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(json.loads(output.getvalue()), {"repaired": 2, "unresolved": 0})
+        self._assert_stolen_target_recovery(created)
 
     def test_duplicate_reference_repair_resumes_after_reference_write(self) -> None:
         self._duplicate_reference_fixture()

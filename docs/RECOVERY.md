@@ -427,11 +427,14 @@ whole preview before its first write, stages all audit intents, then updates eac
 `reference_repair` metadata plus an append-only `reference_repaired` event. A retry with the same request ID,
 plan, IDs and reason resumes or proves the same effects. It never deletes, merges, reopens or moves a card;
 titles, descriptions, comments, metadata, closed state and position remain unchanged. A target acquired by
-another row, mixed record types, missing producer evidence, active work, reference-bearing task/sprint or
-current run-state companions, or another concurrent board revision fails closed. After a committed backend
-change, pending audit intentionally blocks export until the identical retry or `task reconcile-audit` proves
-and completes it. Rollback is therefore an operator-reviewed reverse repair, never a hand edit of checkpoint
-files or Kanboard storage.
+another row before apply, mixed record types, missing producer evidence, active work, reference-bearing
+task/sprint or current run-state companions, or another concurrent board revision fails closed. After a
+committed backend change, pending audit intentionally blocks export until the identical retry or
+`task reconcile-audit` proves and completes it. If another card claims a still-untouched row's proposed target
+after an interruption, either recovery command preserves that card and reallocates the repair target under the
+normal allocation lock; the committed provenance records every superseded allocation. A row already changed
+by the repair is never reallocated around a claimant. Rollback is an operator-reviewed follow-up operation
+after audit reconciliation, never a hand edit of checkpoint files, pending audit, or Kanboard storage.
 
 For the post-merge live repair, the PO runs this exact sequence: preview and retain its plan output; apply that
 plan to the listed backend IDs; let the managed checkpoint writer publish; verify the private remote branch SHA
