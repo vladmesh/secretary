@@ -55,6 +55,7 @@ from secretary.host import (
 )
 from secretary.host_apply import resolve_installed_packaged
 from secretary.host_commands import add_reconcile_subcommands
+from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.installation import add_install_commands
 from secretary.knowledge_write import (
     KnowledgeError,
@@ -75,7 +76,6 @@ from secretary.memory_write import (
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
 from secretary.product_issue_commands import add_product_issue_subcommands
 from secretary.provision import apply_provision_result, render_result, start_provision
-from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.restore import RestoreError, _target, restore_findings
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
 from secretary.role_skills import add_role_skills_subcommands
@@ -1007,8 +1007,9 @@ def print_recovery_inventory(recovery: dict[str, object]) -> None:
             if not isinstance(row, dict):
                 continue
             verified = row.get("verified_at") or "never"
+            reason = f" - {row['reason']}" if row.get("reason") else ""
             print(
-                f"  {row['consumer']}: {row['state']} - {row['reason']} "
+                f"  {row['consumer']}: {row['state']}{reason} "
                 f"[source={row['source']}, verification={row['verification_source']} at {verified}; "
                 f"capability={row['capability']}]"
             )
@@ -1081,6 +1082,12 @@ def checkpoint_findings(report) -> list[str]:
     findings: list[str] = []
     if snapshot["remote_diverged"]:
         findings.append(f"remote diverged: {snapshot['push_reason'] or 'push stopped, resolve by hand'}")
+    elif snapshot["push_status"] == "failed":
+        attempted = snapshot["push_attempted_at"] or "unknown time"
+        findings.append(
+            f"checkpoint push failed at {attempted}: "
+            f"{snapshot['push_reason'] or 'push failure reason unavailable'}"
+        )
     if snapshot["blocked_reason"]:
         findings.append(f"checkpoint gate blocked: {snapshot['blocked_reason']}")
     lag = snapshot["lag_minutes"]

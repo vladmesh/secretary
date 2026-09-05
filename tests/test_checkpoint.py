@@ -1307,6 +1307,29 @@ class CheckpointSnapshotTests(unittest.TestCase):
         self.assertIn("alarm: remote diverged", lines)
         self.assertIn("blocked: secret detected", lines)
 
+    def test_failed_operation_attempt_has_its_own_time_and_age(self):
+        attempted = "2026-07-20T10:00:00+00:00"
+        snapshot = checkpoint_snapshot(
+            self.instance_dir,
+            push_state={
+                "status": "failed",
+                "reason": "earlier credential was missing",
+                "attempted_at": attempted,
+                "attempted_epoch": datetime.fromisoformat(attempted).timestamp(),
+                "last_push_at": "2026-07-20T09:00:00+00:00",
+                "last_push_commit": self.head,
+            },
+            now=datetime.fromisoformat("2026-07-20T10:12:00+00:00").timestamp(),
+        )
+
+        self.assertEqual(snapshot["push_attempted_at"], attempted)
+        self.assertEqual(snapshot["push_attempt_age_minutes"], 12)
+        self.assertEqual(snapshot["push_attempt_freshness"], "fresh")
+        self.assertEqual(snapshot["last_push_at"], "2026-07-20T09:00:00+00:00")
+        lines = "\n".join(render_checkpoint_lines(snapshot))
+        self.assertIn("last push attempt: 2026-07-20T10:00:00+00:00 (12 min ago, fresh)", lines)
+        self.assertIn("push reason: earlier credential was missing", lines)
+
     def test_a_committed_gate_reports_no_blocking_reason(self):
         snapshot = checkpoint_snapshot(
             self.instance_dir,

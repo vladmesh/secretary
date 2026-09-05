@@ -318,12 +318,14 @@ altering scheduling or runtime behavior.
 ## Status and doctor
 
 `secretary status --json --instance INSTANCE` is the read-only operational snapshot. It is safe to poll.
-the `recovery` object is the recovery-readiness inventory shared with text and JSON doctor. Its
+The `recovery` object is the recovery-readiness inventory shared with text and JSON doctor. Its
 `resources` array contains every resource in the installed head registry, including resources no head
 has selected recently. `source` distinguishes a fresh `dispatcher-cache` verdict from a
 `live-read-only-probe` and an unavailable observation; `freshness`, `observed_at`, `age_seconds`, and
 `observed_state` make a stale cached success visibly different from current readiness. Offline reads
-never probe and represent absent evidence as `unknown` and expired evidence as `stale`.
+never probe and represent absent evidence as `unknown` and expired evidence as `stale`. Status always
+uses that metadata-only resource view so it remains safe to poll; doctor performs the bounded live
+read-only probes unless `--offline` is selected. Neither command writes the dispatcher probe cache.
 
 `recovery.credential_consumers` inventories the managed checkpoint GitHub consumer separately from
 provider CLI logins. The latter remain intentionally unmanaged. Consumer readiness and verification

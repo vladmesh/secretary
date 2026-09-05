@@ -67,7 +67,9 @@ def collect_status(
         write_state=_object(production.get("checkpoint")),
         push_state=_object(production.get("checkpoint_push")),
     )
-    recovery = recovery or collect_recovery_inventory(report, inspect_live=not offline, checkpoint=checkpoint)
+    # Status is a pollable metadata snapshot. Provider-backed readiness is therefore cache-only;
+    # doctor supplies an explicitly live inventory when its caller permits live inspection.
+    recovery = recovery or collect_recovery_inventory(report, inspect_live=False, checkpoint=checkpoint)
     return {
         "schema_version": STATUS_SCHEMA_VERSION,
         "installation": {
@@ -181,9 +183,7 @@ def _sprints(
         )
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
         return {
-            "items": reader.statuses(
-                observers=observers, headless=headless_cards(production), create=False
-            ),
+            "items": reader.statuses(observers=observers, headless=headless_cards(production), create=False),
             "error": None,
         }
     except TaskError as exc:

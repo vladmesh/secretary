@@ -10,11 +10,15 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.checkpoint import _credential_snapshot
+from secretary.cli import main
 from secretary.config import validate_instance
 from secretary.head_health import HeadReadiness
+from secretary.host import CollectResult, HostInventory
 from secretary.infra.recovery_inventory import collect_recovery_inventory
 from secretary.secret_store import initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
+from secretary.status import collect_status
+from tests.fakes.dispatcher import FakeKanboard
 from tests.head_registry import write_installed_pair
 
 REGISTRY = """resources:
@@ -110,6 +114,20 @@ class RecoveryInventoryTests(unittest.TestCase):
         self.assertEqual(rows["used"]["state"], "unauthenticated")
         self.assertEqual(rows["used"]["source"], "live-read-only-probe")
 
+    def test_online_status_keeps_resource_readiness_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, report = self.fixture(Path(tmp))
+            inventory = HostInventory(units=set(), unit_states={})
+            with (
+                mock.patch("secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
+                mock.patch("secretary.infra.recovery_inventory.run_probe") as probe,
+            ):
+                snapshot = collect_status(report, sprint_client=FakeKanboard())
+
+        probe.assert_not_called()
+        self.assertTrue(snapshot["recovery"]["resources"])
+        self.assertTrue(all(row["source"] == "unavailable" for row in snapshot["recovery"]["resources"]))
+
     def test_managed_readiness_and_old_push_failure_remain_independent(self) -> None:
         checkpoint = {
             "push_status": "failed",
@@ -129,8 +147,24 @@ class RecoveryInventoryTests(unittest.TestCase):
 
         consumer = snapshot["credential_consumers"][0]
         self.assertEqual(consumer["state"], "managed-ready")
+        self.assertEqual(consumer["reason"], "")
         self.assertEqual(checkpoint["push_status"], "failed")
         self.assertNotIn("earlier credential was missing", consumer["reason"])
+
+    def test_absent_consumer_reason_is_distinct_from_a_healthy_empty_reason(self) -> None:
+        checkpoint = {"credential": {"state": "unknown"}}
+        now = time.time()
+        recorded = {"used": {"status": "ready", "reason": "", "checked_at": now}}
+        with tempfile.TemporaryDirectory() as tmp:
+            _, report = self.fixture(Path(tmp), recorded)
+            snapshot = collect_recovery_inventory(report, inspect_live=False, now=now, checkpoint=checkpoint)
+
+        consumers = {row["consumer"]: row for row in snapshot["credential_consumers"]}
+        self.assertEqual(
+            consumers["checkpoint-github"]["reason"],
+            "checkpoint credential has not been inspected",
+        )
+        self.assertEqual(consumers["provider-login:used"]["reason"], "")
 
     def test_git_bypass_is_metadata_only_and_actionable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,6 +186,17 @@ class RecoveryInventoryTests(unittest.TestCase):
             git(instance, "remote", "set-url", "origin", str(Path(tmp) / "checkpoint.git"))
             snapshot = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
 
+        self.assertFalse(any(row.get("kind") == "manual-transport" for row in snapshot["bypasses"]))
+
+    def test_applicable_rewrite_is_visible_for_a_local_checkpoint_remote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance, report = self.fixture(Path(tmp))
+            local = str(Path(tmp) / "checkpoint.git")
+            git(instance, "remote", "set-url", "origin", local)
+            git(instance, "config", "url.https://example.invalid/.insteadOf", local)
+            snapshot = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
+
+        self.assertTrue(any(row.get("kind") == "insteadOf" for row in snapshot["bypasses"]))
         self.assertFalse(any(row.get("kind") == "manual-transport" for row in snapshot["bypasses"]))
 
     def test_instead_of_bypass_does_not_replace_managed_readiness(self) -> None:
@@ -198,6 +243,98 @@ class RecoveryInventoryTests(unittest.TestCase):
         conflict = next(row for row in conflicting["paths"] if row["capability"] == "runtime-env")
         self.assertEqual(match["state"], "supported")
         self.assertEqual(conflict["state"], "conflicting-override")
+
+    def test_instance_and_pipeline_run_state_path_provenance_is_truthful(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, report = self.fixture(root)
+            workspaces = root / "workspaces"
+            canonical = workspaces / "secretary" / "pipeline" / "state" / "pipeline"
+            bound = {"SECRETARY_INSTANCE": str(instance), "TA_WORKSPACES_ROOT": str(workspaces)}
+            with mock.patch.dict(os.environ, bound, clear=True):
+                declared = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
+            with mock.patch.dict(os.environ, {**bound, "TA_PIPELINE_STATE_DIR": str(canonical)}, clear=True):
+                matching = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
+            with mock.patch.dict(
+                os.environ,
+                {**bound, "TA_PIPELINE_STATE_DIR": str(root / "other-state")},
+                clear=True,
+            ):
+                conflicting = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
+
+        instance_row = next(row for row in declared["paths"] if row["capability"] == "instance")
+        self.assertEqual(instance_row["source"], "declared-installation")
+        run_declared = next(row for row in declared["paths"] if row["capability"] == "pipeline-run-state")
+        run_matching = next(row for row in matching["paths"] if row["capability"] == "pipeline-run-state")
+        run_conflicting = next(
+            row for row in conflicting["paths"] if row["capability"] == "pipeline-run-state"
+        )
+        self.assertEqual(run_declared["source"], "declared-installation")
+        self.assertEqual(run_matching["state"], "supported")
+        self.assertEqual(run_matching["source"], "environment-override")
+        self.assertEqual(run_conflicting["state"], "conflicting-override")
+
+    def test_status_and_doctor_leave_recovery_inputs_unchanged_and_launch_no_heads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, report = self.fixture(root)
+            data = report.data_dir
+            assert data is not None
+            initialize_store(
+                instance,
+                phrase=" ".join(RECOVERY_WORDS[:16]),
+                actor="read-only fixture",
+            )
+            dispatcher = data / "dispatcher"
+            dispatcher.mkdir(parents=True, exist_ok=True)
+            (dispatcher / "production-state.json").write_text(
+                json.dumps({"records": {}, "checkpoint_push": {"status": "failed"}}),
+                encoding="utf-8",
+            )
+            tasks = data / "tasks"
+            tasks.mkdir(parents=True)
+            (tasks / "audit.jsonl").write_text('{"event":"fixture"}\n', encoding="utf-8")
+            runtime = instance / "runtime.env"
+            runtime.write_text("FIXTURE=value\n", encoding="utf-8")
+            git(instance, "config", "fixture.read-only", "yes")
+
+            watched = [instance, dispatcher, tasks]
+
+            def snapshot() -> dict[str, bytes]:
+                files: dict[str, bytes] = {}
+                for target in watched:
+                    paths = (
+                        [target] if target.is_file() else sorted(p for p in target.rglob("*") if p.is_file())
+                    )
+                    for path in paths:
+                        files[str(path)] = path.read_bytes()
+                return files
+
+            before_files = snapshot()
+            bound_env = {
+                "HOME": str(root / "home"),
+                "SECRETARY_INSTANCE": str(instance),
+                "SECRETARY_RUNTIME_ENV_FILE": str(runtime),
+                "TA_PIPELINE_STATE_DIR": str(root / "run-state"),
+            }
+            with (
+                mock.patch.dict(os.environ, bound_env, clear=True),
+                mock.patch("secretary.infra.recovery_inventory.run_probe") as probe,
+                mock.patch("secretary.dispatch.host.CommandHostRuntime.prepare_worker") as worker,
+                mock.patch("secretary.dispatch.host.CommandHostRuntime.start_review") as reviewer,
+                mock.patch("secretary.dispatcher_observer._launch_observer") as observer,
+                mock.patch("builtins.print"),
+            ):
+                before_env = dict(os.environ)
+                self.assertIn(main(["status", "--offline", "--instance", str(instance)]), (0, 1))
+                self.assertIn(main(["doctor", "--offline", "--instance", str(instance)]), (0, 1))
+                self.assertEqual(dict(os.environ), before_env)
+                probe.assert_not_called()
+                worker.assert_not_called()
+                reviewer.assert_not_called()
+                observer.assert_not_called()
+
+            self.assertEqual(snapshot(), before_files)
 
     def test_missing_materialization_and_locked_store_are_not_claimed_healthy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -291,8 +291,9 @@ values.
 ## Observability
 
 `status` and `doctor` show checkpoint freshness: the time and hash of the last commit, the time of the
-last successful push, checkpoint lag in minutes and commits, the reason the gate is blocked, and the
-`remote diverged` state.
+last successful push, the last operation attempt and its age, checkpoint lag in minutes and commits,
+the reason the gate is blocked, and the `remote diverged` state. The attempt timestamp belongs to the
+current operation outcome; it does not replace the timestamp of the last successful push.
 
 A blocked checkpoint degrades the production tick and its durable telemetry. The dispatcher still
 contains the failure and retries the checkpoint on the next tick, but unit health and the steward must

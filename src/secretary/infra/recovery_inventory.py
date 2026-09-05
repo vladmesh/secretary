@@ -158,7 +158,9 @@ def _recorded(entry: object, resource: str) -> HeadReadiness | None:
     return HeadReadiness(
         resource,
         str(entry.get("status") or "unknown"),
-        str(entry.get("reason") or "recorded verdict has no reason"),
+        str(entry["reason"])
+        if "reason" in entry and entry["reason"] is not None
+        else "recorded verdict has no reason",
         checked_at,
         True,
     )
@@ -170,7 +172,11 @@ def _credential_consumers(
     rows: list[dict[str, Any]] = []
     credential = checkpoint.get("credential") if isinstance(checkpoint.get("credential"), dict) else {}
     credential_state = credential.get("state") or "unknown"
-    credential_reason = credential.get("reason") or "checkpoint credential has not been inspected"
+    credential_reason = (
+        str(credential["reason"])
+        if "reason" in credential and credential["reason"] is not None
+        else "checkpoint credential has not been inspected"
+    )
     try:
         if not (instance_dir / ".git").exists():
             raise state_repo.StateRepoError(f"instance repo is unavailable: {instance_dir}")
@@ -271,7 +277,7 @@ def _path_rows(report) -> list[dict[str, Any]]:
         _path_row(
             "instance",
             instance_dir,
-            str(instance_dir),
+            None,
             instance_dir,
             "pass the installed instance path explicitly",
         ),
@@ -297,21 +303,21 @@ def _path_rows(report) -> list[dict[str, Any]]:
             "make TA_SECRETARY_REPO match the installed head-registry source pin",
         ),
     ]
+    workspaces_override = os.environ.get("TA_WORKSPACES_ROOT") if environment_is_bound else None
+    workspaces = (
+        Path(workspaces_override).expanduser() if workspaces_override else Path.home() / "orca" / "workspaces"
+    )
+    canonical_state = (workspaces / "secretary" / "pipeline" / "state" / "pipeline").resolve(strict=False)
     state_override = os.environ.get("TA_PIPELINE_STATE_DIR") if environment_is_bound else None
-    if state_override:
-        path = Path(state_override).expanduser().resolve(strict=False)
-        rows.append(
-            {
-                "capability": "pipeline-run-state",
-                "canonical": None,
-                "configured": str(path),
-                "source": "TA_PIPELINE_STATE_DIR",
-                "state": "manual-only",
-                "supported": False,
-                "reason": "run-state path is selected by an ambient manual override",
-                "supported_next_action": "remove TA_PIPELINE_STATE_DIR and use the installation user's configured workspaces root",
-            }
+    rows.append(
+        _path_row(
+            "pipeline-run-state",
+            canonical_state,
+            state_override,
+            canonical_state,
+            "remove TA_PIPELINE_STATE_DIR or make it match the declared workspaces-root contract",
         )
+    )
     return rows
 
 
@@ -349,11 +355,9 @@ def _git_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
         transport = RemoteExecution(remote, "checkpoint", instance_dir=instance_dir).transport
     except state_repo.StateRepoError:
         return rows
-    if transport == "local":
-        return rows
     # A local/file remote is the supported hermetic checkpoint transport. It needs no
-    # authentication and therefore is not an authentication bypass. SSH and other unmanaged
-    # transports can consume ambient/manual authentication and remain actionable bypass rows.
+    # authentication and therefore adds no transport row. Applicable rewrites and ambient Git
+    # configuration are still inventoried below because Git can apply them before transport.
     if transport in {"ssh", "unmanaged", "https-unsupported"}:
         rows.append(
             {
@@ -392,6 +396,8 @@ def _git_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
             kind = "insteadOf"
             reason = "an applicable Git URL rewrite can bypass the declared checkpoint transport"
         else:
+            if transport == "local":
+                continue
             kind = "credential-helper"
             reason = "ambient Git credential configuration exists; managed pushes disable it, but manual Git may use it"
         rows.append(
@@ -406,6 +412,10 @@ def _git_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
                 "supported_next_action": "remove the ambient Git bypass after confirming no unrelated repository needs it",
             }
         )
+    if transport == "local":
+        # Credential helpers and files cannot authenticate a local transport. URL rewriting was
+        # still inspected above because an applicable rule can change which transport Git uses.
+        return rows
     candidates = [Path.home() / ".git-credentials"]
     xdg = os.environ.get("XDG_CONFIG_HOME")
     candidates.append((Path(xdg) if xdg else Path.home() / ".config") / "git" / "credentials")
