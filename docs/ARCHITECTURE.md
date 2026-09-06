@@ -226,6 +226,35 @@ workspace that cannot be prepared fails there, with nothing started and nothing 
 run. An operator-launched `secretary shell` session is excluded on purpose: a human is sitting in
 front of that terminal and can answer the dialog themselves.
 
+## The read layer
+
+`secretary.webproto` is the one place the three operator questions are answered — what is the
+system doing, what is this card doing, what happened to it next — and it is deliberately separate
+from whatever serves those answers. Sprint 1425 puts a web dashboard on top of it and a Telegram
+head after that, and both read this, not their own collectors.
+
+The separation buys one thing: a single set of beliefs about production. Two transports that each
+assembled "is the worker alive" would eventually disagree, and the operator would then have to
+work out which of their two dashboards was lying before they could act on either. So the layer
+owns the answers, and a transport owns only its protocol: it maps a typed error onto a status
+code or a message, renders a snapshot, and adds nothing to it. Nothing under `webproto` imports
+HTTP, sockets, a framework or a template engine, and a test asserts it.
+
+It also owns no facts. Health is `collect_status`, the collector `secretary status --json` already
+prints; projects are the instance's validated bindings; cards are `TaskReader`; history is the
+board's append-only audit journal, which is why a resumable cursor is a position in that journal
+rather than a new store; agents are the dispatcher's durable production state plus the launch
+heartbeats the head runtime already writes. Building a second collector for any of them would put
+a second answer next to a working one, which is the failure this layer exists to prevent.
+
+Two invariants are enforced rather than documented. It never writes: no operation mutates the
+board, the dispatcher state, the journal or the installation, and none takes an actor. And
+liveness is process state: a pane, terminal or window is not evidence about a head, for the reason
+`secretary head-status` exists — panes outlive, alias and stop drawing the processes behind them.
+
+The protocol, its schema, its states and its cursor semantics are in
+[Protocols](PROTOCOLS.md#reading-the-pipeline).
+
 ## The sprint observer head
 
 An open sprint gets its own observer head. It is neither an interactive session nor a worker: an
