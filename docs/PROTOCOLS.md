@@ -2619,6 +2619,208 @@ already uses; the transport is what turns a code into whatever its protocol says
 | `InvalidCursor` | `validation` | a cursor this layer did not issue, one belonging to another card, or one past the end of the journal — never silently reset to the beginning |
 | `InstallationUnavailable` | `backend_unavailable` | the instance config does not validate, so there is no data plane to read |
 
+## Running the pipeline
+
+The other half of `secretary.webproto`, and the half that produces what the read layer shows: three
+operations that raise a real Codex worker for one card, raise a real Claude reviewer by that
+worker's result, and read a run. They know as little about a transport as the reads do — no HTTP,
+no sockets, no framework — and their failures are typed codes rather than status numbers. Why the
+product runtime does not depend on Orca, and what it reuses instead, is in
+[Architecture](ARCHITECTURE.md#the-product-runtime).
+
+```bash
+python3 -P -m secretary web-run start  --instance I --ref REF --request-id ID --profile P [--instruction TEXT]
+python3 -P -m secretary web-run review --instance I --worker-run RUN --request-id ID --profile P
+python3 -P -m secretary web-run state  --instance I --run-id RUN
+python3 -P -m secretary web-run list   --instance I --ref REF
+```
+
+Every document validates against the packaged `web-run` schema and carries `schema_version`, a
+`kind` of `product_run` or `product_review`, and `observed_at`. Identities are the ones the pipeline
+already has — a card is its reference, a project is its registered id — plus one the runs need of
+their own: a run id, `pr-` prefixed so a product run directory is never mistaken for a pipeline one.
+
+`--profile` is not optional and has no default. Which head a product run raises is installation
+configuration read from the head registry, and the profile has to declare the `local-pty` runtime:
+a profile naming Orca's backend is refused rather than quietly run under a backend it does not
+declare. `--heads-registry` (or `TA_HEADS_REGISTRY`) points one run at a registry other than the
+installation's own.
+
+**`run_start(ref, request_id, profile)`** cuts a workspace, raises a worker head into it and points
+it at a task document. **`run_review(request_id, profile, worker_run)`** settles the worker run
+first and refuses while it is still open, then raises a reviewer head in the same workspace, handed
+the worker's result. **`run_state(run_id)`** reads one run, and is where a run's ending becomes
+durable.
+
+### The lifecycle of a run, and the order it holds
+
+A run passes through `claimed → raising → raised → settled`, and one function moves it between them
+(`secretary.webproto.lifecycle.RunLifecycle.advance`). Every path that can put a process into the
+world and every path that can close a run goes through it; within `secretary.webproto` the
+backend's `start` and `stop` verbs and the run store's `settle` are named in that one module and
+nowhere else, and a test fails if that stops being true.
+
+The order is the contract:
+
+1. **write-ahead.** Before a spawn can be attempted, the record already carries what is needed to
+   *find and stop* the head that spawn will produce: the run directory, the pid path, and a head
+   description addressed by run id. That is `raising`. A failure to bind the handle after a
+   successful spawn therefore cannot orphan anything — the record already points at it.
+2. **ownership is recovered from disk.** The supervised backend addresses a head from the run id
+   and the run's own pid file, and confirms an ending from the launch identity on that path; it
+   consults nothing the spawning process remembers. So the write-ahead record is sufficient on its
+   own to stop the head, and that is checked against the real backend rather than asserted.
+3. **a possibly-live process outranks closing the record.** Closing a run ends its head *first* and
+   settles only on a confirmed ending. An ending that could not be confirmed puts the run in
+   `unresolved`: it reads as `unknown` — never `finished` or `process_failed` — and as **not
+   over**, and it stays **unsettled**, which is what the admission gate's sixth condition already
+   refuses a second run over. An unresolved run is a fence and not a dead end: every later
+   `web-run state` retries the same stop from the same record, and the run settles the moment the
+   ending is confirmed. What it settles *as* is read off the process at that moment, never off the
+   `unresolved` record — a head that survived one unconfirmed stop may have published its result
+   and ended normally in between, and such a run settles `finished` with its result, exactly as it
+   would have without the detour. A normal ending and a failure stay distinguishable on the
+   recovery path, which is the one place they would otherwise collapse.
+4. **"the run is over" and "how it ended" are two facts, and they are stored apart.** The first is
+   a boolean, `ended`, on the run record and on `state`: the process this run may have held is
+   provably gone — a stop this product confirmed, or a launch identity that says there is nothing
+   there — or none was ever spawned under it. The second is `state.value`, one of the same five
+   words, derived from the evidence. Only the first frees a card, and no branch of the admission
+   gate reads the second.
+
+   They were one value before, and it forced a lie. A card was freed by a run whose value was
+   `finished` or `process_failed`, so a head confirmed gone whose journal could not be read had to
+   be recorded as a failed process before its card could be released — an accusation published into
+   the card's history, where no later read can withdraw it. Such a run now settles
+   `source_unavailable` with the reason: it is over, and how it ended was not established. See
+   [Architecture](ARCHITECTURE.md#the-product-runtime).
+
+`phase`, `ended` and `state` are all on every run document, and they answer three different
+questions: the phase says where the lifecycle is, `ended` says whether the run is over, and the
+state value says what the process did or is doing.
+
+### What the product owns
+
+The workspace is a detached `git worktree` of the project's own repository, cut by the product at
+the project's declared default branch into `<data>/webproto/workspaces/<run-id>`; it carries no
+branch, and nothing here commits, pushes or opens a pull request. The head's process is held by a
+supervisor of the product's own under `<data>/webproto/heads/<run-id>`, which is also where its pid
+file (`head.pid`), its journal (`journal.jsonl`), its supervisor log (`supervisor.log`), its task
+document and its result file (`result.json`) live. The run record is
+`<data>/webproto/runs/<run-id>.json`. Every one of those paths is on the run document, so an
+operator reads a run from the document rather than from this page.
+
+A head is told the path it must write its result to (`SECRETARY_RUN_RESULT`), together with
+`SECRETARY_RUN_ID`, `SECRETARY_RUN_ROLE`, `SECRETARY_RUN_REF` and `SECRETARY_RUN_WORKSPACE`. That
+file is the only place a result may appear, and it is what ends a run: `run_state` that finds it
+ends the head holding it, because the product owns that process. A run that publishes nothing is
+ended at its deadline instead (`--deadline-seconds`, one hour by default).
+
+### One owner of a card
+
+`secretary.webproto.admission.admit` is the single gate, and both start paths go through it before
+they build or spawn anything. It decides in this order, and the order is part of the contract:
+
+1. the board holds the card — otherwise `not_found`;
+2. the card's project is registered here and enabled — otherwise `validation`;
+3. no open sprint reserves that project, read from the same index (`sprints/active-repositories.json`)
+   the board's own write guard authorises against;
+4. the card is not in the production dispatcher's lane: it claims `ready` and holds `in_progress`,
+   `validate`, `assessment` and `blocked`, so a product run takes a card only from `issues`;
+5. the dispatcher's durable production state holds no record for the card — and a state file that
+   cannot be read refuses too, because "I could not tell" is not "nobody owns it";
+6. this layer holds no run for the card that is not over — decided by the run's `ended` fact and
+   never by what it ended as, so a run that is genuinely over frees its card whatever value it
+   carries. A run whose cleanup could not be confirmed is not over, and fences the card.
+
+Nothing there is a scheduler, a store or an audit of its own: the reservations and the card's state
+are rules that already exist, and the dispatcher's state is read and never written.
+
+### Idempotency
+
+`start` and `review` are idempotent on `--request-id`. The request id is claimed under the run
+store's lock with the run id and every path already decided, before anything is provisioned or
+spawned, so a repeat — a retried command, a reconnected client, a transport that lost its answer —
+finds that record and returns the same run. It never raises a second head and never cuts a second
+workspace. There is no distributed lock: one operator's retry is what this defends against, not a
+cluster.
+
+A request id is the idempotency key of **one operation made with one set of inputs**, and not a
+name for whatever that caller asked for last. The record the id owns carries the operation
+(`run_start` or `run_review`) and a digest of the request's own inputs — the card reference, the
+profile and the instruction for a start; the card reference, the worker run and the profile for a
+review — and a repeat that disagrees with either is refused with `validation` rather than answered.
+Reusing a worker's start id on `review` therefore says so, instead of returning a `product_review`
+document whose run is the worker's own while no reviewer was ever raised; and a start repeated for
+a different card is refused instead of silently answering about the first one. The digest is what
+is stored, so nothing a caller supplies becomes a path or a readable field of the installation.
+
+### What a run ended as
+
+A run's `state.value` is the same five-word vocabulary the read layer uses for an agent, and the
+process's own exit status rides beside it in `state.exit` rather than as a sixth word. `state.ended`
+is the other fact and is never derived from the value: it says whether the run is over.
+
+| state | exit | ended | what it means |
+| --- | --- | --- | --- |
+| `running` | — | no | a live process matches this run's launch identity |
+| `finished` | any | yes | the run published its result and its process has ended |
+| `finished` | `code: 0` | yes | the process ended normally, having published nothing |
+| `process_failed` | `code: N` | yes | the process exited with a non-zero status |
+| `process_failed` | `signal: N` | yes | the process was ended by a signal |
+| `process_failed` | none | yes | the process is gone, published nothing, and nothing recorded how it ended |
+| `source_unavailable` | — | yes | the head is gone and its journal could not be read: it ended, and how was not established |
+| `source_unavailable` | — | no | the launch identity itself could not be read; nothing is proven about the process either way |
+| `unknown` | — | no | no evidence yet: no head raised, or no heartbeat published, or a foreign pid; or a run whose cleanup could not be confirmed (`phase: unresolved`), where nothing establishes what the process is doing |
+
+The two `source_unavailable` rows are why the facts are two. The word is the same because the
+missing thing is the same — a source that could not say — and what differs is whether the run is
+over, which the value cannot carry and `ended` does. A settled run is over by definition, whatever
+value it carries.
+
+The evidence is the launch-identity heartbeat, the supervisor's journal and the result file. A
+window, pane or panel is never consulted and is not evidence that a run is alive. The first
+observation of a run that is over settles it — recording the state, the reason, the exit status
+and the result together — and a settled run says the same thing forever, exit status and result
+included, even after its run directory is swept. A bring-up that failed is the one ending recorded
+from something other than process evidence: the product tried to raise a head and the attempt
+failed with a named cause, so it settles `process_failed` with that cause.
+
+### Where a run is read back
+
+Nowhere new. A run publishes exactly two events, `product_run.started` and `product_run.finished`,
+into the board's own append-only journal, so `secretary web-read events --ref REF` and
+`secretary web-read task --ref REF` show them with their cursors intact. There is no run history and
+no run outcome store to read instead. Both events are idempotent through the audit's own request-id
+ownership, so an ending observed ten times is published once. They are generic audit records rather
+than typed Card events, because a product run moves no card and must not wake a sprint observer.
+
+Publication is a property every path restores, not a step of the path that created the run. Raising
+a head and publishing its start are two durable writes, and so are settling an ending and
+publishing it: a journal that is briefly unavailable between them would otherwise lose the event
+forever, because the retry idempotency invites finds the run record and returns it. So a `start` or
+`review` that hands back an existing run, and every `run_state` of a settled run, republish what
+that run owes before answering — and a failure to publish is reported rather than swallowed, so a
+caller never reads a success for a launch or an ending that is not on the history. It costs nothing
+when the events are already there: both are pure functions of the run record, `occurred_at`
+included, so a replay rebuilds the record the journal already holds and it is recognised rather
+than refused. That is also why the ending records the exit status and the result it was read off,
+in the run record beside the state and the reason: a terminal event re-derived from a run directory
+would differ once that directory was swept, which is exactly when the recovery is needed.
+
+### Errors
+
+The same typed exceptions the reads use, plus the two only a mutation can make. The CLI prints
+`{"error": {"code", "message"}}` on stderr and exits 2 on `not_found` and `validation`, 3 on
+`owner_conflict`, 1 on `backend_unavailable`.
+
+| exception | code | when |
+| --- | --- | --- |
+| `TaskNotFound` / `RunNotFound` | `not_found` | no such card, or no such run on this installation |
+| `ValidationRefused` | `validation` | no request id, a request id already owning another operation or another request's inputs, no profile, an unlaunchable profile, one on another backend, or an unregistered project |
+| `OwnerConflict` | `owner_conflict` | somebody else owns this card — an open sprint, the dispatcher's lane, its durable record, an unsettled run of this layer's, or a worker run that has not ended yet |
+| `RuntimeUnavailable` | `backend_unavailable` | the workspace, the head or the run's own record could not be made |
+
 ## Knowledge
 
 Long recoverable documents (brainstorms, decision logs, incident write-ups) live in

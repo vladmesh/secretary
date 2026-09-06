@@ -49,3 +49,45 @@ class InstallationUnavailable(ReadError):
     """The instance config itself does not validate, so nothing below it can be read."""
 
     code = "backend_unavailable"
+
+
+# -- the operation half (secretary-1562) --------------------------------------------------------
+#
+# The operations return the same kind of failure the reads do, and deliberately from the same base:
+# a transport that already maps `ReadError.code` onto its own vocabulary maps these with no second
+# table, and a caller that catches `ReadError` around a whole request catches both halves. What is
+# added is the two refusals only a mutation can make.
+
+
+class ValidationRefused(ReadError):
+    """The operation was asked for something it cannot do: a missing input, an unusable profile."""
+
+    code = "validation"
+
+
+class RunNotFound(ReadError):
+    """No product run of this installation is named by this identifier."""
+
+    code = "not_found"
+
+
+class OwnerConflict(ReadError):
+    """Somebody else owns this card, or this run, and a second owner is not created.
+
+    Its own code rather than `validation` because it is not a malformed request: the request was
+    well formed and is refused on the state of the world, and a caller that retries it after the
+    other owner has finished will be admitted. See :mod:`secretary.webproto.admission` for the one
+    place this is decided and the order it decides in.
+    """
+
+    code = "owner_conflict"
+
+
+class RuntimeUnavailable(ReadError):
+    """The product runtime could not raise, reach or record a head, and says which.
+
+    Deliberately not a run outcome: a run that exists and whose head died has a state
+    (`process_failed`), and only a failure that leaves *no* run behind is reported as an error.
+    """
+
+    code = "backend_unavailable"

@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "web-run.schema.json",
+  "title": "Transport-independent product-run operations",
+  "description": "The documents secretary.webproto's operations return. A run's state values are the read layer's own five; the exit status beside them is the process's, not a sixth name for it; and whether a run is over is the separate `ended` fact rather than a value.",
+  "oneOf": [
+    {"$ref": "#/$defs/run"},
+    {"$ref": "#/$defs/review"}
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": ["state", "reason", "observed_at", "data_age_seconds"],
+      "properties": {
+        "state": {"enum": ["available", "unavailable"]},
+        "reason": {"type": ["string", "null"]},
+        "observed_at": {"type": ["string", "null"]},
+        "data_age_seconds": {"type": ["number", "null"]}
+      }
+    },
+    "record": {
+      "type": "object",
+      "description": "What this product owns about one run and what a later reader needs to find it.",
+      "required": [
+        "run_id", "request_id", "ref", "project", "role", "profile", "runtime",
+        "workspace", "run_dir", "pid_file", "journal_path", "log_path", "result_path"
+      ],
+      "properties": {
+        "run_id": {"type": "string"},
+        "request_id": {"type": "string"},
+        "ref": {"type": "string"},
+        "project": {"type": "string"},
+        "role": {"enum": ["worker", "reviewer"]},
+        "profile": {"type": "string"},
+        "adapter": {"type": "string"},
+        "runtime": {"type": "string"},
+        "parent_run_id": {"type": "string"},
+        "workspace": {"type": "string"},
+        "run_dir": {"type": "string"},
+        "pid_file": {"type": "string"},
+        "journal_path": {"type": "string"},
+        "log_path": {"type": "string"},
+        "result_path": {"type": "string"},
+        "head_pid": {"type": "integer"},
+        "supervisor_pid": {"type": "integer"},
+        "started_at": {"type": ["string", "null"]},
+        "deadline_at": {"type": ["string", "null"]},
+        "settled_at": {"type": ["string", "null"]},
+        "ended": {"type": "boolean", "description": "Fact one on the record: this run is over. Written by the settle and never derived from the value beside it."},
+        "settled_state": {"type": "string", "description": "Fact two: how this run ended, one of the read layer's five values. `source_unavailable` is an ending like any other -- the run is over and what it did could not be established."},
+        "phase": {"enum": ["claimed", "raising", "raised", "unresolved", "settled"], "description": "Where this run is in its lifecycle. `raising` is the write-ahead phase: the record can address and stop a head, and a spawn may have happened. `unresolved` is a close that could not be confirmed -- the run stays unsettled, so the card stays fenced."},
+        "head_raised": {"type": "boolean"},
+        "unresolved_reason": {"type": "string"},
+        "settled_reason": {"type": "string"},
+        "settled_exit": {"type": "object", "description": "The exit status this run's ending was read off, recorded with the ending so it outlives the run directory."},
+        "settled_result": {"type": "object", "description": "The result document this run's ending was read off, recorded with the ending for the same reason."},
+        "head_run": {"type": "object"}
+      }
+    },
+    "state": {
+      "type": "object",
+      "required": ["value", "reason", "ended", "source", "exit", "result", "evidence"],
+      "properties": {
+        "value": {"enum": ["running", "finished", "process_failed", "source_unavailable", "unknown"], "description": "How this run ended, or what its process is doing. One of the read layer's five, and never a statement about whether the run is over -- that is `ended`."},
+        "reason": {"type": "string"},
+        "ended": {"type": "boolean", "description": "Whether this run is over: the process it may have held is provably gone -- a confirmed stop, or a launch identity that says there is nothing there -- or none was ever spawned. The only fact that frees a card for the next run, and deliberately not derived from `value`: a head that is gone while its journal cannot be read is over under `source_unavailable`, and a run whose launch identity itself cannot be read is not."},
+        "settled_at": {"type": ["string", "null"]},
+        "source": {"$ref": "#/$defs/source"},
+        "exit": {
+          "type": "object",
+          "description": "The head process's own exit status. A normal ending is code 0; a non-zero exit and a process killed by a signal are told apart here rather than by a sixth state.",
+          "required": ["code", "signal", "at"],
+          "properties": {
+            "code": {"type": ["integer", "null"]},
+            "signal": {"type": ["integer", "null"]},
+            "at": {"type": ["number", "null"]}
+          }
+        },
+        "result": {
+          "type": "object",
+          "required": ["present", "value", "reason", "verdict"],
+          "properties": {
+            "present": {"type": "boolean"},
+            "value": {"type": ["object", "null"]},
+            "reason": {"type": ["string", "null"]},
+            "verdict": {"type": ["string", "null"]}
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "required": ["kind", "heartbeat_state", "pid", "detail"],
+          "properties": {
+            "kind": {"const": "process_heartbeat"},
+            "heartbeat_state": {"type": "string"},
+            "pid": {"type": ["integer", "null"]},
+            "detail": {"type": ["string", "null"]}
+          }
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": ["schema_version", "kind", "observed_at", "run", "state", "reads"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "kind": {"const": "product_run"},
+        "observed_at": {"type": "string"},
+        "run": {"$ref": "#/$defs/record"},
+        "state": {"$ref": "#/$defs/state"},
+        "reads": {
+          "type": "object",
+          "description": "How this run is read back through the read layer that already exists. There is no run history and no run outcome store to point at.",
+          "required": ["task_events", "task_snapshot", "events_kind_started", "events_kind_finished"],
+          "properties": {
+            "task_events": {"type": "string"},
+            "task_snapshot": {"type": "string"},
+            "events_kind_started": {"type": "string"},
+            "events_kind_finished": {"type": "string"}
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["schema_version", "kind", "observed_at", "review", "worker"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "kind": {"const": "product_review"},
+        "observed_at": {"type": "string"},
+        "review": {"$ref": "#/$defs/run"},
+        "worker": {"oneOf": [{"$ref": "#/$defs/run"}, {"type": "null"}]}
+      }
+    }
+  }
+}

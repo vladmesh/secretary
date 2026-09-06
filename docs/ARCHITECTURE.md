@@ -247,13 +247,93 @@ rather than a new store; agents are the dispatcher's durable production state pl
 heartbeats the head runtime already writes. Building a second collector for any of them would put
 a second answer next to a working one, which is the failure this layer exists to prevent.
 
-Two invariants are enforced rather than documented. It never writes: no operation mutates the
-board, the dispatcher state, the journal or the installation, and none takes an actor. And
-liveness is process state: a pane, terminal or window is not evidence about a head, for the reason
-`secretary head-status` exists — panes outlive, alias and stop drawing the processes behind them.
+Two invariants are enforced rather than documented. The three reads never write: none of them
+mutates the board, the dispatcher state, the journal or the installation, and none takes an actor.
+And liveness is process state: a pane, terminal or window is not evidence about a head, for the
+reason `secretary head-status` exists — panes outlive, alias and stop drawing the processes behind
+them.
 
 The protocol, its schema, its states and its cursor semantics are in
 [Protocols](PROTOCOLS.md#reading-the-pipeline).
+
+## The product runtime
+
+The other half of `secretary.webproto` is what produces what those reads show: the product raises a
+real worker head for a card and a real reviewer head by its result, and it owns the workspace, the
+process, the pid, the logs and the outcome of both.
+
+**Why it does not depend on Orca.** The pipeline's heads are Orca panes: `orca worktree create`
+makes the workspace, Orca's session store holds the pty, Orca's repository inventory knows what
+exists, and Orca's teardown removes it. That is a second lifecycle authority for something the
+product is supposed to own, and it costs three things this layer cannot pay. A pane is not
+evidence of a process — it is aliased, detached and redrawn empty over a working head — so a
+dashboard built on it reports a liveness that is not true. A pane's exit status is lost, so "it
+finished", "it exited 17" and "it was killed" collapse into one "the pane is gone". And a workspace
+Orca owns cannot be handed to a web transport without handing that transport Orca too. So on the
+start path and the result-reading path there is no Orca CLI, no Orca RPC, no terminal and no Orca
+repository inventory, and a test fails if any of them appears.
+
+**What it reuses, rather than rebuilds.** Almost everything. The head's process is held by
+`LocalPtyHeadRuntime`, the supervised backend that already exists, reached through the product's one
+name-to-backend mapping (`head_runtime_backends.build_head_runtime`) with a session factory that
+raises — there is no second supervisor here. Liveness is the same launch-identity heartbeat and the
+same reader the watchdog uses. The exit status is the supervisor's own journal. Which head runs is
+the head registry, and the command is `head.command.render_head_command`; a Codex head goes through
+the same `codex_preflight` the pipeline uses, and a Claude head through the same `claude_env`
+first-run preparation. The card and the project are the identities the pipeline already has. The
+run's two events go onto the board's own audit journal, so the read layer shows them with no second
+history. What is genuinely new is small: a workspace cut with `git worktree` instead of by Orca, a
+durable run record, and one admission gate.
+
+**One place owns the order between a process and the record of it.** A run's phases —
+`claimed → raising → raised → settled` — move in one function, and every path that can spawn or
+close goes through it. The reason is a history rather than a preference: three separate defects of
+this runtime were all the same defect, in which "a process may now exist" and "the durable record
+says so" were ordered by three different pieces of code that were each free to order them
+differently. The invariant that function holds is that the record which can *find and stop* a head
+is durable before a spawn can produce one, that the record alone is enough to stop it (the
+supervised backend addresses a head from the run id and pid path, never from what the spawning
+process remembers), and that a cleanup which could not be confirmed is written as unresolved rather
+than as an ending. An unresolved run is not over and not settled, which is exactly what the
+admission gate already refuses a second run over — the fence is an existing rule, not a new one.
+
+**"This run is over" and "this is how it ended" are two facts.** They must be, and the reason is
+what the conflation cost. A run's outcome is one of the read layer's five words, and for a while
+"the run is over" was computed *from* that word: a run counted as over when its value was
+`finished` or `process_failed`. Two of the five therefore carried a second meaning nobody had
+chosen for them, and the consequences ran both ways. A card was freed only by a run whose ending
+had a name, so a head that was confirmed gone while its journal could not be read had to be given
+one before its card could be released — and the only name available was `process_failed`, an
+accusation against a process nobody watched fail, written into the card's own history where no
+later read can withdraw it. Withheld instead, the same run would have fenced its card forever. The
+product had a choice between lying and deadlocking because one value was answering two questions.
+
+So the fact is now a boolean on the record: this run is over when the process it may have held is
+provably gone — a stop this product confirmed, or a launch identity that says there is nothing
+there — or when no process was ever spawned under it. It is established by the lifecycle, which is
+the only place that can establish it, and it is the only property the admission gate consults. What
+a run ended *as* is derived separately from whatever evidence exists, keeps the same five words, and
+is free to say `source_unavailable`: the run is over and what it did could not be established. That
+sentence is true, publishable and terminal, and before the split there was no way to say it.
+
+**Two durable writes are never assumed to be one.** Raising a head and putting its start on the
+card's history are separate durable facts, and so are settling a run's ending and publishing it. So
+publication is a property every path restores rather than a step of the path that created the run:
+an idempotent repeat, and every read of a settled run, republish what that run owes before
+answering. The events are pure functions of the run record — which is why the ending records the
+exit status and the result it was read off, rather than re-deriving them from a run directory a
+sweep may have removed — so a replay rebuilds the record the journal already holds instead of a
+second, differing one. For the same reason a request id owns an *operation and its inputs* and not
+just a run: an idempotency key that could be reused across two different commands would hand a
+caller a document about a run that answers a different question.
+
+**And one owner of a card.** The production dispatcher takes cards from its own lane and an open
+sprint reserves its projects; a product run must be neither a second owner of an attempt nor an
+intruder in a sprint. One function decides that — `webproto.admission.admit` — out of rules that
+already exist, and every path that raises a head goes through it.
+
+Its operations, their idempotency, the ownership rule and the outcome vocabulary are in
+[Protocols](PROTOCOLS.md#running-the-pipeline).
 
 ## The sprint observer head
 
