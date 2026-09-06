@@ -3011,6 +3011,19 @@ in a shape a client acts on rather than parses:
 open a second sprint beside the half-written one. `reference` is filled in when this layer knows
 which sprint the unfinished request already holds.
 
+**That answer does not depend on what failed.** Once `SprintWriter.create` has returned, a sprint
+row exists, and every remaining step of the operation — recording the reference under the request
+id, and reading the sprint back for the document — runs inside one region that answers this way
+whatever raises: the atomic writer, the lock file's `mkdir`/`open`/`flock`, the board read, or a
+defect of the layer itself. The region catches broadly on purpose rather than listing the
+vocabularies it knows, because a list is what has to be kept in step and a step added tomorrow
+would otherwise be the next hole; the cause is chained rather than swallowed, so a traceback still
+names the primitive that failed.
+
+The order inside the message is part of the contract too: the durable fact comes before the cause.
+A caller is told which sprint exists and that repeating the same request is safe, and only then
+what went wrong — because a caller that reads the cause first and acts on it opens a second sprint.
+
 ### Watching one
 
 **`sprint_state(ref)`** is the page somebody watches a sprint on: the goal and definition of done it

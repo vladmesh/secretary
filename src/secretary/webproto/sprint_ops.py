@@ -33,6 +33,15 @@ not yet named here -- is exactly the partial failure criterion 4 is about, and i
 *same* id being handed down to `SprintWriter.create`, whose staged transaction resumes the row it
 already began instead of opening another. Neither half is a distributed lock: what this defends
 against is one operator's retry.
+
+**And once a row exists, the answer is fixed whatever fails.** Any failure after
+`SprintWriter.create` returns reaches the caller as an `OperationPending` carrying
+`backend_unavailable`, the request id and the action "repeat this same request" -- whichever
+primitive raised it, and with the durable fact stated before the cause. That rule is enforced over
+the whole region rather than at any one primitive (:meth:`SprintOperationLayer._after_create`),
+because two earlier rounds of this card fixed it at a primitive and watched it reappear at the next
+one: the atomic writer's `RuntimeError`, then the lock's bare `OSError`. A region cannot grow a
+third hole by acquiring a third primitive.
 """
 
 from __future__ import annotations
@@ -226,11 +235,9 @@ class SprintOperationLayer(ProtocolBoundary):
             )
         except TaskError as exc:
             raise self._refusal(exc, request_id=request_id) from None
-        sprint_ref = str((created.get("sprint") or {}).get("ref") or "")
-        if not sprint_ref:
-            raise RuntimeUnavailable("the sprint writer created a sprint that carries no reference")
-        self._remember(store, request_id, sprint_ref)
-        return self._document(sprint_ref, request_id=request_id, claimed=claimed, now=now)
+        # From here on a sprint row exists on the board, and everything below is inside the one
+        # region that says so however it fails. See :meth:`_after_create`.
+        return self._after_create(store, created, request_id=request_id, claimed=claimed, now=now)
 
     # -- the pieces the operation is made of -------------------------------------------------
 
@@ -262,23 +269,61 @@ class SprintOperationLayer(ProtocolBoundary):
         except RunStoreError as exc:
             raise RuntimeUnavailable(str(exc)) from None
 
-    def _remember(self, store: SprintRequestStore, request_id: str, reference: str) -> None:
-        """Name the sprint this request produced, and refuse rather than hide a store that cannot.
+    def _after_create(
+        self,
+        store: SprintRequestStore,
+        created: dict[str, Any],
+        *,
+        request_id: str,
+        claimed: bool,
+        now: float,
+    ) -> dict[str, Any]:
+        """Everything this operation does once a sprint row exists, and the one answer it fails with.
 
-        Deliberately not swallowed. A create whose reference could not be recorded is exactly the
-        partial failure this layer promises to survive, and the promise is kept by the repeat
-        resuming the writer's own transaction -- not by this call having succeeded. So the caller is
-        told what happened, with the action that resolves it, instead of reading a success whose
-        second half never landed.
+        This region is the enforcement point of one invariant, and it is deliberately a *region*
+        rather than a primitive: **any** failure after `SprintWriter.create` has returned reaches
+        the caller as an :class:`~secretary.webproto.errors.OperationPending` carrying
+        `backend_unavailable`, the request id and the action "repeat this same request" -- whatever
+        raised it. Two rounds of this card were spent chasing that answer from one primitive to the
+        next, because the rule was written about the primitive: first the atomic writer's
+        `RuntimeError` (fixed at :mod:`secretary.webproto.store_io`, which stays), then the lock's
+        bare `OSError` out of `file_lock`'s `mkdir`, `open` and `flock`. A third primitive added to
+        this region tomorrow would have been a third hole. It is not, because nothing here is
+        allowed to leave except through the one `except` below.
+
+        What is caught is `Exception` and not a list of vocabularies, for exactly that reason: a
+        list is the thing that has to be kept in step, and the failure this region must not have is
+        one nobody thought to list. The cause is not lost -- it is chained (`raise ... from exc`),
+        so a traceback still names the primitive and a defect of this layer is still visible where
+        it happened; what changes is that the caller is *first* told the durable fact.
+
+        And that ordering is the second half of the rule. The fact that the entity exists outranks
+        the reason the step failed: the message opens with the sprint that was created and the safe
+        move, and only then says what went wrong, because a caller that reads the cause first and
+        acts on it opens a second sprint.
         """
+        reference = ""
         try:
+            reference = str((created.get("sprint") or {}).get("ref") or "")
+            if not reference:
+                raise RuntimeUnavailable("the sprint writer created a sprint that carries no reference")
             store.record_reference(request_id, reference)
-        except RunStoreError as exc:
+            return self._document(reference, request_id=request_id, claimed=claimed, now=now)
+        except Exception as exc:
             raise OperationPending(
-                f"sprint {reference} was created and this layer could not record it under the "
-                f"request that made it: {exc}",
+                self._pending_message(reference, exc),
                 data=self._pending_action(request_id, reference=reference),
-            ) from None
+            ) from exc
+
+    @staticmethod
+    def _pending_message(reference: str, cause: Exception) -> str:
+        """The durable fact first, the cause after it. Both, in that order, always."""
+        subject = f"sprint {reference}" if reference else "this sprint"
+        return (
+            f"{subject} was created and the request that made it did not finish; repeat the same "
+            f"request id to pick it up rather than opening a second sprint. "
+            f"The step that failed was {type(cause).__name__}: {cause}"
+        )
 
     def _refusal(self, exc: TaskError, *, request_id: str) -> Exception:
         """One `TaskError` from the sprint writer, as this layer's own typed failure.

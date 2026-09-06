@@ -25,7 +25,7 @@ from secretary.config import validate
 from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
 from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.webproto import sprint_reads as sprint_reads_module
-from secretary.webproto import store_io
+from secretary.webproto import sprint_requests, store_io
 from secretary.webproto.boundary import GUARDED, operations
 from secretary.webproto.errors import (
     OperationPending,
@@ -187,6 +187,32 @@ class SprintProtocolFixture(unittest.TestCase):
 
     def reference_of(self, document: dict[str, Any]) -> str:
         return str(document["sprint"]["ref"])
+
+    def assert_pending_after_create(self, refused: OperationPending, *, cause: str) -> dict[str, Any]:
+        """The one answer every post-create failure owes, whichever primitive raised it.
+
+        Returns the single sprint row that exists, so a caller can go on to prove the repeat picks
+        that one up rather than opening a second.
+        """
+        # Typed, and not the primitive's own vocabulary: a caller that catches `ReadError` has it.
+        self.assertIsInstance(refused, ReadError)
+        self.assertEqual(refused.code, "backend_unavailable")
+        self.assertEqual(refused.data["reason"], PENDING_REASON)
+        action = refused.data["action"]
+        self.assertTrue(action["repeat_request"])
+        self.assertEqual(action["request_id"], "req-1")
+        self.assertEqual(action["operation"], "sprint_create")
+        rows = self.sprint_rows()
+        self.assertEqual(len(rows), 1)
+        reference = str(rows[0]["reference"])
+        self.assertEqual(action["reference"], reference)
+        # The durable fact outranks the cause, in the message as well as in the data: a caller that
+        # reads the reason first and acts on it opens a second sprint.
+        message = refused.message
+        self.assertIn(cause, message)
+        self.assertLess(message.index(reference), message.index(cause))
+        self.assertLess(message.index("repeat the same"), message.index(cause))
+        return rows[0]
 
 
 class CreateTests(SprintProtocolFixture):
@@ -358,20 +384,65 @@ class IdempotencyTests(SprintProtocolFixture):
             self.assertRaises(OperationPending) as pending,
         ):
             self.create()
-        # Typed, and not the writer's own vocabulary: a caller that catches `ReadError` catches it.
-        self.assertIsInstance(pending.exception, ReadError)
-        self.assertEqual(pending.exception.code, "backend_unavailable")
-        self.assertEqual(pending.exception.data["reason"], PENDING_REASON)
-        action = pending.exception.data["action"]
-        self.assertTrue(action["repeat_request"])
-        self.assertEqual(action["request_id"], "req-1")
-        self.assertEqual(action["operation"], "sprint_create")
-        created = self.sprint_rows()
-        self.assertEqual(len(created), 1)
+        created = self.assert_pending_after_create(pending.exception, cause="No space left on device")
 
         repeat = self.create()
-        self.assertEqual(self.reference_of(repeat), str(created[0]["reference"]))
+        self.assertEqual(self.reference_of(repeat), str(created["reference"]))
         self.assertEqual(len(self.sprint_rows()), 1)
+
+    def test_a_lock_the_filesystem_refuses_after_the_row_exists_is_the_same_answer(self) -> None:
+        """The second primitive of the same region, and the one that made this round happen.
+
+        `_fsutil.file_lock` does `mkdir`, `open("a+")` and `flock`, and every one of them raises a
+        bare `OSError`. The boundary turned that into `backend_unavailable` with no request id and
+        no action, so a caller learned neither that a sprint already existed nor that repeating the
+        same request was the safe move. It is not caught here by adding `OSError` to a list: the
+        whole post-create region answers this way, which is why the third primitive to arrive in it
+        cannot open a third hole.
+        """
+        real = sprint_requests.file_lock
+        entries = []
+
+        def refuse_the_second_lock(path):
+            # Call one is `claim`, before the writer. Call two is `record_reference`, after the row
+            # exists -- and it is the one a full disk would refuse while creating the lock file.
+            entries.append(path)
+            if len(entries) >= 2:
+                raise OSError(28, "No space left on device")
+            return real(path)
+
+        with (
+            mock.patch.object(sprint_requests, "file_lock", refuse_the_second_lock),
+            self.assertRaises(OperationPending) as pending,
+        ):
+            self.create()
+        self.assertEqual(len(entries), 2, "the failure must land on the post-create lock")
+        created = self.assert_pending_after_create(pending.exception, cause="No space left on device")
+        self.assertIsInstance(pending.exception.__cause__, OSError)
+
+        repeat = self.create()
+        self.assertEqual(self.reference_of(repeat), str(created["reference"]))
+        self.assertEqual(len(self.sprint_rows()), 1)
+
+    def test_any_failure_after_the_row_exists_is_that_answer_including_one_nobody_listed(self) -> None:
+        """The region, not the vocabulary: an exception type no list names is answered the same.
+
+        Deliberately a defect-shaped failure (`TypeError`) raised from the step *after* the request
+        index -- building the document -- because that is the case a list of durable-source
+        vocabularies would miss and the case that must not lose the durable fact. The cause is not
+        swallowed: it is chained, so a traceback still names it.
+        """
+        with (
+            mock.patch.object(
+                SprintOperationLayer,
+                "_document",
+                side_effect=TypeError("a defect in the document builder"),
+            ),
+            self.assertRaises(OperationPending) as pending,
+        ):
+            self.create()
+        self.assert_pending_after_create(pending.exception, cause="a defect in the document builder")
+        self.assertIsInstance(pending.exception.__cause__, TypeError)
 
     def test_a_writer_that_stalls_mid_create_is_reported_as_repeatable_not_as_a_refusal(self) -> None:
         """A create that stopped between its row and its reference is not "it did not happen"."""
@@ -604,7 +675,63 @@ class LayerPropertyTests(SprintProtocolFixture):
                 self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
                 json.dumps(document)
 
+    def test_the_post_create_region_is_one_place_with_one_exit(self) -> None:
+        """The invariant, as structure rather than as a promise every future step must remember.
+
+        Two rounds of this card fixed a post-create failure at the primitive that happened to raise
+        it and watched the next primitive open the same hole. So what is checked here is the shape:
+        `sprint_create` ends by handing the whole post-create region to `_after_create`, and that
+        region is a single `try` with a single `except Exception` that raises the pending answer. A
+        step added to it later is covered by being inside it, and there is no list to keep in step.
+        """
+        import ast
+
+        source = (
+            Path(__file__).resolve().parents[1] / "src" / "secretary" / "webproto" / "sprint_ops.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        layer = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "SprintOperationLayer"
+        )
+        methods = {node.name: node for node in layer.body if isinstance(node, ast.FunctionDef)}
+
+        # `sprint_create` hands over and does nothing after the hand-over.
+        last = methods["sprint_create"].body[-1]
+        self.assertIsInstance(last, ast.Return)
+        self.assertIsInstance(last.value, ast.Call)
+        self.assertEqual(getattr(last.value.func, "attr", ""), "_after_create")
+
+        # And the region has exactly one exit for every failure in it.
+        body = [
+            node
+            for node in methods["_after_create"].body
+            if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
+        ]
+        guarded = [node for node in body if isinstance(node, ast.Try)]
+        self.assertEqual(len(guarded), 1)
+        self.assertIs(guarded[0], body[-1], "nothing runs after the region")
+        handlers = guarded[0].handlers
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(getattr(handlers[0].type, "id", ""), "Exception")
+        raised = [node for node in ast.walk(handlers[0]) if isinstance(node, ast.Raise)]
+        self.assertEqual(len(raised), 1)
+        self.assertEqual(getattr(raised[0].exc.func, "id", ""), "OperationPending")
+        # Chained, so the primitive that failed is still named in a traceback.
+        self.assertIsNotNone(raised[0].cause)
+
     def test_the_sprint_modules_import_no_transport(self) -> None:
+        """The promise as it is meant: this layer speaks no transport to its caller.
+
+        Direct imports, deliberately. A transitive scan would be a different and false claim: the
+        layer's access to the board is `KanboardClient`, the board is an HTTP service, and
+        `secretary.tasks` has imported `urllib` since long before this card -- as `reads.py`,
+        `admission.py`, `ops.py` and `run_events.py` all show. What the promise means, and what is
+        checked here and in the refusal tests above, is that nothing of the transport reaches the
+        caller: no HTTP, socket, framework or rendering in this layer's own surface, and failures
+        that leave it are typed `webproto.errors` codes rather than status numbers.
+        """
         import ast
 
         forbidden = frozenset(
