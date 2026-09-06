@@ -639,7 +639,9 @@ python3 -P -m secretary sprint status --ref sprint:<ID>
 ```
 
 After that the sprint is not driven by hand: the production tick launches the observer head (see below),
-communication with a running sprint goes through entries on the entity (`secretary sprint comment`), and
+communication with a running sprint goes through entries on the entity (`secretary sprint comment`, and
+`secretary sprint comment-delivery` to read what happened to one — see [A PO comment on a running
+sprint](#a-po-comment-on-a-running-sprint)), and
 status is read from data (`secretary sprint status`, `secretary sprint list`, `secretary task list
 --sprint`; see [What is running right now](#what-is-running-right-now)).
 
@@ -731,6 +733,84 @@ Errors are typed and reach the shell as exit statuses: a sprint nobody holds and
 exit `2` with `not_found` / `validation` on stderr, a source that refused exits `1` with
 `backend_unavailable`. `secretary sprint show --ref` is unchanged and remains the way to read the
 entity's own record, comments included.
+
+## A PO comment on a running sprint
+
+This is how a PO intervenes in a sprint that is already running: a comment on the **entity**. Not by
+editing its cards — the sprint's executor cards belong to its observer, and there is no command here
+that opens that path.
+
+```bash
+python3 -P -m secretary sprint comment --ref sprint:1431 --role po --actor <actor> \
+  --request-id po-2026-09-06-slow-down --body-file NOTE.md
+```
+
+It prints one JSON document. Three fields are what an operator reads:
+
+- **`comment_id`** — the durable identifier of the comment. Keep it: it is what the read below takes,
+  and it stays the same however many times the command is repeated. It is the committed audit event
+  id, not a board row number;
+- **`saved`** — `true` when this call wrote the comment, `false` when it found the comment this
+  request id already owns. A repeat writes no second comment, appends no second audit event, and
+  wakes no head a second time;
+- **`delivery`** — the whole delivery document below, as it stands the instant the comment was saved.
+  Right after a write it normally says `saved`: the comment is on the entity and the production tick
+  has not opened a batch for it yet.
+
+**`--request-id` is the retry handle.** Give one and keep it: retrying with the same id gets the same
+comment back. Omit it and the command mints one, which is fine for a comment typed once and useless
+for a retry — a second run with no id is a second comment. A repeat that reuses an id over a
+*different* body, sprint, role or actor is refused with `validation` and exit `2`, deliberately:
+answering it with the first comment's result would tell you a comment was saved that was not.
+
+A closed or stopped sprint refuses a comment: exit `3` with `owner_conflict`, the status this
+command has always given it. That refusal is unchanged, and commenting after a close is a separate
+scenario.
+
+### Reading what happened to that comment
+
+```bash
+python3 -P -m secretary sprint comment-delivery --ref sprint:1431 --comment-id evt_<...>
+```
+
+It reads and does nothing else: no head is woken, nudged, retried or launched, and nothing is written
+to the dispatcher's state. Redelivery belongs to the production tick; this command reports what that
+tick recorded.
+
+Three parts of the document, and they answer three different questions:
+
+1. **`comment.state`** — `saved` (the committed audit holds it), `absent` (the audit answered and
+   holds no such comment on this sprint — check the id), or `unknown` (the audit could not be read).
+2. **`delivery.state`** — where the observer delivery machinery has got it to:
+
+   | state | what it means | what to do |
+   | --- | --- | --- |
+   | `saved` | the comment is on the entity and no delivery batch carries it yet | wait for the tick |
+   | `waiting` | a batch carrying it is held for a busy head, or was sent and is not acknowledged | wait; `batch.stage` says which |
+   | `handed_over` | the batch carrying it was acknowledged by the observer head | nothing — but read the limit below |
+   | `error` | that batch failed and is deferred for retry; `delivery.reason` carries the recorded failure | the dispatcher retries it; investigate the head if the counts in `batch` keep climbing |
+   | `unknown` | the production state could not be read, holds no observer record for this sprint, or holds a cursor the audit cannot place | find out which from `delivery.source` and `delivery.reason` before concluding anything |
+
+   `unknown` is never one of the other four. "Nobody could say where this comment is" and "it is
+   still waiting" are different situations with different repairs, and this command will not merge
+   them for you. `batch` beside the state carries the stage, the cursor ids, the wake and launch
+   failure counts and the last recorded failure — `null` when there is no observer record to stand
+   on.
+3. **`acceptance`** — always `established: false`, and it is there because the honest answer to the
+   question most operators are actually asking is "this product does not know".
+
+**What `handed_over` does not mean.** It does not mean the observer read your comment, agreed with
+it, or changed anything because of it. It means a delivery batch whose range covers your comment's
+event was acknowledged by the head that was woken for it. Delivery is a batch fact: the cursor is
+over the whole event stream, not over your comment. A semantic acknowledgement — read, accepted,
+taken into account — is deliberately not built, is deferred by the owner, and is tracked as
+`issue:cf5c9f03ee0f92d3d347`. If you need to know whether the observer acted on a comment, read its
+next resume entry (`secretary sprint status --ref sprint:ID`, field `decision.entry`) and judge it
+yourself.
+
+One more limit worth knowing: only a `po` comment on the entity is a semantic wake. A comment written
+by another role is carried when a later significant event moves the cursor past it, and this command
+reports that relation truthfully rather than pretending a batch was raised for it.
 
 ## The two-sprint pilot
 

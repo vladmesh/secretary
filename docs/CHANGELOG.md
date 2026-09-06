@@ -4,6 +4,42 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-06 — a PO comment is saved, identified, and honestly reported as delivered (secretary-1575, sprint:1431)
+
+**Two new protocol operations.** `sprint_comment(request_id, actor, reference, body, role)` puts one
+comment on a sprint entity and answers with `kind: sprint_comment`: the durable `comment_id`, whether
+this call `saved` it or found it already saved, and the delivery document below.
+`sprint_comment_delivery(ref, comment_id)` reads what happened to a saved comment
+(`kind: sprint_comment_delivery`). Both are in
+[PROTOCOLS](PROTOCOLS.md#commenting-on-a-running-sprint); the operator scenario is in
+[OPERATIONS](OPERATIONS.md#a-po-comment-on-a-running-sprint).
+
+**`secretary sprint comment` output has changed shape.** It is now a client of `sprint_comment` and
+prints that operation's document (`kind`, `request_id`, `ref`, `comment_id`, `saved`, `delivery`)
+instead of the writer's `{"action": "commented", "sprint": …, "event_id": …}`. `event_id` is now
+`comment_id`, and the whole sprint record is no longer inlined — read it with `sprint status` or
+`sprint show`. Refusals are typed protocol codes and map to the exit statuses `web-read` uses
+(`not_found`/`validation` → 2, `owner_conflict` → 3, `backend_unavailable` → 1), which is the same
+table `secretary web-run` uses and leaves a comment on a closed or stopped sprint exiting `3` as it
+did. What `SprintWriter.comment` decides is unchanged.
+
+**New command.** `secretary sprint comment-delivery --ref sprint:ID --comment-id evt_…` prints the
+delivery document. It is a read: no wake, no nudge, no retry, no head launch, no write to the
+dispatcher's state.
+
+**`--request-id` on a comment is now the retry handle in the full sense.** A repeat with the same id
+writes no second comment, appends no second audit event, and causes no second observer wake or head
+launch — that is `SprintWriter._write`'s existing audit claim, and no second request index was added
+beside it. New: a repeat that reuses an id over a *different* body, sprint, role or actor is refused
+with `validation` instead of being answered with the first comment's result.
+
+**Delivery is not acceptance, and the documents say so.** `delivery.state` is one of `saved`,
+`waiting`, `handed_over`, `error` and `unknown`, derived only from the dispatcher's existing cursors;
+`unknown` is never folded into another answer. Every delivery document carries an `acceptance` object
+that is always `established: false` and names `issue:cf5c9f03ee0f92d3d347` as the deferred mechanism.
+Nothing in the operations, the schema, the CLI output or the documentation states or implies that the
+observer read, accepted or took a comment into account.
+
 ## 2026-09-06 — one place enforces source isolation (secretary-1574, sprint:1431)
 
 **The rule, and where it now lives.** *A source that refused, or that was never read, may not delete,

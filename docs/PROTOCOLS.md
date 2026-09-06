@@ -2908,15 +2908,16 @@ The same typed exceptions the reads use, plus the two only a mutation can make. 
 ## Opening and watching a sprint
 
 The third part of `secretary.webproto`, and the one that decides what the other two have to work
-on: a run is one head on one card, and the cards come from a sprint. One operation opens a sprint,
-three reads answer what a sprint can be built from, what one sprint is doing and what every sprint
-of the installation is doing. They hold the same
+on: a run is one head on one card, and the cards come from a sprint. Two operations open a sprint
+and comment on one, four reads answer what a sprint can be built from, what one sprint is doing,
+what every sprint of the installation is doing, and what happened to one comment. They hold the same
 properties as the halves above — no HTTP, no sockets, no framework, no rendering, typed codes
 instead of status numbers, and every section of every document carrying its own availability — and
 they are the contract the web transport, the CLI and a future Telegram head all call.
 
 Every document validates against the packaged `web-sprint` schema and carries `schema_version`, a
-`kind` of `sprint_options`, `sprint`, `sprint_list` or `sprint_created`, and `observed_at`. The identities are the
+`kind` of `sprint_options`, `sprint`, `sprint_list`, `sprint_created`, `sprint_comment` or
+`sprint_comment_delivery`, and `observed_at`. The identities are the
 ones this pipeline already has: a sprint is its `sprint:N` reference, a product its id, an issue its
 `issue:*` reference, a project its registered id, a head profile its registry id.
 
@@ -3069,6 +3070,101 @@ silence establishes nothing at all, so `launch` is `unavailable` sourced from th
 affirmative claim manufactured from a file that proves only that it holds no row for the reference
 (secretary-1574).
 
+### Commenting on a running sprint
+
+**`sprint_comment(request_id, actor, reference, body, role="po")`** puts one comment on a sprint
+entity and answers with `kind: sprint_comment`. It is the one way a PO intervenes in a sprint that
+is running: a comment on the *entity*, never an edit of the sprint's executor cards, and there is no
+operation here that opens such a path.
+
+| field | what it carries |
+| --- | --- |
+| `request_id` | required; the idempotency key of this one comment (below) |
+| `ref` | the sprint the comment is on |
+| `comment_id` | the **durable identifier of the comment**: the committed audit event id `SprintWriter._write` minted for it. It is what a later read takes back, and it is deliberately not a board row number a caller would have to know how to interpret |
+| `saved` | whether *this* call saved the comment. `false` is a repeat that found it already saved and wrote nothing |
+| `delivery` | the whole `sprint_comment_delivery` document below, embedded exactly as a create embeds the sprint |
+
+Every rule about what a comment may be stays with `SprintWriter.comment`: which roles may write one
+(`po`, `dispatcher`, `worker`, `reviewer`, `steward`, `retro`), that a body may not be empty, and
+that a closed or stopped sprint refuses one. The operation restates none of them and calls it.
+
+**Idempotency is the audit's own claim, and there is no second index.** `SprintWriter._write`
+claims `request_id` in the committed audit before the board is touched, and a repeat is answered
+from the committed event *without the mutation being called at all*. So a repeat writes no second
+comment, appends no second audit event, and — because a wake is driven by a new significant event
+and there is none — causes no second observer wake and no second head launch. A second request store
+beside `<data>/webproto/sprint-requests/` would be a second answer to a question already answered,
+so there is not one.
+
+**A repeat over different inputs is refused, not answered.** The one thing the audit's claim does
+not do is compare what the request said, so `sprint_comment` compares the committed (or pending)
+event this id already owns — its kind, its sprint, its actor and the body digest the event carries —
+against the request being made, and refuses a mismatch with `validation`. That is exactly how
+`sprint_create` refuses a repeat over different inputs, and for the same reason: a request id is the
+idempotency key of *one* request, and answering a different one with the first one's result would
+tell a caller their new comment was saved when it was not.
+
+**A half-written comment is repeated, never restarted.** `audit_pending` from the writer reaches the
+caller as an `OperationPending` carrying `backend_unavailable` and a `data` action naming
+`sprint_comment` and *this* request id, because that id is the one whose repeat resumes the write.
+
+### What happened to a comment
+
+**`sprint_comment_delivery(ref, comment_id)`** is the read half, and it answers three things that
+must never stand in for one another:
+
+* **`comment`** — whether the committed audit holds this comment on this sprint (`saved`), holds no
+  such event (`absent`), or could not be read at all (`unknown`). Sourced `journal`;
+* **`delivery`** — where the dispatcher's own observer delivery machinery has got it to. Sourced
+  `liveness`, needing `journal`, because placing a comment against a cursor needs both;
+* **`acceptance`** — read from no source at all, and always `established: false`. It is this
+  contract saying, in the answer itself, that neither of the two above is the observer having read,
+  accepted or taken the comment into account, and naming `issue:cf5c9f03ee0f92d3d347` as the
+  deferred mechanism that would establish it.
+
+**Delivery is a batch fact, not a per-comment one.** The dispatcher's cursor is `through_event` over
+this installation's committed event stream and no cursor is per comment, so the honest answer is the
+*relation* between this comment's event and those cursors. That relation, and the whole mapping from
+the five `DeliveryStage` values plus the cases that are not a stage at all:
+
+| what the record says | answer | why |
+| --- | --- | --- |
+| no observer record for this sprint | `unknown` | nothing here establishes where the comment is — never "not delivered" |
+| the production state could not be read | `unknown` | the source that would say refused; the section is sourced `liveness` and unavailable |
+| the committed audit could not be read | `unknown` | the comment and the cursors cannot be placed in one order; sourced `journal` and unavailable |
+| a cursor names an event the audit does not hold | `unknown` | the same: the comment cannot be placed against it |
+| `acknowledged_through` is this comment's event or a later one | `handed_over` | the batch that carried it was acknowledged by the head that was woken for it |
+| stage `waiting_for_idle` | `waiting` | a batch is owed and is held until the head is idle; it carries everything after the acknowledged cursor |
+| stage `delivery_intent` or `awaiting_ack`, `through_event` at or after this comment | `waiting` | the batch was fixed and sent and is not acknowledged |
+| stage `retry_deferred` over the same range | `error`, with `last_failure_reason` | the batch failed and the dispatcher is retrying it |
+| stage `idle`, or an active batch fixed *before* this comment arrived | `saved` | no batch carries it yet; an event appended after a delivery intent is deliberately left for the next batch |
+
+`unknown` is never folded into any of the other four. "Nobody could say where this comment is" and
+"it is still waiting" are repaired by different people, and the read has to be able to tell an
+operator which of the two they have.
+
+Beside the state, `batch` carries the part of the delivery record the answer stands on — the stage,
+the delivery and cursor ids, the wake and launch failure counts, the last recorded failure reason,
+and the one `delivery_evidence_summary` line the head that reports its own delivery history is given
+— and is `null` when there is no record to stand on. Nothing else of the dispatcher's internals is
+published.
+
+**The honest limits, stated rather than implied.**
+
+* `handed_over` says a batch carrying this comment was acknowledged. It does not say the observer
+  read this comment, agreed with it, changed anything because of it, or even that this comment was
+  the reason the batch existed;
+* a comment written by a role other than `po` is not on its own a semantic wake
+  (`is_significant_observer_event`), so no batch is opened *for* it; it is carried when a later
+  significant event moves the cursor past it, and this read reports that relation truthfully rather
+  than pretending a batch was raised for it;
+* the answer is only as fresh as the durable state it reads. It consults no terminal, no pane and no
+  head.
+
+**The read performs no delivery.** No wake, no nudge, no retry, no head launch and no write to the
+dispatcher's state — redelivery is the production tick's, and this reports what that tick recorded.
+
 ### One place says which source answered
 
 Every document of this layer is assembled from sources that fail apart, and the whole reason it
@@ -3154,6 +3250,8 @@ because the sections are exactly the builders of `SprintSections`:
 | `waiting` | `sprints`, then `cards`, then `liveness`, then `cards`, then `liveness` (below) | `unknown`, sourced by the first missing input, and its reason names the column the board *did* establish where it did |
 | `observer.declared` | `sprints` | `unknown` — never `absent`, which would be a claim about a row nobody has seen |
 | `observer.launch` | `liveness`, which also needs `sprints` | `unavailable`, sourced `sprints` or `liveness` — never `not_started` |
+| `comment` (delivery document) | `journal` | `unknown`, sourced `journal`; `id` still names which comment the answer would have been about |
+| `delivery` (delivery document) | `journal` when it holds no such comment; `liveness` otherwise, which also needs `journal` | `unknown` with `batch: null`, sourced by whichever of `journal`, `liveness` was missing first |
 
 An unreadable `journal` therefore marks `decision.freshness` and nothing else: the sprint row, the
 current card, the cards grouping, the checks, the observer declaration and its launch all stand.
@@ -3222,7 +3320,13 @@ as a whole, because a board that will not answer leaves no items to say it in.
 
 `secretary sprint list` and `secretary sprint status` are clients of these two operations and hold
 no rule about what a sprint's state is; their exit statuses are the ones `web-read` maps the typed
-codes to (`not_found`/`validation` → 2, `backend_unavailable` → 1).
+codes to (`not_found`/`validation` → 2, `backend_unavailable` → 1). `secretary sprint comment` and
+`secretary sprint comment-delivery` are clients of the two comment operations in exactly the same
+sense: argument parsing, the document on stdout, and that same table -- with `sprint comment`, which
+mutates, using `web-run`'s table instead, so `owner_conflict` keeps the exit status `3` it has always
+answered a closed sprint with. The comment command mints a
+`--request-id` when the operator gave none, which is a convenience of the command and not a rule —
+a person retrying a comment types the same one to get the same comment back.
 
 **The installation config is one more source, including at the edge of the operation.** A config
 that does not validate takes away only what it owns — where the data plane is, and this
@@ -3248,8 +3352,8 @@ re-decides a refusal:
 | --- | --- | --- | --- |
 | `validation`, `role_forbidden` | `ValidationRefused` | `validation` | a closed or foreign issue, an unregistered project, an unknown observer or executor profile, a missing request id, a repeat over different inputs |
 | `not_found` | `TaskNotFound` | `not_found` | the board holds no such product, issue or sprint |
-| `sprint_conflict`, `resource_conflict` | `OwnerConflict` | `owner_conflict` | an open sprint already reserves one of these projects, or this installation is at its open-sprint limit |
-| `audit_pending` | `OperationPending` | `backend_unavailable` | the create is part-done and repairable with the same request id (above) |
+| `sprint_conflict`, `resource_conflict`, `closed` | `OwnerConflict` | `owner_conflict` | an open sprint already reserves one of these projects, this installation is at its open-sprint limit, or the sprint a comment names is closed or stopped |
+| `audit_pending` | `OperationPending` | `backend_unavailable` | the create or the comment is part-done and repairable with the same request id (above); the `data` action names which operation |
 | `backend_error`, anything else | `RuntimeUnavailable` | `backend_unavailable` | a durable source of this installation refused |
 
 ## Serving the pipeline locally

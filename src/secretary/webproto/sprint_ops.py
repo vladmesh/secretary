@@ -1,10 +1,26 @@
-"""The operation that opens a sprint, and nothing else about what a sprint is.
+"""The operations that open a sprint and comment on one, and nothing else about what a sprint is.
 
-secretary-1562 gave this package operations over a product run. This is the one operation over a
-sprint: a client -- the web transport of the next card, `secretary sprint create` today, a Telegram
+secretary-1562 gave this package operations over a product run. These are the operations over a
+sprint. `sprint_create`: a client -- the web transport, `secretary sprint create` today, a Telegram
 head later -- states a product, a goal, a definition of done, the issues the sprint serves, the
 projects it reserves, the head that observes it and, optionally, the heads its cards run on, and a
-sprint entity exists.
+sprint entity exists. `sprint_comment`: the one way a PO intervenes in a *running* sprint, by
+commenting on the entity -- there is deliberately no path here to edit the sprint's cards.
+
+**A comment needs no request index of this layer's own.** `SprintWriter._write` already claims
+`request_id` in the committed audit, and a repeat is answered from that claim *without the mutation
+being called*: no board comment, no second event, and therefore nothing new for a delivery batch to
+carry and no second observer wake. Building a second index beside it would be a second answer to a
+question already answered. The one thing the audit does not do is refuse a repeat that reuses an id
+over *different* inputs, and that -- and only that -- is added here, in the shape `sprint_create`
+already refuses one.
+
+**What a comment answers with is saved, not accepted.** The identifier is the audit event id, the
+`saved` flag says whether this call wrote it, and the delivery status is
+:meth:`~secretary.webproto.sprint_reads.SprintReadLayer.sprint_comment_delivery` -- a read over the
+dispatcher's own cursors. None of the three says the observer read, accepted or took the comment
+into account; that mechanism is deferred by the owner and tracked as
+`secretary.webproto.sprint_reads.ACCEPTANCE_ISSUE`.
 
 **Every rule stays where it already is.** `SprintWriter.create` owns all of them -- the product
 must exist, at least one of the named issues must be an open issue of *that* product, every named
@@ -55,7 +71,7 @@ from typing import Any
 from secretary.config import InstanceReport, validate_instance
 from secretary.sprint_observer import observer_choice
 from secretary.sprints import SprintWriter
-from secretary.tasks import KanboardClient, TaskError
+from secretary.tasks import KanboardClient, TaskAudit, TaskError, _digest
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
@@ -77,8 +93,24 @@ SCHEMA_VERSION = 1
 SPRINT_CREATE_ROLES = ("po", "steward")
 
 #: The reason token an :class:`~secretary.webproto.errors.OperationPending` carries, so a client
-#: branches on a value rather than on a sentence.
+#: branches on a value rather than on a sentence. One per operation, because the safe action is
+#: about *that* operation's request id and a client that repeated the wrong one would be repeating
+#: somebody else's half-finished write.
 PENDING_REASON = "sprint_create_pending_repair"
+COMMENT_PENDING_REASON = "sprint_comment_pending_repair"
+
+#: The name a comment operation is known by on a pending action. Deliberately not a record in
+#: :mod:`secretary.webproto.sprint_requests`: a comment needs no second request index, because the
+#: audit's own committed/pending claim on `request_id` is already what makes a repeat idempotent.
+SPRINT_COMMENT_OPERATION = "sprint_comment"
+
+#: The roles `SprintWriter.comment` admits, named here so a client can offer the choice. The refusal
+#: for anything else is still the writer's own, and the operation restates none of it.
+SPRINT_COMMENT_ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
+
+#: The kind of audit event a sprint comment is, as `SprintWriter.comment` writes it. Read here only
+#: to tell a repeat of *this* request from a request id that already owns some other sprint write.
+COMMENT_EVENT_KIND = "commented"
 
 #: How a `TaskError` from the sprint writer becomes a code of this layer. The writer's vocabulary is
 #: the task protocol's, and every entry below is a mapping and never a re-decision: what was refused
@@ -94,6 +126,10 @@ _CODES: dict[str, Any] = {
     "not_found": TaskNotFound,
     "sprint_conflict": OwnerConflict,
     "resource_conflict": OwnerConflict,
+    # A closed or stopped sprint refusing a write is the same kind of thing: the request is well
+    # formed and refused on the state of the world. This layer only says which of its codes carries
+    # the writer's answer -- what `SprintWriter._write` refuses, and when, is unchanged.
+    "closed": OwnerConflict,
     "backend_error": RuntimeUnavailable,
 }
 
@@ -239,6 +275,81 @@ class SprintOperationLayer(ProtocolBoundary):
         # region that says so however it fails. See :meth:`_after_create`.
         return self._after_create(store, created, request_id=request_id, claimed=claimed, now=now)
 
+    def sprint_comment(
+        self,
+        *,
+        request_id: str,
+        actor: str,
+        reference: str,
+        body: str,
+        role: str = "po",
+    ) -> dict[str, Any]:
+        """Put one comment on a sprint, and say where it got to without saying more than that.
+
+        This is how a PO intervenes in a running sprint: a comment on the *entity*. There is
+        deliberately no path here to edit the sprint's cards.
+
+        **The identifier is the audit event id**, which is what makes it stable: it is minted once
+        by `SprintWriter._write`, a repeat of the same request hands back the same one, and it is
+        the identifier :meth:`~secretary.webproto.sprint_reads.SprintReadLayer.sprint_comment_delivery`
+        takes back. It is not a board row number: a caller never has to know how to interpret it.
+
+        **A repeat is idempotent by the audit's own claim, and by no second mechanism.**
+        `SprintWriter._write` sees the committed event this request id already owns and returns it
+        *without calling the mutation* -- so there is no second comment on the board, no second
+        audit event, and therefore nothing new for a delivery batch to carry and no second observer
+        wake. A second request index here would be a second answer to a question already answered;
+        the one thing the audit does not do is refuse a repeat that reuses the id over *different*
+        inputs, and that is what :meth:`_same_comment` adds, in exactly the shape `sprint_create`
+        refuses one.
+
+        `saved` says whether *this* call is the one that wrote it. False is the idempotency contract
+        stated on the document rather than only in a test.
+
+        `delivery` is the read below, embedded exactly as a create embeds the sprint: a caller that
+        has just commented and a caller asking an hour later read the same document, and right after
+        this call it honestly says the comment is saved and no batch carries it yet.
+        """
+        now = self._clock()
+        if not str(request_id or "").strip():
+            raise ValidationRefused("a sprint operation names the request it is made under")
+        if not str(reference or "").strip():
+            raise ValidationRefused("a sprint comment names the sprint it is made on")
+        report = self.report()
+        data_dir = self.data_dir(report)
+        try:
+            audit = TaskAudit(data_dir)
+            owned = audit.committed_event(request_id) or audit.pending_event(request_id)
+        except TaskError as exc:
+            raise self._comment_refusal(exc, request_id=request_id) from None
+        if owned is not None:
+            self._same_comment(
+                owned, role=role, actor=actor, reference=reference, body=body, request_id=request_id
+            )
+        try:
+            written = self._writer(report, data_dir).comment(
+                role=role, actor=actor, reference=reference, body=body, request_id=request_id
+            )
+        except TaskError as exc:
+            raise self._comment_refusal(exc, request_id=request_id) from None
+        comment_id = str(written.get("event_id") or "")
+        if not comment_id:
+            raise RuntimeUnavailable(
+                "the sprint writer saved a comment that carries no durable identifier"
+            )
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "sprint_comment",
+            "observed_at": sources.isoformat(now),
+            "request_id": request_id,
+            "ref": reference,
+            "comment_id": comment_id,
+            # Whether this call saved it, or found it already saved. A repeat answers `false` and
+            # writes nothing at all.
+            "saved": owned is None,
+            "delivery": self._reads().sprint_comment_delivery(reference, comment_id),
+        }
+
     # -- the pieces the operation is made of -------------------------------------------------
 
     def _existing(self, store: SprintRequestStore, request_id: str, *, fingerprint: str) -> Any:
@@ -325,7 +436,63 @@ class SprintOperationLayer(ProtocolBoundary):
             f"The step that failed was {type(cause).__name__}: {cause}"
         )
 
-    def _refusal(self, exc: TaskError, *, request_id: str) -> Exception:
+    def _same_comment(
+        self,
+        owned: dict[str, Any],
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        body: str,
+        request_id: str,
+    ) -> None:
+        """Refuse a repeat that reuses this id over different inputs, rather than answering it.
+
+        The refusal `sprint_create` already makes, over the record that already exists rather than
+        over a second index of this layer's own: a request id is the idempotency key of *one*
+        request, so a repeat naming another sprint, another role or another body is a `validation`
+        conflict and never a document about the comment somebody else wrote. The comparison is made
+        against the audit event the id owns -- its kind, its sprint, its actor and the body digest
+        `SprintWriter.comment` puts on it -- because that record is what the writer would otherwise
+        hand straight back.
+        """
+        actor_of = owned.get("actor") if isinstance(owned.get("actor"), dict) else {}
+        payload = owned.get("payload") if isinstance(owned.get("payload"), dict) else {}
+        same = (
+            str(owned.get("kind") or "") == COMMENT_EVENT_KIND
+            and str(owned.get("ref") or "") == reference
+            and str(actor_of.get("role") or "") == role
+            and str(actor_of.get("id") or "") == actor
+            and str(payload.get("body_sha256") or "") == _digest(body)
+        )
+        if not same:
+            raise ValidationRefused(
+                f"request id {request_id!r} already owns a sprint write made with different inputs; "
+                "a repeat is a retry of the same request, not a new one"
+            )
+
+    def _comment_refusal(self, exc: TaskError, *, request_id: str) -> Exception:
+        """One `TaskError` from `SprintWriter.comment`, as this layer's own typed failure.
+
+        The same mapping the create uses -- it is the writer's vocabulary either way -- with the
+        pending action naming *this* operation and *this* request id, because that is the id whose
+        repeat resumes the write that did not finish.
+        """
+        return self._refusal(
+            exc,
+            request_id=request_id,
+            operation=SPRINT_COMMENT_OPERATION,
+            reason=COMMENT_PENDING_REASON,
+        )
+
+    def _refusal(
+        self,
+        exc: TaskError,
+        *,
+        request_id: str,
+        operation: str = SPRINT_CREATE_OPERATION,
+        reason: str = PENDING_REASON,
+    ) -> Exception:
         """One `TaskError` from the sprint writer, as this layer's own typed failure.
 
         `audit_pending` is the one that is not a plain mapping, because it is not a plain refusal:
@@ -335,14 +502,24 @@ class SprintOperationLayer(ProtocolBoundary):
         a sentence a client has to read.
         """
         if exc.code == "audit_pending":
-            return OperationPending(exc.message, data=self._pending_action(request_id))
+            return OperationPending(
+                exc.message,
+                data=self._pending_action(request_id, operation=operation, reason=reason),
+            )
         return _CODES.get(exc.code, RuntimeUnavailable)(exc.message)
 
-    def _pending_action(self, request_id: str, *, reference: str = "") -> dict[str, Any]:
+    def _pending_action(
+        self,
+        request_id: str,
+        *,
+        reference: str = "",
+        operation: str = SPRINT_CREATE_OPERATION,
+        reason: str = PENDING_REASON,
+    ) -> dict[str, Any]:
         return {
-            "reason": PENDING_REASON,
+            "reason": reason,
             "action": {
-                "operation": SPRINT_CREATE_OPERATION,
+                "operation": operation,
                 "repeat_request": True,
                 "request_id": request_id,
                 # Present only when this layer knows which sprint the half-finished request holds.
@@ -402,4 +579,12 @@ class SprintOperationLayer(ProtocolBoundary):
         )
 
 
-__all__ = ["PENDING_REASON", "SCHEMA_VERSION", "SPRINT_CREATE_ROLES", "SprintOperationLayer"]
+__all__ = [
+    "COMMENT_PENDING_REASON",
+    "PENDING_REASON",
+    "SCHEMA_VERSION",
+    "SPRINT_COMMENT_OPERATION",
+    "SPRINT_COMMENT_ROLES",
+    "SPRINT_CREATE_ROLES",
+    "SprintOperationLayer",
+]

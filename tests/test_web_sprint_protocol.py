@@ -31,7 +31,7 @@ from secretary.webproto import section as section_module
 from secretary.webproto import sources, sprint_requests, store_io
 from secretary.webproto import sprint_reads as sprint_reads_module
 from secretary.webproto.boundary import GUARDED, operations
-from secretary.webproto.commands import _EXIT_BY_CODE
+from secretary.webproto.commands import _EXIT_BY_CODE, EXIT_CONFLICT
 from secretary.webproto.errors import (
     OperationPending,
     OwnerConflict,
@@ -41,8 +41,23 @@ from secretary.webproto.errors import (
     ValidationRefused,
 )
 from secretary.webproto.runs import RunStoreError
-from secretary.webproto.sprint_ops import PENDING_REASON, SprintOperationLayer
+from secretary.webproto.sprint_ops import (
+    COMMENT_PENDING_REASON,
+    PENDING_REASON,
+    SPRINT_COMMENT_OPERATION,
+    SprintOperationLayer,
+)
 from secretary.webproto.sprint_reads import (
+    ACCEPTANCE_ISSUE,
+    COMMENT_ABSENT,
+    COMMENT_SAVED,
+    COMMENT_UNKNOWN,
+    DELIVERY_ERROR,
+    DELIVERY_HANDED_OVER,
+    DELIVERY_SAVED,
+    DELIVERY_STATES,
+    DELIVERY_UNKNOWN,
+    DELIVERY_WAITING,
     OBSERVER_NOT_STARTED,
     OBSERVER_RUNNING,
     OBSERVER_UNAVAILABLE,
@@ -526,11 +541,16 @@ class LayerPropertyTests(SprintProtocolFixture):
     def test_every_document_validates_against_the_published_schema(self) -> None:
         created = self.create(worker=WORKER_PROFILE)
         reference = self.reference_of(created)
+        commented = self.ops().sprint_comment(
+            request_id="schema-comment", actor="operator", reference=reference, body="a PO note"
+        )
         documents = (
             created,
             self.reads().sprint_state(reference),
             self.reads().sprint_list(),
             self.reads().sprint_options(),
+            commented,
+            self.reads().sprint_comment_delivery(reference, commented["comment_id"]),
         )
         for document in documents:
             with self.subTest(kind=document["kind"]):
@@ -653,6 +673,7 @@ class LayerPropertyTests(SprintProtocolFixture):
         self.reads().sprint_options()
         self.reads().sprint_state(self.reference_of(self.create()))
         self.reads().sprint_list()
+        self.reads().sprint_comment_delivery(self.reference_of(self.create()), "evt_none")
         written = [
             method for method, _params in self.board.calls[before:] if method in _WRITE_METHODS
         ]
@@ -1176,6 +1197,558 @@ class SprintReadCommandTests(SprintProtocolFixture):
 
 
 
+class CommentFixture(SprintProtocolFixture):
+    """One open sprint and the pieces both comment suites drive.
+
+    Delivery is state the dispatcher keeps, so a test that wants a comment in a particular delivery
+    state writes that state into the production file the dispatcher writes -- exactly as the launch
+    tests above write an observer record. Nothing here runs a tick, wakes a head or opens a terminal.
+    """
+
+    #: The body every case comments with unless it is deliberately commenting something else.
+    BODY = "PO: slow down on the second card and finish the first"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.reference = self.reference_of(self.create())
+
+    # -- the operation, and what it left behind ------------------------------------------------
+
+    def comment(self, **kwargs: Any) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "request_id": "po-comment-1",
+            "actor": "operator",
+            "reference": self.reference,
+            "body": self.BODY,
+            "role": "po",
+        }
+        request.update(kwargs)
+        return self.ops().sprint_comment(**request)
+
+    def board_comments(self) -> list[str]:
+        """Every comment on this sprint's row, as the board actually holds them."""
+        row = next(task for task in self.sprint_rows() if task["reference"] == self.reference)
+        return [str(entry.get("comment") or "") for entry in self.board.comments.get(int(row["id"]), [])]
+
+    def audit_events(self) -> list[dict[str, Any]]:
+        from secretary.tasks import TaskAudit
+
+        return TaskAudit(self.data_dir).events()
+
+    def significant_events(self) -> list[str]:
+        """The events that are a semantic wake for this sprint's observer, by the product's own rule.
+
+        `is_significant_observer_event` is what the dispatcher's delivery decision is made from, so
+        this is the input a second wake would have to come from -- not a restatement of it.
+        """
+        from secretary.tasks import is_significant_observer_event
+
+        return [
+            str(event.get("event_id") or "")
+            for event in self.audit_events()
+            if is_significant_observer_event(event, linked_refs=set(), sprint_ref=self.reference)
+        ]
+
+    def pending_wake(self) -> dict[str, Any]:
+        """What the dispatcher's own delivery decision would find owed to this sprint's observer.
+
+        The production function, driven over this fixture's board and audit: it is what decides
+        whether a head is woken at all, so asking it is the difference between covering the wake and
+        counting comments and hoping.
+        """
+        from types import SimpleNamespace
+
+        from secretary.dispatcher_observer import ObserverRecord, _observer_event_state
+        from secretary.sprints import SprintReader
+        from secretary.tasks import TaskAudit
+
+        runtime = SimpleNamespace(
+            sprints=SprintReader(self.board, data_dir=self.data_dir, thresholds=None),
+            audit=TaskAudit(self.data_dir),
+        )
+        record = ObserverRecord.from_json(
+            (self.production_payload().get("observers") or {}).get(self.reference)
+            or {"sprint": self.reference}
+        )
+        owed = _observer_event_state(runtime, self.reference, record)
+        # The age of the latest event moves with the wall clock and is not part of the decision.
+        return {key: value for key, value in owed.items() if key != "age_seconds"}
+
+    def production_payload(self) -> dict[str, Any]:
+        return json.loads(self.production_path().read_text(encoding="utf-8"))
+
+    def production_path(self) -> Path:
+        return self.data_dir / "dispatcher" / "production-state.json"
+
+    def data_plane(self) -> dict[str, bytes]:
+        """Every file of this installation's data plane, so a write anywhere in it is visible."""
+        return {
+            str(path.relative_to(self.data_dir)): path.read_bytes()
+            for path in sorted(self.data_dir.rglob("*"))
+            if path.is_file()
+        }
+
+    # -- the delivery state a case wants ------------------------------------------------------
+
+    def delivery_record(self, **delivery: Any) -> None:
+        """The dispatcher's observer record for this sprint, with the delivery cursors a case needs."""
+        self._production(
+            {
+                self.reference: {
+                    "sprint": self.reference,
+                    "head": OBSERVER_PROFILE,
+                    "state": "working",
+                    "launches": 1,
+                    "bound": True,
+                    "delivery": {"stage": "idle", **delivery},
+                }
+            }
+        )
+
+    def delivery_of(self, comment_id: str, *, through: str = "") -> dict[str, Any]:
+        document = self.reads().sprint_comment_delivery(self.reference, comment_id)
+        self.assertEqual(document["kind"], "sprint_comment_delivery")
+        self.assertEqual(validate(document, "web-sprint", document["kind"]), [], through)
+        return document["delivery"]
+
+
+class CommentTests(CommentFixture):
+    """Criteria 1-3: one named operation, a durable identifier, and a repeat that does nothing."""
+
+    def test_a_comment_is_saved_and_answers_with_a_durable_identifier(self) -> None:
+        answered = self.comment()
+
+        self.assertEqual(answered["kind"], "sprint_comment")
+        self.assertEqual(answered["ref"], self.reference)
+        self.assertTrue(answered["saved"])
+        self.assertEqual(validate(answered, "web-sprint", answered["kind"]), [])
+        # The identifier is the committed audit event of the comment, and the read takes it back.
+        committed = [event for event in self.audit_events() if event["kind"] == "commented"]
+        self.assertEqual([event["event_id"] for event in committed], [answered["comment_id"]])
+        self.assertEqual(self.board_comments(), [f"[po]\n{self.BODY}"])
+        said = self.delivery_of(answered["comment_id"])["source"]
+        self.assertTrue(said["name"])
+
+    def test_the_identifier_is_the_one_a_later_read_uses_and_not_a_board_row(self) -> None:
+        answered = self.comment()
+        comment = self.reads().sprint_comment_delivery(self.reference, answered["comment_id"])["comment"]
+        self.assertEqual(comment["state"], COMMENT_SAVED)
+        self.assertEqual(comment["id"], answered["comment_id"])
+        self.assertEqual(comment["role"], "po")
+        # Durable, and the audit's own: not the board row a caller would have to interpret, and not
+        # the position of the comment in whatever order the board happens to return its rows in.
+        row = next(task for task in self.sprint_rows() if task["reference"] == self.reference)
+        self.assertNotEqual(answered["comment_id"], str(row["id"]))
+        self.assertEqual(
+            answered["comment_id"],
+            next(event["event_id"] for event in self.audit_events() if event["kind"] == "commented"),
+        )
+
+    def test_an_identifier_this_sprint_does_not_hold_is_absent_and_never_delivered(self) -> None:
+        self.comment()
+        document = self.reads().sprint_comment_delivery(self.reference, "evt_nobody")
+        self.assertEqual(document["comment"]["state"], COMMENT_ABSENT)
+        self.assertEqual(document["comment"]["source"]["name"], "journal")
+        self.assertEqual(document["delivery"]["state"], DELIVERY_UNKNOWN)
+        self.assertEqual(document["delivery"]["source"]["name"], "journal")
+
+    def test_a_repeat_makes_no_second_comment_no_second_event_and_no_second_wake(self) -> None:
+        """Criterion 2, as three separate assertions because they are three separate failures.
+
+        Counting comments would pass with a duplicated audit event, and counting audit events would
+        pass with a second wake of the head. So the wake is asked of the dispatcher's own delivery
+        decision, and the production state is compared byte for byte -- a launch, a deferral or a
+        moved cursor all write to it.
+        """
+        first = self.comment()
+        comments, events = self.board_comments(), [event["event_id"] for event in self.audit_events()]
+        significant, owed = self.significant_events(), self.pending_wake()
+        production = self.production_path().read_bytes()
+
+        repeated = self.comment()
+
+        self.assertFalse(repeated["saved"], "a repeat found the comment already saved")
+        self.assertEqual(repeated["comment_id"], first["comment_id"])
+        self.assertEqual(self.board_comments(), comments, "a repeat wrote a second comment")
+        self.assertEqual(
+            [event["event_id"] for event in self.audit_events()], events, "a repeat wrote a second event"
+        )
+        self.assertEqual(self.significant_events(), significant, "a repeat left a second semantic wake")
+        self.assertEqual(self.pending_wake(), owed, "the dispatcher would wake the head a second time")
+        self.assertEqual(self.production_path().read_bytes(), production)
+
+    def test_the_one_comment_is_what_the_dispatcher_would_wake_the_observer_for(self) -> None:
+        """The control for the case above: without it, "unchanged" could mean "never owed at all"."""
+        self.assertFalse(self.pending_wake()["pending"])
+        answered = self.comment()
+        owed = self.pending_wake()
+        self.assertTrue(owed["pending"])
+        self.assertEqual(owed["event_id"], answered["comment_id"])
+
+    def test_a_repeat_over_different_content_is_refused_rather_than_answered(self) -> None:
+        self.comment()
+        with self.assertRaises(ValidationRefused) as refused:
+            self.comment(body="PO: actually, stop the sprint")
+        self.assertIn("different inputs", refused.exception.message)
+        self.assertEqual(self.board_comments(), [f"[po]\n{self.BODY}"])
+
+    def test_a_repeat_over_a_different_sprint_role_or_actor_is_refused_too(self) -> None:
+        self.comment()
+        other = self.add_sprint_row("sprint:9001")
+        for label, request in (
+            ("sprint", {"reference": other}),
+            ("role", {"role": "steward"}),
+            ("actor", {"actor": "somebody-else"}),
+        ):
+            with self.subTest(differs=label), self.assertRaises(ValidationRefused):
+                self.comment(**request)
+
+    def test_a_request_id_that_already_owns_another_sprint_write_is_refused(self) -> None:
+        """The same refusal, over the id of a write that is not a comment at all."""
+        with self.assertRaises(ValidationRefused):
+            self.comment(request_id="req-1")
+
+    def test_a_comment_without_a_request_id_is_refused_before_anything_is_written(self) -> None:
+        with self.assertRaises(ValidationRefused):
+            self.comment(request_id="  ")
+        self.assertEqual(self.board_comments(), [])
+
+    def test_the_writer_keeps_every_rule_including_the_closed_sprint(self) -> None:
+        """This card changes no rule of `SprintWriter`; it only says which code carries its answer."""
+        closed = self.add_sprint_row("sprint:9002", status="closed")
+        with self.assertRaises(OwnerConflict):
+            self.comment(request_id="po-closed", reference=closed)
+        with self.assertRaises(ValidationRefused):
+            self.comment(request_id="po-role", role="observer")
+
+    def test_a_body_the_writer_refuses_is_a_validation_refusal(self) -> None:
+        with self.assertRaises(ValidationRefused):
+            self.comment(body="   ")
+
+    def test_a_half_written_comment_is_repeated_under_the_same_request_id(self) -> None:
+        """`audit_pending` names this operation and this id, never the create's."""
+        from secretary.sprints import SprintWriter
+
+        with mock.patch.object(
+            SprintWriter, "comment", side_effect=TaskError("audit_pending", "audit repair required", 4)
+        ), self.assertRaises(OperationPending) as refused:
+            self.comment()
+        self.assertEqual(refused.exception.data["reason"], COMMENT_PENDING_REASON)
+        action = refused.exception.data["action"]
+        self.assertEqual(action["operation"], SPRINT_COMMENT_OPERATION)
+        self.assertEqual(action["request_id"], "po-comment-1")
+        self.assertTrue(action["repeat_request"])
+
+
+class CommentDeliveryTests(CommentFixture):
+    """Criterion 4: the five answers, each from the delivery machinery that already exists."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.comment_id = self.comment()["comment_id"]
+
+    def test_no_observer_record_is_unknown_and_never_not_delivered(self) -> None:
+        delivery = self.delivery_of(self.comment_id)
+        self.assertEqual(delivery["state"], DELIVERY_UNKNOWN)
+        self.assertIsNone(delivery["batch"])
+        self.assertIn("no observer record", delivery["reason"])
+
+    def test_a_saved_comment_no_batch_carries_yet_says_exactly_that(self) -> None:
+        self.delivery_record()
+        delivery = self.delivery_of(self.comment_id)
+        self.assertEqual(delivery["state"], DELIVERY_SAVED)
+        self.assertEqual(delivery["batch"]["stage"], "idle")
+
+    def test_a_batch_held_for_a_busy_head_is_waiting(self) -> None:
+        self.delivery_record(stage="waiting_for_idle", reason="the head is mid-turn")
+        delivery = self.delivery_of(self.comment_id)
+        self.assertEqual(delivery["state"], DELIVERY_WAITING)
+        self.assertIn("the head is mid-turn", delivery["reason"])
+
+    def test_a_batch_in_flight_that_carries_it_is_waiting(self) -> None:
+        for stage in ("delivery_intent", "awaiting_ack"):
+            with self.subTest(stage=stage):
+                self.delivery_record(
+                    stage=stage, through_event=self.comment_id, delivery_id="delivery-1"
+                )
+                delivery = self.delivery_of(self.comment_id)
+                self.assertEqual(delivery["state"], DELIVERY_WAITING)
+                self.assertEqual(delivery["batch"]["through_event"], self.comment_id)
+
+    def test_an_acknowledged_batch_is_handed_over_and_says_it_is_not_acceptance(self) -> None:
+        self.delivery_record(
+            stage="idle",
+            acknowledged_through=self.comment_id,
+            acknowledged_delivery_id="delivery-1",
+        )
+        document = self.reads().sprint_comment_delivery(self.reference, self.comment_id)
+        self.assertEqual(document["delivery"]["state"], DELIVERY_HANDED_OVER)
+        self.assertIn("not a statement that the comment was read", document["delivery"]["reason"])
+        self.assertFalse(document["acceptance"]["established"])
+        self.assertEqual(document["acceptance"]["issue"], ACCEPTANCE_ISSUE)
+
+    def test_a_failed_batch_is_an_error_carrying_the_recorded_reason(self) -> None:
+        self.delivery_record(
+            stage="retry_deferred",
+            through_event=self.comment_id,
+            delivery_id="delivery-1",
+            wake_attempts=3,
+            wake_failures=2,
+            launch_delivery_failures=1,
+            last_failure_reason="the observer pane refused the prompt",
+        )
+        delivery = self.delivery_of(self.comment_id)
+        self.assertEqual(delivery["state"], DELIVERY_ERROR)
+        self.assertIn("the observer pane refused the prompt", delivery["reason"])
+        self.assertEqual(delivery["batch"]["wake_failures"], 2)
+        self.assertIn("(2 wake, 1 launch)", delivery["batch"]["evidence"])
+
+    def test_a_batch_fixed_before_this_comment_arrived_leaves_it_saved(self) -> None:
+        """An event appended after a delivery intent is left for the next batch, by contract."""
+        earlier = self.audit_events()[0]["event_id"]
+        self.delivery_record(stage="awaiting_ack", through_event=earlier, delivery_id="delivery-1")
+        self.assertEqual(self.delivery_of(self.comment_id)["state"], DELIVERY_SAVED)
+
+    def test_a_cursor_the_audit_cannot_place_is_unknown_and_never_an_answer(self) -> None:
+        for label, record in (
+            ("acknowledged", {"acknowledged_through": "evt_gone"}),
+            ("active", {"stage": "awaiting_ack", "through_event": "evt_gone", "delivery_id": "d"}),
+        ):
+            with self.subTest(cursor=label):
+                self.delivery_record(**record)
+                delivery = self.delivery_of(self.comment_id)
+                self.assertEqual(delivery["state"], DELIVERY_UNKNOWN)
+                self.assertIn("evt_gone", delivery["reason"])
+
+    def test_the_states_are_the_five_and_none_of_them_is_acceptance(self) -> None:
+        """Criterion 5, as a property of the vocabulary rather than of one document."""
+        self.assertEqual(
+            set(DELIVERY_STATES),
+            {DELIVERY_SAVED, DELIVERY_WAITING, DELIVERY_HANDED_OVER, DELIVERY_ERROR, DELIVERY_UNKNOWN},
+        )
+        self.delivery_record(acknowledged_through=self.comment_id)
+        for document in (
+            self.comment(request_id="po-2", body="a second note")["delivery"],
+            self.reads().sprint_comment_delivery(self.reference, self.comment_id),
+        ):
+            with self.subTest(kind=document["kind"]):
+                self.assertFalse(document["acceptance"]["established"])
+                self.assertIn(ACCEPTANCE_ISSUE, document["acceptance"]["reason"])
+                self.assertIn("not acceptance", document["acceptance"]["reason"])
+
+    def test_the_read_delivers_nothing_at_all(self) -> None:
+        """Criterion 6: a read of the delivery state is a read, and this is what that means.
+
+        Nothing of the data plane changes -- so no wake, no nudge, no retry, no launch and no write
+        to the dispatcher's own state -- and the board sees no write either.
+        """
+        self.delivery_record(stage="awaiting_ack", through_event=self.comment_id, delivery_id="d")
+        before, calls = self.data_plane(), len(self.board.calls)
+
+        self.reads().sprint_comment_delivery(self.reference, self.comment_id)
+
+        self.assertEqual(self.data_plane(), before)
+        written = [method for method, _params in self.board.calls[calls:] if method in _WRITE_METHODS]
+        self.assertEqual(written, [])
+
+    def test_a_sprint_nobody_holds_and_a_missing_identifier_are_typed_refusals(self) -> None:
+        with self.assertRaises(TaskNotFound):
+            self.reads().sprint_comment_delivery("sprint:404", self.comment_id)
+        with self.assertRaises(ValidationRefused):
+            self.reads().sprint_comment_delivery(self.reference, "")
+
+
+class CommentDeliveryFaultTests(CommentFixture):
+    """Criterion 7: the delivery answer with each source it stands on refusing, on both surfaces.
+
+    Every fault is this fixture's own installation. The live installation's sources are never made
+    unreadable, so this behaviour is proven here and nowhere else.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.comment_id = self.comment()["comment_id"]
+        self.delivery_record(acknowledged_through=self.comment_id)
+
+    @contextlib.contextmanager
+    def _production_refuses(self) -> Any:
+        path = self.production_path()
+        kept = path.read_text(encoding="utf-8")
+        path.write_text("{", encoding="utf-8")
+        try:
+            yield
+        finally:
+            path.write_text(kept, encoding="utf-8")
+
+    @contextlib.contextmanager
+    def _journal_refuses(self) -> Any:
+        from secretary.tasks import TaskAudit
+
+        with mock.patch.object(
+            TaskAudit, "events", side_effect=PermissionError("audit journal denied")
+        ):
+            yield
+
+    def _documents(self, request_id: str) -> list[dict[str, Any]]:
+        """The same delivery document as the read answers it and as the operation embeds it."""
+        return [
+            self.reads().sprint_comment_delivery(self.reference, self.comment_id),
+            self.ops().sprint_comment(
+                request_id=request_id, actor="operator", reference=self.reference, body=self.BODY
+            )["delivery"],
+        ]
+
+    def test_an_unreadable_production_state_is_unknown_sourced_from_it(self) -> None:
+        with self._production_refuses():
+            documents = self._documents("po-comment-1")
+        for document in documents:
+            with self.subTest(surface=document["kind"]):
+                self.assertEqual(document["delivery"]["state"], DELIVERY_UNKNOWN)
+                self.assertEqual(document["delivery"]["source"]["name"], "liveness")
+                self.assertEqual(document["delivery"]["source"]["state"], "unavailable")
+                # The journal is a different source and its answer stands.
+                self.assertEqual(document["comment"]["state"], COMMENT_SAVED)
+                self.assertEqual(document["comment"]["source"]["state"], "available")
+
+    def test_an_unreadable_audit_is_unknown_sourced_from_the_journal(self) -> None:
+        with self._journal_refuses():
+            documents = self._documents("po-comment-1")
+        for document in documents:
+            with self.subTest(surface=document["kind"]):
+                self.assertEqual(document["comment"]["state"], COMMENT_UNKNOWN)
+                self.assertEqual(document["comment"]["id"], self.comment_id)
+                self.assertEqual(document["comment"]["source"]["name"], "journal")
+                self.assertEqual(document["delivery"]["state"], DELIVERY_UNKNOWN)
+                self.assertEqual(document["delivery"]["source"]["name"], "journal")
+                self.assertEqual(document["delivery"]["source"]["state"], "unavailable")
+
+    def test_both_refusing_names_the_journal_and_claims_nothing(self) -> None:
+        with self._journal_refuses(), self._production_refuses():
+            document = self.reads().sprint_comment_delivery(self.reference, self.comment_id)
+        self.assertEqual(document["delivery"]["state"], DELIVERY_UNKNOWN)
+        self.assertIsNone(document["delivery"]["batch"])
+        self.assertEqual(document["delivery"]["source"]["name"], "journal")
+        self.assertFalse(document["acceptance"]["established"])
+
+    def test_a_repeat_still_answers_when_the_audit_read_of_the_document_refuses(self) -> None:
+        """The write's own idempotency does not depend on the read that reports it."""
+        with self._journal_refuses():
+            repeated = self.ops().sprint_comment(
+                request_id="po-comment-1", actor="operator", reference=self.reference, body=self.BODY
+            )
+        self.assertFalse(repeated["saved"])
+        self.assertEqual(repeated["comment_id"], self.comment_id)
+
+
+class CommentCommandTests(CommentFixture):
+    """Criterion 8: `secretary sprint comment` as a client, and the read beside it."""
+
+    def _run(self, argv: list[str]) -> tuple[int, str, str]:
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch(
+                "secretary.webproto.sprint_reads.KanboardClient.for_instance", return_value=self.board
+            ),
+            mock.patch(
+                "secretary.webproto.sprint_ops.KanboardClient.for_instance", return_value=self.board
+            ),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main([*argv, "--instance", str(self.instance), "--data-dir", str(self.data_dir)])
+        return code, output.getvalue(), errors.getvalue()
+
+    def _body_file(self, text: str) -> str:
+        path = self.tmp / "comment.md"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_sprint_comment_prints_the_document_the_operation_answered(self) -> None:
+        code, output, errors = self._run(
+            [
+                "sprint", "comment", "--ref", self.reference, "--role", "po", "--actor", "operator",
+                "--request-id", "cli-comment", "--body-file", self._body_file(self.BODY),
+            ]
+        )
+
+        self.assertEqual(code, 0, errors)
+        document = json.loads(output)
+        self.assertEqual(document["kind"], "sprint_comment")
+        self.assertTrue(document["saved"])
+        self.assertEqual(self.board_comments(), [f"[po]\n{self.BODY}"])
+        self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
+
+    def test_the_command_holds_no_rule_of_its_own(self) -> None:
+        answered = {"kind": "sprint_comment", "comment_id": "evt_1"}
+        with mock.patch.object(SprintOperationLayer, "sprint_comment", return_value=answered):
+            code, output, _errors = self._run(
+                [
+                    "sprint", "comment", "--ref", self.reference, "--role", "po",
+                    "--body-file", self._body_file("anything"),
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output), answered)
+
+    def test_a_repeat_over_different_content_is_the_validation_exit_status(self) -> None:
+        self._run(
+            [
+                "sprint", "comment", "--ref", self.reference, "--role", "po", "--actor", "operator",
+                "--request-id", "cli-comment", "--body-file", self._body_file(self.BODY),
+            ]
+        )
+        code, output, errors = self._run(
+            [
+                "sprint", "comment", "--ref", self.reference, "--role", "po", "--actor", "operator",
+                "--request-id", "cli-comment", "--body-file", self._body_file("something else"),
+            ]
+        )
+        self.assertEqual(code, _EXIT_BY_CODE["validation"])
+        self.assertEqual(output, "")
+        self.assertEqual(json.loads(errors)["error"]["code"], "validation")
+
+    def test_a_closed_sprint_keeps_the_exit_status_this_command_has_always_given_it(self) -> None:
+        """The refusal is the writer's and is unchanged; only the code that carries it is named."""
+        closed = self.add_sprint_row("sprint:9003", status="closed")
+        code, output, errors = self._run(
+            [
+                "sprint", "comment", "--ref", closed, "--role", "po", "--actor", "operator",
+                "--request-id", "cli-closed", "--body-file", self._body_file(self.BODY),
+            ]
+        )
+        self.assertEqual(code, EXIT_CONFLICT)
+        self.assertEqual(output, "")
+        self.assertEqual(json.loads(errors)["error"]["code"], "owner_conflict")
+
+    def test_sprint_comment_delivery_reads_what_happened_to_it(self) -> None:
+        self.delivery_record(acknowledged_through=self.comment()["comment_id"])
+        comment_id = self.audit_events()[-1]["event_id"]
+
+        code, output, errors = self._run(
+            ["sprint", "comment-delivery", "--ref", self.reference, "--comment-id", comment_id]
+        )
+
+        self.assertEqual(code, 0, errors)
+        document = json.loads(output)
+        self.assertEqual(document["kind"], "sprint_comment_delivery")
+        self.assertEqual(document["delivery"]["state"], DELIVERY_HANDED_OVER)
+        self.assertFalse(document["acceptance"]["established"])
+
+    def test_an_identifier_nobody_holds_still_answers_rather_than_failing(self) -> None:
+        code, output, errors = self._run(
+            ["sprint", "comment-delivery", "--ref", self.reference, "--comment-id", "evt_nobody"]
+        )
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(json.loads(output)["comment"]["state"], COMMENT_ABSENT)
+
+    def test_a_sprint_nobody_holds_is_the_exit_status_web_read_uses(self) -> None:
+        code, _output, errors = self._run(
+            ["sprint", "comment-delivery", "--ref", "sprint:404", "--comment-id", "evt_x"]
+        )
+        self.assertEqual(code, _EXIT_BY_CODE["not_found"])
+        self.assertEqual(json.loads(errors)["error"]["code"], "not_found")
+
+
 class SectionSeamTests(SprintProtocolFixture):
     """The enforcement point itself: what makes the invariant hold for a section written tomorrow.
 
@@ -1353,8 +1926,16 @@ class SectionSeamTests(SprintProtocolFixture):
             | {f"sprints.items[].{name}" for name in work | observer},
         )
         self.assertEqual(self._paths(watched), marks | {"sprint"} | observer | {f"work.{name}" for name in work})
+        # The delivery document is walked the same way, and for the same reason: its two sections are
+        # a section each, and `acceptance` is deliberately not one -- it is read from no source.
+        commented = self.ops().sprint_comment(
+            request_id="seam-1", actor="operator", reference=reference, body="a note"
+        )
+        delivery = commented["delivery"]
+        self.assertEqual(self._paths(delivery), marks | {"comment", "delivery"})
+        self.assertNotIn("acceptance", self._paths(delivery))
         # And every one of them names the source that answered it.
-        for document in (listing, watched):
+        for document in (listing, watched, delivery):
             for path in self._paths(document):
                 with self.subTest(kind=document["kind"], section=path):
                     self.assertTrue(_source_at(document, path)["name"])
