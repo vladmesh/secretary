@@ -23,8 +23,12 @@ Four properties are the point of that half, and each has a test:
 dispatcher state, the journal or the installation. None of the three reads mutates anything, and
 none of them takes an actor.
 
-**It does not know about transports.** No HTTP, no sockets, no framework, no rendering, no
-templates -- not even indirectly through an import. Failures are typed exceptions
+**It does not know about transports.** No HTTP, no sockets, no framework, no rendering and no
+templates in this layer's own surface: nothing here answers a caller in the language of a
+transport. That is deliberately a promise about the surface and not about the import graph, which
+could not carry it -- the layer reaches the board through `KanboardClient`, a Kanboard is an HTTP
+service, and `secretary.tasks` has therefore imported `urllib` under `reads`, `admission`, `ops`
+and `run_events` since this package existed. Failures are typed exceptions
 (:mod:`secretary.webproto.errors`) and availability fields (:mod:`secretary.webproto.sources`),
 never status codes, so the transport is what decides that "not_found" is a 404 or a "no such
 card" message. That is a promise about *every* operation, and it is kept in one place rather than
