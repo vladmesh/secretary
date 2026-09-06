@@ -16,8 +16,11 @@ import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -44,7 +47,7 @@ from tests.fakes.dispatcher import FakeKanboard
 from triggered_agents.agents.pipeline.heads import Registry
 from triggered_agents.runtime.head.identity import publish_heartbeat
 from triggered_agents.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
-from triggered_agents.runtime.head.run import HeadRun
+from triggered_agents.runtime.head.run import HeadRun, StopInitiator
 from triggered_agents.runtime.head.runtime import (
     HEAD_BUSY,
     HEAD_GONE,
@@ -1047,14 +1050,15 @@ class LifecycleTests(ProductRuntimeFixture):
         self.assertEqual(head.role, "worker")
 
     def test_a_head_is_addressable_from_the_write_ahead_record_alone(self) -> None:
-        """Point 2, against the real backend rather than against the double.
+        """The addressing half of point 2, and only that half.
 
         `LocalPtyHeadRuntime.stop` reaches a head through `_address`, which derives the run
         directory from `root/run_id`, the socket and journal from that directory, and the pid file
-        from the run's own `pid_file`. Nothing it consults is remembered by the process that
-        spawned. So the record this product writes *before* the spawn is enough to stop the head
-        that spawn produces -- which is what this asserts, by addressing a real backend with a
-        `HeadRun` rebuilt out of the store and nothing else.
+        from the run's own `pid_file`; nothing it consults is remembered by the process that
+        spawned. This asserts that derivation lands on this product's own paths, with a `HeadRun`
+        rebuilt out of the store and nothing else -- and it asserts nothing about a process,
+        because it starts and stops none. The lifecycle claim itself, a real head ended by a
+        recovered record and confirmed gone, is executed in `RealHeadOwnershipTests`.
         """
         from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
 
@@ -1123,6 +1127,43 @@ class LifecycleTests(ProductRuntimeFixture):
             self.start(request_id="req-second")
         self.assertIn("unsettled product run", str(refused.exception))
 
+    def test_a_recovered_run_that_published_a_result_settles_as_finished(self) -> None:
+        """The recovery path must tell a normal ending apart from a failure. AC 5, at its edge.
+
+        The sequence is the one the `unresolved` phase exists for: a save fails after a successful
+        start, one stop cannot be confirmed, and the head then goes on to do its work, publish its
+        result and end. The read that finally confirms the stop is holding positive evidence of a
+        run that *finished* -- and must classify from that evidence rather than from the record's
+        own `unresolved` shortcut, which would settle a published success as `process_failed`
+        permanently, and only ever here.
+        """
+        self.runtime.stop = lambda run, initiator, **options: StopReceipt(
+            status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
+        )
+        with self._failing_save():
+            with self.assertRaises(RuntimeUnavailable):
+                self.start(request_id="req-late-result")
+        run_id = RunStore(self.data_dir).by_request("req-late-result").run_id
+
+        # The head survived that stop, did its work and published its result.
+        self.runtime.publish_result(run_id, {"status": "done", "summary": "it finished after all"})
+        self.runtime.stop = FakeHeadRuntime.stop.__get__(self.runtime, FakeHeadRuntime)
+
+        settled = self.layer().run_state(run_id)
+        self.assertEqual(settled["state"]["value"], "finished")
+        self.assertTrue(settled["state"]["terminal"])
+        self.assertEqual(
+            settled["state"]["result"]["value"], {"status": "done", "summary": "it finished after all"}
+        )
+        # And the run's one terminal event says so too, on the card's own history.
+        page = self.reads().task_events("secretary-run-1", None, limit=50)
+        finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["data"]["state"], "finished")
+        self.assertEqual(
+            finished[0]["data"]["result"], {"status": "done", "summary": "it finished after all"}
+        )
+
     def test_an_unresolved_run_settles_as_soon_as_the_ending_is_confirmed(self) -> None:
         """An unresolved run is a fence, not a dead end: the next read retries the same stop."""
         refusing = lambda run, initiator, **options: StopReceipt(  # noqa: E731
@@ -1139,6 +1180,135 @@ class LifecycleTests(ProductRuntimeFixture):
         self.assertEqual(settled["state"]["value"], "process_failed")
         self.assertTrue(settled["state"]["terminal"])
         self.assertEqual(self.start(request_id="req-after")["state"]["value"], "running")
+
+
+class RealHeadOwnershipTests(ProductRuntimeFixture):
+    """The outermost claim of this card, executed rather than derived.
+
+    Everywhere else the backend is a double, deliberately: a unit test must not raise real agents.
+    But "Secretary owns the process" has one edge that a double cannot stand in for, because the
+    thing being claimed is that the *durable record alone* is enough to end a real process. So this
+    one test raises a real head under the real `LocalPtyHeadRuntime`, through the product's own
+    start path, then throws the handle away -- a brand new runtime object with no memory of that
+    head, and a `HeadRun` rebuilt out of the **write-ahead** record, which has no socket on it --
+    stops it by that, and confirms it is actually gone from the launch identity, the supervisor's
+    journal and the process table.
+
+    The one substitution is which binary the head is, which this card says is configuration:
+    `render_head_command` is replaced with a child process the test can watch. Everything the claim
+    is about -- the record, the write-ahead ordering, the backend, the stop and its confirmation --
+    is real.
+    """
+
+    #: A real process on a real terminal, and deliberately not an agent. The same child the
+    #: substrate's own suite proves process ownership with.
+    CHILD_COMMAND = f"{sys.executable} -u {REPO_ROOT / 'tests' / 'fixtures' / 'local_pty_child.py'}"
+
+    def test_a_real_head_is_stopped_by_a_record_recovered_from_the_store(self) -> None:
+        from secretary.dispatcher_watchdog import (
+            HEARTBEAT_DEAD,
+            HEARTBEAT_LIVE_MATCH,
+            head_process_status,
+        )
+        from triggered_agents.runtime.head.command import HeadCommand
+        from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime, head_run_journal
+
+        root = self.data_dir / "webproto" / "heads"
+        backend = LocalPtyHeadRuntime(root, head_process_status=head_process_status)
+        self.addCleanup(self._reap, root)
+
+        write_ahead: list[ProductRun] = []
+        real_start = backend.start
+
+        def start(*args, **kwargs):
+            # The record exactly as it lies on disk at the first instant a process can exist.
+            write_ahead.append(RunStore(self.data_dir).get(kwargs["run_id"]))
+            return real_start(*args, **kwargs)
+
+        backend.start = start
+        with (
+            mock.patch.object(lifecycle_module, "CLAUDE_JSON", self.tmp / "claude.json"),
+            mock.patch.object(
+                lifecycle_module,
+                "render_head_command",
+                lambda profile, **kwargs: HeadCommand(command=self.CHILD_COMMAND, adapter="claude"),
+            ),
+        ):
+            document = self.layer(runtime_factory=lambda _root: backend).run_start(
+                "secretary-run-1", request_id="req-real-head", profile=REVIEWER_PROFILE
+            )
+
+        run_id = document["run"]["run_id"]
+        run_dir = root / run_id
+        pid_file = run_dir / "head.pid"
+        stored = RunStore(self.data_dir).get(run_id)
+        self.assertEqual(str(pid_file), stored.pid_file)
+
+        # A real process, on a real terminal, under a supervisor this product owns.
+        self._await(pid_file.exists, "the head never published a launch identity")
+        head_pid = int(json.loads(pid_file.read_text(encoding="utf-8"))["pid"])
+        expected = run_state.expected_identity(stored)
+        self._await(
+            lambda: head_process_status(str(pid_file), expected=expected)["state"]
+            == HEARTBEAT_LIVE_MATCH,
+            "the head's launch identity never became a live match",
+        )
+        self.assertTrue(_alive(head_pid), "the head's process is running")
+
+        # Now throw the handle away. The record used below is the write-ahead one -- written before
+        # the spawn, carrying no socket -- and the runtime is a new object that never started
+        # anything, which is what a later dispatcher process has.
+        ahead = write_ahead[0]
+        self.assertEqual(ahead.phase, "raising")
+        recovered_head = HeadRun.from_json(ahead.head_run)
+        self.assertFalse(recovered_head.handle, "the write-ahead record carries no socket handle")
+        del backend
+        recovered_runtime = LocalPtyHeadRuntime(root, head_process_status=head_process_status)
+
+        receipt = recovered_runtime.stop(
+            recovered_head,
+            StopInitiator("secretary.webproto", "stopped by a record recovered from the store"),
+        )
+
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(head_process_status(str(pid_file))["state"], HEARTBEAT_DEAD)
+        self.assertIn(RUN_EXITED, [record.get("kind") for record in head_run_journal(run_dir)])
+        self.assertFalse(_alive(head_pid), "the head's process is gone")
+
+    # -- keeping a real process out of the rest of the suite ------------------------------------
+
+    def _await(self, predicate, message: str, *, timeout: float = 15.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.02)
+        self.assertTrue(predicate(), message)
+
+    def _reap(self, root: Path) -> None:
+        """Leave no process behind, whatever the test did or failed to do."""
+        for run_dir in sorted(root.glob("*")) if root.is_dir() else []:
+            for name, group in (("head.pid", True), ("supervisor.pid", False)):
+                try:
+                    raw = (run_dir / name).read_text(encoding="utf-8")
+                    pid = int(json.loads(raw)["pid"] if name.endswith(".pid") and raw.strip().startswith("{") else raw)
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+                for number in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(pid, number) if group else os.kill(pid, number)
+                    except OSError:
+                        break
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class OrcaAbsenceTests(ProductRuntimeFixture):

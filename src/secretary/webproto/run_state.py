@@ -76,8 +76,10 @@ TERMINAL_STATES = (FINISHED, PROCESS_FAILED)
 #: Read this module against :mod:`secretary.webproto.lifecycle`: a run's *phase* says where its
 #: lifecycle is and a run's *state* says what its process is doing, and they are not the same
 #: question. Only two phases answer the state question by themselves -- a settled run says its
-#: recorded ending forever, and an unresolved run says `unknown` because nothing established
-#: anything -- and every other phase is decided from the process evidence below.
+#: recorded ending forever, and an unresolved run says `unknown` because at the moment that was
+#: written nothing had established anything -- and every other phase is decided from the process
+#: evidence. :func:`from_evidence` is that decision without either shortcut, for the one caller
+#: that has just changed the world and must not read its own stale record back.
 
 
 def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
@@ -124,7 +126,25 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
             heartbeat={"state": HEARTBEAT_NOT_YET_WRITTEN},
             now=now,
         )
+    return from_evidence(run, now=now)
 
+
+def from_evidence(run: ProductRun, *, now: float) -> dict[str, Any]:
+    """This run's state from the process evidence alone, with no phase shortcut applied.
+
+    :func:`observe` is the reader's answer and answers *two* phases out of the record instead --
+    a settled run says its recorded ending forever, and an unresolved run says `unknown` because
+    at the moment it was written nothing had established anything. This is the other question, and
+    it is the one a caller asks once it has just changed the world: **what do the heartbeat, the
+    journal and the result file say right now**.
+
+    Keeping the two apart is not tidiness. A run whose cleanup could not be confirmed may have gone
+    on to publish a result and end normally, and the read that finally confirms its stop then holds
+    positive evidence of a *finished* run. Classifying that through `observe` would apply the
+    stored `unresolved` shortcut, find no terminal value, and settle the run as `process_failed`
+    beside its own published result -- a normal ending recorded as a failure, permanently, and only
+    ever on the recovery path. So a close classifies from here.
+    """
     heartbeat = head_process_status(run.pid_file, expected=expected_identity(run))
     journal, journal_failure = _journal(run)
     exit_status = _exit_status(journal)

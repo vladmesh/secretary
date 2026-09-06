@@ -30,8 +30,11 @@ of the last step, and their meanings are in :mod:`secretary.webproto.runs`.
    `LocalPtyHeadRuntime.stop` addresses a head through `_address`, which derives the run directory
    from `root/run_id` and the pid file from the run's own `pid_file`, and it confirms the ending
    from the launch identity on that path. It never consults anything this process remembers. That
-   is what makes the write-ahead record sufficient on its own, and it is checked by a test that
-   stops a head using only a record rebuilt from the store.
+   is what makes the write-ahead record sufficient on its own, and it is *executed* rather than
+   argued: `RealHeadOwnershipTests` raises a real head through this path, throws the handle away,
+   rebuilds a `HeadRun` out of the write-ahead record, stops the head with a runtime object that
+   never started anything, and confirms the ending from the launch identity, the supervisor's
+   `run.exited` and the process table.
 
 3. **The truth about a possibly-live process outranks closing the record.** A cleanup that was not
    confirmed may not settle as a terminal outcome. `_close` therefore ends the head *first* and
@@ -46,7 +49,11 @@ of the last step, and their meanings are in :mod:`secretary.webproto.runs`.
      settling a run it had no right to settle.
 
    An unresolved run is not a dead end. Every later `_close` -- a `run_state` of that run -- retries
-   the stop from the same disk record, and settles the moment the ending is confirmed.
+   the stop from the same disk record, and settles the moment the ending is confirmed. What it
+   settles *as* is read off the process at that moment and never off the run's own `unresolved`
+   record: a head that survived one unconfirmed stop may have gone on to publish its result and
+   end normally, and recording that as `process_failed` would make a success indistinguishable
+   from a failure on the one path where it matters most.
 
 **What "one place" means as a check.** Every path that can put a process into the world, and every
 path that can close a run, calls :meth:`RunLifecycle.advance` and nothing else. Within
@@ -317,12 +324,21 @@ class RunLifecycle:
         before anything terminal is written, because a record that says `process_failed` over a
         process that is still running is worse than a record that says it does not know: the first
         frees the card for a second run beside a live head, and the second does not.
+
+        And what is written then is read off the **process**, not off this run's own last record.
+        The distinction only shows on the recovery path and it is the whole difference between a
+        normal ending and a failure there: a run that went to `unresolved` because one stop could
+        not be confirmed may have gone on to publish its result and end cleanly, and the read that
+        finally confirms the stop is holding positive evidence of exactly that. Classifying it
+        through the record's own `unresolved` shortcut would find no terminal value and settle it
+        `process_failed` beside its own published result. So the classification comes from
+        :func:`secretary.webproto.run_state.from_evidence`.
         """
         if self._may_hold_a_process(run, spawned=spawned):
             confirmed, detail = self._end_the_head(run, reason)
             if not confirmed:
                 return self._save(run.in_doubt(detail))
-        state = observed if observed is not None else run_state_reads.observe(run, now=now)
+        state = observed if observed is not None else self._evidence(run, now=now)
         value, why = self._ending(state, failure=failure, reason=reason)
         exit_status, result = run_state_reads.terminal_evidence(run)
         try:
@@ -332,6 +348,12 @@ class RunLifecycle:
         except RunStoreError as exc:
             raise RuntimeUnavailable(str(exc)) from None
         return settled
+
+    def _evidence(self, run: ProductRun, *, now: float) -> dict[str, Any]:
+        """What the process says right now. A settled run is the one thing that is history already."""
+        if run.settled:
+            return run_state_reads.observe(run, now=now)
+        return run_state_reads.from_evidence(run, now=now)
 
     def _ending(self, state: dict[str, Any], *, failure: str, reason: str) -> tuple[str, str]:
         """What this run is recorded as having ended as, and why.

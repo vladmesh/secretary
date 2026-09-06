@@ -2676,7 +2676,11 @@ The order is the contract:
    and it stays **unsettled**, which is what the admission gate's sixth condition already refuses a
    second run over. An unresolved run is a fence and not a dead end: every later `web-run state`
    retries the same stop from the same record, and the run settles the moment the ending is
-   confirmed.
+   confirmed. What it settles *as* is read off the process at that moment, never off the
+   `unresolved` record — a head that survived one unconfirmed stop may have published its result
+   and ended normally in between, and such a run settles `finished` with its result, exactly as it
+   would have without the detour. A normal ending and a failure stay distinguishable on the
+   recovery path, which is the one place they would otherwise collapse.
 
 `phase` is on every run document beside `state`, and the two answer different questions: the phase
 says where the lifecycle is, the state says what the process is doing.
