@@ -153,9 +153,11 @@ refuses before it reaches the transport, and the guard check, which reads a file
 no `reconcile adopt` was run, and no sprint was created anywhere.
 
 ```
-checked at 2026-09-06T15:35:27Z
+checked at 2026-09-06T15:54:15Z
 $ git -C ~/secretary rev-parse --short HEAD
 2235518
+$ git -C ~/secretary reflog show --date=iso -1 HEAD
+2235518 HEAD@{2026-09-06 15:24:17 +0000}: merge origin/main: Fast-forward
 $ systemctl show -p ExecMainStartTimestamp secretary-web.service
 ExecMainStartTimestamp=Sun 2026-09-06 06:45:20 UTC
 $ systemctl is-active secretary-web.service secretary-web-front.service
@@ -192,8 +194,11 @@ Read together, those say four things:
 - **The installed web cannot be showing the new form, and says so itself.** `/sprints/new` is `404`
   on the running transport while `~/secretary/` is at `2235518`, which contains all three merged
   cards.
-- **Why:** the transport process started at `2026-09-06 06:45:20 UTC`; the three cards merged at
-  `13:49`, `14:18` and `15:24 UTC`. A process serves the checkout it started with.
+- **Why, as a comparison of two times rather than of a time and a revision:** the checkout last
+  moved at `2026-09-06 15:24:17 +0000` (its reflog) and the transport process started at
+  `2026-09-06 06:45:20 UTC` — nearly nine hours *earlier*. A process serves the checkout it started
+  with, so this one cannot be serving the merged code, and the `404` above is that fact observed
+  rather than inferred.
 
 ## What is NOT proved here
 

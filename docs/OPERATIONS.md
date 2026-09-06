@@ -2297,15 +2297,22 @@ Run the upgrade as the installation owner and out of the installed checkout
 an upgrade materialises the *configured* checkout, and running the module from a candidate worktree
 is how unmerged work reaches the homes the running heads read.
 
-What is installed afterwards is two facts, and both are worth printing:
+What is installed afterwards is three facts, and all three are worth printing:
 
 ```bash
-git -C ~/secretary rev-parse --short HEAD
-systemctl show -p ExecMainStartTimestamp secretary-web.service
+git -C ~/secretary rev-parse --short HEAD                        # which revision is checked out
+git -C ~/secretary reflog show --date=iso -1 HEAD                # when that checkout last moved
+systemctl show -p ExecMainStartTimestamp secretary-web.service   # when the process started
 ```
 
-The transport must have started *after* the checkout moved; if it did not, the restart did not
-happen and the page is still the old one. `secretary status` prints a third revision — the head
+The transport must have started *after* the checkout moved, and those are the two values that say
+so: the start timestamp against the reflog timestamp, time against time, mind the offsets (the
+reflog prints local time, `systemctl` UTC). The revision is context, not the other half of that
+comparison — a timestamp cannot be ordered against a SHA. If the process is the older of the two,
+the restart did not happen and the page is still the old one; and if the reflog has no entry to
+compare against — a `pull` that fetched nothing writes none — ask the running process instead:
+`curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/sprints/new` answers `200` on code that has
+the sprint form and `404` on code that does not. `secretary status` prints a third revision — the head
 registry pin in `~/secretary-instance/heads/source.yaml` — and it answers a different question. It
 is written by the `head-registry` and `head-registry-checkpoint` steps, which run well before `host`
 and before anything else can fail, so a pin naming this revision says the registry was regenerated
@@ -2377,19 +2384,36 @@ predates the new binding, with `observer head predates the sprint binding`. Rest
 does not do that; `upgrade` does. So if observer heads are running that should not be interrupted,
 do the restart and leave `upgrade` for later.
 
-**2. Prove that the restart actually published.** Two values, and the second must be later than the
-first:
+**2. Prove that the restart actually published.** The decisive check is functional, and it is one
+line: ask the running transport for a route that only the new code has.
 
 ```bash
-git -C ~/secretary rev-parse --short HEAD
-systemctl show -p ExecMainStartTimestamp secretary-web.service
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/sprints/new   # 200 = the new code is live
 ```
 
-If the timestamp predates the moment the checkout moved, the restart did not happen and the browser
-is still being served the old code. `secretary status` prints a third revision — the head-registry
-pin — which answers a different question and is never evidence that this worked. The cheapest single
-check that the new code is live: `curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/sprints/new`
-answers `200` on the new code and `404` on the old.
+`200` means the process serving the browser has the sprint form; `404` means it does not, whatever
+the checkout says, and the restart has not taken effect. That is the whole of the proof, and it is
+the one to trust: it asks the running process rather than reasoning about it.
+
+Two supporting values say *why*, and they are compared time against time — never a time against a
+revision, which is not a comparison anybody can make:
+
+```bash
+git -C ~/secretary rev-parse --short HEAD                        # which revision is checked out
+git -C ~/secretary reflog show --date=iso -1 HEAD                # when that checkout last moved
+systemctl show -p ExecMainStartTimestamp secretary-web.service   # when the running process started
+```
+
+The start timestamp must be **later** than the reflog timestamp: a process that started before the
+checkout moved is serving the code from before the move. Read the offsets — the reflog prints the
+machine's local time with its offset and `systemctl` prints UTC — and compare like with like. Two
+honest limits on that pair: a `git pull` that had nothing to fetch writes no reflog entry, so the
+last move can legitimately be days old and the ordering then proves nothing beyond "the checkout did
+not move today"; and an expired or trimmed reflog gives no entry at all. In both cases the `curl`
+above is the answer, which is why it is first.
+
+`secretary status` prints a third revision — the head-registry pin — which answers a different
+question and is never evidence that this worked.
 
 **3. Walk the form once, in a browser.** Everything below is at `https://5uoc.l.time4vps.cloud/`,
 account `owner`; the password is the installation's own (*Setting or reading the password*).
