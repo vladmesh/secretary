@@ -28,6 +28,20 @@ repeat in the same mode that changed nothing, `resumed` for a resume that lifted
 (:meth:`~secretary.webproto.pause_reads.PauseReadLayer.pause_state`), so a caller reads what the
 pipeline is now from the same sections it would have read before the call.
 
+**And a command that did something says so even when the pipeline cannot be described afterwards.**
+`dispatcher_pause_ops.pause` and `resume` set the flag and then render the status through
+`pause_status`, which converts every dispatcher record -- so a production state that is semantically
+corrupt (an obsolete record shape, an `attempt_round` that is not an integer, a truncated write)
+makes that last step refuse over a pause that has already taken. This layer is what promises a
+readable result, so it is where that is repaired: :meth:`PauseOperationLayer._perform` treats a
+failure of the dispatcher call as possibly-after-the-fact, reads the one durable flag back, and when
+the flag holds exactly what the command intended it reports the action it performed with the
+refusal as a warning and an unavailable section on the embedded state read. It re-decides nothing
+and repairs nothing: a flag that did not reach the intended mode means the command really did fail,
+and the refusal travels unchanged. A refusal of the pause's own rules -- `validation`,
+`pause_conflict` -- never enters that span, because those are decisions made before anything is
+written.
+
 **And a resume says what it put back**, from the lists the stop itself wrote: `relaunched`, `parked`
 and `skipped` as `resume` produced them, with the mode that was lifted. A drain relaunches nothing
 because a drain stopped nothing, and the document says that in words rather than leaving an empty
@@ -42,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.dispatcher import runtime_from_args
+from secretary.dispatcher_pause import normalize_pause_mode
 from secretary.dispatcher_pause_ops import pause as _pause
 from secretary.dispatcher_pause_ops import resume as _resume
 from secretary.dispatcher_types import DispatcherError, HostError
@@ -60,6 +75,16 @@ from secretary.webproto.pause_reads import (
 #: The operations of this module, named so a client can offer them without spelling either twice.
 PAUSE_DRAIN_OPERATION = "pause_drain"
 PAUSE_RESUME_OPERATION = "pause_resume"
+
+#: The mode a resume intends the flag to hold afterwards: none. It is a state of the flag and not a
+#: pause mode, which is why it is the empty string `normalize_pause_mode` already answers with for a
+#: pipeline that is not paused, and why it is spelled here rather than written as a bare `""`.
+LIFTED = ""
+
+#: The flag could not be read at all -- neither a mode nor the absence of one. Not a pause mode and
+#: never compared equal to what a command intended: an unreadable flag establishes nothing, so a
+#: command whose outcome is only knowable from the flag is reported as the failure it raised.
+UNREADABLE_FLAG = "?"
 
 #: The error contract of the pause half, in one place, for the four operations of both its modules.
 #:
@@ -148,7 +173,11 @@ class PauseOperationLayer(ProtocolBoundary):
         """
         now = self._clock()
         runtime = self._runtime()
-        result = self._call(lambda: _pause(runtime, mode=DRAIN, actor=actor, reason=reason))
+        result = self._perform(
+            lambda: _pause(runtime, mode=DRAIN, actor=actor, reason=reason),
+            runtime=runtime,
+            intended=DRAIN,
+        )
         return self._document(PAUSE_DRAIN_OPERATION, result, actor=actor, now=now, restored=None)
 
     def pause_resume(self, *, actor: str) -> dict[str, Any]:
@@ -159,10 +188,14 @@ class PauseOperationLayer(ProtocolBoundary):
         a card whose head reported while the pause was on is left to the next tick rather than given
         a fresh head. What this adds is the reporting: the mode that was lifted and the three lists
         the resume produced, told apart from the no-op of resuming a pipeline that was not paused.
+
+        A resume whose own answer never arrived (:meth:`_perform`) still reports the pause it lifted,
+        with those lists `null` for a freeze: what it put back was in the answer nobody could read,
+        which is not the empty list's claim that it put nothing back.
         """
         now = self._clock()
         runtime = self._runtime()
-        result = self._call(lambda: _resume(runtime, actor=actor))
+        result = self._perform(lambda: _resume(runtime, actor=actor), runtime=runtime, intended=LIFTED)
         return self._document(
             PAUSE_RESUME_OPERATION,
             result,
@@ -206,6 +239,62 @@ class PauseOperationLayer(ProtocolBoundary):
             raise _CODES.get(exc.code, RuntimeUnavailable)(exc.message) from None
         except HostError as exc:
             raise RuntimeUnavailable(f"the host could not answer this pause command: {exc}") from None
+
+    def _perform(
+        self,
+        operation: Callable[[], Any],
+        *,
+        runtime: Any,
+        intended: str,
+    ) -> dict[str, Any]:
+        """One pause command, and the answer to "did it happen" when the call itself could not say.
+
+        `dispatcher_pause_ops.pause` and `resume` write the flag and *then* render the status through
+        `pause_status`, which converts every dispatcher record. So a production state that no longer
+        converts -- a record shape this release does not store, an `attempt_round` that is not an
+        integer, a file a partial write truncated -- raises after the pause has already taken. That
+        ordering is the dispatcher's and this does not change it; what this changes is what the
+        caller hears, because a completed drain reported as `backend_unavailable` tells an operator
+        the safety control did not take while it silently did, in exactly the situation the command
+        exists for.
+
+        So the failure of the dispatcher call is treated as possibly-after-the-fact, and settled
+        against the one durable thing that says what a pause *is*: the flag. It is read back, and
+        only a flag holding exactly what this command intended -- `drain` for a drain, nothing at
+        all for a resume -- makes this an action to report. Anything else, an unreadable flag
+        included, is a command that really did fail, and its refusal travels unchanged.
+
+        The decisions never enter the span. A `validation` refusal and a `pause_conflict` are made
+        before anything is written, and are re-raised as themselves; this re-decides nothing, retries
+        nothing, and writes nothing of its own -- the only call it adds is a read of a file the
+        dispatcher had just read.
+        """
+        held = _mode_now(runtime)
+        try:
+            return self._call(operation)
+        except (ValidationRefused, OwnerConflict):
+            # A refusal, not a failed call: the pause's own rules said no before anything was
+            # written, and there is nothing after the fact to report.
+            raise
+        except Exception as refused:
+            action = _landed(held, _mode_now(runtime), intended)
+            if action is None:
+                raise
+            return {
+                "action": action,
+                "resumed_mode": held,
+                # The lists a freeze's resume produced were in the answer that never arrived. Said
+                # as unknown rather than as empty, which would be the claim that it put nothing back.
+                "reported": False,
+                "warnings": [
+                    (
+                        f"the command completed -- the pause flag holds {_said(intended)} -- but "
+                        f"the dispatcher could not render the pipeline state afterwards: {refused}."
+                        " What could be established is on `state`, where the source that did not "
+                        "answer is marked unavailable"
+                    )
+                ],
+            }
 
     def _document(
         self,
@@ -255,6 +344,42 @@ class PauseOperationLayer(ProtocolBoundary):
         )
 
 
+def _mode_now(runtime: Any) -> str:
+    """The pause mode the flag holds this instant, or :data:`UNREADABLE_FLAG`.
+
+    `ProductionPause.load` and `normalize_pause_mode` answer it -- the same pair the production tick
+    reads the flag with -- so this opens no second flag and holds no second rule. A flag the class
+    marks corrupt is not an answer here: the tick's rule that an unreadable flag is read as a freeze
+    is about what the pipeline *does*, and cannot stand in for what a command did.
+    """
+    try:
+        state = runtime.pause.load()
+        if state.get("corrupt"):
+            return UNREADABLE_FLAG
+        return normalize_pause_mode(state.get("mode"))
+    except Exception:  # noqa: BLE001 -- a flag that cannot be read establishes nothing, and says so
+        return UNREADABLE_FLAG
+
+
+def _landed(held: str, now: str, intended: str) -> str | None:
+    """The action a command performed, from the flag before and after it. None when it performed none.
+
+    The whole rule: a command landed when the flag holds what it intended, and which of the two
+    outcomes it was is what the flag held before. A drain over a drain changed nothing and is the
+    `noop` a repeat has always been; a resume of a pipeline that was not paused is the same. A flag
+    that could not be read on either side answers nothing at all.
+    """
+    if UNREADABLE_FLAG in (held, now) or now != intended:
+        return None
+    if intended == LIFTED:
+        return "resumed" if held else "noop"
+    return "noop" if held == intended else "paused"
+
+
+def _said(intended: str) -> str:
+    return f"mode {intended}" if intended else "no pause"
+
+
 def _restored(result: dict[str, Any]) -> dict[str, Any]:
     """What a resume put back, from the lists the resume itself produced.
 
@@ -262,12 +387,24 @@ def _restored(result: dict[str, Any]) -> dict[str, Any]:
     sentence only says which of the three cases they belong to. The drain case is the one worth
     spelling out -- an empty `relaunched` there is not a resume that failed to bring anything back,
     it is a drain that never stopped anything.
+
+    And when the resume completed but its own answer never arrived (:meth:`PauseOperationLayer.
+    _perform`), the lists are `null` rather than empty for a freeze: nobody read what it put back,
+    and an empty list there would be the claim that it put nothing back. For a drain and for a
+    pipeline that was not paused they are still `[]`, because what was put back is established by
+    what a drain is and not by a list somebody had to read.
     """
     mode = str(result.get("resumed_mode") or "") or None
-    relaunched = list(result.get("relaunched") or [])
-    parked = list(result.get("parked") or [])
-    skipped = list(result.get("skipped") or [])
-    if mode is None:
+    unread = not result.get("reported", True) and mode == "freeze"
+    relaunched = None if unread else list(result.get("relaunched") or [])
+    parked = None if unread else list(result.get("parked") or [])
+    skipped = None if unread else list(result.get("skipped") or [])
+    if unread:
+        statement = (
+            "the freeze was lifted, but the resume's own report could not be read back, so what it "
+            "put back is not established here; the heads that are up now are on `state`"
+        )
+    elif mode is None:
         statement = "the pipeline was not paused, so this resume lifted nothing and put nothing back"
     elif mode == DRAIN:
         statement = (
@@ -285,7 +422,7 @@ def _restored(result: dict[str, Any]) -> dict[str, Any]:
         "relaunched": relaunched,
         "parked": parked,
         "skipped": skipped,
-        "observers_resumed": list(result.get("observers_resumed") or []),
+        "observers_resumed": None if unread else list(result.get("observers_resumed") or []),
         "statement": statement,
     }
 

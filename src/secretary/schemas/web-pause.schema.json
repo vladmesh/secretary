@@ -528,7 +528,7 @@
         "object",
         "null"
       ],
-      "description": "What a resume put back, from the lists the resume itself produced. Null on a pause command, which puts nothing back. `resumed_mode` is null when the pipeline was not paused at all.",
+      "description": "What a resume put back, from the lists the resume itself produced. Null on a pause command, which puts nothing back. `resumed_mode` is null when the pipeline was not paused at all. A list is null when the resume completed but its own report could not be read back -- that is \"nobody read what it put back\", which is not the empty list's claim that it put nothing back.",
       "required": [
         "resumed_mode",
         "relaunched",
@@ -546,25 +546,37 @@
           ]
         },
         "relaunched": {
-          "type": "array",
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "string"
           }
         },
         "parked": {
-          "type": "array",
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "string"
           }
         },
         "skipped": {
-          "type": "array",
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "string"
           }
         },
         "observers_resumed": {
-          "type": "array",
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "string"
           }
@@ -680,7 +692,7 @@
     },
     "pause_command": {
       "type": "object",
-      "description": "What one pause command did. `action` is the answer the dispatcher's own pause gave: `paused` set the flag, `noop` is a repeat in the same mode that changed nothing, `resumed` lifted one. A refusal is not an action and never reaches this document.",
+      "description": "What one pause command did. `action` is the answer the dispatcher's own pause gave: `paused` set the flag, `noop` is a repeat in the same mode that changed nothing, `resumed` lifted one. A refusal is not an action and never reaches this document. A command whose action landed but whose pipeline state could not be rendered afterwards is still this document: the action it performed, the refusal under `warnings`, and the source that did not answer marked unavailable on `state`.",
       "required": [
         "schema_version",
         "kind",

@@ -49,6 +49,20 @@ explicit `--data-dir`, `pause-status` and `pause-scope` now answer from the flag
 state and report `installation` as an unavailable source, where the old path refused — a caller that
 supplied the missing information gains an answer, and no refusal changed its status.
 
+**A pause that took is reported as one even when the pipeline cannot be described afterwards.** The
+dispatcher writes the flag and then renders the status, and that status read converts every
+dispatcher record — so a semantically corrupt `production-state.json` made a completed drain or
+resume answer `backend_unavailable` with no `action`, which reads as "the pause did not take" on a
+safety control that silently did. `pause_drain` and `pause_resume` now read the flag back when the
+dispatcher call fails: a flag holding exactly what the command intended is reported as the action it
+performed, in the ordinary `pause_command` document, with the dispatcher's refusal under `warnings`
+and the embedded `state` read marking the source that could not answer as unavailable. A resume of a
+freeze whose own report was lost carries `relaunched`, `parked`, `skipped` and `observers_resumed` as
+`null` — nobody read what it put back, which is not the empty list's claim that it put nothing back —
+and the `web-pause` schema admits `null` there. Nothing else moved: a command whose flag did not
+reach the intended state still fails with its own refusal, a `pause_conflict` is still
+`owner_conflict` with exit 3, and what a pause or resume *does* is unchanged.
+
 **A durable file that parses but cannot be converted is an unavailable source, not an exception.** A
 pause flag whose `stopped_worker` is a number, a production record whose `attempt_round` is not an
 integer, or one whose shape this release no longer stores (a `DispatcherError` from

@@ -2422,7 +2422,9 @@ for, and each is a field rather than an assumption a reader has to bring:
    and the `relaunched`, `parked` and `skipped` lists `resume` itself produced, plus
    `observers_resumed`. After a drain those lists are empty and the statement says why — a drain
    stopped nothing, so there was nothing to put back — which is a different fact from a resume that
-   failed to bring a head back.
+   failed to bring a head back. And where a freeze's resume completed but its own report could not
+   be read back, those lists are `null` rather than `[]`: nobody read what it put back, which is not
+   the claim that it put nothing back.
 
 **The scope read is the new one, and it is a read.** `pause_scope` answers, before any command is
 issued: that the pause is pipeline-wide, which dispatcher and which files a command would write
@@ -2450,6 +2452,25 @@ not a repeat: it is `owner_conflict`, because the request is well formed and ref
 the world, and the same request after a `resume` is admitted. The three outcomes are therefore always
 distinguishable: `action` is `paused`, `noop` or `resumed`, `changed` is the boolean of that, and a
 refusal is not an action at all and never reaches a document.
+
+**A command that did something says so even when the pipeline cannot be described afterwards.**
+`dispatcher_pause_ops.pause` and `resume` write the flag and *then* render the status through
+`pause_status`, which converts every dispatcher record — so a `production-state.json` that is
+semantically corrupt (a record shape this release no longer stores, a non-integer `attempt_round`, a
+partial write) makes that last step refuse over a pause that has already taken. Reported as
+`backend_unavailable` with no action, that tells an operator the safety control did not take while
+it silently did, in exactly the situation the command exists for. So the operation settles it
+against the one durable thing that says what a pause is: it reads the flag back, and a flag holding
+exactly what the command intended — `drain` for a drain, no pause at all for a resume — is an action
+to report. The caller gets the ordinary `pause_command` document: its `action` and `changed`, the
+dispatcher's refusal under `warnings`, and the embedded `state` read with the source that could not
+answer marked unavailable — the same shape a read of a half-readable installation has. Nothing is
+repaired or re-decided: a flag that did not reach the intended state means the command really failed
+and its refusal travels unchanged, an unreadable flag establishes nothing and does the same, and a
+`validation` or `pause_conflict` refusal is a decision made before anything was written and is never
+turned into an action. It is pinned hermetically over a production state whose records refuse
+conversion (`tests/test_web_pause_protocol.py::CompletedCommandTests`), on the flag and on what the
+caller was told.
 
 **The sources, and the precedence they are consulted in.** Every section goes through
 `SourceSet.decide` or `mark`, and a refused source reaches no claim:

@@ -22,6 +22,7 @@ from unittest import mock
 
 from secretary.config import validate
 from secretary.dispatcher_pause_ops import pause as dispatcher_pause
+from secretary.dispatcher_types import DispatcherError
 from secretary.webproto.errors import OwnerConflict, ReadError, ValidationRefused
 from secretary.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
 from secretary.webproto.pause_reads import DRAIN, PIPELINE_WIDE, PauseReadLayer
@@ -795,6 +796,20 @@ class CommandClientTests(PauseProtocolFixture):
         self.assertEqual(status, 0)
         self.assertEqual(document["operation"], "pause_resume")
 
+    def test_a_command_whose_state_cannot_be_rendered_still_answers_zero_with_its_action(self) -> None:
+        """Criterion 8 over the degraded path: a completed drain is a success at the command too.
+
+        The exit status is what a script branches on, so a pause that took must not answer with the
+        status of a pause that did not.
+        """
+        from secretary import dispatcher_commands
+
+        self.tracked_head(worker_retained_at=1)
+        status, document = self._run(dispatcher_commands.run_pause, mode="drain")
+        self.assertEqual(status, 0)
+        self.assertEqual(document["action"], "paused")
+        self.assertEqual(self.pause_payload()["mode"], DRAIN)
+
     def test_the_conflict_keeps_the_exit_status_it_always_answered_with(self) -> None:
         from secretary import dispatcher_commands
 
@@ -847,6 +862,160 @@ class CommandClientTests(PauseProtocolFixture):
             self.assertEqual(dispatcher_commands.run_pause(self._args(mode="freeze")), 0)
         operations.assert_not_called()
         production.assert_called_once()
+
+
+class CompletedCommandTests(PauseProtocolFixture):
+    """Criterion 6 where it is hardest: the command did something, and the pipeline cannot be read.
+
+    `dispatcher_pause_ops.pause` and `resume` write the flag and then render the status through
+    `pause_status`, which converts every dispatcher record. A production state that no longer
+    converts therefore refuses *after* the pause has taken, and the operator most likely to see it
+    is the one reaching for a drain because something is already wrong with the pipeline. Reported
+    as `backend_unavailable` with no action, that reads as "the pause did not take" over a safety
+    control that silently did.
+
+    So the shape is the one this card already owns: what is established is stated, and the source
+    that could not answer is marked unavailable. Every case here runs against the fixture and its
+    `FakeHost`; nothing touches a live installation.
+    """
+
+    def _state_that_refuses_conversion(self) -> None:
+        """The reviewer's reproduction: a record shape this release does not store.
+
+        `DispatcherRecord.from_json` refuses a flat `worker_retained_at` with a `DispatcherError`,
+        and `pause_status` converts every record, so this is one of the several semantic corruptions
+        -- an unknown outcome terminal path, a non-integer `attempt_round`, a truncated write --
+        that reach the status read after the flag is already written.
+        """
+        self.tracked_head(worker_retained_at=1)
+
+    def _make_the_records_refuse(self) -> None:
+        """The same refusal, applied to the state a command has already written into.
+
+        Separate because the shape cannot be there from the start when the case needs a freeze
+        first: `pause freeze` reads the records itself and would be refused before it set anything.
+        """
+        payload = json.loads(self.production_path().read_text(encoding="utf-8"))
+        payload["records"][EXISTING_CARD]["worker_retained_at"] = 1
+        self.production_path().write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_a_drain_over_a_state_that_refuses_conversion_reports_the_pause_it_set(self) -> None:
+        self._state_that_refuses_conversion()
+        document = self.pause_ops().pause_drain(actor="operator", reason="host maintenance")
+
+        self.assertEqual(document["kind"], "pause_command")
+        self.assertEqual(document["action"], "paused")
+        self.assertTrue(document["changed"])
+        # The flag reached the state the command intended, which is what makes this an action.
+        self.assertEqual(self.pause_payload()["mode"], DRAIN)
+        # And the document says what could not be answered rather than dropping the answer: the
+        # pause is readable, the liveness of the heads is not.
+        self.assert_available(document["state"], "state")
+        self.assertEqual(document["state"]["state"]["mode"], DRAIN)
+        self.assert_unavailable(document["state"], "heads")
+        self.assertIsNone(document["state"]["heads"]["cards"])
+        self.assertTrue(
+            any("could not render the pipeline state" in warning for warning in document["warnings"]),
+            document["warnings"],
+        )
+        self.assertTrue(
+            any("unsupported legacy dispatcher record" in warning for warning in document["warnings"]),
+            document["warnings"],
+        )
+
+    def test_a_repeat_over_the_same_state_is_still_the_no_op_it_always_was(self) -> None:
+        """The repeat contract survives the degraded path: a second drain changed nothing, and says so."""
+        self._state_that_refuses_conversion()
+        first = self.pause_ops().pause_drain(actor="operator", reason="host maintenance")
+        written = self.pause_payload()
+        second = self.pause_ops().pause_drain(actor="somebody-else", reason="a different reason")
+
+        self.assertEqual(first["action"], "paused")
+        self.assertEqual(second["action"], "noop")
+        self.assertFalse(second["changed"])
+        self.assertEqual(self.pause_payload(), written)
+
+    def test_a_resume_over_a_state_that_refuses_conversion_reports_the_pause_it_lifted(self) -> None:
+        self._state_that_refuses_conversion()
+        self.pause_ops().pause_drain(actor="operator", reason="host maintenance")
+        document = self.pause_ops().pause_resume(actor="operator")
+
+        self.assertEqual(document["operation"], "pause_resume")
+        self.assertEqual(document["action"], "resumed")
+        self.assertTrue(document["changed"])
+        self.assertFalse(self.pause_file().exists())
+        restored = document["restored"]
+        self.assertEqual(restored["resumed_mode"], DRAIN)
+        # A drain stopped nothing, so what it put back is established by what a drain is rather than
+        # by a list nobody could read: these are empty, not unknown.
+        self.assertEqual(restored["relaunched"], [])
+        self.assertIn("the drain stopped no head", restored["statement"])
+        self.assert_unavailable(document["state"], "heads")
+
+    def test_a_resume_whose_own_report_never_arrived_says_what_it_cannot_say(self) -> None:
+        """A freeze lifted, and the buckets it produced lost with the answer that carried them.
+
+        The status read is refused directly here rather than through a corrupt record, because that
+        is the fault this pins: the *ordering*, not any one way of reaching it. What a freeze's
+        resume relaunched, parked and skipped was in the answer that never arrived, so the lists are
+        `null` -- nobody read them -- and never `[]`, which would claim it put nothing back.
+        """
+        self.tracked_head()
+        dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
+        with mock.patch(
+            "secretary.dispatcher_pause_ops.pause_status",
+            side_effect=DispatcherError("unsupported_legacy_record", "the records do not convert", 1),
+        ):
+            document = self.pause_ops().pause_resume(actor="operator")
+
+        self.assertEqual(document["action"], "resumed")
+        self.assertTrue(document["changed"])
+        self.assertFalse(self.pause_file().exists())
+        restored = document["restored"]
+        self.assertEqual(restored["resumed_mode"], "freeze")
+        self.assertIsNone(restored["relaunched"])
+        self.assertIsNone(restored["parked"])
+        self.assertIsNone(restored["skipped"])
+        self.assertIn("not established here", restored["statement"])
+        self.assertEqual(validate(document, "web-pause", document["kind"]), [])
+
+    def test_a_command_that_did_not_reach_its_intended_state_still_fails(self) -> None:
+        """The other half of the rule, and the one that keeps this from being a repair.
+
+        `resume` of a freeze reads the records before it clears anything, so a state that refuses
+        conversion stops it *before* the flag is touched. The pipeline is still frozen, and the
+        caller is told so: the refusal travels unchanged and nothing invents an action.
+        """
+        self.tracked_head()
+        dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
+        self._make_the_records_refuse()
+
+        with self.assertRaises(ReadError) as refused:
+            self.pause_ops().pause_resume(actor="operator")
+        self.assertEqual(refused.exception.code, "backend_unavailable")
+        self.assertEqual(self.pause_payload()["mode"], "freeze")
+
+    def test_a_refusal_of_the_pause_rules_is_never_reported_as_an_action(self) -> None:
+        """Criterion 5 through the degraded path: a conflict is still a conflict, and writes nothing."""
+        self.tracked_head()
+        dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
+        self._make_the_records_refuse()
+        frozen = self.pause_payload()
+
+        with self.assertRaises(OwnerConflict):
+            self.pause_ops().pause_drain(actor="operator", reason="host maintenance")
+        with self.assertRaises(ValidationRefused):
+            self.pause_ops().pause_drain(actor="operator", reason="")
+        self.assertEqual(self.pause_payload(), frozen)
+
+    def test_the_degraded_documents_validate_against_the_published_schema(self) -> None:
+        self._state_that_refuses_conversion()
+        drained = self.pause_ops().pause_drain(actor="operator", reason="host maintenance")
+        resumed = self.pause_ops().pause_resume(actor="operator")
+        for document in (drained, resumed):
+            with self.subTest(action=document["action"]):
+                self.assertEqual(validate(document, "web-pause", document["kind"]), [])
+                json.dumps(document)
 
 
 if __name__ == "__main__":

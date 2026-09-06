@@ -1806,6 +1806,19 @@ own: `pause-status` after a drain shows every `stopped_*` list empty and every l
 left to the next tick, and the ones it did not bring back; after a drain it is nothing, and it says
 so — a drain stopped no head, so an empty list there is not a resume that failed.
 
+**If the pipeline state is broken, the command still tells you what it did.** The dispatcher writes
+the flag and then renders the status, and that last step reads every dispatcher record — so a
+`production-state.json` that is corrupt, half-written or left in a shape an upgrade no longer stores
+would otherwise make a pause that *did* take answer like one that failed. It does not: the command
+answers with its `action`, the dispatcher's complaint under `warnings`, and the state read inside it
+showing the section nobody could answer as `unavailable`. Read the flag itself
+(`<data_dir>/dispatcher/pause.json`) if you want the pipeline's own copy of the answer, and repair
+the production state before expecting `pause-status` to describe the heads again. The reverse case is
+just as plain: if the command really failed, it exits non-zero and the flag is untouched — a drain
+that was refused is not a drain that half-happened. For a resume of a freeze in that state,
+`restored`'s lists are `null` rather than empty: what it put back could not be read, which is not the
+same as putting nothing back.
+
 ### Pause or breakage
 
 `pause-status` shows the product dispatcher's state as the protocol document of the pause layer: `state` carries
