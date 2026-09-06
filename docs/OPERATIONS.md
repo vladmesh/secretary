@@ -2069,11 +2069,37 @@ failure and never as a run with nothing to show, which is a different thing and 
 
 ### Opening a sprint from the browser
 
-`/sprints/new` is the form; it offers this installation's own products, its open issues, its
-registered projects and its head profiles, so there is nothing to type from memory and no technical
-identifier to remember. Fill in the goal and the definition of done, tick at least one issue and at
-least one project, choose the observer, and leave the worker and reviewer selects on "the observer
-chooses" unless a role has to be pinned to a particular head.
+Three routes, and they are the whole of it. They are entries of `secretary.web.app.ROUTES` like
+every other route, which is what the guard check below asks about:
+
+| route | what it is |
+| --- | --- |
+| `GET /sprints/new` | the form, built from this installation's own catalogue |
+| `POST /sprints` | the create; answers `303` to the new sprint's page, or renders the form back |
+| `GET /sprints/{ref}` | one sprint: what it was opened with, and where its launch got to |
+
+`/sprints/new` offers this installation's own products, its open issues, its registered projects and
+its head profiles, so there is nothing to type from memory and no technical identifier to remember.
+Fill in the goal and the definition of done, tick at least one issue and at least one project, choose
+the observer, and leave the worker and reviewer selects on "the observer chooses" unless a role has
+to be pinned to a particular head.
+
+**What the form does when it is submitted.** It calls one operation — `sprint_ops.sprint_create` —
+under the role `po` and the actor `web`, so the sprint's audit says a browser opened it. That
+operation is the same one `secretary sprint create` uses, and every rule about what a sprint may be
+belongs to `SprintWriter.create` below it: the product must exist, one of the named issues must be
+an open issue of that product, every project must be registered and unheld by another open sprint,
+and each profile must be one this installation's head registry holds. The web adds no rule of its
+own and skips none, with a single exception it makes deliberately: it does not offer "no observer"
+(see below).
+
+**Leaving worker or reviewer on "the observer chooses" is a decision, and it is the normal one.** An
+unpinned role writes no field on the sprint row at all — the row carries no `sprint_worker` and no
+`sprint_reviewer` — and the observer then picks a head per card the way it always has, out of the
+registry's role defaults. A pin is the exception: it fixes that role's profile for every card of the
+sprint, which is worth doing when a sprint exists to exercise one particular head and is otherwise a
+constraint nobody wanted. The sprint page names a pin when there is one and says the role is the
+observer's when there is not; an empty pin field is therefore never "unknown".
 
 **"Start this sprint" is the create.** There is no separate launch action anywhere in this product:
 the production tick raises one observer head for each open sprint that has none, so opening a sprint
@@ -2111,10 +2137,26 @@ tick deliberately raises nothing for, so it is not offered here and a hand-craft
 Use `secretary sprint create --observer none` if that is really what is wanted; sprints that already
 run without an observer are unaffected and their pages read normally.
 
+**"Saved" is not "working", and the page never conflates them.** A `303` to a sprint page means one
+thing: the entity exists on the board, with the goal, the definition of done, the issues, the
+projects and the observer it was opened with. Nothing has run yet. The sprint is *working* when the
+production tick has raised its observer head and the page reads `running — an observer head is up`;
+until then `saved` is the honest word and the tick is what changes it. So a page that still says
+`saved` a minute later is a question about the dispatcher (is production ticking?), never about the
+create — and `stopped` is a third thing again: an observer was raised for this sprint and is not
+alive now, which is the dispatcher's to answer and not something to repair by submitting the form
+again.
+
 **A submission from another site is refused with 403** before anything runs, on this and on the two
 run routes alike. That check looks at the `Origin` header a browser sends, so a client that sends
 none — `curl`, `secretary web-run`, the diagnostics above — is unaffected; if a `curl` POST ever
 does need to look like a browser's, send `-H "Origin: https://HOST"` matching the host in the URL.
+
+**What of this has actually been walked, and what has not,** is written down in
+`docs/evidence/sprint-user-path-2026-09-06.md`: every step above was driven over a real socket
+against an isolated installation and its answer recorded, and none of it has yet been served by the
+published web. Republishing and finishing that last part is *Finishing the sprint-form acceptance*
+below.
 
 ### Updating the service
 
@@ -2255,15 +2297,22 @@ Run the upgrade as the installation owner and out of the installed checkout
 an upgrade materialises the *configured* checkout, and running the module from a candidate worktree
 is how unmerged work reaches the homes the running heads read.
 
-What is installed afterwards is two facts, and both are worth printing:
+What is installed afterwards is three facts, and all three are worth printing:
 
 ```bash
-git -C ~/secretary rev-parse --short HEAD
-systemctl show -p ExecMainStartTimestamp secretary-web.service
+git -C ~/secretary rev-parse --short HEAD                        # which revision is checked out
+git -C ~/secretary reflog show --date=iso -1 HEAD                # when that checkout last moved
+systemctl show -p ExecMainStartTimestamp secretary-web.service   # when the process started
 ```
 
-The transport must have started *after* the checkout moved; if it did not, the restart did not
-happen and the page is still the old one. `secretary status` prints a third revision — the head
+The transport must have started *after* the checkout moved, and those are the two values that say
+so: the start timestamp against the reflog timestamp, time against time, mind the offsets (the
+reflog prints local time, `systemctl` UTC). The revision is context, not the other half of that
+comparison — a timestamp cannot be ordered against a SHA. If the process is the older of the two,
+the restart did not happen and the page is still the old one; and if the reflog has no entry to
+compare against — a `pull` that fetched nothing writes none — ask the running process instead:
+`curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/sprints/new` answers `200` on code that has
+the sprint form and `404` on code that does not. `secretary status` prints a third revision — the head
 registry pin in `~/secretary-instance/heads/source.yaml` — and it answers a different question. It
 is written by the `head-registry` and `head-registry-checkpoint` steps, which run well before `host`
 and before anything else can fail, so a pin naming this revision says the registry was regenerated
@@ -2303,6 +2352,97 @@ help, and a reload a second later is served by the new code.
 > `host.foreign_units` in `instance.yaml`; that tells reconcile the name is somebody else's and is
 > not an adoption. `codegen-product-kit` is an Orca registration in the same state and takes the
 > same two decisions.
+
+### Finishing the sprint-form acceptance
+
+Sprint 1428 built the sprint form and merged it; nothing on the running installation shows it,
+because the transport serves the checkout it started with. Everything that can be checked without
+publishing was checked and written down in `docs/evidence/sprint-user-path-2026-09-06.md`. What is
+left is one step, and it is the owner's because it needs `sudo`: republish the transport, then walk
+the form once on the live installation.
+
+**1. Republish.** The product checkout only has to move if it is behind; `~/secretary` was already
+at the merge of the three cards on 2026-09-06, in which case the restart alone is the whole update.
+
+```bash
+git -C ~/secretary log --oneline -1                     # is the form's code already here?
+secretary upgrade --instance ~/secretary-instance       # only if it is not: `pull` moves the checkout
+sudo systemctl restart secretary-web.service            # the front is PartOf= and comes with it
+```
+
+Run `upgrade` as the installation owner out of `/home/dev/secretary/.venv/bin/secretary`, never out
+of a task workspace. It stops at its `host` step on this installation — `unowned names in our
+namespace: codegen-product-kit, secretary-web-front.service, secretary-web.service` — and that is
+expected and does not block the restart: `pull` runs first and has already moved the checkout.
+Clearing that conflict is a separate, deliberate decision and is the two `secretary reconcile adopt`
+commands in *Updating the published application to `main`* above; the acceptance below does not need
+it.
+
+**Beware one thing about `upgrade` and observers.** An installation upgraded while sprint observer
+heads are alive performs a changeover: the first production tick after it stops any head that
+predates the new binding, with `observer head predates the sprint binding`. Restarting the transport
+does not do that; `upgrade` does. So if observer heads are running that should not be interrupted,
+do the restart and leave `upgrade` for later.
+
+**2. Prove that the restart actually published.** The decisive check is functional, and it is one
+line: ask the running transport for a route that only the new code has.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/sprints/new   # 200 = the new code is live
+```
+
+`200` means the process serving the browser has the sprint form; `404` means it does not, whatever
+the checkout says, and the restart has not taken effect. That is the whole of the proof, and it is
+the one to trust: it asks the running process rather than reasoning about it.
+
+Two supporting values say *why*, and they are compared time against time — never a time against a
+revision, which is not a comparison anybody can make:
+
+```bash
+git -C ~/secretary rev-parse --short HEAD                        # which revision is checked out
+git -C ~/secretary reflog show --date=iso -1 HEAD                # when that checkout last moved
+systemctl show -p ExecMainStartTimestamp secretary-web.service   # when the running process started
+```
+
+The start timestamp must be **later** than the reflog timestamp: a process that started before the
+checkout moved is serving the code from before the move. Read the offsets — the reflog prints the
+machine's local time with its offset and `systemctl` prints UTC — and compare like with like. Two
+honest limits on that pair: a `git pull` that had nothing to fetch writes no reflog entry, so the
+last move can legitimately be days old and the ordering then proves nothing beyond "the checkout did
+not move today"; and an expired or trimmed reflog gives no entry at all. In both cases the `curl`
+above is the answer, which is why it is first.
+
+`secretary status` prints a third revision — the head-registry pin — which answers a different
+question and is never evidence that this worked.
+
+**3. Walk the form once, in a browser.** Everything below is at `https://5uoc.l.time4vps.cloud/`,
+account `owner`; the password is the installation's own (*Setting or reading the password*).
+
+1. Open `/sprints/new` — the "New sprint" page. Every select is already filled from this
+   installation: products, open issues, registered projects, head profiles. Nothing is typed from
+   memory.
+2. Choose the **product**, then tick the **issues** this sprint serves and the **projects** it
+   reserves — at least one of each. A project another open sprint holds is refused by name, so pick
+   the target deliberately: opening a sprint reserves its projects and the next production tick
+   raises a real observer head for it. This is a real sprint, not a rehearsal.
+3. Choose the **observer**. Only profiles this installation considers eligible to observe are
+   offered, each shown with its model and effort.
+4. Leave **worker** and **reviewer** on "the observer chooses" unless a role must be pinned. Unpinned
+   is the normal answer and writes no pin on the row.
+5. Type the **goal** and the **definition of done**.
+6. Press **"Start this sprint"**. There is no second launch action anywhere in this product.
+7. You land on the sprint's own page. It shows what you just entered, and one line saying where the
+   launch got to. Right after a create that line reads **`saved — no observer is up for it yet`**:
+   correct and expected. Reload after the next production tick and it should read **`running — an
+   observer head is up`**. That transition is the acceptance.
+
+**If a step does not do that.** A refusal comes back as the same form with everything you typed still
+in it and the reason in the board's own words — correct the named field and submit it again; the page
+hands you a fresh request id and says so. An answer saying *this sprint exists and the request that
+opened it did not finish* is the one case where you submit **the same form again** without reloading:
+that id is the only one that reaches the sprint that exists, and a fresh form would open a second.
+A page still reading `saved` well after a tick is a question for the dispatcher (`secretary sprint
+status --ref REF` says the same thing) and not something the form can repair.
 
 ### Taking the slice down, and rolling the application back a revision
 
