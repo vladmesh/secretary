@@ -17,7 +17,8 @@ from typing import Any
 
 import yaml
 
-from secretary.sprints import SPRINT_BOARD_NAME
+from secretary.sprint_observer import OBSERVER_FIELD
+from secretary.sprints import SPRINT_BOARD_NAME, ensure_sprint_board
 from secretary.webproto.errors import OperationPending, ReadError
 from secretary.webproto.sprint_ops import PENDING_REASON, SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
@@ -104,9 +105,13 @@ class SprintProtocolFixture(unittest.TestCase):
         write_installed_pair(instance_dir, HEAD_SNAPSHOT)
         return instance_dir
 
-    def _production(self, observers: dict[str, Any]) -> None:
+    def _production(
+        self, observers: dict[str, Any], records: dict[str, Any] | None = None
+    ) -> None:
         (self.data_dir / "dispatcher" / "production-state.json").write_text(
-            json.dumps({"phase": "production", "records": {}, "observers": observers}),
+            json.dumps(
+                {"phase": "production", "records": records or {}, "observers": observers}
+            ),
             encoding="utf-8",
         )
 
@@ -144,6 +149,47 @@ class SprintProtocolFixture(unittest.TestCase):
         }
         request.update(kwargs)
         return self.ops().sprint_create(**request)
+
+    def add_sprint_row(
+        self,
+        reference: str,
+        *,
+        status: str = "open",
+        goal: str = "an installed sprint",
+        current_task: str | None = None,
+        observer: str | None = OBSERVER_PROFILE,
+        resume: dict[str, Any] | None = None,
+    ) -> str:
+        """Put a sprint on the board directly, as the installation's history holds one.
+
+        A read is the subject here, and going through the writer for every row would buy nothing but
+        the admission rules: two open sprints, sixty closed ones and a sprint that ended on a card
+        are all states this installation is really in, and none of them can be reached by opening
+        sixty sprints in a test. The writes this fixture does exercise go through `create`.
+        """
+        board = ensure_sprint_board(self.board)
+        column = self.board.columns[board][0]["id"]
+        task_id = int(
+            self.board.call(
+                "createTask", project_id=board, title=goal, column_id=column, reference=reference
+            )
+        )
+        values = {
+            "sprint_goal": goal,
+            "sprint_definition_of_done": "stated when the sprint was opened",
+            "sprint_status": status,
+            "sprint_product": "secretary",
+            "sprint_issues": json.dumps(["issue:open"]),
+            "sprint_reservations": json.dumps([]),
+        }
+        if current_task is not None:
+            values["sprint_current_task"] = current_task
+        if observer is not None:
+            values[OBSERVER_FIELD] = json.dumps({"kind": "head", "profile": observer})
+        if resume is not None:
+            values["sprint_resume"] = json.dumps(resume)
+        self.board.call("saveTaskMetadata", task_id=task_id, values=values)
+        return reference
 
     # -- what the board holds ------------------------------------------------------------------
 

@@ -640,7 +640,8 @@ python3 -P -m secretary sprint status --ref sprint:<ID>
 
 After that the sprint is not driven by hand: the production tick launches the observer head (see below),
 communication with a running sprint goes through entries on the entity (`secretary sprint comment`), and
-status is read from data (`secretary sprint status`, `secretary task list --sprint`).
+status is read from data (`secretary sprint status`, `secretary sprint list`, `secretary task list
+--sprint`; see [What is running right now](#what-is-running-right-now)).
 
 The sprint entity goes into the checkpoint as its own set and is restored along with the cards: after a
 recovery the sprint comes back with every field and entry, and does not need to be recreated. The contract is
@@ -650,6 +651,56 @@ Storage split: the goal, Definition of Done text, repositories, status, budget, 
 fields of the entity; a knowledge document holds only the "why" (the context of the moment, the choice of
 goal, the alternatives rejected) plus a pointer to the sprint reference. The document does not duplicate the
 entity's fields.
+
+## What is running right now
+
+Two commands answer it, and both are clients of the same protocol operations, so they cannot
+disagree: `secretary sprint list` for every sprint of the installation at once, and
+`secretary sprint status --ref sprint:ID` for one. Both are reads. Neither starts an executor,
+raises a head or creates a board, and neither is safe to reach for only in an emergency: they are
+what an operator opens first.
+
+```bash
+python3 -P -m secretary sprint list                      # every sprint, with what each is doing
+python3 -P -m secretary sprint list --status open        # only the ones that are open
+python3 -P -m secretary sprint status --ref sprint:1431  # one sprint, plus its own fields
+```
+
+Both print one JSON document. In the listing, `sprints.items` is one entry per sprint; in the
+watched sprint the same object is under `work`. Read an entry in this order:
+
+1. **`status` and `current_task`.** `current_task.live` is the field to read, not `current_task.ref`
+   alone: a closed or stopped sprint keeps the card it ended on, and `live: false` with a reason
+   saying so is how you tell it from a sprint that is working on a card. A sprint that reports
+   `live: true` is one whose observer has cut that card.
+2. **`waiting.state`** — `working`, `waiting`, `blocked`, `ended` or `unknown` — with `waiting.reason`
+   naming what it is standing on: no current card, a card in Blocked with its reason, a card whose
+   worker no dispatcher record can name, or the record state the card is in.
+3. **`checks`** — the mandatory mechanical gate for the current card, as the dispatcher recorded it:
+   `green` (with the attested SHA in `gate.attested_sha`), `not_green` with the reason, `unknown`, or
+   `not_applicable` for a sprint with no current card or one that has ended. Nothing is re-run to
+   answer this; it is the record, read.
+4. **`decision`** — the observer's last resume `entry`, and `freshness` on it. A stale entry is the
+   observer's own error and is visible here without opening a transcript.
+
+**What an unavailable section means.** Every section carries a `source`: `available` with the moment
+it was read, or `unavailable` with the reason and the age of the newest evidence still on disk behind
+it. `unavailable` is never "there is nothing" — it is "nobody could say", and the two are opposite
+answers. Concretely:
+
+- `cards.states: null` or `degraded_cards.items: null` — the Pipeline board or the dispatcher's
+  production state could not be read. An empty `{}` under an `available` source is the other answer:
+  asked, and there is nothing.
+- `checks.state: unknown` — either the production state could not be read, or the dispatcher holds no
+  record for that card at all (nobody has claimed it yet). It never means the gate failed.
+- `waiting.state: unknown` — the source that would say where the sprint stands did not answer.
+- At the top of the listing, `cards.source` and `liveness.source` say the same thing for the document
+  as a whole, which is what a board that returned no items at all still tells you.
+
+Errors are typed and reach the shell as exit statuses: a sprint nobody holds and a malformed filter
+exit `2` with `not_found` / `validation` on stderr, a source that refused exits `1` with
+`backend_unavailable`. `secretary sprint show --ref` is unchanged and remains the way to read the
+entity's own record, comments included.
 
 ## The two-sprint pilot
 
@@ -1703,8 +1754,8 @@ only on the card, so it moves the board and comments every time it is needed.
 While such a card is unresolved, `secretary status` marks its attempt row `degraded` and fills in
 `headless` (record state, missing handle and heartbeat, how long it has been waiting, the retained
 workspace, branch, dirty flag and candidate SHA); the sprint summary repeats the refs under
-`degraded_cards` — `secretary sprint status --ref <sprint>` reports the same map, from the same
-production state. A card sitting in In progress is not on its own evidence that anything is running.
+`work.degraded_cards.items` — `secretary sprint status --ref <sprint>` reports the same map, from
+the same production state, beside the source that answered it. A card sitting in In progress is not on its own evidence that anything is running.
 
 A confirmed pid says the process is running; it does not say the head is doing anything. A head that finished its
 turn and went back to its prompt holds the same live pid as one that is thinking, which is how a card could sit in

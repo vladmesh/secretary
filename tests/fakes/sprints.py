@@ -262,7 +262,23 @@ def _write_project_registry(root: Path, *projects: str) -> Path:
     instance = root / "instance"
     (instance / "projects").mkdir(parents=True, exist_ok=True)
     for project in projects:
-        (instance / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
+        repo = root / "project-repos" / project
+        repo.mkdir(parents=True, exist_ok=True)
+        (instance / "projects" / f"{project}.yaml").write_text(
+            f"id: {project}\nrepo: {repo}\nenabled: true\nadapter: secretary\n"
+            "default_branch: main\n",
+            encoding="utf-8",
+        )
+    # A config that validates, because the reads of this installation are reached through
+    # `secretary.webproto`, and every operation of that layer resolves the instance before it reads
+    # anything. A fixture instance without one is not a smaller installation, it is one no protocol
+    # operation can be run against.
+    (instance / "instance.yaml").write_text(
+        "version: 1\nname: test\n"
+        f"data_dir: {root}\n"
+        "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+        encoding="utf-8",
+    )
     _write_head_registry(instance)
     return instance
 

@@ -1,4 +1,15 @@
-"""CLI handlers for sprint entities."""
+"""CLI handlers for sprint entities.
+
+Two of these are clients rather than implementations. `sprint list` and `sprint status` do not read
+a board or decide what a sprint's state is: they call the named operations of
+:mod:`secretary.webproto.sprint_reads`, print the document those return, and map a typed protocol
+code onto the exit status `secretary web-read` already uses. Until this card they built a
+`SprintReader` of their own beside the layer, which is how one surface could answer a question
+differently from the other; what is left here is argument parsing, output and that mapping.
+
+The writes below are unchanged: they go to `SprintWriter`, which owns every rule about what a
+sprint may become.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +20,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 from secretary.config import ConfigError, load_config
-from secretary.dispatcher_observer import observer_snapshot
-from secretary.dispatch.headless import headless_cards
 from secretary.sprint_observer import observer_choice
 from secretary.sprints import BUDGET_RECORDED_EVENT_TYPES, SprintReader, SprintWriter
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
 from secretary.tasks import KanboardClient, TaskError
+from secretary.webproto.commands import _EXIT_BY_CODE, EXIT_BACKEND
+from secretary.webproto.errors import ReadError
+from secretary.webproto.sprint_reads import SprintReadLayer
 
 
 def add_sprint_subcommands(subparsers) -> None:
@@ -168,8 +180,28 @@ def _write(args: argparse.Namespace, operation: Callable[[SprintWriter], object]
     return 0
 
 
+def _operation(args: argparse.Namespace, operation: Callable[[SprintReadLayer], object]) -> int:
+    """Run one protocol operation, print its document, and map a typed refusal to an exit status.
+
+    The whole of this command group's knowledge about reading a sprint. The codes are the layer's
+    own and the statuses are the ones `secretary web-read` maps them to, taken from that module
+    rather than restated here, so the two surfaces cannot drift apart.
+    """
+    explicit = getattr(args, "data_dir", None)
+    layer = SprintReadLayer(
+        args.instance, data_dir=Path(explicit).expanduser() if explicit else None
+    )
+    try:
+        document = operation(layer)
+    except ReadError as exc:
+        print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
+        return _EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
+    print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
 def run_list(args: argparse.Namespace) -> int:
-    return _read(args, lambda reader: reader.list(statuses=set(args.status or ())))
+    return _operation(args, lambda layer: layer.sprint_list(statuses=args.status or ()))
 
 
 def run_show(args: argparse.Namespace) -> int:
@@ -182,24 +214,7 @@ def run_show(args: argparse.Namespace) -> int:
 
 
 def run_status(args: argparse.Namespace) -> int:
-    data_dir = resolve_data_dir(args)
-    try:
-        raw = json.loads(
-            (Path(data_dir) / "dispatcher" / "production-state.json").read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError, UnicodeError):
-        raw = {}
-    observer = next((row for row in observer_snapshot(raw) if row.get("sprint") == args.ref), None)
-    # The same production state the observer row comes from also says which of this sprint's cards
-    # stand in an active column with no worker. Without it this command answers `degraded_cards: {}`
-    # for every sprint -- an affirmative claim of health, in the command the observer skill opens
-    # with, read by the actor who creates that state (secretary-1544 round 5).
-    return _read(
-        args,
-        lambda reader: reader.status(args.ref, observer=observer, headless=headless_cards(raw)),
-        data_dir=data_dir,
-        thresholds=_thresholds(args),
-    )
+    return _operation(args, lambda layer: layer.sprint_state(args.ref))
 
 
 def _thresholds(args: argparse.Namespace) -> dict | None:

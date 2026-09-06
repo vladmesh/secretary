@@ -14,17 +14,23 @@ entity as a field that was never written (`ExecutorPinTests`).
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
+from secretary.cli import main
 from secretary.config import validate
 from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
 from secretary.sprints import SPRINT_BOARD_NAME
+from secretary.tasks import TaskError
 from secretary.webproto import sprint_reads as sprint_reads_module
 from secretary.webproto import sprint_requests, store_io
 from secretary.webproto.boundary import GUARDED, operations
+from secretary.webproto.commands import _EXIT_BY_CODE
 from secretary.webproto.errors import (
     OperationPending,
     OwnerConflict,
@@ -49,6 +55,17 @@ from tests.webproto_sprint_fixtures import (
     SprintProtocolFixture,
 )
 from triggered_agents.runtime.head.identity import publish_heartbeat
+
+#: What a call to the board writes with. Reads of this layer make none of these, and the sprint
+#: board a fresh installation does not have is one of the things they do not create.
+_WRITE_METHODS = {
+    "createTask",
+    "updateTask",
+    "saveTaskMetadata",
+    "createProject",
+    "createComment",
+    "removeTask",
+}
 
 
 class CreateTests(SprintProtocolFixture):
@@ -626,13 +643,316 @@ class LayerPropertyTests(SprintProtocolFixture):
         before = len(self.board.calls)
         self.reads().sprint_options()
         self.reads().sprint_state(self.reference_of(self.create()))
+        self.reads().sprint_list()
         written = [
-            method
-            for method, _params in self.board.calls[before:]
-            if method
-            in {"createTask", "updateTask", "saveTaskMetadata", "createProject", "createComment", "removeTask"}
+            method for method, _params in self.board.calls[before:] if method in _WRITE_METHODS
         ]
         self.assertEqual(written, [])
+
+
+
+
+class SprintListTests(SprintProtocolFixture):
+    """The listing: every sprint at once, and no sprint described as something it is not.
+
+    Two defects of the live installation are pinned here as cases rather than as prose. Both were
+    reproduced on the owner's board on 2026-09-06, on roughly sixty closed sprints: a finished
+    sprint reported a `current_task` with nothing saying it was historical, and reported its
+    observer as `not_started` -- a sprint that ended described as one waiting for its head to come
+    up.
+    """
+
+    def _entry(self, document: dict, reference: str) -> dict:
+        return next(item for item in document["sprints"]["items"] if item["ref"] == reference)
+
+    def test_the_listing_answers_every_sprint_with_what_it_is_doing(self) -> None:
+        open_sprint = self.reference_of(self.create())
+        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+
+        document = self.reads().sprint_list()
+
+        self.assertEqual(document["kind"], "sprint_list")
+        self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
+        self.assertEqual(
+            sorted(item["ref"] for item in document["sprints"]["items"]),
+            [open_sprint, "sprint:1001"],
+        )
+        entry = self._entry(document, open_sprint)
+        self.assertEqual(entry["goal"], "Give webproto a sprint create")
+        self.assertEqual(entry["status"], "open")
+        for section in ("current_task", "decision", "cards", "degraded_cards", "checks", "waiting"):
+            self.assertIn("source", entry[section], f"{section} carries no availability")
+        self.assertEqual(entry["observer"]["declared"]["profile"], OBSERVER_PROFILE)
+        self.assertEqual(entry["observer"]["launch"]["state"], OBSERVER_NOT_STARTED)
+
+    def test_the_status_filter_selects_and_an_unknown_status_is_refused(self) -> None:
+        self.reference_of(self.create())
+        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+
+        closed = self.reads().sprint_list(statuses=["closed"])
+        self.assertEqual([item["ref"] for item in closed["sprints"]["items"]], ["sprint:1001"])
+        self.assertEqual(closed["filter"]["statuses"], ["closed"])
+
+        with self.assertRaises(ValidationRefused):
+            self.reads().sprint_list(statuses=["retired"])
+
+    def test_a_closed_sprint_is_never_presented_as_working(self) -> None:
+        """Criterion 3, in the two shapes the live board has it in."""
+        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+        self.add_sprint_row("sprint:1030", status="closed")
+
+        document = self.reads().sprint_list()
+
+        ended = self._entry(document, "sprint:1001")
+        # The card is kept -- it is where the sprint got to -- and it is qualified.
+        self.assertEqual(ended["current_task"]["ref"], "secretary-1435")
+        self.assertFalse(ended["current_task"]["live"])
+        self.assertIn("not work in progress", ended["current_task"]["reason"])
+        self.assertEqual(ended["waiting"]["state"], sprint_reads_module.WAITING_ENDED)
+        self.assertEqual(ended["checks"]["state"], sprint_reads_module.CHECKS_NOT_APPLICABLE)
+        # The second defect: a sprint that ended is not one whose observer has not come up.
+        self.assertEqual(ended["observer"]["launch"]["state"], sprint_reads_module.OBSERVER_ENDED)
+        self.assertNotEqual(ended["observer"]["launch"]["state"], OBSERVER_NOT_STARTED)
+
+        without = self._entry(document, "sprint:1030")
+        self.assertIsNone(without["current_task"]["ref"])
+        self.assertFalse(without["current_task"]["live"])
+        self.assertEqual(without["observer"]["launch"]["state"], sprint_reads_module.OBSERVER_ENDED)
+
+    def test_a_watched_closed_sprint_answers_the_way_the_listing_does(self) -> None:
+        """Criterion 2: one question, one answer, whichever operation is asked."""
+        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+
+        watched = self.reads().sprint_state("sprint:1001")
+        listed = self._entry(self.reads().sprint_list(), "sprint:1001")
+
+        self.assertEqual(validate(watched, "web-sprint", watched["kind"]), [])
+        for section in ("current_task", "decision", "cards", "degraded_cards", "checks", "waiting"):
+            self.assertEqual(watched["work"][section], listed[section], section)
+        self.assertEqual(watched["observer"], listed["observer"])
+        # And the sprint's own fields are still there beside the work.
+        self.assertEqual(watched["sprint"]["value"]["current_task"], "secretary-1435")
+
+    def test_the_checks_of_a_current_card_are_the_dispatchers_own_gate_record(self) -> None:
+        reference = self.reference_of(self.create())
+        card = self._card(reference)
+        self._current_task(reference, card)
+        self._production(
+            {},
+            {
+                card: {
+                    "state": "validate",
+                    "gate_state": "green",
+                    # The receipt's own field names: the candidate it is bound to, and the base it
+                    # was validated against. Reporting the base as the attested candidate would name
+                    # the wrong commit, which is why the test states both.
+                    "gate_attestation": {"validated_sha": "abc123", "base_sha": "def456"},
+                }
+            },
+        )
+
+        checks = self._entry(self.reads().sprint_list(), reference)["checks"]
+
+        self.assertEqual(checks["state"], sprint_reads_module.CHECKS_GREEN)
+        self.assertEqual(checks["card"], card)
+        self.assertEqual(checks["gate"]["attested_sha"], "abc123")
+        self.assertEqual(checks["gate"]["base_sha"], "def456")
+        self.assertIn("abc123", checks["reason"])
+
+    def test_a_card_whose_gate_has_not_passed_is_not_green_and_says_why(self) -> None:
+        reference = self.reference_of(self.create())
+        card = self._card(reference)
+        self._current_task(reference, card)
+        self._production({}, {card: {"state": "rework", "gate_state": "", "gate_transport_error": ""}})
+
+        entry = self._entry(self.reads().sprint_list(), reference)
+
+        self.assertEqual(entry["checks"]["state"], sprint_reads_module.CHECKS_NOT_GREEN)
+        self.assertIn("has not passed", entry["checks"]["reason"])
+        self.assertEqual(entry["waiting"]["state"], sprint_reads_module.WAITING_WORKING)
+        self.assertIn("rework", entry["waiting"]["reason"])
+
+    def test_a_current_card_no_record_names_is_unknown_and_never_not_green(self) -> None:
+        """The distinction criterion 2 is about: nobody said, which is not "it has not passed"."""
+        reference = self.reference_of(self.create())
+        card = self._card(reference)
+        self._current_task(reference, card)
+
+        entry = self._entry(self.reads().sprint_list(), reference)
+
+        self.assertEqual(entry["checks"]["state"], sprint_reads_module.CHECKS_UNKNOWN)
+        self.assertIsNone(entry["checks"]["gate"])
+        self.assertIn("no record", entry["checks"]["reason"])
+        self.assertEqual(entry["waiting"]["state"], sprint_reads_module.WAITING_WAITING)
+
+    def test_an_unreadable_pipeline_board_marks_its_own_sections_and_no_others(self) -> None:
+        reference = self.reference_of(self.create())
+        del self.board.projects["Pipeline"]
+
+        document = self.reads().sprint_list()
+        entry = self._entry(document, reference)
+
+        self.assertEqual(document["cards"]["source"]["state"], "unavailable")
+        self.assertIsNone(entry["cards"]["states"], "an empty grouping would claim the sprint has none")
+        self.assertEqual(entry["decision"]["freshness"]["source"]["state"], "unavailable")
+        self.assertIsNone(entry["decision"]["freshness"]["value"])
+        # The sprint's own fields, and the dispatcher's, are other sources and stand.
+        self.assertEqual(document["sprints"]["source"]["state"], "available")
+        self.assertEqual(entry["goal"], "Give webproto a sprint create")
+        self.assertEqual(entry["current_task"]["source"]["state"], "available")
+        self.assertEqual(entry["observer"]["launch"]["state"], OBSERVER_NOT_STARTED)
+
+    def test_an_unreadable_production_state_marks_only_what_it_feeds(self) -> None:
+        reference = self.reference_of(self.create())
+        card = self._card(reference)
+        self._current_task(reference, card)
+        (self.data_dir / "dispatcher" / "production-state.json").write_text("{", encoding="utf-8")
+
+        document = self.reads().sprint_list()
+        entry = self._entry(document, reference)
+
+        self.assertEqual(document["liveness"]["source"]["state"], "unavailable")
+        self.assertEqual(entry["checks"]["state"], sprint_reads_module.CHECKS_UNKNOWN)
+        self.assertEqual(entry["waiting"]["state"], sprint_reads_module.WAITING_UNKNOWN)
+        self.assertIsNone(entry["degraded_cards"]["items"])
+        self.assertEqual(entry["observer"]["launch"]["state"], OBSERVER_UNAVAILABLE)
+        # And the board's answers are untouched.
+        self.assertEqual(entry["current_task"]["ref"], card)
+        self.assertEqual(entry["cards"]["source"]["state"], "available")
+
+    def test_an_unreadable_sprint_board_marks_the_listing_and_still_says_the_rest(self) -> None:
+        self.create()
+        original = self.board.call
+
+        def refuse(method: str, **params: Any) -> Any:
+            if method == "getAllTasks" and params.get("project_id") == self.board.projects[SPRINT_BOARD_NAME]:
+                raise TaskError("backend_error", "the sprint board is unavailable", 1)
+            return original(method, **params)
+
+        self.board.call = refuse  # type: ignore[method-assign]
+        document = self.reads().sprint_list()
+
+        self.assertEqual(document["sprints"]["source"]["state"], "unavailable")
+        self.assertEqual(document["sprints"]["items"], [])
+        self.assertEqual(document["cards"]["source"]["state"], "available")
+        self.assertEqual(document["liveness"]["source"]["state"], "available")
+
+    def test_the_listing_creates_no_board_and_starts_nothing(self) -> None:
+        document = self.reads().sprint_list()
+
+        self.assertEqual(document["sprints"]["items"], [])
+        self.assertNotIn(SPRINT_BOARD_NAME, self.board.projects)
+        self.assertFalse(
+            [method for method, _ in self.board.calls if method in _WRITE_METHODS],
+            "a read of the listing wrote to the board",
+        )
+
+    # -- fixture pieces ------------------------------------------------------------------------
+
+    def _card(self, sprint: str) -> str:
+        """One Pipeline card of this sprint, created the way the observer creates one."""
+        from secretary.tasks import TaskWriter
+        from tests.observer_identity import bind_observer
+
+        bind_observer(self, sprint)
+        return str(
+            TaskWriter(self.board, data_dir=self.data_dir).create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="the current card",
+                sprint=sprint,
+            )["task"]["ref"]
+        )
+
+    def _current_task(self, sprint: str, card: str) -> None:
+        from secretary.sprints import SprintWriter
+
+        SprintWriter(self.board, data_dir=self.data_dir, instance=self.instance).set_current_task(
+            role="observer", actor="observer", reference=sprint, task_reference=card
+        )
+
+
+class SprintReadCommandTests(SprintProtocolFixture):
+    """`secretary sprint list` and `secretary sprint status` as clients of the two operations.
+
+    Criterion 6: the commands keep being what an operator types, and stop being a second reader.
+    What is checked here is exactly that -- the document the command prints is the document the
+    operation returned, and a typed refusal reaches the exit status `secretary web-read` maps it to.
+    """
+
+    def _run(self, argv: list[str]) -> tuple[int, str, str]:
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch(
+                "secretary.webproto.sprint_reads.KanboardClient.for_instance",
+                return_value=self.board,
+            ),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main([*argv, "--instance", str(self.instance), "--data-dir", str(self.data_dir)])
+        return code, output.getvalue(), errors.getvalue()
+
+    def test_sprint_list_prints_the_document_the_operation_answered(self) -> None:
+        reference = self.reference_of(self.create())
+
+        code, output, errors = self._run(["sprint", "list"])
+
+        self.assertEqual(code, 0, errors)
+        document = json.loads(output)
+        self.assertEqual(document["kind"], "sprint_list")
+        self.assertEqual([item["ref"] for item in document["sprints"]["items"]], [reference])
+
+    def test_sprint_list_passes_its_filter_through_and_decides_nothing(self) -> None:
+        self.create()
+        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+
+        code, output, _errors = self._run(["sprint", "list", "--status", "closed"])
+
+        self.assertEqual(code, 0)
+        document = json.loads(output)
+        self.assertEqual([item["ref"] for item in document["sprints"]["items"]], ["sprint:1001"])
+        self.assertFalse(document["sprints"]["items"][0]["current_task"]["live"])
+
+    def test_sprint_status_prints_the_watched_sprint_document(self) -> None:
+        reference = self.reference_of(self.create())
+
+        code, output, errors = self._run(["sprint", "status", "--ref", reference])
+
+        self.assertEqual(code, 0, errors)
+        document = json.loads(output)
+        self.assertEqual(document["kind"], "sprint")
+        self.assertEqual(document["ref"], reference)
+        self.assertIn("waiting", document["work"])
+        self.assertEqual(document["observer"]["launch"]["state"], OBSERVER_NOT_STARTED)
+
+    def test_the_command_prints_whatever_the_operation_returns(self) -> None:
+        """Clientship, checked rather than described: no shaping of its own on the way out."""
+        answered = {"kind": "sprint_list", "sprints": {"items": []}}
+        with mock.patch.object(SprintReadLayer, "sprint_list", return_value=answered):
+            code, output, _errors = self._run(["sprint", "list"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output), answered)
+
+    def test_a_sprint_nobody_holds_is_the_exit_status_web_read_uses(self) -> None:
+        self.create()
+
+        code, output, errors = self._run(["sprint", "status", "--ref", "sprint:404"])
+
+        self.assertEqual(code, _EXIT_BY_CODE["not_found"])
+        self.assertEqual(output, "")
+        self.assertEqual(json.loads(errors)["error"]["code"], "not_found")
+
+    def test_an_installation_that_does_not_validate_is_the_backend_status(self) -> None:
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = main(["sprint", "list", "--instance", str(self.tmp / "not-an-instance")])
+
+        self.assertEqual(code, _EXIT_BY_CODE["backend_unavailable"])
+        self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
 
 
 if __name__ == "__main__":

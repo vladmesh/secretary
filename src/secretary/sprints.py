@@ -610,6 +610,46 @@ class SprintReader:
             result["resume_freshness"] = self._resume_freshness(result, resume)
         return result
 
+    def linked_cards(self) -> dict[str, list[dict[str, Any]]]:
+        """Every Pipeline card grouped by the sprint it is linked to, in one listing.
+
+        One pass for the whole installation, not one per sprint: `TaskReader.list` already reads the
+        board once and batches the metadata of every row, so a caller that needs the cards of many
+        sprints asks for this once and indexes it, exactly as `statuses` does. The Pipeline board is
+        read and never created -- `TaskReader` has no `create` -- so this stays a read.
+        """
+        linked: dict[str, list[dict[str, Any]]] = {}
+        for card in TaskReader(self.client).list():
+            linked.setdefault(str(card.get("sprint") or ""), []).append(card)
+        return linked
+
+    def status_views(
+        self,
+        sprints: list[dict[str, Any]],
+        linked: dict[str, list[dict[str, Any]]],
+        *,
+        observers: dict[str, dict[str, Any]] | None = None,
+        headless: dict[str, dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """The status view of sprints that have already been read, over cards already listed.
+
+        No board call of its own: it is the assembling half of `statuses`, split out so a caller
+        that has to keep the two reads apart -- a protocol layer marking one source unavailable
+        without blanking the other -- can still get exactly this view rather than deriving a second
+        one beside it. The committed audit is consumed at most once for the whole call.
+        """
+        audit = _AuditOnce(self.data_dir)
+        result = []
+        for listed in sprints:
+            sprint = {**listed, "cards": linked.get(listed["ref"], [])}
+            sprint["resume_freshness"] = self._resume_freshness(
+                sprint,
+                sprint.get("resume"),
+                audit=audit,
+            )
+            result.append(self._status(sprint, (observers or {}).get(sprint["ref"]), headless or {}))
+        return result
+
     def statuses(
         self,
         *,
@@ -626,22 +666,12 @@ class SprintReader:
         their metadata are one read each, the cards are one listing shared by every sprint, and the
         committed audit is consumed at most once.
         """
-        observers = observers or {}
-        audit = _AuditOnce(self.data_dir)
-        sprints = self.list(create=create)
-        linked: dict[str, list[dict[str, Any]]] = {}
-        for card in TaskReader(self.client).list():
-            linked.setdefault(str(card.get("sprint") or ""), []).append(card)
-        result = []
-        for listed in sprints:
-            sprint = {**listed, "cards": linked.get(listed["ref"], [])}
-            sprint["resume_freshness"] = self._resume_freshness(
-                sprint,
-                sprint.get("resume"),
-                audit=audit,
-            )
-            result.append(self._status(sprint, observers.get(sprint["ref"]), headless or {}))
-        return result
+        return self.status_views(
+            self.list(create=create),
+            self.linked_cards(),
+            observers=observers,
+            headless=headless,
+        )
 
     def status(
         self,
@@ -673,6 +703,10 @@ class SprintReader:
             "current_task": sprint["current_task"],
             "cards": {key: sorted(value) for key, value in sorted(states.items())},
             "budget": sprint["budget"],
+            # The last observer decision itself, beside the freshness verdict on it. Reading one
+            # without the other is what made "what is this sprint doing" a second read: the entry
+            # is already on the row every caller of this view has just read.
+            "resume": sprint.get("resume"),
             "resume_freshness": sprint["resume_freshness"],
             "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
             "observer": observer or {"state": "unknown"},

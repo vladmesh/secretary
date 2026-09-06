@@ -2909,13 +2909,14 @@ The same typed exceptions the reads use, plus the two only a mutation can make. 
 
 The third part of `secretary.webproto`, and the one that decides what the other two have to work
 on: a run is one head on one card, and the cards come from a sprint. One operation opens a sprint,
-two reads answer what a sprint can be built from and what one is doing. They hold the same
+three reads answer what a sprint can be built from, what one sprint is doing and what every sprint
+of the installation is doing. They hold the same
 properties as the halves above — no HTTP, no sockets, no framework, no rendering, typed codes
 instead of status numbers, and every section of every document carrying its own availability — and
 they are the contract the web transport, the CLI and a future Telegram head all call.
 
 Every document validates against the packaged `web-sprint` schema and carries `schema_version`, a
-`kind` of `sprint_options`, `sprint` or `sprint_created`, and `observed_at`. The identities are the
+`kind` of `sprint_options`, `sprint`, `sprint_list` or `sprint_created`, and `observed_at`. The identities are the
 ones this pipeline already has: a sprint is its `sprint:N` reference, a product its id, an issue its
 `issue:*` reference, a project its registered id, a head profile its registry id.
 
@@ -3029,7 +3030,7 @@ what went wrong — because a caller that reads the cause first and acts on it o
 **`sprint_state(ref)`** is the page somebody watches a sprint on: the goal and definition of done it
 was opened with, its product, issues and reserved projects, its repositories, its status, its
 current card, the state of each executor pin, its last observer resume entry — and, separately,
-whether its observer is up.
+whether its observer is up and what the sprint is actually doing (`work`, below).
 
 The sprint's own fields and the observer's liveness are two sources and fail apart: a dispatcher
 state nobody can read leaves the goal, the reservations and the pins on the page and says that the
@@ -3048,13 +3049,73 @@ consulted and is never evidence. `observer.launch.state` is one of:
 | `unavailable` | the production state could not be read; nothing is established either way |
 | `stopped` | a record exists and its head is not alive — which is neither of the two above |
 | `not_declared` | the sprint declared `--observer none`, so the tick raises none for it |
+| `ended` | the sprint is closed or stopped: the tick stopped its observer and holds no record |
 
-The first three are the three a watching page has to tell apart, and the last two are distinctions
+The first three are the three a watching page has to tell apart, and the last three are distinctions
 the same source already makes: folding a head that was raised and is now gone into "not started",
-or a sprint that chose to run without an observer into "waiting for one", would be a lie in the one
-field an operator opens the page for. Beside the state, `observer.declared` carries what the row
+a sprint that chose to run without an observer into "waiting for one", or a sprint that finished
+months ago into "its observer has not come up yet", would each be a lie in the one field an operator
+opens the page for. The last of those was a live defect until secretary-1573: roughly sixty closed
+sprints of this installation reported `not_started` with the reason "the sprint is saved and the
+production tick holds no observer for it yet". Beside the state, `observer.declared` carries what the row
 itself declares, in its own three states (`declared`, `absent`, `malformed`), because an absent
 observer field and a corrupt one are repaired differently.
+
+### What a sprint is doing
+
+Both reads carry the same `work` object for a sprint — one item of the listing and the watched
+sprint's `work` are built by the same call over the same three reads — so the two surfaces cannot
+answer "what is this sprint doing" differently. Every section names the source that answered it:
+
+| section | source | what is in it |
+| --- | --- | --- |
+| `current_task` | the sprint row | the current card, and `live`: false for a closed or stopped sprint |
+| `decision` | the sprint row, and the Pipeline listing for the verdict | the last observer resume `entry`, and its `freshness` |
+| `cards` | the Pipeline listing | this sprint's cards grouped by board state; `states` is null when the listing failed |
+| `degraded_cards` | the production state | cards in an active column with no worker the dispatcher can name |
+| `checks` | the production state | the mandatory checks of the current card: `green`, `not_green`, `unknown`, `not_applicable` |
+| `waiting` | whichever of the three answered | where the sprint stands: `working`, `waiting`, `blocked`, `ended`, `unknown` |
+
+`current_task.live` is the fix for the second half of the same defect above: a finished sprint's
+current card is a fact worth keeping — it is where the sprint got to — so it is kept and it is
+qualified, and the reason says in words that the card is the record of a sprint that ended rather
+than work in progress. Nothing is inferred from emptiness anywhere here: `cards.states` and
+`degraded_cards.items` are `null`, never `{}`, when the source behind them could not be read.
+
+`checks` is the mechanical gate as the dispatcher's own record holds it, and nothing is re-run: no
+CI backend is called, no gate is minted, and `gate` beside the state carries only the recorded
+`state`, the attested SHA, whether a run is pending, the last transport error and the record's own
+state. `unknown` is a card no dispatcher record names — nobody has claimed it, or nobody could read
+the state that would say — and it is deliberately never folded into `not_green`, because "the gate
+has not passed" and "nothing here says whether it passed" are repaired by different people.
+`not_applicable` is a sprint with no current card, or one that has ended.
+
+### Listing them all
+
+**`sprint_list(statuses=…)`** answers the same question for every sprint of the installation at
+once: `sprints.items` is one entry per sprint, each carrying which sprint it is (`ref`, `goal`,
+`status`, product, issues, reservations, repositories, executor pins, budget), its `observer`
+section exactly as `sprint_state` gives it, and the `work` sections above.
+
+`statuses` filters on `open`, `closed` and `stopped`, and on nothing the listing would have to read
+more to know. The filter is applied after the one board pass, so a filtered listing costs what an
+unfiltered one does, and a status this product does not have is a `validation` refusal rather than
+an empty answer — a filter that matched nothing and a filter that was wrong are different facts.
+
+**What it costs, and what it deliberately does not read.** One pass over the sprint board with its
+metadata batched, one listing of the Pipeline with its metadata batched, one read of the
+dispatcher's production state, and at most one traversal of the committed audit — for the whole
+document, whatever the number of sprints. It reads no sprint's comments, opens no card, calls no
+CI backend and consults no terminal or pane. Beside the items, `cards.source` and `liveness.source`
+carry the availability of the Pipeline listing and of the production state for the document as a
+whole, because a board that will not answer leaves no items to say it in.
+
+`secretary sprint list` and `secretary sprint status` are clients of these two operations and hold
+no rule about what a sprint's state is; their exit statuses are the ones `web-read` maps the typed
+codes to (`not_found`/`validation` → 2, `backend_unavailable` → 1). The reads create nothing: the
+sprint is read through `SprintReader.list(create=False)` and the cards through `TaskReader`, which
+has no create at all, so an installation with no sprint board still gets an answer instead of a
+board.
 
 ### Errors
 

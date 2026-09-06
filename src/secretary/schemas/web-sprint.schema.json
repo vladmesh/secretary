@@ -2,10 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "web-sprint.schema.json",
   "title": "Transport-independent sprint operations and reads",
-  "description": "The documents secretary.webproto's sprint layer returns: what a sprint can be built from, what one sprint is doing, and the answer to opening one. Every section carries its own availability, and no failure here is a status number.",
+  "description": "The documents secretary.webproto's sprint layer returns: what a sprint can be built from, what every sprint of the installation is doing, what one sprint is doing, and the answer to opening one. Every section carries its own availability, and no failure here is a status number.",
   "oneOf": [
     { "$ref": "#/$defs/options" },
     { "$ref": "#/$defs/sprint" },
+    { "$ref": "#/$defs/listing" },
     { "$ref": "#/$defs/created" }
   ],
   "$defs": {
@@ -134,10 +135,169 @@
         }
       }
     },
+    "work": {
+      "type": "object",
+      "description": "What one sprint is doing. The same object in a listing item and in a watched sprint, built by the same call, so the two surfaces cannot answer this differently. Each section names the source that answered it: the sprint board, the Pipeline listing, or the dispatcher's production state.",
+      "required": ["current_task", "decision", "cards", "degraded_cards", "checks", "waiting"],
+      "properties": {
+        "current_task": {
+          "type": "object",
+          "description": "The sprint's current card, and whether it names work in progress. `live` is false for a closed or stopped sprint: the card is kept, because it is where the sprint got to, and it is qualified, because nobody is working on it.",
+          "required": ["source", "ref", "live", "reason"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "ref": { "type": ["string", "null"] },
+            "live": { "type": "boolean" },
+            "reason": { "type": ["string", "null"] }
+          }
+        },
+        "decision": {
+          "type": "object",
+          "description": "The last observer resume entry, and the freshness verdict on it. An open sprint's verdict is judged against its linked cards, so it is unavailable when those could not be listed rather than computed over cards nobody read.",
+          "required": ["source", "entry", "freshness"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "entry": { "type": ["object", "null"] },
+            "freshness": {
+              "type": "object",
+              "required": ["source", "value"],
+              "properties": {
+                "source": { "$ref": "#/$defs/source" },
+                "value": { "type": ["object", "null"] }
+              }
+            }
+          }
+        },
+        "cards": {
+          "type": "object",
+          "description": "This sprint's cards by board state. `states` is null and never an empty mapping when the Pipeline board could not be listed.",
+          "required": ["source", "states"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "states": { "type": ["object", "null"] }
+          }
+        },
+        "degraded_cards": {
+          "type": "object",
+          "description": "Cards of this sprint standing in an active column with no worker the dispatcher can name. Null items is a production state nobody could read, which is not the answer that nothing is degraded.",
+          "required": ["source", "items"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "items": { "type": ["object", "null"] }
+          }
+        },
+        "checks": {
+          "type": "object",
+          "description": "The mandatory checks of the current card, as the dispatcher's own record holds them. Nothing is re-run and no CI backend is called: `unknown` is what a card no record names looks like, and it is never folded into `not_green`.",
+          "required": ["source", "state", "reason", "card", "gate"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "state": { "enum": ["green", "not_green", "unknown", "not_applicable"] },
+            "reason": { "type": ["string", "null"] },
+            "card": { "type": ["string", "null"] },
+            "gate": { "type": ["object", "null"] }
+          }
+        },
+        "waiting": {
+          "type": "object",
+          "description": "Where the sprint stands, and what it is standing on.",
+          "required": ["source", "state", "reason"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "state": { "enum": ["working", "waiting", "blocked", "ended", "unknown"] },
+            "reason": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "observer": {
+      "type": "object",
+      "description": "What the sprint declared, and whether that observer is up. Shared by the listing and the watched sprint, which read it from the same classification of the same production state.",
+      "required": ["declared", "launch"],
+      "properties": {
+        "declared": {
+          "type": "object",
+          "description": "The observer the sprint row declares, in the three states a row can be in.",
+          "required": ["state", "value", "profile"],
+          "properties": {
+            "state": { "enum": ["declared", "absent", "malformed"] },
+            "value": { "type": ["object", "null"] },
+            "profile": { "type": ["string", "null"] }
+          }
+        },
+        "launch": {
+          "type": "object",
+          "description": "Whether an observer is actually up, read from the dispatcher's durable production state. A terminal is never evidence and is never consulted.",
+          "required": ["source", "state", "reason", "record"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "state": {
+              "enum": ["not_started", "running", "unavailable", "stopped", "not_declared", "ended"]
+            },
+            "reason": { "type": "string" },
+            "record": { "type": ["object", "null"] }
+          }
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "description": "One sprint of the listing: which sprint it is, what it is doing, and its observer.",
+      "required": ["ref", "goal", "status", "product", "issues", "reservations", "repositories", "executors", "budget", "observer"],
+      "properties": {
+        "ref": { "type": "string" },
+        "goal": { "type": "string" },
+        "status": { "type": "string" },
+        "product": { "type": ["string", "null"] },
+        "issues": { "type": ["array", "null"], "items": { "type": "string" } },
+        "reservations": { "type": ["array", "null"], "items": { "type": "string" } },
+        "repositories": { "type": "array", "items": { "type": "string" } },
+        "executors": { "type": "object" },
+        "budget": { "type": ["object", "null"] },
+        "observer": { "$ref": "#/$defs/observer" }
+      },
+      "allOf": [{ "$ref": "#/$defs/work" }]
+    },
+    "listing": {
+      "type": "object",
+      "description": "Every sprint of the installation, with what each one is doing. One sprint-board pass, one Pipeline listing and one production-state read for the whole document, whatever the number of sprints.",
+      "required": ["schema_version", "kind", "observed_at", "filter", "sprints", "cards", "liveness"],
+      "properties": {
+        "schema_version": { "type": "integer" },
+        "kind": { "const": "sprint_list" },
+        "observed_at": { "type": "string" },
+        "filter": {
+          "type": "object",
+          "description": "What was asked for. An empty status filter is every sprint; a status this product does not have is refused rather than answered with an empty listing.",
+          "required": ["statuses"],
+          "properties": { "statuses": { "type": "array", "items": { "type": "string" } } }
+        },
+        "sprints": {
+          "type": "object",
+          "required": ["source", "items"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "items": { "type": "array", "items": { "$ref": "#/$defs/entry" } }
+          }
+        },
+        "cards": {
+          "type": "object",
+          "description": "The Pipeline listing every item's card sections were built from, said once for the document too: a board that will not answer leaves no items to say it.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        },
+        "liveness": {
+          "type": "object",
+          "description": "The dispatcher's production state, said once for the document for the same reason.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        }
+      }
+    },
     "sprint": {
       "type": "object",
       "description": "One sprint: what it was opened with, where it is now, and whether its observer is up.",
-      "required": ["schema_version", "kind", "observed_at", "ref", "sprint", "observer"],
+      "required": ["schema_version", "kind", "observed_at", "ref", "sprint", "observer", "work"],
       "properties": {
         "schema_version": { "type": "integer" },
         "kind": { "const": "sprint" },
@@ -192,35 +352,8 @@
             }
           }
         },
-        "observer": {
-          "type": "object",
-          "required": ["declared", "launch"],
-          "properties": {
-            "declared": {
-              "type": "object",
-              "description": "The observer the sprint row declares, in the three states a row can be in.",
-              "required": ["state", "value", "profile"],
-              "properties": {
-                "state": { "enum": ["declared", "absent", "malformed"] },
-                "value": { "type": ["object", "null"] },
-                "profile": { "type": ["string", "null"] }
-              }
-            },
-            "launch": {
-              "type": "object",
-              "description": "Whether an observer is actually up, read from the dispatcher's durable production state. A terminal is never evidence and is never consulted.",
-              "required": ["source", "state", "reason", "record"],
-              "properties": {
-                "source": { "$ref": "#/$defs/source" },
-                "state": {
-                  "enum": ["not_started", "running", "unavailable", "stopped", "not_declared"]
-                },
-                "reason": { "type": "string" },
-                "record": { "type": ["object", "null"] }
-              }
-            }
-          }
-        }
+        "observer": { "$ref": "#/$defs/observer" },
+        "work": { "$ref": "#/$defs/work" }
       }
     },
     "created": {
