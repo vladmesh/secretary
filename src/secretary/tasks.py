@@ -1868,6 +1868,8 @@ class TaskWriter:
                     f"project {project!r} is not reserved by sprint {sprint}",
                     3,
                 )
+            if not restoring:
+                head, review_head = self._sprint_executor_pins(linked_sprint, head, review_head)
         if budget_event not in {"", "recreated_task", "hotfix"}:
             raise TaskError("validation", "budget event must be recreated_task or hotfix", 2)
         if budget_event and not sprint:
@@ -3320,6 +3322,46 @@ class TaskWriter:
         from secretary.sprints import active_sprint_projects
 
         return bool(active_sprint_projects(self.data_dir).get(project))
+
+    def _sprint_executor_pins(self, sprint: dict[str, Any], head: str, review_head: str) -> tuple[str, str]:
+        """The worker and reviewer profiles this card is created with, under its sprint's pins.
+
+        A sprint that pins a role has already decided it for every card it will ever cut, this one
+        and the ones that follow a rework or a reslice. So a card that asks for another profile is
+        refused by name, and a card that asks for nothing is written with the pinned profile rather
+        than left to be resolved into something else later. Nothing new resolves anything: the card
+        still carries the profiles it runs on, exactly as a card the observer chose them for does.
+
+        A role the sprint pins nothing on is untouched, which is every sprint opened until now. A
+        field that is there but unreadable is corruption, and a card is not cut under a constraint
+        nobody can read.
+        """
+        from secretary.sprint_observer import EXECUTOR_FIELDS, EXECUTOR_PINNED, EXECUTOR_UNSET
+
+        reference = str(sprint.get("ref") or "")
+        chosen = {"worker": head, "reviewer": review_head}
+        states = sprint.get("executors") or {}
+        for role in EXECUTOR_FIELDS:
+            state = states.get(role) or {"state": EXECUTOR_UNSET}
+            if state.get("state") == EXECUTOR_UNSET:
+                continue
+            if state.get("state") != EXECUTOR_PINNED:
+                raise TaskError(
+                    "sprint_executor_unreadable",
+                    f"sprint {reference} carries a {role} pin that is not a head profile; repair "
+                    "the sprint entity before cutting cards for it",
+                    3,
+                )
+            profile = str(state.get("profile") or "")
+            if chosen[role] and chosen[role] != profile:
+                raise TaskError(
+                    "sprint_executor_pinned",
+                    f"sprint {reference} pins its {role} to head profile {profile!r}; this card "
+                    f"asks for {chosen[role]!r}",
+                    3,
+                )
+            chosen[role] = profile
+        return chosen["worker"], chosen["reviewer"]
 
     def _guard_sprint_write(
         self,

@@ -35,7 +35,7 @@ from secretary.sprint_observer import (
     ObserverMetadataError,
     check_observer_profile,
     encode_observer,
-    installed_observer_profiles,
+    installed_head_profiles,
     is_executable,
     parse_observer,
 )
@@ -457,7 +457,7 @@ def _check_restored_observers(sprints: list[dict[str, Any]], instance: Path | No
     if any(str(sprint.get("status") or "") == "open" for sprint in sprints):
         # Only open rows need a registered head; closed archives remain restorable.
         try:
-            profiles = installed_observer_profiles(instance)
+            profiles = installed_head_profiles(instance)
         except ObserverMetadataError as exc:
             raise RestoreError(f"sprint observer metadata cannot be validated: {exc.message}") from None
     problems: list[str] = []

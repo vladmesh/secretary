@@ -98,6 +98,7 @@ integration-recovery tests/test_secret_recover.py
 component tests/test_secret_store.py
 unit tests/test_session.py
 unit tests/test_sprint_restore.py
+unit tests/test_sprint_executors.py
 unit tests/test_sprints.py
 unit tests/test_state_repo.py
 unit tests/test_status.py
