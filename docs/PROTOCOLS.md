@@ -2855,9 +2855,14 @@ authorisation of any kind, and two of its routes start real heads on this instal
 who can reach the port owns the pipeline. `--host` is resolved before a socket exists and is refused
 unless every address it resolves to is loopback -- a name is not an address, so `localhost` on a
 host whose `/etc/hosts` maps it elsewhere is refused like any other routable address, and what is
-bound is the literal address that resolution produced rather than the name. Publishing it — on another interface, behind a
-proxy, or as a unit on a live installation — is forbidden until the slice that adds TLS and a
-password (DoD 5).
+bound is the literal address that resolution produced rather than the name.
+
+**And it stayed loopback only after DoD 5.** External access is published by a separate front
+(`secretary web-front`, below), not by relaxing this bind. The refusal above is what makes that
+front the only way in: there is no address this process will answer on that something off this host
+could reach directly, so a request that arrived from outside passed TLS and a password before it
+became a call here. The pages call operations in this process rather than over HTTP, so there is no
+second, internal HTTP surface for a request to arrive on either.
 
 ### Routes
 
@@ -2912,6 +2917,49 @@ Idempotency is the layer's and the transport does not get to weaken it: the requ
 the client's, kept across a reload, and `ops.run_start` / `ops.run_review` answer a repeat with the
 run that already exists. A repeated POST therefore raises no second head — which is a test, not a
 description.
+
+
+## Publishing the pipeline: the guarded front
+
+The transport above is loopback-only by construction. What makes it reachable from outside the host
+is a ready-made front -- Caddy, from the Ubuntu archive -- that terminates TLS, checks a password
+and proxies to `127.0.0.1`. No authentication is implemented in this product: `basicauth` checks the
+owner's password against a bcrypt hash, and the hash comes out of the installation's secret store at
+render time.
+
+```bash
+python3 -P -m secretary web-front set-password --instance INSTANCE (--stdin | --generate)
+python3 -P -m secretary web-front render --instance INSTANCE --site https://HOST [--site ...] [--bind ADDR]
+python3 -P -m secretary web-front check --instance INSTANCE [--config FILE]
+```
+
+| verb | what it does |
+| --- | --- |
+| `set-password` | reads a password from stdin, or generates one from `secrets`; stores the value and its `caddy hash-password` bcrypt hash as two catalog entries. A plaintext never travels through argv and nothing here prints one. |
+| `render` | reads the *hash* from the store and writes the Caddyfile, mode 0600, under `<data-dir>/webfront/`. Refuses a non-https site address, a hash that is not bcrypt, an upstream that is not loopback, and any configuration it would then have to report as leaving a route unguarded. |
+| `check` | parses a rendered file and reports every published route it would answer without a password check, and every address it proxies to. Exit 3 when there is a finding. |
+
+**Why nothing can go round the guard.** The front is the only listener on a public interface; the
+application behind it refuses every address that is not loopback, in code, before a socket exists.
+A page is not a second client either: `/` and `/tasks/{ref}` call `reads.system_snapshot` and
+`reads.task_snapshot` in this process, so there is no browser-visible internal endpoint and no
+server-side request that could arrive unauthenticated. The upstream in the rendered file is checked
+against the same loopback predicate `--host` is checked against, so a front that forwarded off the
+host is refused rather than rendered.
+
+**Why one guard and not one per route.** `basicauth *` covers every path, so a route added to the
+table above is protected the moment it exists and forgetting to protect one is not an available
+mistake. `secretary.webfront.guard` proves it the other way round as well: it parses the rendered
+file and asks, for every entry of `secretary.web.app.ROUTES`, whether anything answers that path
+before a password is checked. `tests/test_web_front.py` runs that predicate over the shipped
+renderer and over hand-written counter-examples that must be reported, so a green result means the
+predicate can fail and did not.
+
+**TLS without a domain.** This installation has no domain name, so no publicly trusted certificate
+is obtainable for it. `tls internal` issues from Caddy's own CA; what a browser shows the first time
+and how to trust the root are in [Operations](OPERATIONS.md#the-published-web-front). Plain HTTP is
+a redirect Caddy derives from the `https://` site addresses and never a second way in; the guard
+reader treats an `http://` block that serves anything but a redirect as a finding.
 
 ## Knowledge
 

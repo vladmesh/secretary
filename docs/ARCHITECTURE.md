@@ -370,15 +370,53 @@ implementation failure into `backend_unavailable`. So an unreadable product-run 
 product-runs section of a card page unavailable, beside a card state, history and result that are
 read from other sources and still shown -- rather than taking the page down.
 
-**Loopback only until DoD 5.** It has no password, no TLS and no authorisation, and its POST routes
-start real heads, so reaching the port is owning the pipeline. A non-loopback bind is refused in
-code before a socket exists -- by resolving the requested name and refusing unless every address it
-resolves to is loopback, since a spelling check would let a host's own mappings publish it -- and the service is not published, proxied or enabled as a unit on a
-live installation until the slice that adds TLS and a password.
+**Loopback only, and it stayed that way when the pipeline was published.** It has no password, no
+TLS and no authorisation, and its POST routes start real heads, so reaching the port is owning the
+pipeline. A non-loopback bind is refused in code before a socket exists -- by resolving the
+requested name and refusing unless every address it resolves to is loopback, since a spelling check
+would let a host's own mappings publish it. DoD 5 did not touch that refusal, and the reason is
+below.
 
 Its routes, its code-to-status table and its cursor semantics are in
 [Protocols](PROTOCOLS.md#serving-the-pipeline-locally); running and stopping it is in
 [Operations](OPERATIONS.md#the-local-web-transport).
+
+## The guarded front
+
+Outside access to the pipeline is a password over TLS, and none of it is this product's code.
+`secretary.webfront` renders a configuration for Caddy -- from the Ubuntu archive, not a GitHub
+release -- which terminates TLS, checks the owner's password with `basicauth` against a bcrypt hash,
+and proxies to `127.0.0.1`.
+
+**Why the protection is taken ready-made.** Password authentication is a thing to get exactly right
+and nothing to invent: constant-time comparison, a work-factored hash, a challenge that leaks
+nothing about which half was wrong, TLS termination, HTTP/2 and HTTP/3, and years of other people's
+bugs already found. Writing that here would put a security-critical implementation into a product
+whose subject is a task pipeline, and would have to be maintained by whoever is holding this
+repository next. So there is no authentication code in this product at all: there is a
+configuration, and a reader that audits it.
+
+**Why the application stayed loopback.** The alternative was to teach the transport a password and
+let it bind a public address. That trades one boundary for many: every route, every future route
+and every page would then have to remember the check, and the property "no unauthenticated request
+can reach this process" would become an assertion repeated in code rather than a fact about the
+network. Keeping the refusal makes it a fact. There is exactly one listener on a public interface,
+it is the front, and the thing behind it cannot be bound anywhere a second listener could be. The
+pages call the read layer in-process rather than over HTTP, so there is no internal HTTP surface
+for a request to appear on either.
+
+**Why one guard for the whole site.** `basicauth *` guards every path, so protection is not a
+property somebody has to add to each new route. `secretary.webfront.guard` checks the converse:
+it parses the rendered configuration and reports every entry of `secretary.web.app.ROUTES` -- the
+same table `docs/PROTOCOLS.md` publishes -- that something would answer before a password was
+checked. That is what makes "forgetting a route" impossible rather than merely unlikely, and it is
+the same shape as the operation registry in the error contract: the surface asks the table, the
+table is not copied into the test.
+
+**Where the credential lives.** In the installation's secret store, both halves of it: the
+password and its bcrypt hash. The repository holds a renderer, not a hash; the rendered file is
+mode-0600 machine state under the data directory and is produced from the store on demand, so
+rotating the password is `set-password`, `render`, restart -- and no commit.
 
 ## The sprint observer head
 

@@ -22,11 +22,15 @@ from typing import Any
 
 TITLE = "secretary"
 
-#: Said on every page. This service has no authentication of any kind, so where it may listen is
-#: not a deployment preference; see :mod:`secretary.web.server`.
+#: Said on every page. This application still has no authentication of any kind of its own, so
+#: where it may listen is not a deployment preference; see :mod:`secretary.web.server`. What
+#: changed with DoD 5 is what stands in front of it, not what it is: a request that arrived from
+#: off this host passed TLS and a password at the front (:mod:`secretary.webfront`) before it
+#: reached this process, and there is no path here that does not.
 LOOPBACK_NOTICE = (
-    "local only — this service has no password, no TLS and no authorisation, and is refused a "
-    "non-loopback address until the slice that adds them"
+    "local only — this application has no password, no TLS and no authorisation of its own and is "
+    "refused a non-loopback address; anything reaching it from outside came through the guarded "
+    "front"
 )
 
 STYLE = """
