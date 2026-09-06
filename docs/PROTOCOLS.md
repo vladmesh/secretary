@@ -1244,13 +1244,27 @@ transition into `open`, a pin is a property of the sprint that survives its clos
 
 The pins are what the observer is told and what the card guard holds it to. The launch document the
 dispatcher writes for the observer prints both roles in an `## Executors` section — the pinned profile,
-or, for an unpinned role, that the owner fixed none and the observer chooses one per card. A card
-created for a sprint that pins a role must run that role on that profile: `task create` writes the
-pinned profile onto the card when the caller names none, and refuses a card that asks for a different
-one with `sprint_executor_pinned`, naming the sprint and the pinned profile. That holds for every card
-of the sprint, including cards recreated after a rework or a reslice. A sprint that pins nothing adds
-no check at all, and a card's actually chosen profiles stay readable on the card itself, where they
-have always been: there is no second routing registry and no new resolver.
+or, for an unpinned role, that the owner fixed none and the observer chooses one per card.
+
+A card of a sprint that pins a role must run that role on that profile, and the constraint has one
+door. Every write of a card's `head` or `review_head` goes through the same check: `task create`, for a
+first card, a later one, or one recreated after a rework or a reslice, and `task edit`, which revises a
+card until it is claimed. Both write the pinned profile when the caller names none — including an edit
+that would clear the field — and both refuse a value naming a different profile with
+`sprint_executor_pinned`, which names the sprint and the pinned profile. A sprint whose row carries an
+unreadable pin refuses both with `sprint_executor_unreadable` rather than writing a card under a
+constraint nobody can read. What the dispatcher records in `resolved_head` when it claims a card is not
+a third door: it launches the profile the card declares and records the one it launched.
+
+A sprint that pins nothing adds no check at all on any of those paths, and a card's actually chosen
+profiles stay readable on the card itself, where they have always been: there is no second routing
+registry and no new resolver.
+
+The pins are part of the durable entity, so they travel its recovery path. The normalized export
+carries a key per role only where the row declares a pin, absence stays absence through the round trip,
+and both fields are compared by the sprint parity check. An exported key that is not a profile name
+stops the restore in the preflight, beside the observer set and before the first backend write, because
+recovering it as "the owner pinned nobody" would turn a constraint the owner set into a free choice.
 
 ### The observer fence
 

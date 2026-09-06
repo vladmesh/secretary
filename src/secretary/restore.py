@@ -32,8 +32,10 @@ from secretary.product_issues import (
     registered_projects,
 )
 from secretary.sprint_observer import (
+    EXECUTOR_FIELDS,
     ObserverMetadataError,
     check_observer_profile,
+    encode_executor,
     encode_observer,
     installed_head_profiles,
     is_executable,
@@ -106,6 +108,7 @@ def import_normalized_board(
             sprints = _normalized_sprints(data_dir)
             # Validate both sets before the first backend write.
             _check_restored_observers(sprints, instance)
+            _check_restored_executors(sprints)
             _check_restored_admission(sprints, instance)
             if client is None:
                 if instance is None:
@@ -443,6 +446,8 @@ SPRINT_PARITY_FIELDS = (
     "resume",
     "audit",
     "observer",
+    "worker",
+    "reviewer",
 )
 
 
@@ -490,6 +495,26 @@ def _check_restored_observers(sprints: list[dict[str, Any]], instance: Path | No
                 problems.append(exc.message)
     if problems:
         raise RestoreError("sprint observer metadata is invalid: " + "; ".join(problems))
+
+
+def _check_restored_executors(sprints: list[dict[str, Any]]) -> None:
+    """Validate the exported executor pins as a set, beside the observers and before any write.
+
+    Absence is legal here and needs no repair: a sprint that pins nobody carries neither key, and
+    every export taken before these fields existed is one of those. What is refused is a key that is
+    there and is not a profile name, because recovering it as absence would turn a constraint the
+    owner set into "the observer chooses", silently and durably.
+    """
+    from secretary.sprint_observer import EXECUTOR_PINNED, parse_executor
+
+    problems = [
+        f"{sprint.get('reference') or '?'}: {role} pin is not a head profile name"
+        for sprint in sprints
+        for role in EXECUTOR_FIELDS
+        if role in sprint and parse_executor(sprint[role])["state"] != EXECUTOR_PINNED
+    ]
+    if problems:
+        raise RestoreError("sprint executor metadata is invalid: " + "; ".join(problems))
 
 
 def _check_restored_admission(sprints: list[dict[str, Any]], instance: Path | None) -> None:
@@ -570,6 +595,13 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
         "sprint_resume": (json.dumps(resume, sort_keys=True, separators=(",", ":")) if resume else ""),
         "sprint_source_audit": json.dumps(sprint["audit"], sort_keys=True, separators=(",", ":")),
         **({"sprint_observer": encode_observer(sprint["observer"])} if "observer" in sprint else {}),
+        # Written back only for a role the record declares, so a restored row carries the pin it
+        # was exported with and no field at all where the owner pinned nobody.
+        **{
+            EXECUTOR_FIELDS[role]: encode_executor(str(sprint[role]))
+            for role in EXECUTOR_FIELDS
+            if sprint.get(role)
+        },
     }
 
 

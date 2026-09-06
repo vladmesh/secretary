@@ -10,22 +10,36 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
+from secretary.data import export_board, init_layout, normalize_sprint_entity
 from secretary.dispatcher_observer import render_observer_prompt
+from secretary.restore import RestoreError, import_normalized_board
 from secretary.sprint_observer import (
     REVIEWER_FIELD,
     WORKER_FIELD,
     executor_malformed,
     executor_pinned,
     executor_unset,
+    head_choice,
     parse_executor,
 )
-from secretary.sprints import SprintReader
+from secretary.sprints import SprintReader, SprintWriter
 from secretary.tasks import TaskAudit, TaskError, TaskWriter
-from tests.fakes.sprints import KEEP_THE_ISSUE_OPEN, SprintFixture
+from tests.fakes.sprints import (
+    KEEP_THE_ISSUE_OPEN,
+    ProductSprintKanboard,
+    SprintFixture,
+    _write_project_registry,
+)
+from tests.observer_identity import as_observer
+from tests.restore_fixtures import _EmptyBoardsKanboard
+from tests.sprint_close_fixtures import close_decisions
 
 UNSET_BOTH = {"worker": executor_unset(), "reviewer": executor_unset()}
 
@@ -324,6 +338,178 @@ class SprintCardExecutorTests(SprintFixture):
             [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=reference)],
             ["created"],
         )
+
+
+class SprintExecutorRecoveryTests(unittest.TestCase):
+    """The pins through the entity's own recovery path: export, parity, restore.
+
+    A durable field that a checkpoint drops is not durable. The window this closes is the one
+    between the export and the restore, where a pin the owner set came back as "the observer
+    chooses" — the substitution the whole contract is written against.
+    """
+
+    def _round_trip(self, **pins: str) -> tuple[dict, dict, Path, Path]:
+        """Seed one closed sprint with these pins, export it, restore it into an empty backend."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        source_data, target_data = root / "source-data", root / "target-data"
+        init_layout(source_data)
+        init_layout(target_data)
+        source = ProductSprintKanboard()
+        instance = _write_project_registry(root, "secretary")
+        writer = SprintWriter(source, data_dir=source_data, instance=instance)  # type: ignore[arg-type]
+        reference = writer.create(
+            role="po",
+            actor="operator",
+            goal="recovered",
+            reference="sprint:recovered",
+            product="secretary",
+            issues=["issue:open"],
+            projects=["secretary"],
+            observer=head_choice("codex-observer"),
+            request_id="seed-create",
+            **pins,
+        )["sprint"]["ref"]
+        with as_observer(reference):
+            TaskWriter(source, data_dir=source_data).create(  # type: ignore[arg-type]
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="linked",
+                target="ready",
+                sprint=reference,
+                request_id="seed-card",
+            )
+        writer.close(
+            role="po",
+            actor="operator",
+            reference=reference,
+            request_id="seed-close",
+            decisions=close_decisions(writer, reference),
+        )
+        export_board(
+            source_data,
+            instance_dir=instance,
+            reader=mock.Mock(export=mock.Mock(return_value=[])),
+            sprint_client=source,
+        )
+        for name in ("cards.json", "sprints.json"):
+            shutil.copy(source_data / "board" / name, target_data / "board" / name)
+        exported = json.loads((target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
+        client = _EmptyBoardsKanboard()
+        import_normalized_board(target_data, client=client, instance=instance)  # type: ignore[arg-type]
+        restored = SprintReader(client, data_dir=target_data).show(reference)  # type: ignore[arg-type]
+        return exported["sprints"][0], restored, target_data, instance
+
+    def test_absence_comes_back_as_absence(self) -> None:
+        record, restored, _, _ = self._round_trip()
+        # The record of a sprint that pins nobody carries neither key, so an export taken before
+        # these fields existed and one taken after are the same bytes.
+        self.assertNotIn("worker", record)
+        self.assertNotIn("reviewer", record)
+        self.assertEqual(restored["executors"], UNSET_BOTH)
+
+    def test_each_pin_comes_back_as_the_profile_it_was(self) -> None:
+        for pins, expected in (
+            ({"worker": "codex-observer"}, {"worker": "codex-observer"}),
+            ({"reviewer": "claude-observer"}, {"reviewer": "claude-observer"}),
+            (
+                {"worker": "codex-observer", "reviewer": "claude-observer"},
+                {"worker": "codex-observer", "reviewer": "claude-observer"},
+            ),
+        ):
+            with self.subTest(pins=pins):
+                record, restored, _, _ = self._round_trip(**pins)
+                self.assertEqual({key: record[key] for key in expected}, expected)
+                for role in ("worker", "reviewer"):
+                    self.assertEqual(
+                        restored["executors"][role],
+                        executor_pinned(expected[role]) if role in expected else executor_unset(),
+                    )
+                # The recovered row is one the guard still holds: its cards keep the pin.
+                self.assertNotIn(
+                    "unset",
+                    json.dumps({role: restored["executors"][role] for role in expected}),
+                )
+
+    def test_the_recovered_row_normalizes_back_to_the_record_it_came_from(self) -> None:
+        """Parity is what makes the restore report success, so it has to compare the pins too."""
+        record, restored, _, _ = self._round_trip(worker="codex-observer")
+        self.assertEqual(normalize_sprint_entity(restored), record)
+
+    def test_a_pin_that_is_not_a_profile_stops_the_restore_before_the_first_write(self) -> None:
+        """Recovering corruption as "the owner pinned nobody" is the one repair nobody asked for."""
+        record, _, target_data, instance = self._round_trip(worker="codex-observer")
+        payload = {"version": 1, "sprints": [{**record, "worker": ""}]}
+        (target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
+        client = _EmptyBoardsKanboard()
+
+        with self.assertRaisesRegex(RestoreError, "worker pin is not a head profile name"):
+            import_normalized_board(target_data, client=client, instance=instance)  # type: ignore[arg-type]
+        # Nothing of either set was written: the refusal is the preflight, not the sprint step.
+        self.assertEqual(client.tasks, [])
+
+
+class CardEditExecutorTests(SprintFixture):
+    """`task edit` is the second door onto the card's two profiles, and the same guard holds it."""
+
+    def _card(self, sprint: str, request_id: str, **kwargs) -> dict:
+        return TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+            role="observer",
+            actor="observer",
+            project="secretary",
+            task_type="code",
+            title="work",
+            target="ready",
+            sprint=sprint,
+            request_id=request_id,
+            **kwargs,
+        )["task"]
+
+    def _edit(self, reference: str, request_id: str, **kwargs) -> dict:
+        return TaskWriter(self.client, data_dir=self.tmp.name).edit(  # type: ignore[arg-type]
+            role="observer",
+            actor="observer",
+            reference=reference,
+            request_id=request_id,
+            **kwargs,
+        )["task"]
+
+    def test_an_edit_may_restate_the_pin_and_may_not_replace_it(self) -> None:
+        reference = self._create(goal="pinned", worker="codex-observer")["sprint"]["ref"]
+        card = self._card(reference, "card")["ref"]
+
+        edited = self._edit(card, "same", head="codex-observer")
+        self.assertEqual(edited["routing"]["head_override"], "codex-observer")
+
+        with self.assertRaises(TaskError) as raised:
+            self._edit(card, "other", head="claude-observer")
+        self.assertEqual(raised.exception.code, "sprint_executor_pinned")
+        self.assertIn(reference, raised.exception.message)
+        self.assertIn("codex-observer", raised.exception.message)
+        self.assertEqual(
+            self._edit(card, "title-only", title="renamed")["routing"]["head_override"],
+            "codex-observer",
+        )
+
+    def test_an_edit_cannot_clear_the_pin_off_the_card(self) -> None:
+        """Clearing the override would hand the card back to `role_defaults`, pin and all."""
+        reference = self._create(goal="pinned", reviewer="claude-observer")["sprint"]["ref"]
+        card = self._card(reference, "card")["ref"]
+
+        edited = self._edit(card, "cleared", review_head="")
+        self.assertEqual(edited["routing"]["review_head_override"], "claude-observer")
+
+    def test_an_unpinned_sprint_edits_exactly_as_before(self) -> None:
+        reference = self._create(goal="unpinned")["sprint"]["ref"]
+        card = self._card(reference, "card", head="codex-observer")["ref"]
+
+        edited = self._edit(card, "free", head="claude-observer", review_head="codex-observer")
+        self.assertEqual(edited["routing"]["head_override"], "claude-observer")
+        self.assertEqual(edited["routing"]["review_head_override"], "codex-observer")
+        self.assertIsNone(self._edit(card, "cleared", head="")["routing"]["head_override"])
 
 
 if __name__ == "__main__":

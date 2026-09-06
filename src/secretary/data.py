@@ -351,6 +351,9 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         # A key present and `None` is a value that is not one of the four tagged forms: restore
         # refuses the whole set on it rather than guessing a repair.
         **({"observer": sprint["observer"]} if "observer" in sprint else {}),
+        # The two optional executor pins, carried only where the row declares one, so a record of
+        # a sprint that pins nobody stays byte-identical to the record this export always wrote.
+        **_sprint_executors(sprint),
         "status": str(sprint.get("status") or ""),
         "budget": {
             "by_type": {str(key): _int_or_none(value) or 0 for key, value in sorted(by_type.items())},
@@ -369,6 +372,29 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
             if isinstance(comment, dict)
         ],
     }
+
+
+def _sprint_executors(sprint: dict[str, Any]) -> dict[str, str | None]:
+    """The worker and reviewer pins a row declares, and nothing for a role it pins nobody on.
+
+    Absence has to survive recovery as absence: a record that carried a value for every role would
+    restore a sprint the owner left free as one pinned to whatever the reader answered, which is the
+    substitution this field exists to prevent. A key present and `None` is a stored value that is
+    not a profile at all; restore refuses the set on it rather than recovering corruption as "the
+    owner pinned nobody".
+    """
+    from secretary.sprint_observer import EXECUTOR_FIELDS, EXECUTOR_PINNED, EXECUTOR_UNSET
+
+    states = sprint.get("executors")
+    states = states if isinstance(states, dict) else {}
+    record: dict[str, str | None] = {}
+    for role in EXECUTOR_FIELDS:
+        state = states.get(role)
+        state = state if isinstance(state, dict) else {"state": EXECUTOR_UNSET}
+        if state.get("state") == EXECUTOR_UNSET:
+            continue
+        record[role] = str(state.get("profile")) if state.get("state") == EXECUTOR_PINNED else None
+    return record
 
 
 def _sprint_audit(audit: dict[str, Any]) -> dict[str, str]:

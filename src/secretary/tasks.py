@@ -1869,7 +1869,13 @@ class TaskWriter:
                     3,
                 )
             if not restoring:
-                head, review_head = self._sprint_executor_pins(linked_sprint, head, review_head)
+                pinned_head, pinned_review = self._sprint_executor_pins(
+                    sprint_ref=sprint,
+                    head=head,
+                    review_head=review_head,
+                    sprint=linked_sprint,
+                )
+                head, review_head = pinned_head or "", pinned_review or ""
         if budget_event not in {"", "recreated_task", "hotfix"}:
             raise TaskError("validation", "budget event must be recreated_task or hotfix", 2)
         if budget_event and not sprint:
@@ -3272,6 +3278,14 @@ class TaskWriter:
             and not self._sprint_holds_project(current["project"])
         ):
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+        # A card can be revised until it is claimed, so an edit is the second door onto the same
+        # two fields and goes through the same guard. Only the fields this edit writes are asked
+        # about: an edit of the title alone says nothing about the executors and is left alone.
+        head, review_head = self._sprint_executor_pins(
+            sprint_ref=str(current.get("sprint") or ""),
+            head=head,
+            review_head=review_head,
+        )
         payload = {
             "title_sha256": _digest(title.strip()) if title is not None else None,
             "title_sha256_was": _digest(current["title"]) if title is not None else None,
@@ -3323,45 +3337,80 @@ class TaskWriter:
 
         return bool(active_sprint_projects(self.data_dir).get(project))
 
-    def _sprint_executor_pins(self, sprint: dict[str, Any], head: str, review_head: str) -> tuple[str, str]:
-        """The worker and reviewer profiles this card is created with, under its sprint's pins.
+    def _sprint_executor_pins(
+        self,
+        *,
+        sprint_ref: str,
+        head: str | None,
+        review_head: str | None,
+        sprint: dict[str, Any] | None = None,
+    ) -> tuple[str | None, str | None]:
+        """The single place a card's worker and reviewer profile is held to its sprint's pins.
 
-        A sprint that pins a role has already decided it for every card it will ever cut, this one
-        and the ones that follow a rework or a reslice. So a card that asks for another profile is
-        refused by name, and a card that asks for nothing is written with the pinned profile rather
-        than left to be resolved into something else later. Nothing new resolves anything: the card
-        still carries the profiles it runs on, exactly as a card the observer chose them for does.
+        Every write of those two card fields comes through here, so the constraint has one door:
+        `create` cuts a card (a first card, a later one, or one recreated after a rework or a
+        reslice) and `edit` revises one before it is claimed. Both pass what they are about to
+        write and use what comes back; a guard the second door walked past would not be a
+        constraint at all. What the dispatcher later records in `resolved_head` is not a third
+        door: it launches what the card declares here, and records which profile it launched.
+
+        `None` is a field this call does not write and is returned untouched. `""` is a caller
+        that asks for no profile of its own, and under a pin it becomes the pinned profile rather
+        than something a default resolves later — the card carries the profiles it runs on exactly
+        as it always has. A different profile is refused by name.
 
         A role the sprint pins nothing on is untouched, which is every sprint opened until now. A
-        field that is there but unreadable is corruption, and a card is not cut under a constraint
-        nobody can read.
+        field that is there but unreadable is corruption, and a card is not written under a
+        constraint nobody can read.
         """
         from secretary.sprint_observer import EXECUTOR_FIELDS, EXECUTOR_PINNED, EXECUTOR_UNSET
 
-        reference = str(sprint.get("ref") or "")
-        chosen = {"worker": head, "reviewer": review_head}
-        states = sprint.get("executors") or {}
+        requested: dict[str, str | None] = {"worker": head, "reviewer": review_head}
+        if not sprint_ref or (head is None and review_head is None):
+            return requested["worker"], requested["reviewer"]
+        entity = sprint if sprint is not None else self._sprint_entity(sprint_ref)
+        states = entity.get("executors") or {}
         for role in EXECUTOR_FIELDS:
+            asked = requested[role]
+            if asked is None:
+                continue
             state = states.get(role) or {"state": EXECUTOR_UNSET}
             if state.get("state") == EXECUTOR_UNSET:
                 continue
             if state.get("state") != EXECUTOR_PINNED:
                 raise TaskError(
                     "sprint_executor_unreadable",
-                    f"sprint {reference} carries a {role} pin that is not a head profile; repair "
-                    "the sprint entity before cutting cards for it",
+                    f"sprint {sprint_ref} carries a {role} pin that is not a head profile; repair "
+                    "the sprint entity before writing its cards",
                     3,
                 )
             profile = str(state.get("profile") or "")
-            if chosen[role] and chosen[role] != profile:
+            if asked and asked != profile:
                 raise TaskError(
                     "sprint_executor_pinned",
-                    f"sprint {reference} pins its {role} to head profile {profile!r}; this card "
-                    f"asks for {chosen[role]!r}",
+                    f"sprint {sprint_ref} pins its {role} to head profile {profile!r}; this card "
+                    f"asks for {asked!r}",
                     3,
                 )
-            chosen[role] = profile
-        return chosen["worker"], chosen["reviewer"]
+            requested[role] = profile
+        return requested["worker"], requested["reviewer"]
+
+    def _sprint_entity(self, reference: str) -> dict[str, Any]:
+        """The sprint a card names, read here only to answer what it pins.
+
+        A sprint that cannot be read fails closed: the alternative is writing a profile onto a card
+        whose constraint nobody could check, which is the one outcome the pin exists to prevent.
+        """
+        from secretary.sprints import SprintReader
+
+        try:
+            return SprintReader(self.client).show(reference, include_cards=False)
+        except TaskError as exc:
+            raise TaskError(
+                "sprint_executor_unreadable",
+                f"sprint {reference} cannot be read, so its executor pins cannot be checked: {exc.message}",
+                3,
+            ) from None
 
     def _guard_sprint_write(
         self,
