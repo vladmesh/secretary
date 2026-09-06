@@ -429,18 +429,35 @@ def _sprint_board(client: KanboardClient, *, create: bool) -> int | None:
 
 
 class _AuditOnce:
-    """One committed-audit traversal shared by the sprint summaries of a single operation."""
+    """One committed-audit traversal shared by the sprint summaries of a single operation.
 
-    def __init__(self, data_dir: Path | None) -> None:
+    `events` may be given instead of a directory, for a caller that has already walked the journal
+    and has to keep that walk's failure apart from the board's. The journal is a source of its own:
+    a caller that reads it itself can mark it unavailable without the board pass appearing to have
+    failed, which is what `secretary.webproto.sprint_reads` does.
+    """
+
+    def __init__(self, data_dir: Path | None, *, events: list[dict[str, Any]] | None = None) -> None:
         self._data_dir = data_dir
-        self._events: list[dict[str, Any]] | None = None
+        self._events: list[dict[str, Any]] | None = events
 
     def events(self) -> list[dict[str, Any]]:
+        if self._events is not None:
+            return self._events
         if self._data_dir is None:
             return []
-        if self._events is None:
-            self._events = TaskAudit(self._data_dir).events()
+        self._events = TaskAudit(self._data_dir).events()
         return self._events
+
+
+def audit_traversal(events: list[dict[str, Any]]) -> _AuditOnce:
+    """A traversal over a committed audit somebody has already walked.
+
+    The journal is a source of its own, and a caller that has to be able to say *the journal*
+    refused -- rather than the board it is read beside -- walks it itself and passes the result to
+    `status_views`, which then opens nothing. `secretary.webproto.sprint_reads` is that caller.
+    """
+    return _AuditOnce(None, events=events)
 
 
 def _task_id(raw: dict[str, Any]) -> int:
@@ -630,6 +647,7 @@ class SprintReader:
         *,
         observers: dict[str, dict[str, Any]] | None = None,
         headless: dict[str, dict[str, Any]] | None = None,
+        audit: _AuditOnce | None = None,
     ) -> list[dict[str, Any]]:
         """The status view of sprints that have already been read, over cards already listed.
 
@@ -637,8 +655,13 @@ class SprintReader:
         that has to keep the two reads apart -- a protocol layer marking one source unavailable
         without blanking the other -- can still get exactly this view rather than deriving a second
         one beside it. The committed audit is consumed at most once for the whole call.
+
+        `audit` is that split taken one source further: a caller that has already walked the
+        committed journal -- and that has to be able to say *the journal* refused rather than the
+        board -- passes its own traversal in, and this call opens nothing. With none given the
+        journal is walked here, lazily, exactly as `statuses` has always walked it.
         """
-        audit = _AuditOnce(self.data_dir)
+        audit = audit if audit is not None else _AuditOnce(self.data_dir)
         result = []
         for listed in sprints:
             sprint = {**listed, "cards": linked.get(listed["ref"], [])}

@@ -19,7 +19,7 @@ import io
 import json
 import unittest
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 from secretary.cli import main
@@ -27,8 +27,9 @@ from secretary.config import validate
 from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
 from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.tasks import TaskError
+from secretary.webproto import section as section_module
+from secretary.webproto import sources, sprint_requests, store_io
 from secretary.webproto import sprint_reads as sprint_reads_module
-from secretary.webproto import sprint_requests, store_io
 from secretary.webproto.boundary import GUARDED, operations
 from secretary.webproto.commands import _EXIT_BY_CODE
 from secretary.webproto.errors import (
@@ -396,7 +397,9 @@ class OptionsTests(SprintProtocolFixture):
         (self.instance / "heads" / "heads.yaml").write_text("{", encoding="utf-8")
         options = self.reads().sprint_options()
         self.assertEqual(options["heads"]["source"]["state"], "unavailable")
-        self.assertEqual(options["heads"]["items"], [])
+        # `null` and not `[]`: an empty catalogue is the claim that this installation runs off no
+        # head at all, which is the opposite of a registry nobody could read.
+        self.assertIsNone(options["heads"]["items"])
         self.assertEqual(options["products"]["source"]["state"], "available")
         self.assertTrue(options["products"]["items"])
 
@@ -523,7 +526,13 @@ class LayerPropertyTests(SprintProtocolFixture):
     def test_every_document_validates_against_the_published_schema(self) -> None:
         created = self.create(worker=WORKER_PROFILE)
         reference = self.reference_of(created)
-        for document in (created, self.reads().sprint_state(reference), self.reads().sprint_options()):
+        documents = (
+            created,
+            self.reads().sprint_state(reference),
+            self.reads().sprint_list(),
+            self.reads().sprint_options(),
+        )
+        for document in documents:
             with self.subTest(kind=document["kind"]):
                 self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
                 json.dumps(document)
@@ -886,9 +895,12 @@ class SprintListTests(SprintWorkFixture):
         document = self.reads().sprint_list()
 
         self.assertEqual(document["sprints"]["source"]["state"], "unavailable")
-        self.assertEqual(document["sprints"]["items"], [])
+        # `null` items, and never `[]`: an empty listing is the affirmative claim that this
+        # installation holds no sprints, which is exactly what a board that refused cannot say.
+        self.assertIsNone(document["sprints"]["items"])
         self.assertEqual(document["cards"]["source"]["state"], "available")
         self.assertEqual(document["liveness"]["source"]["state"], "available")
+        self.assertEqual(document["journal"]["source"]["state"], "available")
 
     def test_the_listing_creates_no_board_and_starts_nothing(self) -> None:
         document = self.reads().sprint_list()
@@ -1125,6 +1137,34 @@ class SprintReadCommandTests(SprintProtocolFixture):
         self.assertEqual(output, "")
         self.assertEqual(json.loads(errors)["error"]["code"], "not_found")
 
+    def test_an_unvalidated_config_with_an_explicit_data_dir_still_answers_from_the_board(self) -> None:
+        """Criterion 4: the config is one more source that refused, not a refusal of the operation.
+
+        The previous round documented this as a stricter precondition and that was wrong: an
+        operator with a usable board transport and an explicit `--data-dir` had these answers before
+        the commands became clients of the layer, and losing them is losing an answer. The rule is
+        the same one every section obeys -- the unvalidated config appears as an unavailable source,
+        and takes away only what it owns.
+        """
+        reference = self.reference_of(self.create())
+        (self.instance / "instance.yaml").write_text(
+            f"version: 1\nname: test\ndata_dir: {self.data_dir}\n", encoding="utf-8"
+        )
+
+        code, output, errors = self._run(["sprint", "list"])
+        self.assertEqual(code, 0, errors)
+        listing = json.loads(output)
+        self.assertEqual([item["ref"] for item in listing["sprints"]["items"]], [reference])
+        self.assertEqual(listing["installation"]["source"]["state"], "unavailable")
+        self.assertIn("does not validate", listing["installation"]["source"]["reason"])
+        self.assertEqual(listing["sprints"]["source"]["state"], "available")
+
+        code, output, errors = self._run(["sprint", "status", "--ref", reference])
+        self.assertEqual(code, 0, errors)
+        watched = json.loads(output)
+        self.assertEqual(watched["sprint"]["value"]["ref"], reference)
+        self.assertEqual(watched["installation"]["source"]["state"], "unavailable")
+
     def test_an_installation_that_does_not_validate_is_the_backend_status(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
@@ -1132,6 +1172,450 @@ class SprintReadCommandTests(SprintProtocolFixture):
 
         self.assertEqual(code, _EXIT_BY_CODE["backend_unavailable"])
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
+
+
+
+
+class SectionSeamTests(SprintProtocolFixture):
+    """The enforcement point itself: what makes the invariant hold for a section written tomorrow.
+
+    Four sites of one document broke the same rule in four different ways across two review rounds,
+    each repaired where it was found. What is checked here is the place that makes the fifth one
+    hard to write: every section of both documents is a guarded builder of `SprintSections`, a rule
+    is not run when a source it needs refused, a refusal cannot answer, and a section assembled
+    outside the seam cannot reach a document at all.
+    """
+
+    def _paths(self, document: dict, prefix: str = "") -> set[str]:
+        """Every place in a document that carries a source, by path."""
+        found: set[str] = set()
+        for key, value in document.items():
+            path = f"{prefix}{key}"
+            if isinstance(value, dict):
+                if isinstance(value.get("source"), dict):
+                    found.add(path)
+                found |= self._paths(value, f"{path}.")
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        found |= {
+                            entry.replace(f"{path}.0.", f"{path}[].") for entry in
+                            self._paths(item, f"{path}.0.")
+                        }
+        return found
+
+    def test_every_section_of_both_documents_is_a_guarded_builder(self) -> None:
+        for name in section_module.sections(sprint_reads_module.SprintSections):
+            with self.subTest(section=name):
+                built = getattr(sprint_reads_module.SprintSections, name)
+                self.assertTrue(getattr(built, section_module.GUARDED, False))
+
+    def test_a_builder_that_answers_with_anything_but_a_section_is_caught(self) -> None:
+        """The half of the seam that covers a section somebody writes by hand next month."""
+
+        class Rogue(section_module.SectionSet):
+            def loose(self, read: Any) -> Any:
+                return {"source": sources.available(0.0).to_json(), "state": "green"}
+
+        with self.assertRaises(section_module.SectionContractError):
+            Rogue().loose(None)
+
+    def test_a_hand_built_section_cannot_reach_a_document(self) -> None:
+        """And the other half: `render` is the only way a source gets into a document."""
+        hand_built = {"work": {"checks": {"source": sources.available(0.0).to_json(), "state": "green"}}}
+        with self.assertRaises(section_module.SectionContractError):
+            section_module.render(hand_built)
+        # A mapping that merely has a field called `source` is data, and is left alone.
+        self.assertEqual(
+            section_module.render({"event": {"source": "the observer"}}), {"event": {"source": "the observer"}}
+        )
+
+    def test_a_rule_never_runs_when_a_source_it_needs_refused(self) -> None:
+        """Not a check a branch remembers: the code that would have claimed is not executed."""
+        ran: list[str] = []
+        read = section_module.SourceSet(
+            [
+                section_module.Reading("first", sources.unavailable("gone", now=0.0)),
+                section_module.Reading("second", sources.available(0.0), {"card": "x"}),
+            ]
+        )
+        decided = read.decide(
+            section_module.rule("first", lambda _value: ran.append("first") or {"state": "working"}),
+            section_module.Rule(
+                "second", ("first", "second"), lambda *_v: ran.append("both") or {"state": "working"}
+            ),
+            blank={"state": "unknown"},
+            narrates=(),
+        )
+        self.assertEqual(ran, [], "a rule needing a refused source was executed")
+        self.assertEqual(decided.name, "first")
+        self.assertEqual(decided.fields["state"], "unknown")
+        # And its payload is not reachable at all, so it cannot be read by accident either.
+        with self.assertRaises(section_module.SectionContractError):
+            read.value("first")
+
+    def test_a_section_that_claims_under_a_refusal_is_caught(self) -> None:
+        """Criterion 1's pin: a section that tries to violate the invariant fails here."""
+        read = section_module.SourceSet(
+            [section_module.Reading("liveness", sources.unavailable("unreadable", now=0.0))]
+        )
+        with self.assertRaises(section_module.SectionContractError):
+            read.decide(
+                section_module.rule("liveness", lambda _value: {"state": "working"}),
+                blank={"state": "unknown", "reason": None},
+                unresolved=lambda _reading: {"state": "working", "reason": "the head is up"},
+            )
+
+    def test_a_section_that_cannot_answer_when_everything_answered_is_a_hole(self) -> None:
+        read = section_module.SourceSet([section_module.Reading("sprints", sources.available(0.0), {})])
+        with self.assertRaises(section_module.SectionContractError):
+            read.decide(
+                section_module.rule("sprints", lambda _value: None),
+                blank={"state": "unknown"},
+                narrates=(),
+            )
+
+    def test_every_section_a_document_carries_is_one_the_seam_decided(self) -> None:
+        """The exhaustive walk of both documents, as a set rather than as a survey.
+
+        A section added to either document without going through `SprintSections` fails here, and so
+        does one silently removed: the paths are the contract `docs/PROTOCOLS.md` publishes.
+        """
+        reference = self.reference_of(self.create())
+        listing = self.reads().sprint_list()
+        watched = self.reads().sprint_state(reference)
+        work = {
+            "current_task",
+            "decision",
+            "decision.freshness",
+            "cards",
+            "degraded_cards",
+            "checks",
+            "waiting",
+        }
+        marks = {"cards", "journal", "liveness", "installation"}
+        observer = {"observer.declared", "observer.launch"}
+        self.assertEqual(
+            self._paths(listing),
+            marks
+            | {"sprints"}
+            | {f"sprints.items[].{name}" for name in work | observer},
+        )
+        self.assertEqual(self._paths(watched), marks | {"sprint"} | observer | {f"work.{name}" for name in work})
+        # And every one of them names the source that answered it.
+        for document in (listing, watched):
+            for path in self._paths(document):
+                with self.subTest(kind=document["kind"], section=path):
+                    self.assertTrue(_source_at(document, path)["name"])
+
+
+def _source_at(document: dict, path: str) -> dict:
+    """The `source` of one section of a document, by the path `SectionSeamTests` walks."""
+    node: Any = document
+    for step in path.split("."):
+        if step.endswith("[]"):
+            node = node[step[:-2]][0]
+        else:
+            node = node[step]
+    return node["source"]
+
+
+
+
+class SourceIsolationMatrixTests(SprintWorkFixture):
+    """Every source refusing alone and in combination, per section, over both operations.
+
+    Criterion 6 of secretary-1574, as a table rather than as prose: for each fault the whole work
+    document is asserted at once -- what each section says *and* which source it names -- so a
+    repair that fixes one section by taking an answer away from another fails here. Both operations
+    are asserted every time, because they share the assembly and a repair that reached only one of
+    them would be no repair at all.
+
+    Every fault is injected into this fixture's own installation. The live installation's sources
+    are never made unreadable, which is why source-isolation fault behaviour is proven here and not
+    against the real board.
+    """
+
+    #: Which section of the work document is asserted, and the field that carries its claim.
+    CLAIMS: ClassVar[dict[str, str]] = {
+        "current_task": "ref",
+        "decision": "entry",
+        "cards": "states",
+        "degraded_cards": "items",
+        "checks": "state",
+        "waiting": "state",
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.reference = self.reference_of(self.create())
+        self.card = self._card(self.reference)
+        self._current_task(self.reference, self.card)
+        # In progress: the one column the board deliberately does not settle, so every source in the
+        # chain has something only it can say about this sprint.
+        self._move(self.card, "In progress")
+        self._production({}, {self.card: {"state": "claimed"}})
+
+    # -- the faults, each hermetic and each only this fixture's ------------------------------
+
+    @contextlib.contextmanager
+    def _sprint_board_refuses(self) -> Any:
+        original = self.board.call
+        board = self.board.projects[SPRINT_BOARD_NAME]
+
+        def refuse(method: str, **params: Any) -> Any:
+            if method == "getAllTasks" and params.get("project_id") == board:
+                raise TaskError("backend_error", "the sprint board is unavailable", 1)
+            return original(method, **params)
+
+        self.board.call = refuse  # type: ignore[method-assign]
+        try:
+            yield
+        finally:
+            self.board.call = original  # type: ignore[method-assign]
+
+    @contextlib.contextmanager
+    def _pipeline_refuses(self) -> Any:
+        pipeline = self.board.projects.pop("Pipeline")
+        try:
+            yield
+        finally:
+            self.board.projects["Pipeline"] = pipeline
+
+    @contextlib.contextmanager
+    def _journal_refuses(self) -> Any:
+        from secretary.tasks import TaskAudit
+
+        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("audit journal denied")):
+            yield
+
+    @contextlib.contextmanager
+    def _production_refuses(self) -> Any:
+        path = self.data_dir / "dispatcher" / "production-state.json"
+        kept = path.read_text(encoding="utf-8")
+        path.write_text("{", encoding="utf-8")
+        try:
+            yield
+        finally:
+            path.write_text(kept, encoding="utf-8")
+
+    @contextlib.contextmanager
+    def _config_refuses(self) -> Any:
+        """A schema-invalid `instance.yaml`, with the explicit data directory this layer was given."""
+        path = self.instance / "instance.yaml"
+        kept = path.read_text(encoding="utf-8")
+        path.write_text(f"version: 1\nname: test\ndata_dir: {self.data_dir}\n", encoding="utf-8")
+        try:
+            yield
+        finally:
+            path.write_text(kept, encoding="utf-8")
+
+    def _faults(self, *names: str) -> Any:
+        stack = contextlib.ExitStack()
+        for name in names:
+            stack.enter_context(getattr(self, f"_{name}_refuses")())
+        return stack
+
+    # -- what the document says, in one shape -------------------------------------------------
+
+    def _entry_of(self, document: dict[str, Any], kind: str) -> dict[str, Any] | None:
+        """This sprint's sections, or `None` when the board that would list it did not answer."""
+        if kind == "sprint_state":
+            return {**document["work"], "observer": document["observer"]}
+        items = document["sprints"]["items"]
+        return None if items is None else next(
+            (item for item in items if item["ref"] == self.reference), None
+        )
+
+    def _seen(self, kind: str) -> dict[str, Any]:
+        """Every asserted section of one operation's document: its source, and what it claims.
+
+        The document-level marks are keyed `source:<name>` so that they cannot collide with the work
+        section of the same name -- `cards` is both a source of this document and a section of it,
+        and the whole point of the table is that the two are asserted apart.
+        """
+        layer = self.reads()
+        document = layer.sprint_state(self.reference) if kind == "sprint_state" else layer.sprint_list()
+        seen: dict[str, Any] = {
+            f"source:{key}": (document[key]["source"]["name"], document[key]["source"]["state"])
+            for key in ("cards", "journal", "liveness", "installation")
+        }
+        entry = self._entry_of(document, kind)
+        if entry is None:
+            listed = document["sprints"]
+            seen["sprints"] = (listed["source"]["name"], listed["source"]["state"], listed["items"])
+            return seen
+        for section, claim in self.CLAIMS.items():
+            source = entry[section]["source"]
+            seen[section] = (source["name"], source["state"], entry[section][claim])
+        freshness = entry["decision"]["freshness"]
+        seen["decision.freshness"] = (
+            freshness["source"]["name"],
+            freshness["source"]["state"],
+            freshness["value"] is not None,
+        )
+        for half in ("declared", "launch"):
+            said = entry["observer"][half]
+            seen[f"observer.{half}"] = (said["source"]["name"], said["source"]["state"], said["state"])
+        return seen
+
+    def _assert_sections(self, faults: tuple[str, ...], expected: dict[str, Any]) -> None:
+        """The same table over both operations, since they share the assembly."""
+        for kind in ("sprint_list", "sprint_state"):
+            with self.subTest(faults=faults or ("none",), operation=kind):
+                with self._faults(*faults):
+                    seen = self._seen(kind)
+                self.assertEqual(seen, expected)
+
+    def _sections(self, **overrides: Any) -> dict[str, Any]:
+        """The healthy answer, with the sections a fault changes named explicitly by each case."""
+        healthy: dict[str, Any] = {
+            "source:cards": ("cards", "available"),
+            "source:journal": ("journal", "available"),
+            "source:liveness": ("liveness", "available"),
+            "source:installation": ("installation", "available"),
+            "current_task": ("sprints", "available", self.card),
+            "decision": ("sprints", "available", None),
+            "decision.freshness": ("journal", "available", True),
+            "cards": ("cards", "available", {"in_progress": [self.card]}),
+            "degraded_cards": ("liveness", "available", {}),
+            "checks": ("liveness", "available", sprint_reads_module.CHECKS_NOT_GREEN),
+            "waiting": ("liveness", "available", sprint_reads_module.WAITING_WORKING),
+            "observer.declared": ("sprints", "available", sprint_reads_module.OBSERVER_DECLARED),
+            "observer.launch": ("liveness", "available", OBSERVER_NOT_STARTED),
+        }
+        return {**healthy, **overrides}
+
+    def test_nothing_refuses(self) -> None:
+        """The control: with every source in hand, each section names the one that answered it."""
+        self._assert_sections((), self._sections())
+
+    def test_the_audit_journal_alone_refuses(self) -> None:
+        """Site 3: the sprint row, the current card and the observer all stand."""
+        self._assert_sections(
+            ("journal",),
+            self._sections(
+                **{
+                    "source:journal": ("journal", "unavailable"),
+                    "decision.freshness": ("journal", "unavailable", False),
+                },
+            ),
+        )
+
+    def test_the_pipeline_alone_refuses(self) -> None:
+        self._assert_sections(
+            ("pipeline",),
+            self._sections(
+                cards=("cards", "unavailable", None),
+                **{
+                    "source:cards": ("cards", "unavailable"),
+                    "decision.freshness": ("cards", "unavailable", False),
+                },
+            ),
+        )
+
+    def test_the_production_state_alone_refuses(self) -> None:
+        self._assert_sections(
+            ("production",),
+            self._sections(
+                degraded_cards=("liveness", "unavailable", None),
+                checks=("liveness", "unavailable", sprint_reads_module.CHECKS_UNKNOWN),
+                waiting=("liveness", "unavailable", sprint_reads_module.WAITING_UNKNOWN),
+                **{
+                    "source:liveness": ("liveness", "unavailable"),
+                    "observer.launch": ("liveness", "unavailable", OBSERVER_UNAVAILABLE),
+                },
+            ),
+        )
+
+    def test_the_installation_config_alone_refuses(self) -> None:
+        """Criterion 4: an unvalidated config takes away nothing the board can still answer."""
+        self._assert_sections(
+            ("config",), self._sections(**{"source:installation": ("installation", "unavailable")})
+        )
+
+    def test_the_journal_and_the_production_state_refuse_together(self) -> None:
+        self._assert_sections(
+            ("journal", "production"),
+            self._sections(
+                degraded_cards=("liveness", "unavailable", None),
+                checks=("liveness", "unavailable", sprint_reads_module.CHECKS_UNKNOWN),
+                waiting=("liveness", "unavailable", sprint_reads_module.WAITING_UNKNOWN),
+                **{
+                    "source:journal": ("journal", "unavailable"),
+                    "source:liveness": ("liveness", "unavailable"),
+                    "decision.freshness": ("journal", "unavailable", False),
+                    "observer.launch": ("liveness", "unavailable", OBSERVER_UNAVAILABLE),
+                },
+            ),
+        )
+
+    def test_the_pipeline_and_the_production_state_refuse_together(self) -> None:
+        """With both of a section's sources gone it names the first one the chain needed."""
+        self._assert_sections(
+            ("pipeline", "production"),
+            self._sections(
+                cards=("cards", "unavailable", None),
+                degraded_cards=("liveness", "unavailable", None),
+                checks=("liveness", "unavailable", sprint_reads_module.CHECKS_UNKNOWN),
+                waiting=("cards", "unavailable", sprint_reads_module.WAITING_UNKNOWN),
+                **{
+                    "source:cards": ("cards", "unavailable"),
+                    "source:liveness": ("liveness", "unavailable"),
+                    "decision.freshness": ("cards", "unavailable", False),
+                    "observer.launch": ("liveness", "unavailable", OBSERVER_UNAVAILABLE),
+                },
+            ),
+        )
+
+    def test_the_sprint_board_alone_refuses(self) -> None:
+        """Site 4: with no sprint row, the observer claims nothing -- and neither does anything else.
+
+        The production state is readable here and holds no observer for this reference. That proves
+        only that it holds no row: `absent` and `not_started` would both be affirmative claims about
+        a sprint nobody has seen.
+        """
+        refused = ("sprints", "unavailable")
+        marks = {
+            "source:cards": ("cards", "available"),
+            "source:journal": ("journal", "available"),
+            "source:liveness": ("liveness", "available"),
+            "source:installation": ("installation", "available"),
+        }
+        with self._faults("sprint_board"):
+            listed = self._seen("sprint_list")
+            watched = self._seen("sprint_state")
+        # The listing has no item to carry sections: `null` items, never an empty listing.
+        self.assertEqual(listed, {**marks, "sprints": (*refused, None)})
+        self.assertEqual(
+            watched,
+            {
+                **marks,
+                "current_task": (*refused, None),
+                "decision": (*refused, None),
+                "decision.freshness": (*refused, False),
+                "cards": (*refused, None),
+                "degraded_cards": (*refused, None),
+                "checks": (*refused, sprint_reads_module.CHECKS_UNKNOWN),
+                "waiting": (*refused, sprint_reads_module.WAITING_UNKNOWN),
+                "observer.declared": (*refused, sprint_reads_module.OBSERVER_UNKNOWN),
+                "observer.launch": (*refused, OBSERVER_UNAVAILABLE),
+            },
+        )
+
+    def test_every_source_refuses_at_once(self) -> None:
+        with self._faults("sprint_board", "pipeline", "journal", "production", "config"):
+            listing = self.reads().sprint_list()
+            watched = self.reads().sprint_state(self.reference)
+        self.assertIsNone(listing["sprints"]["items"])
+        for name in ("cards", "journal", "liveness", "installation"):
+            with self.subTest(source=name):
+                for document in (listing, watched):
+                    self.assertEqual(document[name]["source"]["state"], "unavailable")
+                    self.assertEqual(document[name]["source"]["name"], name)
+        self.assertIsNone(watched["sprint"]["value"])
+        self.assertEqual(watched["sprint"]["source"]["name"], "sprints")
+        self.assertEqual(watched["observer"]["declared"]["state"], sprint_reads_module.OBSERVER_UNKNOWN)
 
 
 if __name__ == "__main__":

@@ -3046,7 +3046,7 @@ consulted and is never evidence. `observer.launch.state` is one of:
 | --- | --- |
 | `not_started` | the entity is saved and the production tick holds no observer record for it yet |
 | `running` | the dispatcher holds a record and its head is alive |
-| `unavailable` | the production state could not be read; nothing is established either way |
+| `unavailable` | the production state could not be read, or the sprint board could not be: nothing is established either way |
 | `stopped` | a record exists and its head is not alive — which is neither of the two above |
 | `not_declared` | the sprint declared `--observer none`, so the tick raises none for it |
 | `ended` | the sprint is closed or stopped: the tick stopped its observer and holds no record |
@@ -3061,20 +3061,96 @@ production tick holds no observer for it yet". Beside the state, `observer.decla
 itself declares, in its own three states (`declared`, `absent`, `malformed`), because an absent
 observer field and a corrupt one are repaired differently.
 
+**The launch needs the sprint row as well as the production state, and says so when it has neither.**
+What "the dispatcher holds no observer record" means depends on whether the sprint is saved and open,
+finished, or declared none — all facts of the row. With the sprint board unavailable the dispatcher's
+silence establishes nothing at all, so `launch` is `unavailable` sourced from the *sprint board* and
+`declared` is a fourth state, `unknown`. Reporting `absent` and `not_started` there was an
+affirmative claim manufactured from a file that proves only that it holds no row for the reference
+(secretary-1574).
+
+### One place says which source answered
+
+Every document of this layer is assembled from sources that fail apart, and the whole reason it
+carries availability at all is one rule:
+
+> A source that refused, or that was never read, may not delete, shadow or fabricate an answer
+> another source already gave. Every section says which source answered it, and an answer is
+> attributed to the source that actually produced it.
+
+**The place that enforces it is `secretary.webproto.section`**, and every section of every sprint
+document is assembled there — nowhere else in the layer decides an attribution. `sources.py` gives a
+refusal its shape; this gives the rule a seam:
+
+* a **source is read once** for the document, as a `Reading`, and its payload cannot be read at all
+  when it did not answer;
+* a **section is decided by rules**, each naming the source it answers from and every source it
+  needs. A rule *is not executed* unless all of them answered, so the value of a refused source
+  cannot reach a claim — not because a branch remembered to check, but because the code that would
+  have used it never runs. The section carries the `Source` of the rule that answered, and names it;
+* **what a refusal may say is declared once per section**, as the field values that claim nothing.
+  When no rule can answer, the section is that blank, attributed to the first source of the
+  precedence order below that was consulted and refused, and carrying its reason. A branch that
+  tries to answer under a source that refused fails there instead of shipping;
+* a section that **cannot answer when every source answered** is a hole in its own rules, and is
+  raised as a defect of the layer rather than reported as an unavailable installation;
+* and a **section cannot be hand-built**: the document is rendered by the same module, which refuses
+  any mapping carrying a source that was not decided there. `SectionSet` closes the other side —
+  every public method of `SprintSections` is wrapped at class creation and must answer with a
+  decided section, exactly as `ProtocolBoundary` wraps every public operation.
+
+So a section added next month is covered by the act of being a section, and there is no list to keep
+in step. `tests/test_web_sprint_protocol.py::SectionSeamTests` pins it, including a section that
+tries to claim under a refusal and one assembled outside the seam; the per-section behaviour is
+`SourceIsolationMatrixTests`, which asserts every source refusing alone and in combination.
+
+**The sources, and the precedence they are consulted in.** The order is what a refusal is attributed
+in, because it is the order in which the chain needs them:
+
+| source | what it is | what it alone can settle |
+| --- | --- | --- |
+| `installation` | `instance.yaml`, validated | where this installation keeps its data, and its own budget thresholds |
+| `sprints` | the sprint board, one pass with batched metadata | which sprints exist, and everything on their rows |
+| `cards` | the Pipeline, one listing with batched metadata | which column each of a sprint's cards stands in |
+| `journal` | `board/events.ndjson`, the committed audit | when the last significant event on an open sprint's cards happened |
+| `liveness` | `dispatcher/production-state.json` | whether a head is really behind a card, and behind a sprint |
+
+The journal is a source of its own and not a corner of the sprint board, even though
+`SprintReader.status_views` is what consumes it: it is a different file that fails for different
+reasons, and sharing a `try` with the board pass made an unreadable `board/events.ndjson` blank the
+sprint rows of a board that had answered. It is read once here and handed to `status_views`, which
+then opens nothing. Both documents carry `cards`, `journal`, `liveness` and `installation` beside
+their items, so a reader can tell an installation with no sprints from a board that would not
+answer.
+
 ### What a sprint is doing
 
 Both reads carry the same `work` object for a sprint — one item of the listing and the watched
-sprint's `work` are built by the same call over the same three reads — so the two surfaces cannot
+sprint's `work` are built by the same call over the same sources — so the two surfaces cannot
 answer "what is this sprint doing" differently. Every section names the source that answered it:
 
-| section | source | what is in it |
+**The per-section source contract.** Every section of both documents, which sources may answer it,
+and what it says when each of its inputs is missing. This is the whole table, and it is exhaustive
+because the sections are exactly the builders of `SprintSections`:
+
+| section | may be answered by | what it says with an input missing |
 | --- | --- | --- |
-| `current_task` | the sprint row | the current card, and `live`: false for a closed or stopped sprint |
-| `decision` | the sprint row, and the Pipeline listing for the verdict | the last observer resume `entry`, and its `freshness` |
-| `cards` | the Pipeline listing | this sprint's cards grouped by board state; `states` is null when the listing failed |
-| `degraded_cards` | the production state | cards in an active column with no worker the dispatcher can name |
-| `checks` | the sprint row for `not_applicable`, the production state otherwise | the mandatory checks of the current card: `green`, `not_green`, `unknown`, `not_applicable` |
-| `waiting` | whichever of the three settles it, in that order | where the sprint stands: `working`, `waiting`, `blocked`, `ended`, `unknown` |
+| `sprint` (watched) / `sprints` (listing) | `sprints` | `value: null` / `items: null` — never an empty listing, which would claim this installation holds no sprints |
+| `current_task` | `sprints` | `ref: null`, `live: false`, sourced `sprints` |
+| `decision` | `sprints` | `entry: null`, sourced `sprints` |
+| `decision.freshness` | `sprints` for a closed or stopped sprint (its record is frozen); `journal` for an open one, which also needs `cards` | `value: null`, sourced by whichever of `sprints`, `cards`, `journal` was missing first |
+| `cards` | `cards` | `states: null`, never `{}` |
+| `degraded_cards` | `liveness` | `items: null`, never `{}` |
+| `checks` | `sprints` for `not_applicable`; `liveness` otherwise | `unknown`, sourced `sprints` or `liveness`; `card` still names the current card wherever the row answered |
+| `waiting` | `sprints`, then `cards`, then `liveness`, then `cards`, then `liveness` (below) | `unknown`, sourced by the first missing input, and its reason names the column the board *did* establish where it did |
+| `observer.declared` | `sprints` | `unknown` — never `absent`, which would be a claim about a row nobody has seen |
+| `observer.launch` | `liveness`, which also needs `sprints` | `unavailable`, sourced `sprints` or `liveness` — never `not_started` |
+
+An unreadable `journal` therefore marks `decision.freshness` and nothing else: the sprint row, the
+current card, the cards grouping, the checks, the observer declaration and its launch all stand.
+An unavailable `sprints` yields no affirmative observer claim: the dispatcher's production state
+proves only that it holds no observer row for the reference, never that the sprint exists, was
+saved, or declared none.
 
 **Which source may answer `waiting`, and in what order.** A source that refused never shadows an
 answer another source has already given, so the sections are decided in the order the sources can
@@ -3091,6 +3167,7 @@ settle them, and each answer carries the one that decided it:
 | `waiting` | the production state | the dispatcher holds no record for a card in an active column |
 | `working` | the production state | the dispatcher's record for the current card, and the state it is in |
 | `unknown` | the production state | the card is in an active column and the production state could not be read — the reason still names the column, because that much *was* established |
+| `unknown` | the Pipeline listing | neither the listing nor the production state could be read: the listing is the first input the chain was missing, so it is what the section names |
 | `unknown` | the sprint row | the sprint board could not be read, so there is no sprint here to be waiting |
 
 A column is deliberately not evidence that a head is behind it (`docs/OPERATIONS.md`, "A card
@@ -3130,13 +3207,24 @@ an empty answer — a filter that matched nothing and a filter that was wrong ar
 metadata batched, one listing of the Pipeline with its metadata batched, one read of the
 dispatcher's production state, and at most one traversal of the committed audit — for the whole
 document, whatever the number of sprints. It reads no sprint's comments, opens no card, calls no
-CI backend and consults no terminal or pane. Beside the items, `cards.source` and `liveness.source`
-carry the availability of the Pipeline listing and of the production state for the document as a
-whole, because a board that will not answer leaves no items to say it in.
+CI backend and consults no terminal or pane. Beside the items, `cards.source`, `journal.source`,
+`liveness.source` and `installation.source` carry the availability of every source of the document
+as a whole, because a board that will not answer leaves no items to say it in.
 
 `secretary sprint list` and `secretary sprint status` are clients of these two operations and hold
 no rule about what a sprint's state is; their exit statuses are the ones `web-read` maps the typed
-codes to (`not_found`/`validation` → 2, `backend_unavailable` → 1). The reads create nothing: the
+codes to (`not_found`/`validation` → 2, `backend_unavailable` → 1).
+
+**The installation config is one more source, including at the edge of the operation.** A config
+that does not validate takes away only what it owns — where the data plane is, and this
+installation's own budget thresholds, which fall back to the product's defaults. With an explicit
+`--data-dir` and a usable board transport, `sprint list` and `sprint status` still answer from the
+board and report the config as an unavailable `installation` source. Only a caller that gave no data
+directory is refused with `backend_unavailable`, because then there is nothing left to locate the
+data plane with. Treating it as a stricter precondition instead was wrong: it lost a caller an
+answer it had, which is the same collapse the rule above exists to prevent, one source further out.
+
+The reads create nothing: the
 sprint is read through `SprintReader.list(create=False)` and the cards through `TaskReader`, which
 has no create at all, so an installation with no sprint board still gets an answer instead of a
 board.

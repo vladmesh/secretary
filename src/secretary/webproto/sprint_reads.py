@@ -21,18 +21,47 @@ a new fact. Every value below is read from the source that already owns it:
   state.
 
 **The listing and the watched sprint are one read with two framings.** `sprint_list` and
-`sprint_state` are assembled by `_read_once` from the same three sources -- the sprint board, the
-Pipeline listing and the dispatcher's production state -- and both carry the same `work` sections,
-decided by the same code. So neither can answer "what is this sprint doing" differently from the
-other, and reading sixty sprints costs what reading one does: one pass over each source, never one
-per sprint. What that deliberately does not buy is anything per sprint -- no comments, no card
-opened, no CI backend asked -- and where a field cannot be established at that cost, the section
-carrying it says so with a reason rather than reporting a value nothing backs.
+`sprint_state` are assembled by `_read_once` from the same sources and both carry the same `work`
+sections, decided by the same code. So neither can answer "what is this sprint doing" differently
+from the other, and reading sixty sprints costs what reading one does: one pass over each source,
+never one per sprint. What that deliberately does not buy is anything per sprint -- no comments, no
+card opened, no CI backend asked -- and where a field cannot be established at that cost, the
+section carrying it says so with a reason rather than reporting a value nothing backs.
+
+**Five sources, told apart.** The installation config, the sprint board, the Pipeline listing, the
+committed audit journal and the dispatcher's production state are read once each and fail apart:
+
+| source | what it is | what it alone can settle |
+| --- | --- | --- |
+| `installation` | `instance.yaml`, validated | where this installation keeps its data, and its own budget thresholds |
+| `sprints` | the sprint board, one pass with batched metadata | which sprints exist, and everything on their rows |
+| `cards` | the Pipeline, one listing with batched metadata | which column each of a sprint's cards stands in |
+| `journal` | `board/events.ndjson`, the committed audit | when the last significant event of an open sprint's cards happened |
+| `liveness` | `dispatcher/production-state.json` | whether a head is really behind a card, and behind a sprint |
+
+The journal is a source of its own and not a corner of the sprint board, even though
+`SprintReader.status_views` is where it is consumed: it is a different file, it fails for different
+reasons, and folding it in made an unreadable `board/events.ndjson` blank the sprint rows of a board
+that had answered (secretary-1574, site 3). It is read here and handed to `status_views`, which then
+opens nothing.
+
+**One place enforces what every section owes.** No section decides its own attribution: they are all
+assembled by :class:`SprintSections` through `secretary.webproto.section`, which runs a section's
+rule only when every source that rule needs has answered, attributes the answer to the source that
+produced it, and replaces what a refusal would have said with the section's declared no-claim shape.
+Adding a section is adding a method there, and it is covered by being one. That module's docstring
+carries the invariant and why it exists.
 
 **A finished sprint is not a working one.** Its current card is kept, because it is where the sprint
 got to, and it is qualified: `current_task.live` is false, its observer is `ended` rather than
 "waiting to be raised", and its checks are `not_applicable`. Roughly sixty closed sprints of this
 installation read as work in progress until that distinction existed.
+
+**An installation whose config will not validate is a source that refused, not a refusal of the
+operation.** With an explicit data directory and a usable board transport, a caller keeps every
+answer the board can still give and the `installation` section says what could not be established --
+which is the same rule as everywhere else, applied at the edge of the operation. Only a caller with
+no explicit data directory is refused, because then nothing at all can be located.
 
 All three reads hold the properties of this package rather than describing them. They write
 nothing -- including, deliberately, no sprint board: `SprintReader.show` would create the board it reads from,
@@ -77,14 +106,33 @@ from secretary.sprints import (
     SPRINT_TERMINAL_STATUSES,
     SprintReader,
     active_sprint_projects,
+    audit_traversal,
     sprint_guard_index_initialized,
 )
-from secretary.tasks import KanboardClient, TaskError
+from secretary.tasks import KanboardClient, TaskAudit, TaskError
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import InstallationUnavailable, TaskNotFound, ValidationRefused
+from secretary.webproto.section import Reading, Rule, Section, SectionSet, SourceSet, render, rule
 
 SCHEMA_VERSION = 1
+
+#: The sources of a sprint document, in the precedence they are consulted in -- which is the order
+#: in which a refusal is attributed, because it is the order in which the chain needs them. The
+#: installation locates the data plane; the sprint board says which sprints exist at all; the
+#: Pipeline listing says where each of their cards stands; the journal dates what happened to those
+#: cards; and only then does the dispatcher say whether anything is actually behind them.
+SOURCE_INSTALLATION = "installation"
+SOURCE_SPRINTS = "sprints"
+SOURCE_CARDS = "cards"
+SOURCE_JOURNAL = "journal"
+SOURCE_LIVENESS = "liveness"
+
+#: The sources of the catalogue, in the same sense: the board the products and issues come off, the
+#: project registry a refusal reads, and the installed head registry.
+SOURCE_CATALOGUE = "catalogue"
+SOURCE_REGISTRY = "registry"
+SOURCE_HEADS = "heads"
 
 #: What a sprint's observer is doing, as far as anything durable can say. The first three are the
 #: three states a watching page has to tell apart: the entity is saved and the tick has not raised
@@ -140,6 +188,19 @@ WAITING_STATES = (WAITING_WORKING, WAITING_WAITING, WAITING_BLOCKED, WAITING_END
 OBSERVER_DECLARED = "declared"
 OBSERVER_ABSENT = "absent"
 OBSERVER_MALFORMED = "malformed"
+#: And the fourth, which is not a state of a row but the absence of one: nobody could read the
+#: sprint board, so what this sprint declares is not established. `absent` there would be an
+#: affirmative claim about a row nobody has seen -- the dispatcher's production state proves only
+#: that it holds no observer for this reference, never that the sprint declared none
+#: (secretary-1574, site 4).
+OBSERVER_UNKNOWN = "unknown"
+
+OBSERVER_DECLARATION_STATES = (
+    OBSERVER_DECLARED,
+    OBSERVER_ABSENT,
+    OBSERVER_MALFORMED,
+    OBSERVER_UNKNOWN,
+)
 
 #: Failures a source read may answer with instead of a value, caught per section exactly as the
 #: card reads catch theirs.
@@ -155,35 +216,459 @@ _SOURCE_FAILURES = (
 
 
 @dataclass(frozen=True, slots=True)
-class _SprintPass:
-    """One read of the three sources a sprint document is built from, and their availability.
+class _Production:
+    """The dispatcher's production state, read once and classified once for the whole document."""
 
-    It exists so that the sections cannot each go and read again: everything below takes this and
-    asks it, so listing sixty sprints costs the same three reads that watching one does.
-    """
-
-    #: The sprint rows, and the status view of each one, in the same order.
-    rows: list[dict[str, Any]]
-    views: list[dict[str, Any]]
-    sprints: sources.Source
-    #: Every sprint's linked cards, keyed by sprint reference, from the one Pipeline listing.
-    linked: dict[str, list[dict[str, Any]]]
-    cards: sources.Source
-    #: The dispatcher's production state, or `None` when nobody could read it.
-    production: dict[str, Any] | None
-    liveness: sources.Source
-
-    def find(self, reference: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        for row, view in zip(self.rows, self.views, strict=True):
-            if str(row.get("ref") or "") == reference:
-                return row, view
-        return None, None
+    payload: dict[str, Any]
+    #: `observer_snapshot`'s rows keyed by sprint, computed once rather than once per sprint.
+    observers: dict[str, dict[str, Any]]
 
     def record(self, card: str) -> dict[str, Any] | None:
         """The dispatcher's record for one card, or `None` when it holds none for it."""
-        records = (self.production or {}).get("records")
+        records = self.payload.get("records")
         record = records.get(card) if isinstance(records, dict) else None
         return record if isinstance(record, dict) else None
+
+
+#: One sprint as the sources have it: its board row and the status view over it, or `(None, None)`
+#: when the sprint board did not answer. It is the value of the `sprints` source, narrowed to one
+#: sprint, so every section sees exactly the part of that source it is about.
+_Sprint = tuple[dict[str, Any] | None, dict[str, Any] | None]
+
+
+class SprintSections(SectionSet):
+    """Every section of every sprint document, and the only place a source is attributed to one.
+
+    One method per section, and a section is covered by being one: `SectionSet` wraps each public
+    method at class creation, so a section that answers with anything but a decided `Section` is a
+    failure here rather than a document that quietly claims too much. Inside each method the rules
+    are declarative -- which source may answer, which sources it needs, and what this section says
+    when none of them can -- and `SourceSet.decide` is what holds the invariant over all of them.
+
+    Nothing here reads a file. Every value comes from a source that was read once for the document,
+    and a rule receives exactly the sources it declares, so a section physically cannot see a source
+    it did not name.
+    """
+
+    # -- the watched sprint and the listing ------------------------------------------------
+
+    def sprint(self, read: SourceSet) -> Section:
+        """The sprint's own record, as a watching page reads it."""
+        return read.decide(
+            rule(
+                SOURCE_SPRINTS,
+                lambda sprint: None if sprint[0] is None else {"value": _sprint_value(sprint[0])},
+            ),
+            blank={"value": None},
+            narrates=(),
+        )
+
+    def listing(self, read: SourceSet, items: Callable[[], list[dict[str, Any]]]) -> Section:
+        """Every sprint of the installation, or `null` items when the board did not answer.
+
+        `null` and never `[]`: an empty listing is the affirmative claim that this installation has
+        no sprints, which is the opposite of a board that could not be read.
+        """
+        return read.decide(
+            rule(SOURCE_SPRINTS, lambda _sprints: {"items": items()}),
+            blank={"items": None},
+            narrates=(),
+        )
+
+    # -- what one sprint is doing ------------------------------------------------------------
+
+    def current_task(self, read: SourceSet) -> Section:
+        """The sprint's current card, and whether it names work or a finished sprint's last card.
+
+        The card of a sprint that ended is a fact worth keeping -- it is where the sprint got to --
+        and it is exactly the field that made roughly sixty closed sprints of this installation read
+        as if they were working. So it is kept and it is qualified: `live` is false for a closed or
+        stopped sprint, and the reason says the card is the record of a sprint that ended.
+        """
+
+        def from_row(sprint: _Sprint) -> dict[str, Any] | None:
+            if sprint[0] is None:
+                return None
+            reference, status, current = _subject(sprint)
+            terminal = status in SPRINT_TERMINAL_STATUSES
+            if current is None:
+                return {
+                    "ref": None,
+                    "live": False,
+                    "reason": (
+                        f"{reference} ended with no current card"
+                        if terminal
+                        else f"{reference} has no current card: nobody has cut one for it"
+                    ),
+                }
+            reason = (
+                f"{reference} is {status}: {current} is the card it was on when it ended, "
+                "not work in progress"
+                if terminal
+                else f"{reference} is open and its observer has {current} as the current card"
+            )
+            return {"ref": current, "live": not terminal, "reason": reason}
+
+        return read.decide(
+            rule(SOURCE_SPRINTS, from_row),
+            blank={"ref": None, "live": False, "reason": None},
+        )
+
+    def decision(self, read: SourceSet, freshness: Section) -> Section:
+        """The last observer decision on this sprint, with the freshness verdict beside it.
+
+        The entry itself is on the sprint row. Its freshness is a different question with different
+        sources, so it is a section of its own rather than a field of this one.
+        """
+        return read.decide(
+            rule(
+                SOURCE_SPRINTS,
+                lambda sprint: (
+                    None
+                    if sprint[1] is None
+                    else {"entry": sprint[1].get("resume"), "freshness": freshness}
+                ),
+            ),
+            blank={"entry": None, "freshness": freshness},
+            narrates=(),
+        )
+
+    def freshness(self, read: SourceSet) -> Section:
+        """How fresh the last observer decision is, judged by whoever can judge it.
+
+        A closed or stopped sprint is judged against its own frozen record and no cards at all,
+        which is `SprintReader._resume_freshness`'s own rule, so the sprint row settles it and the
+        verdict stands whatever else failed. An open sprint is judged against the significant events
+        of its linked cards, which needs both the Pipeline listing and the committed journal: with
+        either missing there is no verdict, and saying so is the whole of site 3's repair -- an
+        unreadable `board/events.ndjson` marks *this* section unavailable and leaves the sprint row,
+        the current card and the observer standing.
+        """
+
+        def frozen(sprint: _Sprint) -> dict[str, Any] | None:
+            view = sprint[1]
+            if view is None or str(view.get("status") or "") not in SPRINT_TERMINAL_STATUSES:
+                return None
+            return {"value": view.get("resume_freshness")}
+
+        def judged(sprint: _Sprint, _linked: Any, _events: Any) -> dict[str, Any] | None:
+            view = sprint[1]
+            return None if view is None else {"value": view.get("resume_freshness")}
+
+        return read.decide(
+            rule(SOURCE_SPRINTS, frozen),
+            Rule(SOURCE_JOURNAL, (SOURCE_SPRINTS, SOURCE_CARDS, SOURCE_JOURNAL), judged),
+            blank={"value": None},
+            narrates=(),
+        )
+
+    def cards(self, read: SourceSet) -> Section:
+        """This sprint's cards by board state, or the reason nobody could group them.
+
+        `states` is `null` and never `{}` when the Pipeline listing failed: an empty grouping is the
+        affirmative claim that the sprint has no cards, which is the opposite of not knowing.
+        """
+        return read.decide(
+            Rule(
+                SOURCE_CARDS,
+                (SOURCE_SPRINTS, SOURCE_CARDS),
+                lambda sprint, _linked: (
+                    None if sprint[1] is None else {"states": sprint[1].get("cards") or {}}
+                ),
+            ),
+            blank={"states": None},
+            narrates=(),
+        )
+
+    def degraded_cards(self, read: SourceSet) -> Section:
+        """This sprint's cards standing in an active column with no worker anything can name."""
+        return read.decide(
+            Rule(
+                SOURCE_LIVENESS,
+                (SOURCE_SPRINTS, SOURCE_LIVENESS),
+                lambda sprint, _production: (
+                    None if sprint[1] is None else {"items": sprint[1].get("degraded_cards")}
+                ),
+            ),
+            blank={"items": None},
+            narrates=(),
+        )
+
+    def checks(self, read: SourceSet) -> Section:
+        """The mandatory checks of this sprint's current card, as the dispatcher's record has them.
+
+        The mechanical gate is the check the pipeline makes mandatory for a card, and the
+        dispatcher's own production record is where its result lives: `gate_state` is `green` only
+        for the current code state of that card, and it is cleared on every fresh entry to validate.
+        Nothing is re-run here and no CI backend is called; a read establishes what is recorded, and
+        says so when nothing records it.
+
+        The two answers the sprint row settles on its own -- a sprint that has ended, and one with
+        no current card -- are `not_applicable` under the `sprints` source, so a dispatcher state
+        nobody could read neither changes them nor lends them its own unavailability. Only the
+        states that really are the dispatcher's to say carry `liveness`.
+        """
+
+        def from_row(sprint: _Sprint) -> dict[str, Any] | None:
+            reference, status, current = _subject(sprint)
+            if sprint[1] is None:
+                return None
+            if status in SPRINT_TERMINAL_STATUSES:
+                return {
+                    "card": current,
+                    "gate": None,
+                    "state": CHECKS_NOT_APPLICABLE,
+                    "reason": f"{reference} is {status}: no card of it is running checks",
+                }
+            if current is None:
+                return {
+                    "card": None,
+                    "gate": None,
+                    "state": CHECKS_NOT_APPLICABLE,
+                    "reason": f"{reference} has no current card, so no card's checks are due",
+                }
+            return None
+
+        def from_dispatcher(sprint: _Sprint, production: _Production) -> dict[str, Any] | None:
+            _reference, _status, current = _subject(sprint)
+            if sprint[1] is None or current is None:
+                return None
+            record = production.record(current)
+            if record is None:
+                return {
+                    "card": current,
+                    "gate": None,
+                    "state": CHECKS_UNKNOWN,
+                    "reason": (
+                        f"the dispatcher holds no record for {current}, so nothing here says "
+                        "whether its mandatory checks have passed"
+                    ),
+                }
+            gate = _gate(record)
+            if gate["state"] == "green":
+                return {
+                    "card": current,
+                    "gate": gate,
+                    "state": CHECKS_GREEN,
+                    "reason": (
+                        "the mechanical gate is green for "
+                        f"{gate['attested_sha'] or 'the recorded candidate'}"
+                    ),
+                }
+            return {
+                "card": current,
+                "gate": gate,
+                "state": CHECKS_NOT_GREEN,
+                "reason": _not_green_reason(gate, current),
+            }
+
+        return read.decide(
+            rule(SOURCE_SPRINTS, from_row),
+            Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), from_dispatcher),
+            blank={"card": None, "gate": None, "state": CHECKS_UNKNOWN, "reason": None},
+            # `card` is which card the answer would have been about, not a claim about its checks:
+            # it is the sprint row's own field, and it is carried whenever the row answered.
+            narrates=("reason", "card"),
+            unresolved=lambda reading: {
+                "card": _current_of(read),
+                "gate": None,
+                "state": CHECKS_UNKNOWN,
+                "reason": reading.source.reason,
+            },
+        )
+
+    def waiting(self, read: SourceSet) -> Section:
+        """Where this sprint stands, and what it is standing on.
+
+        Decided from what has already been read and never from a fresh source, in the order the
+        sources can actually answer in, and each answer carries the source that decided it:
+
+        * the sprint row alone decides `ended` (closed), `blocked` (stopped, with the stop reason)
+          and the `waiting` of a sprint with no current card. Nothing the Pipeline or the dispatcher
+          could say would change any of those;
+        * the Pipeline listing decides `blocked` for a current card standing in Blocked -- the
+          board's own statement, with the card's `blocked_by` -- before anything is asked of the
+          dispatcher at all, readable or not. Its other answers, the `waiting` of a card in Ready,
+          Issues or Done, are used wherever the dispatcher has nothing to add: it could not be read,
+          or it holds no record for the card, which is why the dispatcher's own rule sits between
+          the two;
+        * only what is left needs the dispatcher: whether an active column really has a head behind
+          it. A column is not evidence of that (`docs/OPERATIONS.md`, "A card sitting in In progress
+          is not on its own evidence that anything is running"), so `working`, the degraded `blocked`
+          and the bare "no record" are its answers.
+
+        With every source in hand this changes nothing: the dispatcher's record still decides an
+        active column, and the board's columns still decide the ones it settles.
+        """
+
+        def from_row(sprint: _Sprint) -> dict[str, Any] | None:
+            reference, status, current = _subject(sprint)
+            if sprint[1] is None:
+                return None
+            if status == "closed":
+                return {"state": WAITING_ENDED, "reason": f"{reference} is closed: nothing is waiting on it"}
+            if status == "stopped":
+                stopped = sprint[1].get("stop_reason") or "no reason recorded"
+                return {"state": WAITING_BLOCKED, "reason": f"{reference} was stopped: {stopped}"}
+            if current is None:
+                return {
+                    "state": WAITING_WAITING,
+                    "reason": f"{reference} has no current card: nobody has cut one for it",
+                }
+            return None
+
+        def board_holds_it(sprint: _Sprint, linked: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
+            """A card the board holds in Blocked is blocked, and no record makes it less so."""
+            settled = _board_wait(*_card_of(sprint, linked))
+            return None if settled is None or settled[0] != WAITING_BLOCKED else _said(settled)
+
+        def dispatcher_holds_it(sprint: _Sprint, production: _Production) -> dict[str, Any] | None:
+            _reference, _status, current = _subject(sprint)
+            if sprint[1] is None or current is None:
+                return None
+            degraded = (sprint[1].get("degraded_cards") or {}).get(current)
+            if degraded is not None:
+                return {
+                    "state": WAITING_BLOCKED,
+                    "reason": (
+                        f"{current} stands in an active column with no worker the dispatcher can "
+                        f"name ({degraded.get('state') or 'no record state'})"
+                    ),
+                }
+            record = production.record(current)
+            if record is None:
+                return None
+            return {
+                "state": WAITING_WORKING,
+                "reason": f"the dispatcher record for {current} is {record.get('state') or 'unnamed'!s}",
+            }
+
+        def board_settled(sprint: _Sprint, linked: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
+            settled = _board_wait(*_card_of(sprint, linked))
+            return None if settled is None else _said(settled)
+
+        def nothing_claimed(sprint: _Sprint, _production: _Production) -> dict[str, Any] | None:
+            _reference, _status, current = _subject(sprint)
+            if sprint[1] is None or current is None:
+                return None
+            return {
+                "state": WAITING_WAITING,
+                "reason": (
+                    f"the dispatcher holds no record for {current}: nothing of it has been claimed yet"
+                ),
+            }
+
+        return read.decide(
+            rule(SOURCE_SPRINTS, from_row),
+            Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), board_holds_it),
+            Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), dispatcher_holds_it),
+            Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), board_settled),
+            Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), nothing_claimed),
+            blank={"state": WAITING_UNKNOWN, "reason": None},
+            unresolved=lambda reading: {
+                "state": WAITING_UNKNOWN,
+                "reason": _unsettled_reason(read, reading.source.reason),
+            },
+        )
+
+    # -- the observer ------------------------------------------------------------------------
+
+    def declaration(self, read: SourceSet) -> Section:
+        """What this sprint's row declares, in the states a row can be in -- and `unknown` for none.
+
+        A sprint board nobody could read leaves this `unknown`. `absent` would be the affirmative
+        claim that the row carries no observer field, and no other source can establish that: the
+        production state proves only that it holds no observer for this reference.
+        """
+        return read.decide(
+            rule(
+                SOURCE_SPRINTS,
+                lambda sprint: None if sprint[0] is None else _declared_observer(sprint[0]),
+            ),
+            blank={"state": OBSERVER_UNKNOWN, "value": None, "profile": None},
+            narrates=(),
+        )
+
+    def launch(self, read: SourceSet) -> Section:
+        """Whether an observer is actually up, from the dispatcher's own production state.
+
+        It needs the sprint row as well as the production state, and that is the point: what "no
+        observer record" means depends on whether the sprint is saved and open, or finished, or
+        declared none -- all facts of the row. Without the row the dispatcher's silence establishes
+        nothing at all, so the section is unavailable rather than `not_started`.
+        """
+
+        def from_dispatcher(sprint: _Sprint, production: _Production) -> dict[str, Any] | None:
+            row, _view = sprint
+            if row is None:
+                return None
+            reference, status, _current = _subject(sprint)
+            observer = production.observers.get(reference)
+            state, reason = _launch_state(_declared_observer(row), observer, status)
+            return {
+                "state": state,
+                "reason": reason,
+                "record": None if observer is None else _observer_record(observer),
+            }
+
+        return read.decide(
+            Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), from_dispatcher),
+            blank={"state": OBSERVER_UNAVAILABLE, "reason": None, "record": None},
+            unresolved=lambda reading: {
+                "state": OBSERVER_UNAVAILABLE,
+                "reason": reading.source.reason or "the source that would say could not be read",
+                "record": None,
+            },
+        )
+
+    # -- the catalogue -----------------------------------------------------------------------
+
+    def products(self, read: SourceSet) -> Section:
+        """The products a sprint may be opened on, off the board that owns them."""
+        return read.decide(
+            rule(SOURCE_CATALOGUE, lambda catalogue: {"items": catalogue[0]}),
+            blank={"items": None},
+            narrates=(),
+        )
+
+    def issues(self, read: SourceSet) -> Section:
+        """The issues a create will admit -- the open ones, each carrying the product that owns it."""
+        return read.decide(
+            rule(SOURCE_CATALOGUE, lambda catalogue: {"items": catalogue[1]}),
+            blank={"items": None},
+            narrates=(),
+        )
+
+    def projects(self, read: SourceSet) -> Section:
+        """The registered projects, with the open sprint holding each one where one does."""
+        return read.decide(
+            rule(SOURCE_REGISTRY, lambda registry: {"items": registry}),
+            blank={"items": None},
+            narrates=(),
+        )
+
+    def heads(self, read: SourceSet) -> Section:
+        """The head profiles this installation runs off, as a sprint may name them."""
+        return read.decide(
+            rule(SOURCE_HEADS, lambda registry: registry),
+            blank={
+                "items": None,
+                # The observer field takes one more answer than a profile id, and it is not a
+                # profile: `none` says the sprint runs without an observer. It is offered here
+                # because a client that had to know the word would be knowing a rule instead of
+                # reading one. Both it and the roles below are this product's own vocabulary, so
+                # they are the same whether the registry answered or not.
+                "observer": {"none": NONE_SPELLING, "default": None},
+                "role_defaults": {},
+                "executor_roles": list(EXECUTOR_FIELDS),
+            },
+            narrates=(),
+        )
+
+
+#: One instance is enough: no section holds state, and the set exists to be enumerated as much as
+#: to be called.
+SECTIONS = SprintSections()
 
 
 class SprintReadLayer(ProtocolBoundary):
@@ -213,12 +698,15 @@ class SprintReadLayer(ProtocolBoundary):
     # -- shared plumbing -------------------------------------------------------------------
 
     def report(self) -> InstanceReport:
-        report = validate_instance(self.instance)
-        if not report.ok or report.data_dir is None:
-            raise InstallationUnavailable(
-                "this instance config does not validate: "
-                + "; ".join(str(error) for error in report.errors[:5])
-            )
+        """The validated installation, or the refusal a caller that needs one gets.
+
+        The reads below do not go through this: they take the config as a source and carry on with
+        what the other sources can still answer. It is here for a caller that really does need the
+        validated config -- resolving the data directory when none was given is the only one.
+        """
+        report, refused = self._installation(now=self._clock())
+        if report is None:
+            raise InstallationUnavailable(str(refused.source.reason))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:
@@ -227,6 +715,35 @@ class SprintReadLayer(ProtocolBoundary):
         report = report if report is not None else self.report()
         assert report.data_dir is not None
         return report.data_dir
+
+    def _installation(self, *, now: float) -> tuple[InstanceReport | None, Reading]:
+        """The installation config as a source, and the refusal only it can force.
+
+        A config that does not validate is one more source that refused, and it removes exactly what
+        it owns: where the data plane is, and this installation's own budget thresholds. With an
+        explicit data directory the rest of the document is answered from the sources that did
+        answer -- criterion 6 of secretary-1573 is that a caller does not lose an answer it has
+        today, and "the config could not be validated" is not a reason to lose the board's.
+
+        Without one there is nothing to fall back on: the data directory is what the config was
+        being read for, so the operation is refused rather than answered from a guess.
+        """
+        report = validate_instance(self.instance)
+        if report.ok and report.data_dir is not None:
+            return report, Reading(SOURCE_INSTALLATION, sources.available(now), report)
+        reason = (
+            "this instance config does not validate: "
+            + "; ".join(str(error) for error in report.errors[:5])
+            if report.errors
+            else "this instance config names no data directory"
+        )
+        if self._data_dir is None:
+            raise InstallationUnavailable(reason)
+        return None, Reading(
+            SOURCE_INSTALLATION,
+            sources.unavailable(reason, now=now, evidence=report.instance_path),
+            None,
+        )
 
     # -- operations ------------------------------------------------------------------------
 
@@ -243,21 +760,35 @@ class SprintReadLayer(ProtocolBoundary):
         which is what the create takes back.
         """
         now = self._clock()
-        report = self.report()
+        report, installation = self._installation(now=now)
         data_dir = self.data_dir(report)
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "kind": "sprint_options",
-            "observed_at": sources.isoformat(now),
-            **self._catalogue(report, data_dir, now=now),
-        }
+        read = SourceSet(
+            [
+                installation,
+                self._catalogue(data_dir, now=now),
+                self._registry(data_dir, now=now),
+                self._head_profiles(now=now),
+            ]
+        )
+        return render(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "sprint_options",
+                "observed_at": sources.isoformat(now),
+                "products": SECTIONS.products(read),
+                "issues": SECTIONS.issues(read),
+                "projects": SECTIONS.projects(read),
+                "heads": SECTIONS.heads(read),
+                "installation": read.mark(SOURCE_INSTALLATION),
+            }
+        )
 
     def sprint_list(self, *, statuses: Sequence[str] | None = None) -> dict[str, Any]:
         """Every sprint of this installation, and what each one is actually doing.
 
         The listing and :meth:`sprint_state` are one read with two framings: both are assembled by
-        `_read_once` from the same three sources, and every sprint in either document carries the
-        same sections, decided by the same code. A field the cheap read cannot establish says so in
+        `_read_once` from the same sources, and every sprint in either document carries the same
+        sections, decided by the same code. A field the cheap read cannot establish says so in
         both, rather than being answered in one and omitted from the other.
 
         `statuses` filters by sprint status (`open`, `closed`, `stopped`) and never by anything the
@@ -266,32 +797,35 @@ class SprintReadLayer(ProtocolBoundary):
         """
         now = self._clock()
         wanted = _wanted_statuses(statuses)
-        report = self.report()
-        data_dir = self.data_dir(report)
-        read = self._read_once(report, data_dir, now=now)
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "kind": "sprint_list",
-            "observed_at": sources.isoformat(now),
-            "filter": {"statuses": sorted(wanted)},
-            "sprints": {
-                "source": read.sprints.to_json(),
-                "items": [
-                    {
-                        **_identity(row, view),
-                        **self._work(row, view, read, now=now),
-                        "observer": self._observer(str(view["ref"]), row, read, now=now),
-                    }
-                    for row, view in zip(read.rows, read.views, strict=True)
-                    if not wanted or str(view["status"]) in wanted
-                ],
-            },
-            # The two sources every item's sections are marked by, said once for the document as
-            # well: a board that will not answer leaves no items to carry a source of their own,
-            # and a reader still has to be able to tell that from an installation with no sprints.
-            "cards": {"source": read.cards.to_json()},
-            "liveness": {"source": read.liveness.to_json()},
-        }
+        report, installation = self._installation(now=now)
+        read = self._read_once(report, installation, self.data_dir(report), now=now)
+
+        def items() -> list[dict[str, Any]]:
+            rows, views = read.value(SOURCE_SPRINTS)
+            return [
+                {
+                    **_identity(row, view),
+                    **self._work(read.replacing(SOURCE_SPRINTS, (row, view))),
+                    "observer": self._observer(read.replacing(SOURCE_SPRINTS, (row, view))),
+                }
+                for row, view in zip(rows, views, strict=True)
+                if not wanted or str(view["status"]) in wanted
+            ]
+
+        return render(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "sprint_list",
+                "observed_at": sources.isoformat(now),
+                "filter": {"statuses": sorted(wanted)},
+                "sprints": SECTIONS.listing(read, items),
+                # The sources every item's sections are marked by, said once for the document as
+                # well: a board that will not answer leaves no items to carry a source of their own,
+                # and a reader still has to be able to tell that from an installation with no
+                # sprints.
+                **self._marks(read),
+            }
+        )
 
     def sprint_state(self, ref: str) -> dict[str, Any]:
         """One sprint, and whether its observer is up: the page somebody watches a sprint on.
@@ -310,36 +844,171 @@ class SprintReadLayer(ProtocolBoundary):
         reference = str(ref or "")
         if not reference:
             raise TaskNotFound("a sprint reference is required")
-        report = self.report()
-        data_dir = self.data_dir(report)
-        read = self._read_once(report, data_dir, now=now)
-        row, view = read.find(reference)
-        if row is None and read.sprints.state == sources.AVAILABLE:
+        report, installation = self._installation(now=now)
+        read = self._read_once(report, installation, self.data_dir(report), now=now)
+        row, view = _find(read, reference)
+        if row is None and read.answered(SOURCE_SPRINTS):
             raise TaskNotFound(f"the board holds no sprint {reference!r}")
+        sprint = read.replacing(SOURCE_SPRINTS, (row, view))
+        return render(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "sprint",
+                "observed_at": sources.isoformat(now),
+                "ref": reference,
+                "sprint": SECTIONS.sprint(sprint),
+                "observer": self._observer(sprint),
+                "work": self._work(sprint),
+                **self._marks(read),
+            }
+        )
+
+    # -- assembly ----------------------------------------------------------------------------
+
+    def _work(self, sprint: SourceSet) -> dict[str, Any]:
+        """What one sprint is doing, in the sections a listing and a watched page both carry."""
         return {
-            "schema_version": SCHEMA_VERSION,
-            "kind": "sprint",
-            "observed_at": sources.isoformat(now),
-            "ref": reference,
-            "sprint": {"source": read.sprints.to_json(), "value": _sprint_value(row)},
-            "observer": self._observer(reference, row, read, now=now),
-            "work": self._work(row, view, read, now=now),
+            "current_task": SECTIONS.current_task(sprint),
+            "decision": SECTIONS.decision(sprint, SECTIONS.freshness(sprint)),
+            "cards": SECTIONS.cards(sprint),
+            "degraded_cards": SECTIONS.degraded_cards(sprint),
+            "checks": SECTIONS.checks(sprint),
+            "waiting": SECTIONS.waiting(sprint),
         }
 
-    # -- sections --------------------------------------------------------------------------
+    def _observer(self, sprint: SourceSet) -> dict[str, Any]:
+        """What this sprint declared, and whether that observer is actually up.
 
-    def _catalogue(self, report: InstanceReport, data_dir: Path, *, now: float) -> dict[str, Any]:
-        products, issues = self._products_and_issues(report, data_dir, now=now)
+        Two facts, and they are two sections on purpose. The declaration is the sprint's own field;
+        the liveness is the dispatcher's durable production state, classified by `observer_snapshot`
+        -- the same rows `secretary sprint status` shows. Nothing here consults a terminal, and no
+        branch below treats the existence of one as evidence.
+        """
+        return {"declared": SECTIONS.declaration(sprint), "launch": SECTIONS.launch(sprint)}
+
+    def _marks(self, read: SourceSet) -> dict[str, Any]:
+        """The availability of every source of the document, said once for the document."""
         return {
-            "products": products,
-            "issues": issues,
-            "projects": self._projects(data_dir, now=now),
-            "heads": self._heads(now=now),
+            key: read.mark(key)
+            for key in (SOURCE_CARDS, SOURCE_JOURNAL, SOURCE_LIVENESS, SOURCE_INSTALLATION)
         }
 
-    def _products_and_issues(
-        self, report: InstanceReport, data_dir: Path, *, now: float
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    # -- the sources -------------------------------------------------------------------------
+
+    def _read_once(
+        self, report: InstanceReport | None, installation: Reading, data_dir: Path, *, now: float
+    ) -> SourceSet:
+        """Every source a sprint document is built from, read once each.
+
+        Once for the document and never once per sprint: the sprint rows and their metadata are one
+        board pass, the linked cards of *every* sprint are one Pipeline listing, the committed audit
+        is one traversal and the dispatcher's production state is one file read. That is the whole
+        cost of listing sixty sprints, and it is the cost of watching one, because the two are the
+        same read.
+
+        They fail apart, and each one's failure marks only the sections it feeds. The Pipeline board
+        is the one an installation may legitimately not have yet, and losing it must not blank the
+        sprint that is right there on the board that answered. The journal is read here rather than
+        inside `status_views` for exactly that reason: sharing a `try` with the board pass made an
+        unreadable `board/events.ndjson` look like a sprint board that had failed.
+
+        `SprintReader.list(create=False)` and deliberately not `show`: `show` calls
+        `ensure_sprint_board`, which creates the sprint board when the installation has none, and a
+        read of this layer creates nothing. `linked_cards` reads the Pipeline board through
+        `TaskReader`, which has no create at all.
+        """
+        liveness = self._production(data_dir, now=now)
+        journal = self._journal(data_dir, now=now)
+        reader = SprintReader(self._client(), data_dir=data_dir, thresholds=_thresholds(report))
+        cards = self._linked_cards(reader, data_dir, now=now)
+        production: _Production | None = liveness.value if liveness.answered else None
+        try:
+            rows = reader.list(create=False)
+            # Every rule about what a sprint's status view is stays in `SprintReader`; this call
+            # re-decides none of them, and the observer rows and the headless episodes it takes are
+            # the ones `secretary sprint status` already hands it. The journal it would otherwise
+            # walk is handed to it, so nothing it does can fail for the journal's reasons.
+            views = reader.status_views(
+                rows,
+                cards.value if cards.answered else {},
+                observers=production.observers if production is not None else {},
+                headless=headless_cards(production.payload if production is not None else {}),
+                audit=audit_traversal(journal.value if journal.answered else []),
+            )
+            sprints = Reading(SOURCE_SPRINTS, sources.available(now), (rows, views))
+        except _SOURCE_FAILURES as exc:
+            sprints = Reading(
+                SOURCE_SPRINTS,
+                sources.unavailable(
+                    f"the sprint board could not be read: {_reason(exc)}",
+                    now=now,
+                    evidence=data_dir / "board" / "cards.ndjson",
+                ),
+                None,
+            )
+        return SourceSet([installation, sprints, cards, journal, liveness])
+
+    def _production(self, data_dir: Path, *, now: float) -> Reading:
+        """The dispatcher's durable production state, read and classified once for the document.
+
+        A refusal is "nobody could say", never "nothing is running": every section built from this
+        payload carries it rather than an empty value that reads as health.
+        """
+        path = data_dir / "dispatcher" / "production-state.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise TypeError("the dispatcher production state is not an object")
+            production = _Production(payload, _observer_rows(payload))
+        except _SOURCE_FAILURES as exc:
+            return Reading(
+                SOURCE_LIVENESS,
+                sources.unavailable(
+                    f"the dispatcher production state could not be read: {_reason(exc)}",
+                    now=now,
+                    evidence=path,
+                ),
+                None,
+            )
+        return Reading(SOURCE_LIVENESS, sources.available(now), production)
+
+    def _journal(self, data_dir: Path, *, now: float) -> Reading:
+        """The committed audit, walked once for the whole document.
+
+        A source of its own: it is the file the resume-freshness verdict is judged against, it is
+        not the sprint board, and an installation can lose one without losing the other.
+        """
+        try:
+            events = TaskAudit(data_dir).events()
+        except _SOURCE_FAILURES as exc:
+            return Reading(
+                SOURCE_JOURNAL,
+                sources.unavailable(
+                    f"the committed audit journal could not be read: {_reason(exc)}",
+                    now=now,
+                    evidence=data_dir / "board" / "events.ndjson",
+                ),
+                None,
+            )
+        return Reading(SOURCE_JOURNAL, sources.available(now), events)
+
+    def _linked_cards(self, reader: SprintReader, data_dir: Path, *, now: float) -> Reading:
+        """Every sprint's cards, in one Pipeline listing, or the reason there are none to show."""
+        try:
+            linked = reader.linked_cards()
+        except _SOURCE_FAILURES as exc:
+            return Reading(
+                SOURCE_CARDS,
+                sources.unavailable(
+                    f"the Pipeline board could not be read: {_reason(exc)}",
+                    now=now,
+                    evidence=data_dir / "board" / "cards.ndjson",
+                ),
+                None,
+            )
+        return Reading(SOURCE_CARDS, sources.available(now), linked)
+
+    def _catalogue(self, data_dir: Path, *, now: float) -> Reading:
         """The board's two halves of the catalogue, read once and reported apart.
 
         One store, one failure: the products and the issues come off the same board through the
@@ -349,11 +1018,8 @@ class SprintReadLayer(ProtocolBoundary):
         `catalogue` reads that board once for both halves, so the form does not pay a second full
         pass to answer the same question twice.
         """
-        evidence = data_dir / "board" / "cards.ndjson"
         try:
-            store = ProductIssueStore(
-                self._client(), data_dir=data_dir, instance=report.instance_path.parent
-            )
+            store = ProductIssueStore(self._client(), data_dir=data_dir, instance=self._instance_dir())
             # `include_closed=False` is the admissible half of `_check_ownership` and not a
             # convenience: a closed issue is refused there, so offering one would be offering a
             # request this installation will not accept.
@@ -380,18 +1046,26 @@ class SprintReadLayer(ProtocolBoundary):
                 if str(issue.get("ref") or "")
             ]
         except _SOURCE_FAILURES as exc:
-            refused = sources.unavailable(
-                f"the board could not be read: {_reason(exc)}", now=now, evidence=evidence
-            ).to_json()
-            return ({"source": refused, "items": []}, {"source": refused, "items": []})
-        answered = sources.available(now).to_json()
-        return (
-            {"source": answered, "items": sorted(products, key=lambda item: item["id"])},
-            {"source": answered, "items": sorted(issues, key=lambda item: item["ref"])},
+            return Reading(
+                SOURCE_CATALOGUE,
+                sources.unavailable(
+                    f"the board could not be read: {_reason(exc)}",
+                    now=now,
+                    evidence=data_dir / "board" / "cards.ndjson",
+                ),
+                None,
+            )
+        return Reading(
+            SOURCE_CATALOGUE,
+            sources.available(now),
+            (
+                sorted(products, key=lambda item: item["id"]),
+                sorted(issues, key=lambda item: item["ref"]),
+            ),
         )
 
-    def _projects(self, data_dir: Path, *, now: float) -> dict[str, Any]:
-        """The registered projects, with the open sprint holding each one where one does.
+    def _registry(self, data_dir: Path, *, now: float) -> Reading:
+        """The registered projects, and which open sprint holds each one.
 
         Both halves come from the two sources the refusals read: `registered_projects` is what an
         unknown project is refused against, and the guard index is what a project already reserved
@@ -401,23 +1075,25 @@ class SprintReadLayer(ProtocolBoundary):
         try:
             registered = sorted(registered_projects(self.instance))
         except _SOURCE_FAILURES as exc:
-            return {
-                "source": sources.unavailable(
+            return Reading(
+                SOURCE_REGISTRY,
+                sources.unavailable(
                     f"the project registry could not be read: {_reason(exc)}",
                     now=now,
                     evidence=self._instance_dir() / "projects",
-                ).to_json(),
-                "items": [],
-            }
+                ),
+                None,
+            )
         # The guard index collapses "absent or unreadable" into an empty mapping, which here would
         # read as "held by nobody" -- the opposite of what an unreadable index proves. So the
         # predicate that tells the two apart is asked first, and `reserved_by` is null when the
         # index could not be established at all.
         reserved_known = sprint_guard_index_initialized(data_dir)
         held = active_sprint_projects(data_dir) if reserved_known else {}
-        return {
-            "source": sources.available(now).to_json(),
-            "items": [
+        return Reading(
+            SOURCE_REGISTRY,
+            sources.available(now),
+            [
                 {
                     "id": project,
                     "label": project,
@@ -425,9 +1101,9 @@ class SprintReadLayer(ProtocolBoundary):
                 }
                 for project in registered
             ],
-        }
+        )
 
-    def _heads(self, *, now: float) -> dict[str, Any]:
+    def _head_profiles(self, *, now: float) -> Reading:
         """The head profiles this installation runs off, as a sprint may name them.
 
         Read from the installed registry and never from a constant here: the profiles an
@@ -440,17 +1116,15 @@ class SprintReadLayer(ProtocolBoundary):
             registry = installed_heads(self.instance)
             eligible = installed_head_profiles(self.instance)
         except _SOURCE_FAILURES as exc:
-            return {
-                "source": sources.unavailable(
+            return Reading(
+                SOURCE_HEADS,
+                sources.unavailable(
                     f"the head registry could not be read: {_reason(exc)}",
                     now=now,
                     evidence=self._instance_dir() / "heads" / "heads.yaml",
-                ).to_json(),
-                "items": [],
-                "observer": {"none": NONE_SPELLING, "default": None},
-                "role_defaults": {},
-                "executor_roles": list(EXECUTOR_FIELDS),
-            }
+                ),
+                None,
+            )
         profiles = registry.get("profiles") or {}
         role_defaults = {
             str(role): str(profile)
@@ -477,447 +1151,18 @@ class SprintReadLayer(ProtocolBoundary):
                     "role_default_for": defaults_by_profile.get(profile_id, []),
                 }
             )
-        return {
-            "source": sources.available(now).to_json(),
-            "items": items,
-            # The observer field takes one more answer than a profile id, and it is not a profile:
-            # `none` says the sprint runs without an observer. It is offered here because a client
-            # that had to know the word would be knowing a rule instead of reading one.
-            "observer": {"none": NONE_SPELLING, "default": role_defaults.get("observer")},
-            "role_defaults": role_defaults,
-            # The two roles a sprint may pin, named by the model that owns them rather than spelled
-            # again here.
-            "executor_roles": list(EXECUTOR_FIELDS),
-        }
-
-    def _read_once(self, report: InstanceReport, data_dir: Path, *, now: float) -> _SprintPass:
-        """The three sources every sprint document of this layer is built from, read once each.
-
-        Once for the document and never once per sprint: the sprint rows and their metadata are one
-        board pass, the linked cards of *every* sprint are one Pipeline listing, and the
-        dispatcher's production state is one file read. That is the whole cost of listing sixty
-        sprints, and it is the cost of watching one, because the two are the same read.
-
-        The three fail apart, and each one's failure marks only the sections it feeds. The Pipeline
-        board is the one an installation may legitimately not have yet, and losing it must not blank
-        the sprint that is right there on the board that answered.
-
-        `SprintReader.list(create=False)` and deliberately not `show`: `show` calls
-        `ensure_sprint_board`, which creates the sprint board when the installation has none, and a
-        read of this layer creates nothing. `linked_cards` reads the Pipeline board through
-        `TaskReader`, which has no create at all.
-        """
-        payload, liveness = self._production(data_dir, now=now)
-        reader = SprintReader(self._client(), data_dir=data_dir, thresholds=_thresholds(report))
-        linked, cards = self._linked_cards(reader, data_dir, now=now)
-        try:
-            rows = reader.list(create=False)
-            # Every rule about what a sprint's status view is stays in `SprintReader`; this call
-            # re-decides none of them, and the observer rows and the headless episodes it takes are
-            # the ones `secretary sprint status` already hands it.
-            views = reader.status_views(
-                rows,
-                linked or {},
-                observers=_observer_rows(payload),
-                headless=headless_cards(payload or {}),
-            )
-            sprints = sources.available(now)
-        except _SOURCE_FAILURES as exc:
-            rows, views = [], []
-            sprints = sources.unavailable(
-                f"the sprint board could not be read: {_reason(exc)}",
-                now=now,
-                evidence=data_dir / "board" / "cards.ndjson",
-            )
-        return _SprintPass(
-            rows=rows,
-            views=views,
-            sprints=sprints,
-            linked=linked or {},
-            cards=cards,
-            production=payload,
-            liveness=liveness,
-        )
-
-    def _production(self, data_dir: Path, *, now: float) -> tuple[dict[str, Any] | None, sources.Source]:
-        """The dispatcher's durable production state, read once for the whole document.
-
-        `None` is "nobody could say", never "nothing is running": every section built from this
-        payload carries the refusal below rather than an empty value that reads as health.
-        """
-        path = data_dir / "dispatcher" / "production-state.json"
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise TypeError("the dispatcher production state is not an object")
-        except _SOURCE_FAILURES as exc:
-            return None, sources.unavailable(
-                f"the dispatcher production state could not be read: {_reason(exc)}",
-                now=now,
-                evidence=path,
-            )
-        return payload, sources.available(now)
-
-    def _linked_cards(
-        self, reader: SprintReader, data_dir: Path, *, now: float
-    ) -> tuple[dict[str, list[dict[str, Any]]] | None, sources.Source]:
-        """Every sprint's cards, in one Pipeline listing, or the reason there are none to show."""
-        try:
-            return reader.linked_cards(), sources.available(now)
-        except _SOURCE_FAILURES as exc:
-            return None, sources.unavailable(
-                f"the Pipeline board could not be read: {_reason(exc)}",
-                now=now,
-                evidence=data_dir / "board" / "cards.ndjson",
-            )
-
-    def _work(
-        self,
-        row: dict[str, Any] | None,
-        view: dict[str, Any] | None,
-        read: _SprintPass,
-        *,
-        now: float,
-    ) -> dict[str, Any]:
-        """What one sprint is doing, in the sections a listing and a watched page both carry.
-
-        Every section says which source answered it. `current_task` and `decision` come off the
-        sprint row; `cards` and the freshness verdict need the Pipeline listing; `checks`,
-        `degraded_cards` and `waiting` need the dispatcher's production state. None of them is
-        inferred from another being empty.
-        """
-        reference = str((view or row or {}).get("ref") or "")
-        status = str((view or row or {}).get("status") or "")
-        current = str((view or row or {}).get("current_task") or "") or None
-        cards = self._cards_section(view, read, now=now)
-        return {
-            "current_task": self._current_task(reference, status, current, read, now=now),
-            "decision": self._decision(view, status, read, now=now),
-            "cards": cards,
-            # A sprint nobody could read has no cards to group and none to call degraded, and the
-            # source that could not answer is the sprint board rather than the two behind these
-            # sections: a null under an `available` source would be a section contradicting itself.
-            "degraded_cards": (
-                {"source": read.sprints.to_json(), "items": None}
-                if view is None
-                else {
-                    "source": read.liveness.to_json(),
-                    "items": view.get("degraded_cards") if read.production is not None else None,
-                }
-            ),
-            "checks": self._checks(reference, status, current, view, read, now=now),
-            "waiting": self._waiting(reference, status, current, view, read, now=now),
-        }
-
-    def _cards_section(
-        self, view: dict[str, Any] | None, read: _SprintPass, *, now: float
-    ) -> dict[str, Any]:
-        """This sprint's cards by board state, or the reason nobody could group them.
-
-        `states` is `null` and never `{}` when the Pipeline listing failed: an empty grouping is the
-        affirmative claim that the sprint has no cards, which is the opposite of not knowing.
-        """
-        if view is None:
-            return {"source": read.sprints.to_json(), "states": None}
-        if read.cards.state != sources.AVAILABLE:
-            return {"source": read.cards.to_json(), "states": None}
-        return {"source": read.cards.to_json(), "states": view.get("cards") or {}}
-
-    def _current_task(
-        self, reference: str, status: str, current: str | None, read: _SprintPass, *, now: float
-    ) -> dict[str, Any]:
-        """The sprint's current card, and whether it names work or a finished sprint's last card.
-
-        The card of a sprint that ended is a fact worth keeping -- it is where the sprint got to --
-        and it is exactly the field that made roughly sixty closed sprints of this installation read
-        as if they were working. So it is kept and it is qualified: `live` is false for a closed or
-        stopped sprint, and the reason says the card is the record of a sprint that ended.
-        """
-        if read.sprints.state != sources.AVAILABLE:
-            return {"source": read.sprints.to_json(), "ref": None, "live": False, "reason": None}
-        terminal = status in SPRINT_TERMINAL_STATUSES
-        if current is None:
-            reason = (
-                f"{reference} ended with no current card"
-                if terminal
-                else f"{reference} has no current card: nobody has cut one for it"
-            )
-            return {"source": read.sprints.to_json(), "ref": None, "live": False, "reason": reason}
-        if terminal:
-            reason = (
-                f"{reference} is {status}: {current} is the card it was on when it ended, "
-                "not work in progress"
-            )
-        else:
-            reason = f"{reference} is open and its observer has {current} as the current card"
-        return {
-            "source": read.sprints.to_json(),
-            "ref": current,
-            "live": not terminal,
-            "reason": reason,
-        }
-
-    def _decision(
-        self, view: dict[str, Any] | None, status: str, read: _SprintPass, *, now: float
-    ) -> dict[str, Any]:
-        """The last observer decision on this sprint, and how fresh that decision is.
-
-        The entry itself is on the sprint row and always answered. Its freshness is judged against
-        the significant events of the sprint's linked cards, so an open sprint whose cards could not
-        be listed gets a freshness section marked unavailable rather than a verdict computed over a
-        card list nobody read. A closed or stopped sprint is judged against its own frozen record
-        and no cards at all, which is `SprintReader._resume_freshness`'s own rule -- so its verdict
-        stands even when the Pipeline board does not answer.
-        """
-        if view is None:
-            return {
-                "source": read.sprints.to_json(),
-                "entry": None,
-                "freshness": {"source": read.sprints.to_json(), "value": None},
-            }
-        backed = read.cards.state == sources.AVAILABLE or status in SPRINT_TERMINAL_STATUSES
-        freshness_source = sources.available(now) if backed else read.cards
-        return {
-            "source": read.sprints.to_json(),
-            "entry": view.get("resume"),
-            "freshness": {
-                "source": freshness_source.to_json(),
-                "value": view.get("resume_freshness") if backed else None,
+        return Reading(
+            SOURCE_HEADS,
+            sources.available(now),
+            {
+                "items": items,
+                "observer": {"none": NONE_SPELLING, "default": role_defaults.get("observer")},
+                "role_defaults": role_defaults,
+                # The two roles a sprint may pin, named by the model that owns them rather than
+                # spelled again here.
+                "executor_roles": list(EXECUTOR_FIELDS),
             },
-        }
-
-    def _checks(
-        self,
-        reference: str,
-        status: str,
-        current: str | None,
-        view: dict[str, Any] | None,
-        read: _SprintPass,
-        *,
-        now: float,
-    ) -> dict[str, Any]:
-        """The mandatory checks of this sprint's current card, as the dispatcher's record has them.
-
-        The mechanical gate is the check the pipeline makes mandatory for a card, and the
-        dispatcher's own production record is where its result lives: `gate_state` is `green` only
-        for the current code state of that card, and it is cleared on every fresh entry to validate.
-        Nothing is re-run here and no CI backend is called; a read establishes what is recorded, and
-        says so when nothing records it.
-
-        The order is the same rule `_waiting` follows, and for the same reason: the two answers the
-        sprint row settles on its own -- a sprint that has ended, and one with no current card --
-        are given first and carry the `sprints` source, so a dispatcher state nobody could read
-        neither changes them nor lends them its own unavailability. Only the states that really are
-        the dispatcher's to say are sourced from `liveness`.
-        """
-        card = {"card": current, "gate": None}
-        if view is None:
-            # The sprint itself could not be read, so neither its status nor its current card is
-            # established, and there is nothing here to be `not_applicable` about.
-            return {
-                **card,
-                "source": read.sprints.to_json(),
-                "state": CHECKS_UNKNOWN,
-                "reason": read.sprints.reason,
-            }
-        if status in SPRINT_TERMINAL_STATUSES:
-            return {
-                **card,
-                "source": read.sprints.to_json(),
-                "state": CHECKS_NOT_APPLICABLE,
-                "reason": f"{reference} is {status}: no card of it is running checks",
-            }
-        if current is None:
-            return {
-                **card,
-                "source": read.sprints.to_json(),
-                "state": CHECKS_NOT_APPLICABLE,
-                "reason": f"{reference} has no current card, so no card's checks are due",
-            }
-        card = {**card, "source": read.liveness.to_json()}
-        if read.production is None:
-            return {**card, "state": CHECKS_UNKNOWN, "reason": read.liveness.reason}
-        record = read.record(current)
-        if record is None:
-            return {
-                **card,
-                "state": CHECKS_UNKNOWN,
-                "reason": (
-                    f"the dispatcher holds no record for {current}, so nothing here says whether "
-                    "its mandatory checks have passed"
-                ),
-            }
-        gate = _gate(record)
-        if gate["state"] == "green":
-            return {
-                **card,
-                "gate": gate,
-                "state": CHECKS_GREEN,
-                "reason": (
-                    f"the mechanical gate is green for {gate['attested_sha'] or 'the recorded candidate'}"
-                ),
-            }
-        return {**card, "gate": gate, "state": CHECKS_NOT_GREEN, "reason": _not_green_reason(gate, current)}
-
-    def _waiting(
-        self,
-        reference: str,
-        status: str,
-        current: str | None,
-        view: dict[str, Any] | None,
-        read: _SprintPass,
-        *,
-        now: float,
-    ) -> dict[str, Any]:
-        """Where this sprint stands, and what it is standing on.
-
-        Decided from what has already been read and never from a fresh source, and in the order the
-        sources can actually answer in, which is the point of the ordering rather than an accident
-        of it: **a source that refused never shadows an answer another source already gave.** Each
-        branch below is reached only when every source that could have answered more definitely has
-        been asked, and each carries the source that decided it:
-
-        * the sprint row alone decides `ended` (closed), `blocked` (stopped, with the stop reason)
-          and the `waiting` of a sprint with no current card. Nothing the Pipeline or the dispatcher
-          could say would change any of those, so they are answered first and sourced from `sprints`;
-        * the Pipeline listing decides `blocked` for a current card standing in Blocked -- the
-          board's own statement, with the card's `blocked_by` -- before anything is asked of the
-          dispatcher at all, readable or not, and sourced from `cards`. Its other two answers, the
-          `waiting` of a card in Ready, Issues or Done, are used wherever the dispatcher has nothing
-          to add: it could not be read, or it holds no record for the card;
-        * only what is left needs the dispatcher: whether an active column really has a head behind
-          it. A column is not evidence of that (`docs/OPERATIONS.md`, "A card sitting in In progress
-          is not on its own evidence that anything is running"), so `working`, the degraded
-          `blocked` and the `unknown` of an unreadable production state are its answers and carry
-          `liveness` -- and that `unknown` is now the answer only to the part the board could not
-          settle, naming the column it did establish.
-
-        Round 1 of this card had the production-availability branch above the board ones, so an
-        unreadable dispatcher state hid a blocked reason the Pipeline listing had already
-        established at the listing's fixed cost. That is the collapse `sources.py` exists to
-        prevent, and `WaitingSourceIsolationTests` is what holds the order now.
-        """
-        if view is None:
-            return {"source": read.sprints.to_json(), "state": WAITING_UNKNOWN, "reason": read.sprints.reason}
-        if status == "closed":
-            return {
-                "source": read.sprints.to_json(),
-                "state": WAITING_ENDED,
-                "reason": f"{reference} is closed: nothing is waiting on it",
-            }
-        if status == "stopped":
-            return {
-                "source": read.sprints.to_json(),
-                "state": WAITING_BLOCKED,
-                "reason": f"{reference} was stopped: {view.get('stop_reason') or 'no reason recorded'}",
-            }
-        if current is None:
-            return {
-                "source": read.sprints.to_json(),
-                "state": WAITING_WAITING,
-                "reason": f"{reference} has no current card: nobody has cut one for it",
-            }
-        card = self._current_card(reference, current, read)
-        settled = _board_wait(current, card)
-        board = (
-            None
-            if settled is None
-            else {"source": read.cards.to_json(), "state": settled[0], "reason": settled[1]}
         )
-        # A card the board holds in Blocked is blocked, and no dispatcher record makes it less so:
-        # this is the board's own statement of why the sprint is standing still, and it is answered
-        # before anything is asked of the production state -- readable or not.
-        if board is not None and board["state"] == WAITING_BLOCKED:
-            return board
-        if read.production is None:
-            # The rest of the board's answers are used exactly here, where the dispatcher cannot
-            # improve on them: "nobody has claimed it" and "the card is done" are established by the
-            # column, and returning `unknown` instead would hide an answer this document already
-            # holds behind a source that has nothing to do with it.
-            return board or {
-                "source": read.liveness.to_json(),
-                "state": WAITING_UNKNOWN,
-                "reason": _unsettled_reason(current, card, read.liveness.reason),
-            }
-        degraded = (view.get("degraded_cards") or {}).get(current)
-        if degraded is not None:
-            return {
-                "source": read.liveness.to_json(),
-                "state": WAITING_BLOCKED,
-                "reason": (
-                    f"{current} stands in an active column with no worker the dispatcher can name "
-                    f"({degraded.get('state') or 'no record state'})"
-                ),
-            }
-        record = read.record(current)
-        if record is None:
-            # Same rule once more: with no record to describe the card, the column is the better
-            # answer where it settles one, and the bare "no record" is what is left when it does not.
-            return board or {
-                "source": read.liveness.to_json(),
-                "state": WAITING_WAITING,
-                "reason": (
-                    f"the dispatcher holds no record for {current}: nothing of it has been claimed yet"
-                ),
-            }
-        return {
-            "source": read.liveness.to_json(),
-            "state": WAITING_WORKING,
-            "reason": f"the dispatcher record for {current} is {record.get('state') or 'unnamed'!s}",
-        }
-
-    def _current_card(
-        self, reference: str, current: str, read: _SprintPass
-    ) -> dict[str, Any] | None:
-        """The sprint's current card as the Pipeline listing has it, or `None` when it does not.
-
-        `None` covers both "the listing could not be read" and "the listing holds no such card", and
-        the caller treats them the same way on purpose: neither establishes anything about the card,
-        and the sections that say why a source could not answer are `cards` and `liveness`.
-        """
-        if read.cards.state != sources.AVAILABLE:
-            return None
-        return next(
-            (
-                entry
-                for entry in read.linked.get(reference) or []
-                if isinstance(entry, dict) and str(entry.get("ref") or "") == current
-            ),
-            None,
-        )
-
-    def _observer(
-        self, reference: str, sprint: dict[str, Any] | None, read: _SprintPass, *, now: float
-    ) -> dict[str, Any]:
-        """What this sprint declared, and whether that observer is actually up.
-
-        Two facts, and they are read from two places on purpose. The declaration is the sprint's
-        own field; the liveness is the dispatcher's durable production state, classified by
-        `observer_snapshot` -- the same rows `secretary sprint status` shows. Nothing here consults
-        a terminal, and no branch below treats the existence of one as evidence.
-        """
-        declared = _declared_observer(sprint)
-        if read.production is None:
-            return {
-                "declared": declared,
-                "launch": {
-                    "source": read.liveness.to_json(),
-                    "state": OBSERVER_UNAVAILABLE,
-                    "reason": "the dispatcher production state could not be read",
-                    "record": None,
-                },
-            }
-        row = _observer_rows(read.production).get(reference)
-        state, reason = _launch_state(declared, row, str((sprint or {}).get("status") or ""))
-        return {
-            "declared": declared,
-            "launch": {
-                "source": read.liveness.to_json(),
-                "state": state,
-                "reason": reason,
-                "record": None if row is None else _observer_record(row),
-            },
-        }
 
     # -- plumbing --------------------------------------------------------------------------
 
@@ -926,6 +1171,56 @@ class SprintReadLayer(ProtocolBoundary):
 
     def _instance_dir(self) -> Path:
         return self.instance.parent if self.instance.is_file() else self.instance
+
+
+def _find(read: SourceSet, reference: str) -> _Sprint:
+    """One sprint's row and status view, or `(None, None)` when the board did not answer."""
+    if not read.answered(SOURCE_SPRINTS):
+        return None, None
+    rows, views = read.value(SOURCE_SPRINTS)
+    for row, view in zip(rows, views, strict=True):
+        if str(row.get("ref") or "") == reference:
+            return row, view
+    return None, None
+
+
+def _subject(sprint: _Sprint) -> tuple[str, str, str | None]:
+    """Which sprint a section is about, from the row the sprint board gave: ref, status, card."""
+    row, view = sprint
+    held = view or row or {}
+    return (
+        str(held.get("ref") or ""),
+        str(held.get("status") or ""),
+        str(held.get("current_task") or "") or None,
+    )
+
+
+def _current_of(read: SourceSet) -> str | None:
+    """The current card of the sprint in front of these sources, when the board answered at all."""
+    if not read.answered(SOURCE_SPRINTS):
+        return None
+    return _subject(read.value(SOURCE_SPRINTS))[2]
+
+
+def _card_of(
+    sprint: _Sprint, linked: dict[str, list[dict[str, Any]]]
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The sprint's current card as the Pipeline listing has it, or `None` when it holds none."""
+    reference, _status, current = _subject(sprint)
+    if sprint[1] is None or current is None:
+        return current, None
+    return current, next(
+        (
+            entry
+            for entry in linked.get(reference) or []
+            if isinstance(entry, dict) and str(entry.get("ref") or "") == current
+        ),
+        None,
+    )
+
+
+def _said(settled: tuple[str, str]) -> dict[str, Any]:
+    return {"state": settled[0], "reason": settled[1]}
 
 
 def _wanted_statuses(statuses: Sequence[str] | None) -> set[str]:
@@ -960,9 +1255,14 @@ def _identity(row: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _thresholds(report: InstanceReport) -> dict[str, int] | None:
-    """The installation's own budget thresholds, so a listed budget is judged by this instance."""
-    thresholds = report.instance.get("sprint_budget") if isinstance(report.instance, dict) else None
+def _thresholds(report: InstanceReport | None) -> dict[str, int] | None:
+    """The installation's own budget thresholds, so a listed budget is judged by this instance.
+
+    `None` when the config could not be validated: the product's own defaults are what is left, and
+    the `installation` section of the document says that this installation's were not established.
+    """
+    instance = report.instance if report is not None else None
+    thresholds = instance.get("sprint_budget") if isinstance(instance, dict) else None
     return thresholds if isinstance(thresholds, dict) else None
 
 
@@ -1046,19 +1346,23 @@ def _board_wait(reference: str, card: dict[str, Any] | None) -> tuple[str, str] 
     return None
 
 
-def _unsettled_reason(reference: str, card: dict[str, Any] | None, refusal: str | None) -> str:
-    """Why the dispatcher was needed here, and what the board did say before it refused.
+def _unsettled_reason(read: SourceSet, refusal: str | None) -> str:
+    """Why nothing settled this sprint, and what the sources that did answer had already said.
 
     The board's column is named when it is known, precisely so that the `unknown` does not read as
     "nothing at all is known about this card": what could not be established is narrower than that,
-    and it is the part only the production state answers.
+    and it is the part only the production state answers. Where the sprint board itself is what
+    refused there is no card to name, and the refusal is the whole answer.
     """
-    refused = refusal or "the dispatcher production state could not be read"
+    refused = refusal or "the source that would say could not be read"
+    if not (read.answered(SOURCE_SPRINTS) and read.answered(SOURCE_CARDS)):
+        return refused
+    current, card = _card_of(read.value(SOURCE_SPRINTS), read.value(SOURCE_CARDS))
     if card is None:
         return refused
     state = str(card.get("state") or "") or "an unnamed column"
     return (
-        f"{reference} stands in {state.replace('_', ' ')}, which is not on its own evidence that "
+        f"{current} stands in {state.replace('_', ' ')}, which is not on its own evidence that "
         f"anything is running on it, and {refused}"
     )
 
@@ -1202,6 +1506,7 @@ __all__ = [
     "CHECKS_UNKNOWN",
     "CHECK_STATES",
     "OBSERVER_ABSENT",
+    "OBSERVER_DECLARATION_STATES",
     "OBSERVER_DECLARED",
     "OBSERVER_ENDED",
     "OBSERVER_FIELD",
@@ -1212,7 +1517,13 @@ __all__ = [
     "OBSERVER_RUNNING",
     "OBSERVER_STOPPED",
     "OBSERVER_UNAVAILABLE",
+    "OBSERVER_UNKNOWN",
     "SCHEMA_VERSION",
+    "SOURCE_CARDS",
+    "SOURCE_INSTALLATION",
+    "SOURCE_JOURNAL",
+    "SOURCE_LIVENESS",
+    "SOURCE_SPRINTS",
     "WAITING_BLOCKED",
     "WAITING_ENDED",
     "WAITING_STATES",
@@ -1220,4 +1531,5 @@ __all__ = [
     "WAITING_WAITING",
     "WAITING_WORKING",
     "SprintReadLayer",
+    "SprintSections",
 ]

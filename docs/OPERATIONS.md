@@ -687,19 +687,45 @@ watched sprint the same object is under `work`. Read an entry in this order:
 4. **`decision`** — the observer's last resume `entry`, and `freshness` on it. A stale entry is the
    observer's own error and is visible here without opening a transcript.
 
-**What an unavailable section means.** Every section carries a `source`: `available` with the moment
-it was read, or `unavailable` with the reason and the age of the newest evidence still on disk behind
-it. `unavailable` is never "there is nothing" — it is "nobody could say", and the two are opposite
-answers. Concretely:
+### Reading an answer that is only partly available
 
-- `cards.states: null` or `degraded_cards.items: null` — the Pipeline board or the dispatcher's
-  production state could not be read. An empty `{}` under an `available` source is the other answer:
-  asked, and there is nothing.
+Every section carries a `source`: `available` with the moment it was read, or `unavailable` with the
+reason and the age of the newest evidence still on disk behind it — and, either way, `source.name`,
+which says **which** source answered it. `unavailable` is never "there is nothing": it is "nobody
+could say", and the two are opposite answers.
+
+A document is assembled from five sources that fail apart, and each failure takes away only what
+that source owns. At the top of both documents, `cards.source`, `journal.source`, `liveness.source`
+and `installation.source` say whether each one answered for the document as a whole; that is what a
+listing with no items still tells you. When one of them is `unavailable`, this is what you have lost
+and what you still have:
+
+| the source that refused | what goes unavailable | what still stands |
+| --- | --- | --- |
+| the sprint board (`sprints`) | everything about the sprint: `items: null` in the listing, and every section of a watched sprint, including `observer.declared: unknown` and `observer.launch: unavailable` | nothing about that sprint — and this is the only failure of which that is true |
+| the Pipeline listing (`cards`) | `cards.states: null` and `decision.freshness` for an open sprint | the sprint row, the current card, the checks, the observer, and `waiting` wherever the dispatcher can settle it |
+| the audit journal (`journal`) | `decision.freshness` for an open sprint, and nothing else at all | the sprint rows, the current card, the cards grouping, the checks, the observer — a lost `board/events.ndjson` costs you exactly one verdict |
+| the production state (`liveness`) | `degraded_cards.items: null`, `checks: unknown`, `observer.launch: unavailable`, and `waiting: unknown` for a card in an active column | the sprint row, the current card, the cards grouping, the observer declaration, and `waiting` wherever the board settles it — a card in Blocked still reports its reason |
+| `instance.yaml` (`installation`) | this installation's own sprint budget thresholds, which fall back to the product's defaults | everything the board and the dispatcher can answer, as long as `--data-dir` was given |
+
+The rule under all of it: a source that refused never takes away an answer another source already
+gave, and never lends its unavailability to a section it did not decide. So a `waiting.state:
+blocked` under an `available` `cards` source is the board's own statement and is as good as it gets,
+whatever the dispatcher is doing, and a `checks.state: not_applicable` on a closed sprint is the
+sprint row's answer even when nothing else on the installation can be read.
+
+Two `unknown`s to read carefully:
+
 - `checks.state: unknown` — either the production state could not be read, or the dispatcher holds no
-  record for that card at all (nobody has claimed it yet). It never means the gate failed.
-- `waiting.state: unknown` — the source that would say where the sprint stands did not answer.
-- At the top of the listing, `cards.source` and `liveness.source` say the same thing for the document
-  as a whole, which is what a board that returned no items at all still tells you.
+  record for that card at all (nobody has claimed it yet). It never means the gate failed. The
+  `source` tells the two apart: `unavailable` for the first, `available` for the second.
+- `waiting.state: unknown` — the card sits in an active column and whether a head is behind it could
+  not be established. The reason names the column anyway.
+
+**A config that does not validate is a source too.** With an explicit `--data-dir` and a reachable
+board, `sprint list` and `sprint status` still answer, and say so in `installation.source`. Without
+`--data-dir` there is nothing left to find the data plane with, and the command exits `1` with
+`backend_unavailable`.
 
 Errors are typed and reach the shell as exit statuses: a sprint nobody holds and a malformed filter
 exit `2` with `not_found` / `validation` on stderr, a source that refused exits `1` with

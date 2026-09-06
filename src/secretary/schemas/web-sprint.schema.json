@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "web-sprint.schema.json",
   "title": "Transport-independent sprint operations and reads",
-  "description": "The documents secretary.webproto's sprint layer returns: what a sprint can be built from, what every sprint of the installation is doing, what one sprint is doing, and the answer to opening one. Every section carries its own availability, and no failure here is a status number.",
+  "description": "The documents secretary.webproto's sprint layer returns: what a sprint can be built from, what every sprint of the installation is doing, what one sprint is doing, and the answer to opening one. Every section carries the availability of the source that answered it and names that source, and no section is assembled anywhere but secretary.webproto.section -- so a source that refused can neither answer nor take away an answer another source gave. No failure here is a status number.",
   "oneOf": [
     { "$ref": "#/$defs/options" },
     { "$ref": "#/$defs/sprint" },
@@ -12,18 +12,23 @@
   "$defs": {
     "source": {
       "type": "object",
-      "required": ["state", "reason", "observed_at", "data_age_seconds"],
+      "description": "Whether one source answered this section, and which source it was. The name is part of the contract and not decoration: two sources that both answered carry the same four availability fields, so without it a reader cannot tell an answer the board established from one the dispatcher established.",
+      "required": ["state", "reason", "observed_at", "data_age_seconds", "name"],
       "properties": {
         "state": { "enum": ["available", "unavailable"] },
         "reason": { "type": ["string", "null"] },
         "observed_at": { "type": ["string", "null"] },
-        "data_age_seconds": { "type": ["number", "null"] }
+        "data_age_seconds": { "type": ["number", "null"] },
+        "name": {
+          "enum": ["installation", "sprints", "cards", "journal", "liveness", "catalogue", "registry", "heads"],
+          "description": "The source that answered: the installation config, the sprint board, the Pipeline listing, the committed audit journal, the dispatcher's production state, or -- on the catalogue -- the board, the project registry and the head registry."
+        }
       }
     },
     "options": {
       "type": "object",
       "description": "What a sprint of this installation can be built from. Each section is read from the source that already owns the rule it feeds, and fails apart from the others.",
-      "required": ["schema_version", "kind", "observed_at", "products", "issues", "projects", "heads"],
+      "required": ["schema_version", "kind", "observed_at", "products", "issues", "projects", "heads", "installation"],
       "properties": {
         "schema_version": { "type": "integer" },
         "kind": { "const": "sprint_options" },
@@ -34,7 +39,8 @@
           "properties": {
             "source": { "$ref": "#/$defs/source" },
             "items": {
-              "type": "array",
+              "type": ["array", "null"],
+              "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that this installation has none, which is the opposite of a source nobody could read.",
               "items": {
                 "type": "object",
                 "required": ["id", "label", "ref", "projects"],
@@ -55,7 +61,8 @@
           "properties": {
             "source": { "$ref": "#/$defs/source" },
             "items": {
-              "type": "array",
+              "type": ["array", "null"],
+              "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that this installation has none, which is the opposite of a source nobody could read.",
               "items": {
                 "type": "object",
                 "required": ["ref", "label", "product", "kind", "priority"],
@@ -76,7 +83,8 @@
           "properties": {
             "source": { "$ref": "#/$defs/source" },
             "items": {
-              "type": "array",
+              "type": ["array", "null"],
+              "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that this installation has none, which is the opposite of a source nobody could read.",
               "items": {
                 "type": "object",
                 "required": ["id", "label", "reserved_by"],
@@ -100,7 +108,8 @@
           "properties": {
             "source": { "$ref": "#/$defs/source" },
             "items": {
-              "type": "array",
+              "type": ["array", "null"],
+              "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that this installation has none, which is the opposite of a source nobody could read.",
               "items": {
                 "type": "object",
                 "required": ["id", "label", "adapter", "model", "effort", "observer", "observer_reason", "role_default_for"],
@@ -132,6 +141,12 @@
             "role_defaults": { "type": "object" },
             "executor_roles": { "type": "array", "items": { "type": "string" } }
           }
+        },
+        "installation": {
+          "type": "object",
+          "description": "The installation config this catalogue was read under, which refuses like any other source.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
         }
       }
     },
@@ -217,10 +232,11 @@
       "properties": {
         "declared": {
           "type": "object",
-          "description": "The observer the sprint row declares, in the three states a row can be in.",
-          "required": ["state", "value", "profile"],
+          "description": "The observer the sprint row declares, in the three states a row can be in -- and `unknown`, which is not a state of a row but the absence of one. A sprint board nobody could read leaves `unknown`, because `absent` would be an affirmative claim about a row nobody has seen, and no other source can establish it: the production state proves only that it holds no observer for this reference.",
+          "required": ["source", "state", "value", "profile"],
           "properties": {
-            "state": { "enum": ["declared", "absent", "malformed"] },
+            "source": { "$ref": "#/$defs/source" },
+            "state": { "enum": ["declared", "absent", "malformed", "unknown"] },
             "value": { "type": ["object", "null"] },
             "profile": { "type": ["string", "null"] }
           }
@@ -234,7 +250,7 @@
             "state": {
               "enum": ["not_started", "running", "unavailable", "stopped", "not_declared", "ended"]
             },
-            "reason": { "type": "string" },
+            "reason": { "type": ["string", "null"] },
             "record": { "type": ["object", "null"] }
           }
         }
@@ -261,7 +277,7 @@
     "listing": {
       "type": "object",
       "description": "Every sprint of the installation, with what each one is doing. One sprint-board pass, one Pipeline listing and one production-state read for the whole document, whatever the number of sprints.",
-      "required": ["schema_version", "kind", "observed_at", "filter", "sprints", "cards", "liveness"],
+      "required": ["schema_version", "kind", "observed_at", "filter", "sprints", "cards", "journal", "liveness", "installation"],
       "properties": {
         "schema_version": { "type": "integer" },
         "kind": { "const": "sprint_list" },
@@ -277,7 +293,11 @@
           "required": ["source", "items"],
           "properties": {
             "source": { "$ref": "#/$defs/source" },
-            "items": { "type": "array", "items": { "$ref": "#/$defs/entry" } }
+            "items": {
+              "type": ["array", "null"],
+              "description": "Null and never an empty array when the sprint board refused: an empty listing is the affirmative claim that this installation holds no sprints.",
+              "items": { "$ref": "#/$defs/entry" }
+            }
           }
         },
         "cards": {
@@ -286,9 +306,21 @@
           "required": ["source"],
           "properties": { "source": { "$ref": "#/$defs/source" } }
         },
+        "journal": {
+          "type": "object",
+          "description": "The committed audit journal an open sprint's resume freshness is judged against. A source of its own and not a corner of the sprint board: an unreadable `board/events.ndjson` marks the freshness section unavailable and leaves the sprint rows, the current card and the observer standing.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        },
         "liveness": {
           "type": "object",
           "description": "The dispatcher's production state, said once for the document for the same reason.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        },
+        "installation": {
+          "type": "object",
+          "description": "The installation config this document was read under. It refuses like any other source: with an explicit data directory, a config that does not validate is reported here and the rest of the document is still answered by the sources that did answer.",
           "required": ["source"],
           "properties": { "source": { "$ref": "#/$defs/source" } }
         }
@@ -297,7 +329,7 @@
     "sprint": {
       "type": "object",
       "description": "One sprint: what it was opened with, where it is now, and whether its observer is up.",
-      "required": ["schema_version", "kind", "observed_at", "ref", "sprint", "observer", "work"],
+      "required": ["schema_version", "kind", "observed_at", "ref", "sprint", "observer", "work", "cards", "journal", "liveness", "installation"],
       "properties": {
         "schema_version": { "type": "integer" },
         "kind": { "const": "sprint" },
@@ -353,7 +385,31 @@
           }
         },
         "observer": { "$ref": "#/$defs/observer" },
-        "work": { "$ref": "#/$defs/work" }
+        "work": { "$ref": "#/$defs/work" },
+        "cards": {
+          "type": "object",
+          "description": "The Pipeline listing the card sections were built from, said once for the document too.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        },
+        "journal": {
+          "type": "object",
+          "description": "The committed audit journal the resume freshness is judged against, said once for the document.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        },
+        "liveness": {
+          "type": "object",
+          "description": "The dispatcher's production state, said once for the document.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        },
+        "installation": {
+          "type": "object",
+          "description": "The installation config this document was read under, which refuses like any other source.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        }
       }
     },
     "created": {

@@ -4,6 +4,55 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-06 — one place enforces source isolation (secretary-1574, sprint:1431)
+
+**The rule, and where it now lives.** *A source that refused, or that was never read, may not delete,
+shadow or fabricate an answer another source already gave; every section says which source answered
+it.* It is enforced in one place, `secretary.webproto.section`, which every section of every sprint
+document is assembled through: a rule that needs a source that did not answer is not run, a refusal
+can only produce the section's declared no-claim shape, and a section assembled anywhere else cannot
+reach a document. Documented in [PROTOCOLS](PROTOCOLS.md#one-place-says-which-source-answered).
+
+**Corrected: the CLI precondition of the previous entry.** `secretary sprint list` and
+`secretary sprint status` answer from the board again when `instance.yaml` does not validate, as long
+as the transport is usable and `--data-dir` is explicit. The unvalidated config is reported as an
+unavailable `installation` source in the document rather than as a refusal of the operation; only a
+caller that gave no data directory still exits `1` with `backend_unavailable`. The "stricter
+precondition" recorded in the entry below was wrong and is struck there: a caller must not lose an
+answer it has, and "the config could not be validated" is one more source that refused. No rule about
+sprint state moved back into `sprint_commands.py`.
+
+**New document fields.**
+
+- Every `source` object now carries `name` — which source answered that section (`installation`,
+  `sprints`, `cards`, `journal`, `liveness`; on the catalogue, `catalogue`, `registry`, `heads`).
+  Two available sources are otherwise indistinguishable, so without it "the section names its
+  source" held only for the ones that failed.
+- Both documents carry `journal.source` and `installation.source` beside `cards.source` and
+  `liveness.source`, and `sprint status` now carries all four. The committed audit journal is a
+  source of its own rather than part of the sprint board.
+- `observer.declared` gained a `source` and a fourth state, `unknown`.
+
+**Changed answers.**
+
+- An unreadable `board/events.ndjson` marks `decision.freshness` unavailable and nothing else. It
+  used to blank the whole sprint listing — `sprints.items: []` and `sprint.value: null` — attributed
+  to a sprint-board failure that had not happened.
+- An unreadable sprint board no longer produces an observer claim: `observer.declared` is `unknown`
+  rather than `absent`, and `observer.launch` is `unavailable` sourced from the sprint board rather
+  than `not_started` sourced from an available production state.
+- A section that could not be answered now reports `null` where it used to report an empty list:
+  `sprints.items` in the listing, and `products`, `issues`, `projects` and `heads` items in the
+  sprint form's catalogue. An empty list under an `unavailable` source claimed the installation had
+  none, which is the opposite of not knowing.
+- With both the Pipeline listing and the production state unreadable, `work.waiting` is `unknown`
+  sourced from `cards` rather than from `liveness`: a section that cannot answer names the first
+  input the chain was missing.
+
+**Also changed.** `SprintReader.status_views` takes an optional `audit` traversal, so a caller that
+has already walked the committed journal — and has to keep that walk's failure apart from the
+board's — hands it in and the call opens nothing. `secretary.sprints.audit_traversal` builds one.
+
 ## 2026-09-06 — the sprint state protocol (secretary-1573, sprint:1431)
 
 **New.** `secretary.webproto.sprint_reads.SprintReadLayer.sprint_list(statuses=…)`: every sprint of
@@ -37,9 +86,11 @@ read of the dispatcher's production state — whatever the number of sprints. Do
   same thing in `work.waiting.reason`.
 - Both commands now refuse with the exit statuses `secretary web-read` uses: `2` for `not_found` and
   `validation`, `1` for `backend_unavailable`.
-- **Stricter precondition:** both now resolve the installation the way every `webproto` operation
+- ~~**Stricter precondition:** both now resolve the installation the way every `webproto` operation
   does, so an instance config that does not validate is a `backend_unavailable` refusal rather than a
-  read that proceeds from a board client alone.
+  read that proceeds from a board client alone.~~ **Withdrawn the same day, before this reached an
+  operator** — see the entry above. It was never right: it lost a caller an answer it had, and
+  documenting it did not preserve it.
 
 `secretary sprint show` is unchanged.
 

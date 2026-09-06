@@ -234,5 +234,6 @@ class CatalogueSectionRefusalTests(SprintProtocolFixture):
         options = self.reads().sprint_options()
         for section in ("products", "issues"):
             self.assertEqual(options[section]["source"]["state"], "unavailable")
-            self.assertEqual(options[section]["items"], [])
+            # `null` and never `[]`: a board that refused cannot say the installation has none.
+            self.assertIsNone(options[section]["items"])
             self.assertIn("the board could not be read", options[section]["source"]["reason"])
