@@ -26,6 +26,14 @@ manager, and no inventory of any kind:
   2. the supervisor's **journal** in the run directory, for `run.exited` and the exit status on it;
   3. this run's **result file**, which the head is told the path of and writes itself.
 
+**Two facts, and they are not one field.** `ended` says the run is **over** -- the process it may
+have held is provably gone, or none was ever spawned -- and `value` says **how** it ended. They
+were one value until secretary-1563, because "terminal" was computed as `value in (finished,
+process_failed)`: an ending that could only be named `source_unavailable` was therefore not an
+ending at all, and every path that had to produce a terminal answer had to name a failure it had
+no evidence for. Told apart, `source_unavailable` is an ending like any other -- the run is over,
+what it did could not be established -- and nothing has to lie to close a run.
+
 The order of the decision is the point of the module. A result that was published and a process
 that has since ended is a run that finished — however that process ended, including a stop this
 product asked for once the result was in, because the product owns the process and ending a head
@@ -69,9 +77,12 @@ from triggered_agents.runtime.local_pty_head import JOURNAL_NAME as JOURNAL_NAME
 # reader and that writer cannot disagree about either.
 from triggered_agents.runtime.local_pty_head import RUN_EXITED, head_run_journal
 
-#: The states from which a run never moves again. What `settle` records and what a client polling
-#: a run stops polling on.
-TERMINAL_STATES = (FINISHED, PROCESS_FAILED)
+#: The three values that *name an ending*. `running` is not one, and `unknown` is the absence of
+#: one, so a run that is over while the evidence says either of those is recorded
+#: `source_unavailable` by :meth:`secretary.webproto.lifecycle.RunLifecycle._ending` -- over, and
+#: how not established. This is a partition of the same five values and not a sixth: whether a run
+#: is over is the separate `ended` fact, and no reader decides it from this tuple.
+ENDING_VALUES = (FINISHED, PROCESS_FAILED, SOURCE_UNAVAILABLE)
 
 #: Read this module against :mod:`secretary.webproto.lifecycle`: a run's *phase* says where its
 #: lifecycle is and a run's *state* says what its process is doing, and they are not the same
@@ -84,7 +95,7 @@ TERMINAL_STATES = (FINISHED, PROCESS_FAILED)
 
 def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
     """This run's state, its exit status and its result, from process evidence alone."""
-    if run.settled:
+    if run.ended:
         # A settled run is history and says the same thing forever. Re-deriving it would let a run
         # that was `finished` at noon read as `source_unavailable` at midnight because its run
         # directory had been swept -- and the exit status and result are part of "the same thing",
@@ -98,16 +109,21 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
             exit_status=settled_exit(run),
             result=settled_result(run),
             heartbeat={"state": "settled"},
+            # Fact one, off the record and not off the value: a settled run is over whatever it
+            # ended as, `source_unavailable` included. Deriving this from the value again is
+            # exactly the seam this module was split on.
+            ended=True,
             now=now,
             settled_at=run.settled_at,
         )
     if run.phase == UNRESOLVED:
         # A run whose cleanup was not confirmed. It is not `process_failed`: nothing established
-        # that the process failed, and a terminal value here would free the card for a second run
-        # beside a head that may still be alive. `unknown` is the read layer's own word for "no
-        # evidence establishes this", it is not terminal, and it keeps the run unsettled -- which
-        # is what `admission.admit` already refuses a second run over. The heartbeat and the
-        # journal still travel on `evidence` and `exit`, so an operator sees what *is* known.
+        # that the process failed, and naming a failure here would be the same lie under a
+        # different name. `unknown` is the read layer's own word for "no evidence establishes
+        # this", and the fact that decides the card is the `ended: False` below -- the run stays
+        # unsettled, which is what `admission.admit` already refuses a second run over. The
+        # heartbeat and the journal still travel on `evidence` and `exit`, so an operator sees
+        # what *is* known.
         return _document(
             UNKNOWN,
             run.unresolved_reason
@@ -115,6 +131,9 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
             exit_status=_exit_status(_journal(run)[0]),
             result=_result(run),
             heartbeat=head_process_status(run.pid_file, expected=expected_identity(run)),
+            # Fact one is false here, and that is the whole of the fence: a head may still be
+            # alive under this run, so it is not over and no gate may treat it as over.
+            ended=False,
             now=now,
         )
     if run.phase == CLAIMED:
@@ -124,6 +143,10 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
             exit_status=_empty_exit(),
             result=_result(run),
             heartbeat={"state": HEARTBEAT_NOT_YET_WRITTEN},
+            # A claim is the phase before anything can exist: this run has not ended, it has not
+            # begun. The lifecycle knows the other half -- that no process was ever spawned under
+            # it -- and that is where a close of such a run establishes fact one.
+            ended=False,
             now=now,
         )
     return from_evidence(run, now=now)
@@ -141,15 +164,15 @@ def from_evidence(run: ProductRun, *, now: float) -> dict[str, Any]:
     Keeping the two apart is not tidiness. A run whose cleanup could not be confirmed may have gone
     on to publish a result and end normally, and the read that finally confirms its stop then holds
     positive evidence of a *finished* run. Classifying that through `observe` would apply the
-    stored `unresolved` shortcut, find no terminal value, and settle the run as `process_failed`
-    beside its own published result -- a normal ending recorded as a failure, permanently, and only
-    ever on the recovery path. So a close classifies from here.
+    stored `unresolved` shortcut and settle the run as `unknown` beside its own published result --
+    a normal ending lost, permanently, and only ever on the recovery path. So a close classifies
+    from here.
     """
     heartbeat = head_process_status(run.pid_file, expected=expected_identity(run))
     journal, journal_failure = _journal(run)
     exit_status = _exit_status(journal)
     result = _result(run)
-    state, reason = _classify(
+    state, reason, ended = _classify(
         heartbeat=heartbeat,
         exit_status=exit_status,
         result=result,
@@ -161,6 +184,7 @@ def from_evidence(run: ProductRun, *, now: float) -> dict[str, Any]:
         exit_status=exit_status,
         result=result,
         heartbeat=heartbeat,
+        ended=ended,
         now=now,
     )
 
@@ -204,40 +228,69 @@ def _classify(
     exit_status: dict[str, Any],
     result: dict[str, Any],
     journal_failure: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
+    """The two facts this evidence establishes: how the run ended, why, and whether it is over.
+
+    The third value is fact one as the *evidence* can see it -- the launch identity says there is
+    no such process, or the supervisor recorded that it exited -- and it is deliberately not a
+    function of the first: a run whose head is gone and whose journal cannot be read is over
+    (`True`) while the only honest value for it is `source_unavailable`, and a run whose launch
+    identity itself cannot be read is *not* over (`False`) under that same value. One value, two
+    endedness answers, is precisely why these cannot be one field.
+
+    A pid that belongs to another process stays `unknown` and not over, as it was: pid reuse
+    proves nothing about this run's head either way, and a gate that freed the card on it would
+    free it on a guess.
+    """
     state = str(heartbeat.get("state") or "")
     if state == HEARTBEAT_LIVE_MATCH:
-        return RUNNING, "a live process matches this run's launch identity"
+        return RUNNING, "a live process matches this run's launch identity", False
     if state == HEARTBEAT_UNREADABLE:
-        return SOURCE_UNAVAILABLE, (
-            f"this run's launch identity could not be read ({heartbeat.get('reason') or 'unreadable'}), "
-            "so nothing is proven about its process either way"
+        return (
+            SOURCE_UNAVAILABLE,
+            (
+                f"this run's launch identity could not be read ({heartbeat.get('reason') or 'unreadable'}), "
+                "so nothing is proven about its process either way"
+            ),
+            False,
         )
-    ended = state == HEARTBEAT_DEAD or exit_status["recorded"]
+    ended = state == HEARTBEAT_DEAD or bool(exit_status["recorded"])
     if not ended:
         if state == HEARTBEAT_IDENTITY_MISMATCH:
-            return UNKNOWN, (
-                "the pid in this run's launch identity belongs to another process, which proves "
-                "nothing about this run"
+            return (
+                UNKNOWN,
+                (
+                    "the pid in this run's launch identity belongs to another process, which proves "
+                    "nothing about this run"
+                ),
+                False,
             )
-        return UNKNOWN, "this run's head has not published a launch heartbeat yet"
+        return UNKNOWN, "this run's head has not published a launch heartbeat yet", False
     if journal_failure and not exit_status["recorded"]:
-        return SOURCE_UNAVAILABLE, (
-            f"this run's head is gone and its journal could not be read ({journal_failure}), so "
-            "how it ended could not be established"
+        return (
+            SOURCE_UNAVAILABLE,
+            (
+                f"this run's head is gone and its journal could not be read ({journal_failure}), so "
+                "how it ended could not be established"
+            ),
+            True,
         )
     if result["present"]:
-        return FINISHED, (
-            "this run published its result and its head's process has ended" + _exit_tail(exit_status)
+        return (
+            FINISHED,
+            "this run published its result and its head's process has ended" + _exit_tail(exit_status),
+            True,
         )
     if exit_status["code"] == 0:
-        return FINISHED, "this run's head process ended normally, and it published no result"
+        return FINISHED, "this run's head process ended normally, and it published no result", True
     if exit_status["code"] is not None:
-        return PROCESS_FAILED, f"this run's head process exited with status {exit_status['code']}"
+        return PROCESS_FAILED, f"this run's head process exited with status {exit_status['code']}", True
     if exit_status["signal"] is not None:
-        return PROCESS_FAILED, f"this run's head process was ended by signal {exit_status['signal']}"
-    return PROCESS_FAILED, (
-        "this run's head process is gone, it published no result, and nothing recorded how it ended"
+        return PROCESS_FAILED, f"this run's head process was ended by signal {exit_status['signal']}", True
+    return (
+        PROCESS_FAILED,
+        "this run's head process is gone, it published no result, and nothing recorded how it ended",
+        True,
     )
 
 
@@ -316,15 +369,22 @@ def _document(
     exit_status: dict[str, Any],
     result: dict[str, Any],
     heartbeat: dict[str, Any],
+    ended: bool,
     now: float,
     settled_at: float = 0.0,
 ) -> dict[str, Any]:
+    """One run's state as its readers see it, carrying both facts and conflating neither.
+
+    `ended` is passed in rather than derived here, and that is the contract: whether a run is over
+    is established by the caller that holds the evidence for it -- the record, the launch identity,
+    or the lifecycle that confirmed a stop -- and never re-derived from the value beside it.
+    """
     available = state != SOURCE_UNAVAILABLE
     source = sources.available(now) if available else sources.unavailable(reason, now=now)
     return {
         "value": state,
         "reason": reason,
-        "terminal": state in TERMINAL_STATES,
+        "ended": bool(ended),
         "settled_at": sources.isoformat(settled_at) if settled_at else None,
         "source": source.to_json(),
         "exit": {"code": exit_status["code"], "signal": exit_status["signal"], "at": exit_status["at"]},

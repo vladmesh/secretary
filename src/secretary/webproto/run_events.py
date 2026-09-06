@@ -89,7 +89,10 @@ def publish_finished(audit: TaskAudit, run: ProductRun, state: dict[str, Any]) -
 
     `outcome` is the journal's own two-valued field and is not a third name for the run's state: it
     says whether the run reached its ending having done its work, and `payload.state` carries the
-    exact value out of the read layer's vocabulary that this ending is.
+    exact value out of the read layer's vocabulary that this ending is. A run that is over while
+    nothing could establish how it ended is `failure` there and `source_unavailable` here, and the
+    two say different things on purpose: the audit's field is about the work, and the state is
+    about the process -- which is exactly the claim this event must not overstate.
     """
     result = state.get("result") if isinstance(state.get("result"), dict) else {}
     return _publish(

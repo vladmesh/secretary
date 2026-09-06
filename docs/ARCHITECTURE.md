@@ -294,8 +294,27 @@ differently. The invariant that function holds is that the record which can *fin
 is durable before a spawn can produce one, that the record alone is enough to stop it (the
 supervised backend addresses a head from the run id and pid path, never from what the spawning
 process remembers), and that a cleanup which could not be confirmed is written as unresolved rather
-than as an ending. An unresolved run is not terminal and not settled, which is exactly what the
+than as an ending. An unresolved run is not over and not settled, which is exactly what the
 admission gate already refuses a second run over — the fence is an existing rule, not a new one.
+
+**"This run is over" and "this is how it ended" are two facts.** They must be, and the reason is
+what the conflation cost. A run's outcome is one of the read layer's five words, and for a while
+"the run is over" was computed *from* that word: a run counted as over when its value was
+`finished` or `process_failed`. Two of the five therefore carried a second meaning nobody had
+chosen for them, and the consequences ran both ways. A card was freed only by a run whose ending
+had a name, so a head that was confirmed gone while its journal could not be read had to be given
+one before its card could be released — and the only name available was `process_failed`, an
+accusation against a process nobody watched fail, written into the card's own history where no
+later read can withdraw it. Withheld instead, the same run would have fenced its card forever. The
+product had a choice between lying and deadlocking because one value was answering two questions.
+
+So the fact is now a boolean on the record: this run is over when the process it may have held is
+provably gone — a stop this product confirmed, or a launch identity that says there is nothing
+there — or when no process was ever spawned under it. It is established by the lifecycle, which is
+the only place that can establish it, and it is the only property the admission gate consults. What
+a run ended *as* is derived separately from whatever evidence exists, keeps the same five words, and
+is free to say `source_unavailable`: the run is over and what it did could not be established. That
+sentence is true, publishable and terminal, and before the split there was no way to say it.
 
 **Two durable writes are never assumed to be one.** Raising a head and putting its start on the
 card's history are separate durable facts, and so are settling a run's ending and publishing it. So

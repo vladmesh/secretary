@@ -30,11 +30,19 @@ one before it has been answered:
 5. **the dispatcher holds no durable record for it.** The state file is the dispatcher's own answer
    to "am I running this card", read (never written) exactly as the read layer reads it. A card
    whose column moved while an attempt is still recorded is still that attempt's;
-6. **this layer holds no unsettled run for it.** One product run per card at a time. A settled run
-   is history and does not block the next one, which is what lets a review follow its worker.
+6. **this layer holds no run for it that is not over.** One product run per card at a time. A run
+   that is over is history and does not block the next one, which is what lets a review follow its
+   worker.
+
+   The fact this reads is `ProductRun.ended`, and it is the **only** fact about a run any branch of
+   this gate consults: whether the run is over, never how it ended. The two were one value until
+   secretary-1563 -- a card was freed by the run carrying a value in `(finished, process_failed)`,
+   so a run that was genuinely over but whose ending could only be named `source_unavailable` had
+   to be given a false one before its card could be freed. Told apart, this condition asks the
+   question it actually means, and no ending has to be invented to answer it.
 
    This is also the whole of how an *unresolved* run fences a card, and deliberately so. A run
-   whose head could not be confirmed stopped stays unsettled (:mod:`secretary.webproto.lifecycle`),
+   whose head could not be confirmed stopped is not over (:mod:`secretary.webproto.lifecycle`),
    so this condition already refuses the next run over it -- with no second register of ownership
    and no new rule here. The failure that made this necessary got past this gate only because the
    code that could not confirm a cleanup settled the run anyway; the repair is that it no longer
@@ -73,7 +81,8 @@ class Admission:
     project: str
     card: dict[str, Any]
     binding: dict[str, Any]
-    #: The settled runs this card already has, oldest first. `run_review` finds its worker here.
+    #: The runs this card already has, oldest first, all of them over. `run_review` finds its
+    #: worker here.
     runs: tuple[ProductRun, ...] = ()
 
     @property
@@ -193,7 +202,15 @@ def _refuse_dispatcher_record(ref: str, production_state: Path) -> None:
 
 
 def _refuse_open_run(ref: str, runs: tuple[ProductRun, ...]) -> None:
-    open_runs = [run for run in runs if not run.settled]
+    """The fence, decided by one fact: is each run of this card over.
+
+    `run.ended` and nothing else. Not the run's outcome value, not whether that value is one this
+    reader would call a success or a failure, and not the phase spelled out again here: a run is
+    over when the process it may have held is provably gone or was never spawned, and that is the
+    only property of a run that can free a card. Whatever a run ended *as* is a matter for whoever
+    reads it, and it has no vote here.
+    """
+    open_runs = [run for run in runs if not run.ended]
     if open_runs:
         names = ", ".join(f"{run.run_id} ({run.role})" for run in open_runs)
         raise OwnerConflict(

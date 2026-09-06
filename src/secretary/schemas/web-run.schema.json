@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "web-run.schema.json",
   "title": "Transport-independent product-run operations",
-  "description": "The documents secretary.webproto's operations return. A run's state values are the read layer's own five; the exit status beside them is the process's, not a sixth name for it.",
+  "description": "The documents secretary.webproto's operations return. A run's state values are the read layer's own five; the exit status beside them is the process's, not a sixth name for it; and whether a run is over is the separate `ended` fact rather than a value.",
   "oneOf": [
     {"$ref": "#/$defs/run"},
     {"$ref": "#/$defs/review"}
@@ -46,7 +46,8 @@
         "started_at": {"type": ["string", "null"]},
         "deadline_at": {"type": ["string", "null"]},
         "settled_at": {"type": ["string", "null"]},
-        "settled_state": {"type": "string"},
+        "ended": {"type": "boolean", "description": "Fact one on the record: this run is over. Written by the settle and never derived from the value beside it."},
+        "settled_state": {"type": "string", "description": "Fact two: how this run ended, one of the read layer's five values. `source_unavailable` is an ending like any other -- the run is over and what it did could not be established."},
         "phase": {"enum": ["claimed", "raising", "raised", "unresolved", "settled"], "description": "Where this run is in its lifecycle. `raising` is the write-ahead phase: the record can address and stop a head, and a spawn may have happened. `unresolved` is a close that could not be confirmed -- the run stays unsettled, so the card stays fenced."},
         "head_raised": {"type": "boolean"},
         "unresolved_reason": {"type": "string"},
@@ -58,11 +59,11 @@
     },
     "state": {
       "type": "object",
-      "required": ["value", "reason", "terminal", "source", "exit", "result", "evidence"],
+      "required": ["value", "reason", "ended", "source", "exit", "result", "evidence"],
       "properties": {
-        "value": {"enum": ["running", "finished", "process_failed", "source_unavailable", "unknown"]},
+        "value": {"enum": ["running", "finished", "process_failed", "source_unavailable", "unknown"], "description": "How this run ended, or what its process is doing. One of the read layer's five, and never a statement about whether the run is over -- that is `ended`."},
         "reason": {"type": "string"},
-        "terminal": {"type": "boolean"},
+        "ended": {"type": "boolean", "description": "Whether this run is over: the process it may have held is provably gone -- a confirmed stop, or a launch identity that says there is nothing there -- or none was ever spawned. The only fact that frees a card for the next run, and deliberately not derived from `value`: a head that is gone while its journal cannot be read is over under `source_unavailable`, and a run whose launch identity itself cannot be read is not."},
         "settled_at": {"type": ["string", "null"]},
         "source": {"$ref": "#/$defs/source"},
         "exit": {

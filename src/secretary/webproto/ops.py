@@ -390,7 +390,10 @@ class OperationLayer:
 
         worker = self._worker_run(store, ref=ref, worker_run_id=worker_run_id)
         worker_state = self.run_state(worker.run_id)
-        if not worker_state["state"]["terminal"]:
+        # `ended` and not the outcome value: what a review waits for is the worker being *over*,
+        # and a worker that ended in a way nothing could establish is over too. Reading the value
+        # here would leave such a run unreviewable forever.
+        if not worker_state["state"]["ended"]:
             raise OwnerConflict(
                 f"the worker run {worker.run_id} is {worker_state['state']['value']}: a review is "
                 "raised by a worker's result, so it waits until that run has ended"
@@ -447,8 +450,8 @@ class OperationLayer:
     def run_state(self, run_id: str) -> dict[str, Any]:
         """One run's state — and the one place a run's ending becomes durable.
 
-        Reading is most of it, and the write is exactly one thing: the first observation of a
-        terminal state settles the run, recording the state, the reason, the exit status and the
+        Reading is most of it, and the write is exactly one thing: the first observation of a run
+        that is over settles the run, recording the state, the reason, the exit status and the
         result together, and its single `product_run.finished` event goes onto the card's own
         journal. That is not a second history, and not a second answer either:
         :meth:`secretary.webproto.runs.RunStore.settle` records an ending once, and the event is a
@@ -474,7 +477,7 @@ class OperationLayer:
         if closing:
             run = self._lifecycle(data_dir, store).advance(run, SETTLED, now=now, reason=closing)
             state = run_state_reads.observe(run, now=now)
-        if run.settled:
+        if run.ended:
             # Not `if first`: an ending is settled once, and *publishing* it is a separate durable
             # write that may have failed after the settle. So every terminal read republishes,
             # which is free when the event is already on the journal and is the only way an ending
@@ -574,13 +577,13 @@ class OperationLayer:
         included -- so a replay builds the byte-identical record `TaskAudit` already holds and
         recognises, and neither a second event nor a second history can come of it.
         """
-        if not run.raised and not run.settled:
+        if not run.raised and not run.ended:
             return state
         observed = state if state is not None else run_state_reads.observe(run, now=now)
         audit = self._audit(data_dir)
         if run.raised:
             run_events.publish_started(audit, run)
-        if run.settled:
+        if run.ended:
             run_events.publish_finished(audit, run, observed)
         return observed
 
@@ -650,15 +653,19 @@ class OperationLayer:
           ending is confirmed. A card is therefore not fenced by an unresolved run for any longer
           than the head under it actually survives;
         * a running run is closed when its work is done or its time is up;
-        * a run whose process evidence is already terminal is closed so that ending becomes
-          durable, and one whose evidence says `unknown` or `source_unavailable` is not: a source
-          that could not answer is not an ending.
+        * a run whose process evidence says it is **over** is closed so that ending becomes
+          durable, and one whose evidence does not is left alone. That fact is `state["ended"]`
+          and never the outcome value beside it: a head that is gone while its journal cannot be
+          read is over and settles `source_unavailable`, and a run whose launch identity itself
+          could not be read carries that same value while nothing about its process is established
+          -- so it is not closed. One value, two answers, which is why the closing question reads
+          the fact and not the word.
 
         The deadline is the earlier of the one the run was started with and the one this caller is
         configured with, so `--deadline-seconds` on a read shortens a run that is going nowhere and
         can never silently extend one past what its own start promised.
         """
-        if run.settled:
+        if run.ended:
             return ""
         if run.unresolved:
             return STOP_ENDED
@@ -669,7 +676,7 @@ class OperationLayer:
                 moment for moment in (run.deadline_at, run.started_at + self.deadline_seconds) if moment
             ]
             return STOP_DEADLINE if deadlines and now >= min(deadlines) else ""
-        return STOP_ENDED if state["terminal"] else ""
+        return STOP_ENDED if state["ended"] else ""
 
     def _worker_run(self, store: RunStore, *, ref: str, worker_run_id: str) -> ProductRun:
         if worker_run_id:

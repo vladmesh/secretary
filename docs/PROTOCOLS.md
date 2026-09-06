@@ -2672,18 +2672,32 @@ The order is the contract:
    own to stop the head, and that is checked against the real backend rather than asserted.
 3. **a possibly-live process outranks closing the record.** Closing a run ends its head *first* and
    settles only on a confirmed ending. An ending that could not be confirmed puts the run in
-   `unresolved`: it reads as `unknown` — never `finished` or `process_failed`, and never terminal —
-   and it stays **unsettled**, which is what the admission gate's sixth condition already refuses a
-   second run over. An unresolved run is a fence and not a dead end: every later `web-run state`
-   retries the same stop from the same record, and the run settles the moment the ending is
-   confirmed. What it settles *as* is read off the process at that moment, never off the
+   `unresolved`: it reads as `unknown` — never `finished` or `process_failed` — and as **not
+   over**, and it stays **unsettled**, which is what the admission gate's sixth condition already
+   refuses a second run over. An unresolved run is a fence and not a dead end: every later
+   `web-run state` retries the same stop from the same record, and the run settles the moment the
+   ending is confirmed. What it settles *as* is read off the process at that moment, never off the
    `unresolved` record — a head that survived one unconfirmed stop may have published its result
    and ended normally in between, and such a run settles `finished` with its result, exactly as it
    would have without the detour. A normal ending and a failure stay distinguishable on the
    recovery path, which is the one place they would otherwise collapse.
+4. **"the run is over" and "how it ended" are two facts, and they are stored apart.** The first is
+   a boolean, `ended`, on the run record and on `state`: the process this run may have held is
+   provably gone — a stop this product confirmed, or a launch identity that says there is nothing
+   there — or none was ever spawned under it. The second is `state.value`, one of the same five
+   words, derived from the evidence. Only the first frees a card, and no branch of the admission
+   gate reads the second.
 
-`phase` is on every run document beside `state`, and the two answer different questions: the phase
-says where the lifecycle is, the state says what the process is doing.
+   They were one value before, and it forced a lie. A card was freed by a run whose value was
+   `finished` or `process_failed`, so a head confirmed gone whose journal could not be read had to
+   be recorded as a failed process before its card could be released — an accusation published into
+   the card's history, where no later read can withdraw it. Such a run now settles
+   `source_unavailable` with the reason: it is over, and how it ended was not established. See
+   [Architecture](ARCHITECTURE.md#the-product-runtime).
+
+`phase`, `ended` and `state` are all on every run document, and they answer three different
+questions: the phase says where the lifecycle is, `ended` says whether the run is over, and the
+state value says what the process did or is doing.
 
 ### What the product owns
 
@@ -2715,8 +2729,9 @@ they build or spawn anything. It decides in this order, and the order is part of
    `validate`, `assessment` and `blocked`, so a product run takes a card only from `issues`;
 5. the dispatcher's durable production state holds no record for the card — and a state file that
    cannot be read refuses too, because "I could not tell" is not "nobody owns it";
-6. this layer holds no unsettled run for the card — which includes a run whose cleanup could not
-   be confirmed, since such a run is never settled.
+6. this layer holds no run for the card that is not over — decided by the run's `ended` fact and
+   never by what it ended as, so a run that is genuinely over frees its card whatever value it
+   carries. A run whose cleanup could not be confirmed is not over, and fences the card.
 
 Nothing there is a scheduler, a store or an audit of its own: the reservations and the card's state
 are rules that already exist, and the dispatcher's state is read and never written.
@@ -2743,24 +2758,33 @@ is stored, so nothing a caller supplies becomes a path or a readable field of th
 ### What a run ended as
 
 A run's `state.value` is the same five-word vocabulary the read layer uses for an agent, and the
-process's own exit status rides beside it in `state.exit` rather than as a sixth word:
+process's own exit status rides beside it in `state.exit` rather than as a sixth word. `state.ended`
+is the other fact and is never derived from the value: it says whether the run is over.
 
-| state | exit | what it means |
-| --- | --- | --- |
-| `running` | — | a live process matches this run's launch identity |
-| `finished` | any | the run published its result and its process has ended |
-| `finished` | `code: 0` | the process ended normally, having published nothing |
-| `process_failed` | `code: N` | the process exited with a non-zero status |
-| `process_failed` | `signal: N` | the process was ended by a signal |
-| `process_failed` | none | the process is gone, published nothing, and nothing recorded how it ended |
-| `source_unavailable` | — | the launch identity or the journal could not be read; nothing is proven |
-| `unknown` | — | no evidence yet: no head raised, or no heartbeat published, or a foreign pid; or a run whose cleanup could not be confirmed (`phase: unresolved`), where nothing establishes what the process is doing |
+| state | exit | ended | what it means |
+| --- | --- | --- | --- |
+| `running` | — | no | a live process matches this run's launch identity |
+| `finished` | any | yes | the run published its result and its process has ended |
+| `finished` | `code: 0` | yes | the process ended normally, having published nothing |
+| `process_failed` | `code: N` | yes | the process exited with a non-zero status |
+| `process_failed` | `signal: N` | yes | the process was ended by a signal |
+| `process_failed` | none | yes | the process is gone, published nothing, and nothing recorded how it ended |
+| `source_unavailable` | — | yes | the head is gone and its journal could not be read: it ended, and how was not established |
+| `source_unavailable` | — | no | the launch identity itself could not be read; nothing is proven about the process either way |
+| `unknown` | — | no | no evidence yet: no head raised, or no heartbeat published, or a foreign pid; or a run whose cleanup could not be confirmed (`phase: unresolved`), where nothing establishes what the process is doing |
+
+The two `source_unavailable` rows are why the facts are two. The word is the same because the
+missing thing is the same — a source that could not say — and what differs is whether the run is
+over, which the value cannot carry and `ended` does. A settled run is over by definition, whatever
+value it carries.
 
 The evidence is the launch-identity heartbeat, the supervisor's journal and the result file. A
 window, pane or panel is never consulted and is not evidence that a run is alive. The first
-observation of a terminal state settles the run — recording the state, the reason, the exit status
+observation of a run that is over settles it — recording the state, the reason, the exit status
 and the result together — and a settled run says the same thing forever, exit status and result
-included, even after its run directory is swept.
+included, even after its run directory is swept. A bring-up that failed is the one ending recorded
+from something other than process evidence: the product tried to raise a head and the attempt
+failed with a named cause, so it settles `process_failed` with that cause.
 
 ### Where a run is read back
 

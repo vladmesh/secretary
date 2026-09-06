@@ -168,8 +168,19 @@ class ProductRun:
     head_raised: bool = False
     #: Why this run's ownership could not be resolved, when it could not. Empty otherwise.
     unresolved_reason: str = ""
+    #: **Fact one: this run is over.** The process it may have held is *provably* gone -- a stop
+    #: this product confirmed, or a launch identity that says there is nothing there -- or no
+    #: process was ever spawned under this record. It is written by :meth:`settled_as` and by
+    #: nothing else, because :mod:`secretary.webproto.lifecycle` is the one place that can
+    #: establish it, and it is stored rather than derived from the value below so that the two
+    #: facts cannot be read off one another. Nothing about *how* the run ended is in it.
+    ended: bool = False
     #: Set once, by whoever first observed this run reach a terminal process state.
     settled_at: float = 0.0
+    #: **Fact two: how this run ended**, one of the read layer's five values, derived from the
+    #: evidence at the moment fact one became true. `source_unavailable` here is an ending like
+    #: any other: the run is over and what it did could not be established. A reader deciding
+    #: whether the run is over asks `ended`; this answers a different question.
     settled_state: str = ""
     settled_reason: str = ""
     #: The evidence that ending was read off, recorded with it. A settled run is history, and
@@ -202,9 +213,6 @@ class ProductRun:
         """The same run in another phase. The only way `phase` is ever written."""
         return replace(self, phase=phase, **changes)
 
-    @property
-    def settled(self) -> bool:
-        return bool(self.settled_state)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -231,6 +239,7 @@ class ProductRun:
             "phase": self.phase,
             "head_raised": self.head_raised,
             "unresolved_reason": self.unresolved_reason,
+            "ended": self.ended,
             "settled_at": self.settled_at,
             "settled_state": self.settled_state,
             "settled_reason": self.settled_reason,
@@ -267,6 +276,10 @@ class ProductRun:
             phase=_phase(payload, head_run),
             head_raised=_flag(payload.get("head_raised"), bool(head_run)),
             unresolved_reason=_text(payload.get("unresolved_reason")),
+            # A record written before the two facts were told apart carries only the value, and a
+            # value was only ever written by a settle: reading it as "this run is over" is what
+            # that record meant, and it is the one direction that cannot invent a fact.
+            ended=_flag(payload.get("ended"), bool(_text(payload.get("settled_state")))),
             settled_at=_float(payload.get("settled_at")),
             settled_state=_text(payload.get("settled_state")),
             settled_reason=_text(payload.get("settled_reason")),
@@ -311,12 +324,13 @@ class ProductRun:
         settlement is what makes the run's one terminal event publishable exactly once, and a second
         writer that could overwrite it would be a second ending for the same run.
         """
-        if self.settled:
+        if self.ended:
             return self
         return replace(
             self,
             phase=SETTLED,
             unresolved_reason="",
+            ended=True,
             settled_state=state,
             settled_reason=reason,
             settled_at=now,
@@ -496,7 +510,7 @@ class RunStore:
             current = self.get(run_id)
             if current is None:
                 raise RunStoreError(f"there is no product run {run_id!r} to settle")
-            if current.settled:
+            if current.ended:
                 return current, False
             settled = current.settled_as(
                 state, reason, now=now, exit_status=exit_status, result=result

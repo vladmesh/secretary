@@ -13,7 +13,7 @@ having to re-implement any of it.
 The operator loop `web-run` makes is the loop a web page will make:
 
     secretary web-run start  --instance I --ref R --request-id X --profile P
-    secretary web-run state  --instance I --run-id  <run>          # until it is terminal
+    secretary web-run state  --instance I --run-id  <run>          # until state.ended
     secretary web-run review --instance I --worker-run <run> --request-id Y --profile Q
     secretary web-run state  --instance I --run-id  <review>
 

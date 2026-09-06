@@ -49,6 +49,7 @@ from triggered_agents.runtime.head.identity import publish_heartbeat
 from triggered_agents.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
 from triggered_agents.runtime.head.run import HeadRun, StopInitiator
 from triggered_agents.runtime.head.runtime import (
+    HEAD_ALIVE,
     HEAD_BUSY,
     HEAD_GONE,
     HEAD_OK,
@@ -648,6 +649,92 @@ class AdmissionTests(ProductRuntimeFixture):
         self.assertIn("durable record", refusal("secretary-run-3"))
 
 
+    # -- the fence reads one fact ---------------------------------------------------------------
+
+    def _record(self, run_id: str, **overrides: Any) -> ProductRun:
+        """One run of the fixture's card, written into the store as it stands."""
+        payload = {
+            "run_id": run_id,
+            "request_id": f"req-{run_id}",
+            "ref": "secretary-run-1",
+            "project": "secretary",
+            "role": "worker",
+            "profile": WORKER_PROFILE,
+            "started_at": self.clock,
+        }
+        payload.update(overrides)
+        run = ProductRun.from_json(payload)
+        RunStore(self.data_dir).save(run)
+        return run
+
+    def _admit(self) -> Any:
+        return admission_module.admit(
+            "secretary-run-1",
+            report=self.layer().report(),
+            data_dir=self.data_dir,
+            board=self.board,
+            store=RunStore(self.data_dir),
+            production_state=self.data_dir / "dispatcher" / "production-state.json",
+        )
+
+    def test_the_fence_is_lifted_by_the_run_being_over_and_never_by_what_it_ended_as(self) -> None:
+        """Criterion 3 of secretary-1563, in both directions and over all five values.
+
+        The gate's sixth condition asks one question -- is the run that already sits on this card
+        over -- and a run that is over frees the card whatever it ended as. `source_unavailable`
+        and `unknown` are in the list deliberately: under the old contract only `finished` and
+        `process_failed` freed a card, which is precisely why a run confirmed over with unreadable
+        evidence had to be given a value it had not earned.
+        """
+        for value in ("finished", "process_failed", "source_unavailable", "unknown", "running"):
+            with self.subTest(value=value):
+                run = self._record(
+                    f"pr-over-{value}",
+                    phase="settled",
+                    ended=True,
+                    settled_state=value,
+                    settled_reason=f"this run ended as {value}",
+                    settled_at=self.clock,
+                )
+                self.assertEqual(self._admit().runs[-1].run_id, run.run_id)
+                (self.data_dir / "webproto" / "runs" / f"{run.run_id}.json").unlink()
+
+        # And a run that is not over fences the card, whatever it may say about a process: an
+        # unresolved run carries no ending at all, and a head may still be alive under it.
+        self._record("pr-in-doubt", phase="unresolved", unresolved_reason="the stop was refused")
+        with self.assertRaises(OwnerConflict) as refused:
+            self._admit()
+        self.assertIn("pr-in-doubt", str(refused.exception))
+
+    def test_no_branch_of_the_gate_reads_what_a_run_ended_as(self) -> None:
+        """The static half: the outcome vocabulary is not reachable from this module's code.
+
+        A behavioural check can only sample the values; this says the question is not asked at all.
+        Docstrings are excluded on purpose -- the module explains the distinction at length, and
+        naming a value while explaining why it is not consulted is not consulting it.
+        """
+        import ast
+
+        tree = ast.parse(
+            (REPO_ROOT / "src" / "secretary" / "webproto" / "admission.py").read_text(encoding="utf-8")
+        )
+        forbidden = {"running", "finished", "process_failed", "source_unavailable", "unknown"}
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)):
+                body = node.body[1:] if ast.get_docstring(node) else node.body
+                for statement in body:
+                    for inner in ast.walk(statement):
+                        if isinstance(inner, ast.Constant) and inner.value in forbidden:
+                            offenders.append(f"line {inner.lineno}: {inner.value!r}")
+                        if isinstance(inner, ast.Attribute) and inner.attr in {
+                            "settled_state",
+                            "settled_reason",
+                        }:
+                            offenders.append(f"line {inner.lineno}: .{inner.attr}")
+        self.assertEqual(sorted(set(offenders)), [])
+
+
 class RunStateTests(ProductRuntimeFixture):
     """Criterion 5: five outcomes, told apart, out of the read layer's own five values."""
 
@@ -708,7 +795,7 @@ class RunStateTests(ProductRuntimeFixture):
         publish_heartbeat(run.pid_file, run_state.expected_identity(run))
         state = run_state.observe(run, now=self.clock)
         self.assertEqual(state["value"], "running")
-        self.assertFalse(state["terminal"])
+        self.assertFalse(state["ended"])
 
     def test_a_published_result_and_an_ended_process_is_a_normal_completion(self) -> None:
         run = self._run()
@@ -760,7 +847,31 @@ class RunStateTests(ProductRuntimeFixture):
         state = run_state.observe(run, now=self.clock)
         self.assertEqual(state["value"], "source_unavailable")
         self.assertEqual(state["source"]["state"], "unavailable")
-        self.assertFalse(state["terminal"])
+        # The same value a confirmed ending with an unreadable journal settles as, and the fact
+        # beside it is what tells the two apart: nothing here says this run's process is gone.
+        self.assertFalse(state["ended"])
+
+    def test_one_value_answers_two_questions_and_they_are_read_separately(self) -> None:
+        """`source_unavailable` says nothing about whether a run is over, so `ended` says it.
+
+        The same value over two situations, and the fact beside it is what tells them apart: a head
+        that is confirmed gone while its journal cannot be read has *ended* and something must
+        record that; a run whose launch identity itself cannot be read has not been shown to end
+        anything. Deriving "is it over" from the value would have to answer both the same way.
+        """
+        gone = self._run()
+        self._dead_heartbeat(gone)
+        Path(gone.journal_path).mkdir()
+        ended = run_state.observe(gone, now=self.clock)
+        self.assertEqual(ended["value"], "source_unavailable")
+        self.assertTrue(ended["ended"])
+        self.assertIn("could not be read", ended["reason"])
+
+        unreadable = self._run()
+        Path(unreadable.pid_file).write_text("{not json", encoding="utf-8")
+        still_open = run_state.observe(unreadable, now=self.clock)
+        self.assertEqual(still_open["value"], "source_unavailable")
+        self.assertFalse(still_open["ended"])
 
     def test_no_evidence_yet_is_unknown_rather_than_absent(self) -> None:
         state = run_state.observe(self._run(), now=self.clock)
@@ -1114,13 +1225,13 @@ class LifecycleTests(ProductRuntimeFixture):
                 self.start(request_id="req-in-doubt")
         run = RunStore(self.data_dir).by_request("req-in-doubt")
         self.assertEqual(run.phase, UNRESOLVED)
-        self.assertFalse(run.settled, "an unconfirmed cleanup is not an ending")
+        self.assertFalse(run.ended, "an unconfirmed cleanup is not an ending")
         self.assertIn("may still be running", run.unresolved_reason)
 
         # It reads through the layer as `unknown`, never as a terminal outcome.
         state = self.layer().run_state(run.run_id)["state"]
         self.assertEqual(state["value"], "unknown")
-        self.assertFalse(state["terminal"])
+        self.assertFalse(state["ended"])
 
         # And no second run of the card is admitted while ownership is in doubt.
         with self.assertRaises(OwnerConflict) as refused:
@@ -1151,7 +1262,7 @@ class LifecycleTests(ProductRuntimeFixture):
 
         settled = self.layer().run_state(run_id)
         self.assertEqual(settled["state"]["value"], "finished")
-        self.assertTrue(settled["state"]["terminal"])
+        self.assertTrue(settled["state"]["ended"])
         self.assertEqual(
             settled["state"]["result"]["value"], {"status": "done", "summary": "it finished after all"}
         )
@@ -1163,6 +1274,79 @@ class LifecycleTests(ProductRuntimeFixture):
         self.assertEqual(
             finished[0]["data"]["result"], {"status": "done", "summary": "it finished after all"}
         )
+
+    def test_a_confirmed_ending_nothing_can_classify_settles_without_inventing_a_failure(self) -> None:
+        """The reviewer's scenario of secretary-1562, and the reason the two facts are two.
+
+        A save fails after a successful start, one stop cannot be confirmed, and the run is fenced
+        as `unresolved`. Later the head is confirmed gone -- but its journal cannot be read and it
+        published no result, so *how* it ended is not establishable by anything. The run is over
+        and must settle: leaving it open would fence the card forever. What it settles as is
+        `source_unavailable` with the reason, because that is what the evidence supports.
+
+        `process_failed` is the answer the old contract was forced into, and it appears nowhere
+        here -- not in the returned document, not in the record, and not in the event on the card's
+        history, which is the copy no later read could correct.
+        """
+        self.runtime.stop = lambda run, initiator, **options: StopReceipt(
+            status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
+        )
+        with self._failing_save():
+            with self.assertRaises(RuntimeUnavailable):
+                self.start(request_id="req-dark")
+        run = RunStore(self.data_dir).by_request("req-dark")
+        self.assertEqual(run.phase, UNRESOLVED)
+
+        # The journal becomes unreadable -- a directory in its place is an `OSError` on the read,
+        # which is what "the source could not say" is, as opposed to a swept run directory saying
+        # nothing. The head publishes no result, and the next stop is confirmed.
+        journal = Path(run.journal_path)
+        journal.unlink()
+        journal.mkdir()
+        self.assertFalse(Path(run.result_path).exists())
+
+        def confirmed_stop(head, initiator, **options):
+            self.runtime.stops.append((head.run_id, initiator.reason))
+            record = json.loads(Path(run.pid_file).read_text(encoding="utf-8"))
+            record["pid"] = _dead_pid()
+            Path(run.pid_file).write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+            return StopReceipt(status=HEAD_OK, run=head)
+
+        self.runtime.stop = confirmed_stop
+        document = self.layer().run_state(run.run_id)
+        state = document["state"]
+
+        self.assertTrue(state["ended"], "a head confirmed gone is a run that is over")
+        self.assertEqual(state["value"], "source_unavailable")
+        self.assertIn("could not be read", state["reason"])
+        self.assertIn("how it ended could not be established", state["reason"])
+
+        settled = RunStore(self.data_dir).get(run.run_id)
+        self.assertTrue(settled.ended)
+        self.assertEqual(settled.settled_state, "source_unavailable")
+        self.assertEqual(settled.settled_reason, state["reason"])
+
+        # The one terminal event says the same thing the document does, and the card's history
+        # never carries the accusation.
+        page = self.reads().task_events("secretary-run-1", None, limit=50)
+        finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["data"]["state"], "source_unavailable")
+        self.assertEqual(finished[0]["data"]["reason"], state["reason"])
+        snapshot = self.reads().task_snapshot("secretary-run-1")
+        published = [item for item in snapshot["events"]["items"] if item["kind"] == run_events.FINISHED]
+        self.assertEqual(published[0]["data"]["state"], "source_unavailable")
+        self.assertEqual(published[0]["data"]["reason"], state["reason"])
+        for where, payload in (
+            ("the state document", document),
+            ("the run record", settled.to_json()),
+            ("the card's history", page["items"]),
+        ):
+            self.assertNotIn("process_failed", json.dumps(payload), f"{where} invents a failure")
+
+        # And the card is free, because the fence is lifted by the run being over and by nothing
+        # about what it ended as.
+        self.assertEqual(self.start(request_id="req-after")["state"]["value"], "running")
 
     def test_an_unresolved_run_settles_as_soon_as_the_ending_is_confirmed(self) -> None:
         """An unresolved run is a fence, not a dead end: the next read retries the same stop."""
@@ -1178,7 +1362,7 @@ class LifecycleTests(ProductRuntimeFixture):
         self.runtime.stop = FakeHeadRuntime.stop.__get__(self.runtime, FakeHeadRuntime)
         settled = self.layer().run_state(run_id)
         self.assertEqual(settled["state"]["value"], "process_failed")
-        self.assertTrue(settled["state"]["terminal"])
+        self.assertTrue(settled["state"]["ended"])
         self.assertEqual(self.start(request_id="req-after")["state"]["value"], "running")
 
 

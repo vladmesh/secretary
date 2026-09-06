@@ -6,7 +6,10 @@ Three rounds of this card produced three defects of the same shape, and the shap
   two writes and only one of them was retried;
 * an ending was settled and its `product_run.finished` was lost, for the same reason;
 * a head was spawned and `RunStore.save` failed, so a **live head was left with no owner** while
-  the record settled as `process_failed` and admission let a second run onto the same card.
+  the record settled as `process_failed` and admission let a second run onto the same card;
+* an ending that was confirmed but could not be *classified* was recorded as `process_failed`,
+  because the vocabulary the gate read had no way to say "over, and how is not established"
+  (secretary-1563; point 4 below).
 
 Each of those was repaired where it was found, and each repair moved the seam one step along. What
 they have in common is that the order between "a process may now exist" and "the durable record
@@ -37,15 +40,14 @@ of the last step, and their meanings are in :mod:`secretary.webproto.runs`.
    `run.exited` and the process table.
 
 3. **The truth about a possibly-live process outranks closing the record.** A cleanup that was not
-   confirmed may not settle as a terminal outcome. `_close` therefore ends the head *first* and
-   settles only on a confirmed ending; when the ending cannot be confirmed the run goes to
-   `unresolved`, which:
+   confirmed may not settle. `_close` therefore ends the head *first* and settles only on a
+   confirmed ending; when the ending cannot be confirmed the run goes to `unresolved`, which:
 
    * reads through :mod:`secretary.webproto.run_state` as `unknown` -- one of the five words the
-     read layer already has, never `finished` or `process_failed`, and never terminal;
+     read layer already has, never `finished` or `process_failed` -- and as **not over**;
    * keeps the run **unsettled**, which is exactly what makes `admission.admit`'s existing sixth
      condition refuse a second run on that card. No new rule and no new register: the gate already
-     refuses a card that carries an unsettled run, and the previous code got past it only by
+     refuses a card that carries a run that is not over, and the previous code got past it only by
      settling a run it had no right to settle.
 
    An unresolved run is not a dead end. Every later `_close` -- a `run_state` of that run -- retries
@@ -54,6 +56,20 @@ of the last step, and their meanings are in :mod:`secretary.webproto.runs`.
    record: a head that survived one unconfirmed stop may have gone on to publish its result and
    end normally, and recording that as `process_failed` would make a success indistinguishable
    from a failure on the one path where it matters most.
+
+4. **"This run is over" and "this is how it ended" are two facts, kept apart** (secretary-1563).
+   The first is a boolean on the record, written only by a settle and only from something that
+   establishes it: a stop this product confirmed, a launch identity that says the process is gone,
+   or a spawn that provably never happened. The second is one of the read layer's same five values,
+   derived from whatever evidence there is. Only the first frees a card; the second is never asked
+   to stand in for it.
+
+   They were one value before, and the cost is on the record: because a card was freed by the value
+   being `finished` or `process_failed`, a run that was confirmed over while its journal could not
+   be read had no true value to settle as, and `_ending` invented `process_failed` for it -- an
+   accusation against a process nobody watched fail, published into the card's history where no
+   later read can withdraw it. Apart, such a run settles `source_unavailable` with the reason,
+   which is the truth: it is over, and how it ended was not established.
 
 **What "one place" means as a check.** Every path that can put a process into the world, and every
 path that can close a run, calls :meth:`RunLifecycle.advance` and nothing else. Within
@@ -330,9 +346,17 @@ class RunLifecycle:
         normal ending and a failure there: a run that went to `unresolved` because one stop could
         not be confirmed may have gone on to publish its result and end cleanly, and the read that
         finally confirms the stop is holding positive evidence of exactly that. Classifying it
-        through the record's own `unresolved` shortcut would find no terminal value and settle it
-        `process_failed` beside its own published result. So the classification comes from
+        through the record's own `unresolved` shortcut would find `unknown` and settle a published
+        success as an ending nothing could establish. So the classification comes from
         :func:`secretary.webproto.run_state.from_evidence`.
+
+        **The two facts meet here, and only here.** Reaching the settle below means fact one is
+        true and says exactly why: either this run could hold no process at all (`spawned` false
+        over a record with no trace, so none was ever put into the world), or its head was ended
+        and that ending was *confirmed* from the launch identity. Fact one is therefore established
+        by control flow that cannot be fooled by missing evidence, and fact two -- how the run
+        ended -- is read off whatever evidence there is, with no obligation to name a failure when
+        there is none. Before this card the two were one value, and this method had to invent one.
         """
         if self._may_hold_a_process(run, spawned=spawned):
             confirmed, detail = self._end_the_head(run, reason)
@@ -351,25 +375,39 @@ class RunLifecycle:
 
     def _evidence(self, run: ProductRun, *, now: float) -> dict[str, Any]:
         """What the process says right now. A settled run is the one thing that is history already."""
-        if run.settled:
+        if run.ended:
             return run_state_reads.observe(run, now=now)
         return run_state_reads.from_evidence(run, now=now)
 
     def _ending(self, state: dict[str, Any], *, failure: str, reason: str) -> tuple[str, str]:
-        """What this run is recorded as having ended as, and why.
+        """How this run is recorded as having ended, and why. Fact two, and only it.
 
-        A bring-up that failed says so in its own words. Otherwise the process evidence decides,
-        and an ending the evidence cannot name a terminal value for is `process_failed` with the
-        reason the product ended it: by the time this is reached the head has been stopped and
-        confirmed gone, so "still running" is not one of the answers available.
+        Whether the run is over was decided by :meth:`_close` before this is called, so nothing
+        here has to produce a value that *means* "over". That is the whole change: this method used
+        to fall back to `process_failed` for evidence that named no ending, which turned "I could
+        not establish how this ended" into "its process failed" and published that accusation into
+        the card's history, where no later read can take it back.
+
+        Three answers, and no fourth:
+
+        * a **bring-up that failed** says so in its own words. The product tried to raise a head and
+          the attempt failed with a named cause, so the failure is established rather than assumed;
+        * evidence that **names an ending** -- `finished`, `process_failed` or `source_unavailable`
+          -- is recorded as it stands, with the reason it gave;
+        * evidence that names none (`running`, which a confirmed stop contradicts, or `unknown`)
+          is recorded as `source_unavailable`: the run is over, and how it ended is not
+          established. That is a statement about the *evidence*, which is what was missing, and not
+          about the process, which nobody watched fail.
         """
         if failure:
             return run_state_reads.PROCESS_FAILED, failure
-        if state.get("terminal"):
-            return str(state["value"]), str(state["reason"])
-        return run_state_reads.PROCESS_FAILED, (
-            f"{reason}; its head was ended and confirmed gone, and the process evidence named no "
-            f"terminal state of its own ({state.get('reason') or state.get('value')})"
+        value = str(state.get("value") or "")
+        if value in run_state_reads.ENDING_VALUES:
+            return value, str(state["reason"])
+        return run_state_reads.SOURCE_UNAVAILABLE, (
+            f"{reason}; this run is over -- its head was ended and confirmed gone, or none was "
+            "ever raised under it -- and the evidence establishes no ending of its own "
+            f"({state.get('reason') or value or 'no evidence'}), so how it ended is not established"
         )
 
     def _may_hold_a_process(self, run: ProductRun, *, spawned: bool) -> bool:
