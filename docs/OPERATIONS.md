@@ -2067,6 +2067,42 @@ the outcome column is what the run *produced*: the reviewer's verdict when it wr
 own result summary, and the exit status the supervisor recorded. A failure therefore reads as a
 failure and never as a run with nothing to show, which is a different thing and says so.
 
+### Opening a sprint from the browser
+
+`/sprints/new` is the form; it offers this installation's own products, its open issues, its
+registered projects and its head profiles, so there is nothing to type from memory and no technical
+identifier to remember. Fill in the goal and the definition of done, tick at least one issue and at
+least one project, choose the observer, and leave the worker and reviewer selects on "the observer
+chooses" unless a role has to be pinned to a particular head.
+
+**"Start this sprint" is the create.** There is no separate launch action anywhere in this product:
+the production tick raises one observer head for each open sprint that has none, so opening a sprint
+with an observer is the whole of starting it. The page you land on says where that got to, in words:
+
+| what the page says | what it means | what to do |
+| --- | --- | --- |
+| saved — no observer is up for it yet | the entity exists and the tick has not reached it | wait for the next tick; `secretary sprint status --ref REF` says the same thing |
+| running — an observer head is up | the dispatcher holds a record and its head is alive | nothing |
+| stopped — an observer was raised for it and is not alive | a record exists and the head is gone | look at the dispatcher, not at this page: the tick owns the head |
+| no observer — this sprint declared none | it was opened with `none` | nothing; no observer will be raised |
+| not established — this could not be read at all | the dispatcher production state could not be read | the sprint's own fields on the page are still true; the liveness is what is unknown |
+
+**Submitting twice is safe, and is the repair.** The form carries one request id for as long as it
+is open, so a double click, a retried submission and a browser that reconnected all reach the same
+sprint. If a submission comes back saying the sprint exists and the request that opened it did not
+finish, submit that same form again — it picks the sprint up. Do **not** reload the form first: a
+fresh form is a fresh request id, and that is the one way to end up with two sprints.
+
+**A refusal keeps what you typed.** Missing fields are named on the form; what a sprint may be —
+an unknown profile, a closed issue, an unregistered project, a project another open sprint already
+holds — is decided by the board and shown on the form in the board's own words, with every value
+still in place.
+
+**A submission from another site is refused with 403** before anything runs, on this and on the two
+run routes alike. That check looks at the `Origin` header a browser sends, so a client that sends
+none — `curl`, `secretary web-run`, the diagnostics above — is unaffected; if a `curl` POST ever
+does need to look like a browser's, send `-H "Origin: https://HOST"` matching the host in the URL.
+
 ### Updating the service
 
 ```bash

@@ -1,8 +1,8 @@
 """`secretary web-serve`: the third command over the same layer, beside `web-read` and `web-run`.
 
-It builds the two layers from the same arguments those two groups take -- `--instance`,
-`--data-dir`, `--heads-registry` -- hands them to the application, and serves. Nothing about a
-snapshot, a state or a run is decided here.
+It builds the four layers from the same arguments those groups take -- `--instance`, `--data-dir`,
+`--heads-registry` -- hands them to the application, and serves. Nothing about a snapshot, a state,
+a run or a sprint is decided here.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from secretary.web.app import WebApp
 from secretary.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from secretary.webproto.ops import OperationLayer
 from secretary.webproto.reads import ReadLayer
+from secretary.webproto.sprint_ops import SprintOperationLayer
+from secretary.webproto.sprint_reads import SprintReadLayer
 
 #: The same status `web-read` and `web-run` exit with when they were asked for something they
 #: cannot do.
@@ -57,6 +59,8 @@ def run_web_serve(args: argparse.Namespace) -> int:
     app = WebApp(
         ReadLayer(args.instance, data_dir=args.data_dir, offline=bool(args.offline)),
         OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
+        SprintReadLayer(args.instance, data_dir=args.data_dir),
+        SprintOperationLayer(args.instance, data_dir=args.data_dir),
     )
     try:
         return serve(app, host=args.host, port=args.port)

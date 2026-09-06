@@ -3109,6 +3109,9 @@ neither reaches a handler.
 | --- | --- | --- | --- |
 | GET | `/` | `reads.system_snapshot` | the dashboard: health with its reason and age, projects, current cards, running agents |
 | GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`) | one card: state, attempt, heads, product runs, worker and reviewer output, result, event tail |
+| GET | `/sprints/new` | `sprint_reads.sprint_options` | the "new sprint" form, on this installation's own products, open issues, projects and head profiles |
+| POST | `/sprints` | `sprint_ops.sprint_create` | open one sprint from that form; 303 to its page, or the form again with what was refused |
+| GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: what it was opened with, its pins, its current card, its last resume, and whether its observer is up |
 | GET | `/api/system` | `reads.system_snapshot` | the dashboard's document |
 | GET | `/api/tasks/{ref}` | `reads.task_snapshot` | the card page's document; `?events=N` sets the tail length |
 | GET | `/api/tasks/{ref}/events` | `reads.task_events` | one page of history; `?cursor=C&limit=N` |
@@ -3117,8 +3120,74 @@ neither reaches a handler.
 | POST | `/api/runs/start` | `ops.run_start` | raise a worker; body `{ref, request_id, profile, instruction?}` |
 | POST | `/api/runs/review` | `ops.run_review` | raise a reviewer; body `{request_id, profile, worker_run_id?, ref?}` |
 
-A POST body is a JSON object and carries only the fields listed. An unknown field is refused rather
-than ignored: a client sending one believes this endpoint does something it does not.
+A POST body is a JSON object and carries only the fields listed, except on `/sprints`, which takes
+the submitted form (`application/x-www-form-urlencoded`) whose fields are `request_id`, `product`,
+`goal`, `definition_of_done`, `issues`, `projects`, `observer`, `worker` and `reviewer`. Either way
+an unknown field is refused rather than ignored: a client sending one believes this endpoint does
+something it does not.
+
+### Opening a sprint from a browser
+
+The two sprint pages are a client of the contract above and decide nothing of their own. Every
+choice on the form is an entry of `sprint_options`, so a board or a registry holding something else
+offers something else, and no product, issue, project or profile is written into the transport.
+Nothing is typed from memory: the observer and the two optional pins are selects over the registry's
+own profiles, each showing the label, model and effort the registry holds.
+
+| field | what it carries |
+| --- | --- |
+| `request_id` | the id this form was served with, hidden in the form and submitted back unchanged |
+| `product`, `goal`, `definition_of_done` | required; an empty one is refused by name before the layer is called |
+| `issues`, `projects` | one value per checked box; at least one of each is required |
+| `observer` | required: a profile the layer marked eligible, or the `none` spelling `heads.observer.none` publishes |
+| `worker`, `reviewer` | two independent optional selects whose default option is empty; an empty one reaches the layer as `None`, and never as the empty string |
+
+**Two kinds of refusal, and they are different kinds of thing.** A field the form itself requires is
+answered by the transport, named field by field, because the person is looking at the form. What a
+sprint may *be* — an unknown profile, a closed issue, an unregistered project, a project another
+open sprint holds — stays a judgement of `SprintWriter.create` reached through the layer, and the
+transport only shows what it was told. Either way the form comes back with every value that was
+submitted still in it, under the same request id.
+
+**A submission is idempotent because the id is the form's.** It is minted once, when the form is
+served, and travels in the markup the browser holds; a double click, a retried POST and a
+reconnected client therefore all carry the same one and reach the sprint the layer already opened.
+A success is a **303** to `/sprints/{ref}`, so the address bar ends on the sprint and a refresh
+re-reads it rather than re-posting. A partial failure (`OperationPending`) is rendered on the form
+as what it is: the sprint exists, submitting this same form again is safe, and starting over with a
+new form would open a second sprint. No lock is introduced anywhere.
+
+**There is no "start" button, because there is no start action.** Opening a sprint with an observer
+is the whole of starting it; the sprint page reads where it got to from `observer.launch.state`,
+whose five states it renders in words — not in colour alone — so that "saved and no observer yet",
+"an observer is up" and "this could not be read at all" cannot be confused on the page an operator
+opens to tell them apart.
+
+### Who may make a mutation
+
+Every POST is checked once, in `WebApp.handle`, before a handler is chosen and therefore before any
+operation of the layer can run. A rule written per route is a rule the next route forgets, so there
+is exactly one and it covers `/api/runs/start` and `/api/runs/review` as much as `/sprints`.
+
+The rule is the one a browser makes checkable. A browser sends `Origin` on every request whose
+method is not GET or HEAD — on its own pages' requests as much as on somebody else's — so a POST
+whose `Origin` names an authority other than the `Host` it was addressed to came from a page this
+service did not serve, and is refused **403** before any operation runs. Two properties of the shape
+are load-bearing:
+
+* **no `Origin` at all is not a browser**, and it keeps working: `secretary web-run`, `curl` and the
+  diagnostics in [Operations](OPERATIONS.md#the-local-web-transport) send none, and cross-origin is
+  a browser's problem precisely because a browser is what attaches somebody's credentials to a
+  request they did not make. `Origin: null` is refused, because that *is* a browser saying its page
+  came from somewhere opaque;
+* **the comparison is authority, never scheme**: the front terminates TLS and proxies to
+  `127.0.0.1` over plain HTTP, so a genuine `https://host` origin arrives at a process that would
+  call itself `http`. Comparing schemes would refuse every real request through the published front.
+
+Reads are not asked: a GET is a read of this service whoever linked to it, and the password at the
+front is what decides whether it may be read at all. `Content-Security-Policy` carries the same
+rule from the other side — `form-action 'self'`, so a page served here may submit to this service
+and to nowhere else.
 
 ### Protocol code to HTTP status
 

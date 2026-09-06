@@ -4,7 +4,13 @@ This module is the transport in the literal sense: it turns a request line into 
 one operation of :mod:`secretary.webproto`, and turns what comes back into JSON or into a page. It
 holds no session, no cache and no state between requests — the cursor a client watches a card with
 is the client's, which is why a reload and a reconnect resume rather than restart, and why two
-browsers watching the same card cannot disturb each other.
+browsers watching the same card cannot disturb each other. The same rule covers the sprint form:
+the request id that makes a submission idempotent lives in the form the browser holds, and this
+process remembers nothing between the two requests that would let it invent a second one.
+
+The one thing this module decides for itself is who may make a mutation, and it decides it in one
+place on the POST path rather than per route (:func:`cross_origin_reason`). Everything else it is
+handed.
 
 The route table is the surface, all of it, and it is a table so that it can be read and asserted
 against. Every entry names an operation that already exists. There is no entry that takes a
@@ -15,10 +21,11 @@ is 404 and an unrouted method on a routed path is 405, neither of which reaches 
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, quote, unquote
 
 from secretary.web import pages
 from secretary.web.statuses import status_for
@@ -32,6 +39,14 @@ MAX_BODY_BYTES = 64 * 1024
 
 JSON_TYPE = "application/json; charset=utf-8"
 HTML_TYPE = "text/html; charset=utf-8"
+FORM_TYPE = "application/x-www-form-urlencoded"
+
+#: The two body encodings a route may declare. A JSON object is what a program sends; a submitted
+#: form is what a browser sends, and it is the encoding the sprint form uses so that the page works
+#: as a page -- the request id it carries is in the markup the browser holds, which is exactly what
+#: makes a double click, a retry and a reconnection one sprint rather than three.
+JSON_BODY = "json"
+FORM_BODY = "form"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +68,12 @@ class Route:
     handler: str
     #: The layer call this route is a transport for, named so the table reads as the contract it is.
     operation: str
+    #: How a body arrives here: a JSON object, or a submitted HTML form. Both are read into the
+    #: same shape and both are held to the same closed field list; what differs is the decoding.
+    body: str = JSON_BODY
+    #: Whether this route answers a person or a program. A refusal on a page route is rendered as
+    #: a page carrying the same status, so a browser shows the reason instead of a blank body.
+    page: bool = False
 
     @property
     def segments(self) -> tuple[str, ...]:
@@ -61,8 +82,11 @@ class Route:
 
 #: The whole externally reachable surface of this service.
 ROUTES: tuple[Route, ...] = (
-    Route("GET", "/", "dashboard", "reads.system_snapshot"),
-    Route("GET", "/tasks/{ref}", "task_page", "reads.task_snapshot"),
+    Route("GET", "/", "dashboard", "reads.system_snapshot", page=True),
+    Route("GET", "/tasks/{ref}", "task_page", "reads.task_snapshot", page=True),
+    Route("GET", "/sprints/new", "sprint_form", "sprint_reads.sprint_options", page=True),
+    Route("POST", "/sprints", "sprint_create", "sprint_ops.sprint_create", body=FORM_BODY, page=True),
+    Route("GET", "/sprints/{ref}", "sprint_page", "sprint_reads.sprint_state", page=True),
     Route("GET", "/api/system", "system", "reads.system_snapshot"),
     Route("GET", "/api/tasks/{ref}", "task", "reads.task_snapshot"),
     Route("GET", "/api/tasks/{ref}/events", "events", "reads.task_events"),
@@ -78,23 +102,67 @@ ROUTES: tuple[Route, ...] = (
 #: second, undocumented surface.
 START_FIELDS = frozenset({"ref", "request_id", "profile", "instruction"})
 REVIEW_FIELDS = frozenset({"ref", "request_id", "profile", "worker_run_id"})
+SPRINT_FIELDS = frozenset(
+    {
+        "request_id",
+        "product",
+        "goal",
+        "definition_of_done",
+        "issues",
+        "projects",
+        "observer",
+        "worker",
+        "reviewer",
+    }
+)
+
+#: The role and the actor a sprint opened from here is opened under. The web has no identity of its
+#: own -- the front checks one password belonging to the owner -- so it says which of the roles
+#: `SprintWriter.create` admits it is acting as, and names itself as the actor so the sprint's audit
+#: says where the create came from rather than pretending to be a CLI.
+SPRINT_ROLE = "po"
+SPRINT_ACTOR = "web"
+
+#: The value the two executor selects carry when the owner leaves the role to the observer. It is
+#: the empty option of an HTML select and never a profile name: the handler turns it into `None`,
+#: which is the layer's spelling for "nothing was said about this role". See criterion 4.
+EXECUTOR_UNPINNED = ""
 
 
 class WebApp:
-    """The routing half, built over one read layer and one operation layer.
+    """The routing half, built over the read, operation and sprint layers.
 
-    Both are handed in rather than constructed here, which is what lets a test drive every route
-    against a fake board and a fake head backend with no socket, no Orca and no live installation.
+    All four are handed in rather than constructed here, which is what lets a test drive every
+    route against fakes with no socket, no Orca and no live installation. None of them is
+    optional: a layer a route needs is a fact about how this application was built, so an
+    application missing one fails where it was built rather than on the first request that
+    reaches that route.
     """
 
-    def __init__(self, reads: Any, ops: Any) -> None:
+    def __init__(self, reads: Any, ops: Any, sprint_reads: Any, sprint_ops: Any) -> None:
         self.reads = reads
         self.ops = ops
+        self.sprint_reads = sprint_reads
+        self.sprint_ops = sprint_ops
 
     # -- the entry point -------------------------------------------------------------------
 
-    def handle(self, method: str, path: str, *, query: str = "", body: bytes = b"") -> Response:
-        """One request, answered. The only place a protocol code becomes a status."""
+    def handle(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: str = "",
+        body: bytes = b"",
+        headers: Any = None,
+    ) -> Response:
+        """One request, answered. The only place a protocol code becomes a status.
+
+        The cross-origin check is here and only here. It is asked once, of every POST, before a
+        handler is chosen and therefore before any operation of the layer can run -- which is the
+        whole of it: a rule written per route is a rule the next route forgets, and the two routes
+        that already start heads would have been exactly the ones nobody went back to.
+        """
         route, params = self.match(method, path)
         if route is None:
             return self._refuse(
@@ -104,9 +172,13 @@ class WebApp:
                 code=params["code"],
                 message=params["message"],
             )
+        if route.method == "POST":
+            reason = cross_origin_reason(headers)
+            if reason is not None:
+                return self._deny(route, status=403, code="cross_origin", message=reason)
         handler: Callable[..., Response] = getattr(self, f"_{route.handler}")
         try:
-            payload = _body(body) if route.method == "POST" else {}
+            payload = _payload(route, body)
             return handler(params, _query(query), payload)
         except ReadError as exc:
             return self._error(route, exc)
@@ -211,13 +283,109 @@ class WebApp:
         except ReadError as exc:
             return {"available": False, "reason": exc.message, "items": []}
 
+    # -- sprint routes ---------------------------------------------------------------------
+
+    def _sprint_form(self, _params, _query, _body) -> Response:
+        """The empty form, on this installation's own catalogue.
+
+        The request id is minted here rather than by the browser, and it is minted once per form:
+        it is what the submission carries back, so it is a property of *this* form and not of each
+        POST somebody makes from it. A reload of this page is a new intention and gets a new id; a
+        second submission of the page already open is the same intention and gets the same one.
+        """
+        return _html(
+            200,
+            pages.sprint_form(
+                self.sprint_reads.sprint_options(),
+                submitted=_blank_submission(_request_id()),
+                errors={},
+            ),
+        )
+
+    def _sprint_create(self, _params, _query, body) -> Response:
+        """One submission: refuse what is incomplete, hand the rest down, and go to the sprint.
+
+        Two kinds of refusal, and they are not the same kind of thing. A field the form itself
+        requires -- no goal, no definition of done, no observer, no issue, no project -- is answered
+        here, named field by field, because the person is looking at the form and can fix it. What a
+        sprint *may be* is never decided here: an unknown profile, a closed issue, an unregistered
+        project and a project another sprint holds are the writer's judgements, reached through the
+        layer, and what this does with them is show what it was told beside the values the person
+        typed.
+
+        Success is a redirect and not a rendered page, so the address bar ends up on the sprint and
+        a refresh re-reads it rather than re-posting the form.
+        """
+        _fields(body, SPRINT_FIELDS, "sprint create")
+        submitted = _submission(body)
+        errors = _incomplete(submitted)
+        if errors:
+            return self._form_again(submitted, errors=errors, status=400)
+        try:
+            created = self.sprint_ops.sprint_create(
+                request_id=submitted["request_id"],
+                actor=SPRINT_ACTOR,
+                role=SPRINT_ROLE,
+                product=submitted["product"],
+                goal=submitted["goal"],
+                definition_of_done=submitted["definition_of_done"],
+                issues=list(submitted["issues"]),
+                projects=list(submitted["projects"]),
+                observer=submitted["observer"],
+                worker=_pin(submitted["worker"]),
+                reviewer=_pin(submitted["reviewer"]),
+            )
+        except ReadError as exc:
+            return self._form_again(submitted, errors={}, status=status_for(exc.code), refusal=exc)
+        reference = str((created.get("sprint") or {}).get("ref") or "")
+        return _redirect(f"/sprints/{quote(reference)}")
+
+    def _sprint_page(self, params, _query, _body) -> Response:
+        return _html(200, pages.sprint(self.sprint_reads.sprint_state(params["ref"])))
+
+    def _form_again(
+        self,
+        submitted: dict[str, Any],
+        *,
+        errors: dict[str, str],
+        status: int,
+        refusal: ReadError | None = None,
+    ) -> Response:
+        """The form the person just submitted, with what was refused and everything they typed.
+
+        The catalogue is read again because the form is rendered again, and a catalogue that cannot
+        be read must not replace the refusal on the screen with its own: the reason the submission
+        was refused is the thing being answered, so an unreadable catalogue is shown beside it as a
+        section that could not be read rather than raised over the top of it.
+        """
+        try:
+            options, catalogue = self.sprint_reads.sprint_options(), None
+        except ReadError as exc:
+            options, catalogue = None, exc.message
+        return _html(
+            status,
+            pages.sprint_form(
+                options,
+                submitted=submitted,
+                errors=errors,
+                refusal=None if refusal is None else refusal.to_json(),
+                catalogue=catalogue,
+            ),
+        )
+
     # -- failures --------------------------------------------------------------------------
 
     def _error(self, route: Route, exc: ReadError) -> Response:
         status = status_for(exc.code)
-        if route.handler in {"dashboard", "task_page"}:
+        if route.page:
             return _html(status, pages.error(status, exc.code, exc.message))
         return _json(status, {"error": exc.to_json()})
+
+    def _deny(self, route: Route, *, status: int, code: str, message: str) -> Response:
+        """A refusal this transport made itself, in the shape the route answers in."""
+        if route.page:
+            return _html(status, pages.error(status, code, message))
+        return _json(status, {"error": {"code": code, "message": message}})
 
     def _refuse(self, method: str, path: str, *, status: int, code: str, message: str) -> Response:
         if status == 404 and method.upper() == "GET" and not path.startswith("/api/"):
@@ -270,6 +438,31 @@ def _events_count(query: dict[str, list[str]]) -> int:
     return _int(query, "events", TASK_SNAPSHOT_EVENTS, ceiling=MAX_LIMIT)
 
 
+def _payload(route: Route, raw: bytes) -> dict[str, Any]:
+    """The body of this request, decoded the way this route says its clients send one."""
+    if route.method != "POST":
+        return {}
+    return _form(raw) if route.body == FORM_BODY else _body(raw)
+
+
+def _form(raw: bytes) -> dict[str, Any]:
+    """A submitted HTML form, as the fields it carries.
+
+    A field a form submits more than once -- the issues and the projects a sprint serves -- is a
+    list, and one submitted once is the string it carries. `keep_blank_values` is on because an
+    empty field is an answer: the executor selects are submitted empty when the owner leaves the
+    role to the observer, and dropping them here would make "nothing was said" indistinguishable
+    from "this browser sent no such field at all".
+    """
+    if len(raw) > MAX_BODY_BYTES:
+        raise ValidationRefused(f"this request body is larger than the {MAX_BODY_BYTES} bytes accepted here")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationRefused(f"this form is not UTF-8 text: {exc}") from None
+    return {name: values for name, values in parse_qs(text, keep_blank_values=True).items()}
+
+
 def _body(raw: bytes) -> dict[str, Any]:
     if len(raw) > MAX_BODY_BYTES:
         raise ValidationRefused(f"this request body is larger than the {MAX_BODY_BYTES} bytes accepted here")
@@ -308,6 +501,146 @@ def _text(value: Any) -> str:
     return value
 
 
+# -- the sprint submission ----------------------------------------------------------------------
+
+
+def _submission(form: dict[str, Any]) -> dict[str, Any]:
+    """One form as the sprint create's own vocabulary, and as what to put back in the boxes.
+
+    This is deliberately the only shape the handler and the page both know: the person's answers,
+    whatever became of them. So a refused submission is re-rendered from the same object that was
+    sent down, and no field can be lost on the way back by being read out of two different places.
+    """
+    return {
+        "request_id": _first(form, "request_id"),
+        "product": _first(form, "product"),
+        "goal": _first(form, "goal"),
+        "definition_of_done": _first(form, "definition_of_done"),
+        "issues": _all(form, "issues"),
+        "projects": _all(form, "projects"),
+        "observer": _first(form, "observer"),
+        "worker": _first(form, "worker"),
+        "reviewer": _first(form, "reviewer"),
+    }
+
+
+def _blank_submission(request_id: str) -> dict[str, Any]:
+    submission = _submission({})
+    submission["request_id"] = request_id
+    return submission
+
+
+def _first(form: dict[str, Any], name: str) -> str:
+    values = _all(form, name)
+    return values[-1] if values else ""
+
+
+def _all(form: dict[str, Any], name: str) -> list[str]:
+    raw = form.get(name)
+    values = raw if isinstance(raw, list) else [] if raw is None else [raw]
+    for value in values:
+        if not isinstance(value, str):
+            raise ValidationRefused("every field of a submitted form is text")
+    return [value.strip() for value in values if str(value).strip()]
+
+
+#: What the form itself requires, and the words each one is refused with. These are the four
+#: emptinesses a person can see on their own screen; everything about whether a filled-in value is
+#: *admissible* belongs to the writer and is never re-decided here.
+_REQUIRED: tuple[tuple[str, str], ...] = (
+    ("request_id", "this submission carries no request id, so it cannot be repeated safely; open the form again"),
+    ("product", "choose the product this sprint serves"),
+    ("goal", "say what this sprint is for; a sprint with no goal cannot be reviewed against one"),
+    ("definition_of_done", "say what would make this sprint done"),
+    ("issues", "choose at least one open issue of that product for this sprint to serve"),
+    ("projects", "choose at least one registered project for this sprint to reserve"),
+    ("observer", "choose the observer head that will run this sprint"),
+)
+
+
+def _incomplete(submitted: dict[str, Any]) -> dict[str, str]:
+    return {name: reason for name, reason in _REQUIRED if not submitted.get(name)}
+
+
+def _pin(value: str) -> str | None:
+    """One executor select, as the layer spells it: a profile, or nothing said about the role.
+
+    The empty option means the observer chooses, and `None` is how the layer is told so -- the row
+    is then written with no field for that role at all. An empty string must never travel down as
+    if it were a profile name, which is the whole reason this is a function and not an inline
+    `or`.
+    """
+    text = str(value or "").strip()
+    return None if text == EXECUTOR_UNPINNED else text
+
+
+def _request_id() -> str:
+    """The id one form carries for its whole life. See :meth:`WebApp._sprint_form`."""
+    return f"web-sprint-{uuid.uuid4()}"
+
+
+# -- who may make a mutation ----------------------------------------------------------------------
+
+#: Said to a browser whose page came from somewhere else. Quoted into the refusal so the reason is
+#: on the screen rather than only in a status number.
+CROSS_ORIGIN_REFUSAL = (
+    "this request was made from a page this service did not serve, so it is refused before any "
+    "operation runs; open the page from this service's own address and submit it there"
+)
+
+
+def cross_origin_reason(headers: Any) -> str | None:
+    """Why this POST is refused as cross-origin, or `None` if it may proceed.
+
+    The rule is the one a browser makes checkable: a browser sends `Origin` on every request whose
+    method is not GET or HEAD, on its own requests as much as on somebody else's, so a POST that
+    carries an origin naming a host other than the one it was addressed to came from a page this
+    service did not serve. That is refused here, before a handler exists.
+
+    Two properties of the shape are load-bearing:
+
+    **A request with no `Origin` at all is not a browser**, and it keeps working. `secretary
+    web-run`, `curl` and the diagnostics in OPERATIONS.md send none, and refusing them would break
+    the loopback client this service is operated with while defending nothing: cross-origin is a
+    browser's problem precisely because a browser is the thing that attaches somebody else's
+    credentials to a request the person did not make.
+
+    **The comparison is host and port, never scheme.** The front terminates TLS and proxies to
+    `127.0.0.1` over plain HTTP, so a genuine `https://host` origin arrives at a process that would
+    call itself `http`. Comparing schemes would refuse every real request through the published
+    front; comparing the authority is what the check is actually about.
+    """
+    origin = _header(headers, "Origin")
+    if not origin:
+        return None
+    if origin.strip().lower() == "null":
+        return CROSS_ORIGIN_REFUSAL
+    host = _header(headers, "Host")
+    if not host:
+        return CROSS_ORIGIN_REFUSAL
+    return None if _authority(origin) == host.strip().lower() else CROSS_ORIGIN_REFUSAL
+
+
+def _authority(origin: str) -> str:
+    """The `host:port` of an origin, with the scheme dropped. See :func:`cross_origin_reason`."""
+    text = origin.strip().lower()
+    _scheme, separator, rest = text.partition("://")
+    return (rest if separator else text).split("/")[0]
+
+
+def _header(headers: Any, name: str) -> str:
+    """One header, from whatever the caller was handed: a mapping, or `http.client.HTTPMessage`."""
+    if headers is None:
+        return ""
+    getter = getattr(headers, "get", None)
+    if getter is None:
+        return ""
+    value = getter(name)
+    if value is None:
+        value = getter(name.lower())
+    return str(value or "")
+
+
 # -- responses ----------------------------------------------------------------------------------
 
 
@@ -317,3 +650,15 @@ def _json(status: int, document: Any) -> Response:
 
 def _html(status: int, markup: str) -> Response:
     return Response(status, markup.encode("utf-8"), HTML_TYPE)
+
+
+def _redirect(location: str) -> Response:
+    """See the thing that was made, at its own address.
+
+    303 and not 302: the browser is told to *get* what the POST produced, so the address bar ends
+    on the sprint and a refresh re-reads it. A form that answered a submission with a rendered page
+    would leave the browser holding a POST it can be asked to repeat, which is the one thing the
+    request id exists to make harmless and the one thing a person should not have to rely on it
+    for.
+    """
+    return Response(303, pages.redirect(location).encode("utf-8"), HTML_TYPE, {"Location": location})

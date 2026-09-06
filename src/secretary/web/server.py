@@ -86,7 +86,9 @@ class _Handler(BaseHTTPRequestHandler):
     """The thinnest adapter there is: request line in, `WebApp.handle` out.
 
     It decides nothing. Every status it writes was decided by the application, which took it from
-    the one code-to-status table, and every body it writes was produced there too.
+    the one code-to-status table, and every body it writes was produced there too. The request
+    headers are handed over unread for the same reason: whether a POST may be answered at all is
+    the application's single cross-origin check, not a rule this adapter gets its own copy of.
     """
 
     protocol_version = "HTTP/1.1"
@@ -109,7 +111,9 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._write(413, str(exc).encode("utf-8"), "text/plain; charset=utf-8", head=False)
             return
-        response = self.server.app.handle(method, path, query=query, body=body)
+        response = self.server.app.handle(
+            method, path, query=query, body=body, headers=self.headers
+        )
         self._write(response.status, response.body, response.content_type, head=head, extra=response.headers)
 
     def _read_body(self) -> bytes:
@@ -136,10 +140,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         # No frame, no third party, no script this service did not serve itself: the pages are one
-        # file each and load nothing from anywhere.
+        # file each and load nothing from anywhere. `form-action 'self'` is what the sprint form
+        # needs and is the whole of what it needs: a form on these pages may submit to this service
+        # and to nowhere else, which is the same promise `'none'` made for pages that had no form.
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'",
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'",
         )
         for name, value in (extra or {}).items():
             self.send_header(name, value)
