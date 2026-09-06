@@ -2012,6 +2012,91 @@ any other name) to a routable address is refused rather than published; the addr
 produced is the one bound, so nothing resolves the name a second time.
 
 
+
+### Running a card through the installed service
+
+The two POST routes are the whole of it, and both are reached through the front rather than on
+loopback: the demonstration below is exactly what an owner does from a browser, written as `curl`
+so that it can be pasted. `~/.secretary-owner.curlrc` is a mode-0600 file holding
+`user = "owner:..."` and `cacert = "~/secretary-data/webfront/caddy/pki/authorities/local/root.crt"`,
+so the password never appears in a command line, in a shell history or in a process listing.
+
+```bash
+F=https://5uoc.l.time4vps.cloud
+K=~/.secretary-owner.curlrc
+
+# 1. a card this installation may run: a registered project, no open sprint reserving it, Issues
+curl -sS -K $K "$F/api/tasks/REF" | python3 -m json.tool | head -30
+
+# 2. raise the worker. `request_id` is the client's, and it is what makes a retry safe
+curl -sS -K $K -H 'Content-Type: application/json' "$F/api/runs/start" \
+  -d '{"ref":"REF","request_id":"ID","profile":"codex-product-worker-local-pty","instruction":"..."}'
+
+# 3. watch it. A reload of /tasks/REF resumes; so does the same GET from a kept cursor
+curl -sS -K $K "$F/api/runs/RUN" | python3 -m json.tool
+
+# 4. review it, by its result, once it has ended
+curl -sS -K $K -H 'Content-Type: application/json' "$F/api/runs/review" \
+  -d '{"request_id":"ID2","profile":"claude-product-reviewer-local-pty","worker_run_id":"RUN"}'
+```
+
+**The profiles are installation configuration, not code.** The service reads this installation's own
+head registry, so a product run can only name a profile in
+`~/secretary-instance/heads/heads.yaml`. Three of them exist for this path, and each declares
+`runtime = "local-pty"` because the product runtime raises no other kind — a profile naming Orca's
+backend is refused by name rather than quietly run under a backend it did not declare:
+
+| profile | what it is |
+| --- | --- |
+| `codex-product-worker-local-pty` | the worker: the Codex head `codex-high-tui` is, held by this product |
+| `claude-product-reviewer-local-pty` | the reviewer, across the family line from the worker |
+| `hermes-product-failing-local-pty` | the failure path: a head whose own binary refuses its configuration and exits non-zero, so a refusal can be demonstrated on a real head rather than in a fixture. It reaches no API and is named by no role default |
+
+None of the three is named by `role_defaults` or by any fallback chain, so the production dispatcher
+never selects one.
+
+**Repeating a request is safe and is the intended recovery.** A `request_id` owns one operation made
+with one set of inputs: the same POST again returns the run that already exists — same run id, same
+pid, same workspace, no second process — and a repeat naming different inputs is refused rather than
+answered with somebody else's run. A browser that reloaded, a client that reconnected and a command
+that was retried all take that same path.
+
+**What a card page says about a run.** The state column is what the *process* did — `running`,
+`finished`, `process_failed`, `source_unavailable`, `unknown` — with `(open)` or `(over)` beside it;
+the outcome column is what the run *produced*: the reviewer's verdict when it wrote one, the head's
+own result summary, and the exit status the supervisor recorded. A failure therefore reads as a
+failure and never as a run with nothing to show, which is a different thing and says so.
+
+### Updating the service
+
+```bash
+# the code: after the product checkout moves, restart the transport (the front follows it)
+sudo systemctl restart secretary-web.service
+
+# the head profiles: edit the canonical registry, then regenerate the pair the standard way
+$EDITOR ~/secretary-instance/heads/heads.toml
+cd ~/secretary && python3 -P -m secretary upgrade --instance ~/secretary-instance --no-pull
+sudo systemctl restart secretary-web.service
+```
+
+Two things about that second one are worth knowing before it surprises somebody.
+
+**Never edit `heads/heads.yaml` by hand.** It is a generated snapshot and `heads/source.yaml` pins
+its `snapshot_sha256`; an edited snapshot no longer matches its pin and the live tick rejects the
+pair. `secretary upgrade` regenerates both from `heads.toml` and commits them to the instance repo.
+
+**The registry is read once per process.** `secretary-web.service` is long-lived, so a profile added
+while it is running is invisible to it until it is restarted. A `validation` refusal saying a
+profile "is not launchable" right after a registry change is almost always this.
+
+> **Known: `secretary upgrade` stops at its `host` step on this installation** with `unowned names
+> in our namespace: codegen-product-kit, secretary-web-front.service, secretary-web.service`. The
+> two web units were installed ahead of the host manifest that would own them, so reconcile sees
+> resources in its namespace it has no record of and refuses rather than adopting them. Everything
+> before that step — including the head registry regeneration and its checkpoint — completes; the
+> steps after it (`automations`, `memory`, `verify`) do not run. Adopting the units into
+> `~/secretary-data/host-managed.json` is what clears it.
+
 ## The published web front
 
 `secretary-web-front.service` is how the owner reaches the pipeline from a browser: Caddy, installed

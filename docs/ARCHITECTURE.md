@@ -377,6 +377,22 @@ requested name and refusing unless every address it resolves to is loopback, sin
 would let a host's own mappings publish it. DoD 5 did not touch that refusal, and the reason is
 below.
 
+**What a page shows about a run, and why it is two columns.** A run carries two answers that are
+not one: what its *process* did — one of the read layer's five values, with whether the run is over
+beside it — and what the run *produced*, which is the head's own result document, the verdict on it
+when there is one, and the exit status its supervisor recorded. Drawn as one column they collapse:
+a review that called the work `red` and a review that called it `green` both ended normally, so the
+state word is identical and the only thing a card page is opened to find out is missing. Drawn
+apart, a failed run reads as a failure carrying its exit status, and never as a run with nothing to
+show — which is what an open run has, and a different thing.
+
+**It is installed, and the profiles it runs on are installation configuration.** `secretary-web.service`
+runs this transport on `127.0.0.1:8787` and the guarded front publishes it; a product run started
+through the front names a profile from this installation's own head registry, and only one that
+declares the supervised backend. So which head does the work is a registry entry rather than a code
+path, and the scenario reproduces from the installation instead of from a file in somebody's
+checkout.
+
 Its routes, its code-to-status table and its cursor semantics are in
 [Protocols](PROTOCOLS.md#serving-the-pipeline-locally); running and stopping it is in
 [Operations](OPERATIONS.md#the-local-web-transport).

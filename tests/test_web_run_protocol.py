@@ -16,6 +16,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -1375,7 +1376,80 @@ class LifecycleTests(ProductRuntimeFixture):
         self.assertEqual(self.start(request_id="req-after")["state"]["value"], "running")
 
 
-class RealHeadOwnershipTests(ProductRuntimeFixture):
+class RealHeadFixture(ProductRuntimeFixture):
+    """The pieces the two real-head suites below share: a real backend, and nothing left running.
+
+    Everywhere else in this file the backend is a double, deliberately: a unit test must not raise
+    real agents. These two suites are the exceptions, and they are exceptions for two different
+    claims -- that a record alone can end a real process, and that a real head's result and exit
+    status reach the product's own documents -- so the fixture is here and the claims are apart.
+    """
+
+    #: A real process on a real terminal, and deliberately not an agent. The same child the
+    #: substrate's own suite proves process ownership with.
+    CHILD_COMMAND = f"{sys.executable} -u {REPO_ROOT / 'tests' / 'fixtures' / 'local_pty_child.py'}"
+
+    #: The child that publishes a result and the one that refuses: see its own docstring.
+    PRODUCT_CHILD = f"{sys.executable} -u {REPO_ROOT / 'tests' / 'fixtures' / 'product_run_child.py'}"
+
+    def real_backend(self):
+        """The real supervised backend, over this fixture's own data directory, reaped afterwards."""
+        from secretary.dispatcher_watchdog import head_process_status
+        from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
+
+        root = self.data_dir / "webproto" / "heads"
+        self.addCleanup(self._reap, root)
+        return root, LocalPtyHeadRuntime(root, head_process_status=head_process_status)
+
+    @contextlib.contextmanager
+    def commands(self, *rendered: str):
+        """Run the block with each bring-up given the next of these commands, in order.
+
+        Which binary a head is, is configuration -- this card's own words -- so it is the one thing
+        substituted here. Everything the claims are about (the record, the ordering, the backend,
+        the result file, the exit status, the stop and its confirmation) is real.
+        """
+        from triggered_agents.runtime.head.command import HeadCommand
+
+        pending = list(rendered)
+
+        def render(profile, **kwargs):
+            return HeadCommand(command=pending.pop(0), adapter="claude")
+
+        with (
+            mock.patch.object(lifecycle_module, "CLAUDE_JSON", self.tmp / "claude.json"),
+            mock.patch.object(lifecycle_module, "render_head_command", render),
+        ):
+            yield
+        self.assertEqual(pending, [], "every rendered command was used")
+
+    # -- keeping a real process out of the rest of the suite ------------------------------------
+
+    def _await(self, predicate, message: str, *, timeout: float = 15.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.02)
+        self.assertTrue(predicate(), message)
+
+    def _reap(self, root: Path) -> None:
+        """Leave no process behind, whatever the test did or failed to do."""
+        for run_dir in sorted(root.glob("*")) if root.is_dir() else []:
+            for name, group in (("head.pid", True), ("supervisor.pid", False)):
+                try:
+                    raw = (run_dir / name).read_text(encoding="utf-8")
+                    pid = int(json.loads(raw)["pid"] if name.endswith(".pid") and raw.strip().startswith("{") else raw)
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+                for number in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(pid, number) if group else os.kill(pid, number)
+                    except OSError:
+                        break
+
+
+class RealHeadOwnershipTests(RealHeadFixture):
     """The outermost claim of this card, executed rather than derived.
 
     Everywhere else the backend is a double, deliberately: a unit test must not raise real agents.
@@ -1392,10 +1466,6 @@ class RealHeadOwnershipTests(ProductRuntimeFixture):
     is about -- the record, the write-ahead ordering, the backend, the stop and its confirmation --
     is real.
     """
-
-    #: A real process on a real terminal, and deliberately not an agent. The same child the
-    #: substrate's own suite proves process ownership with.
-    CHILD_COMMAND = f"{sys.executable} -u {REPO_ROOT / 'tests' / 'fixtures' / 'local_pty_child.py'}"
 
     def test_a_real_head_is_stopped_by_a_record_recovered_from_the_store(self) -> None:
         from secretary.dispatcher_watchdog import (
@@ -1468,30 +1538,140 @@ class RealHeadOwnershipTests(ProductRuntimeFixture):
         self.assertIn(RUN_EXITED, [record.get("kind") for record in head_run_journal(run_dir)])
         self.assertFalse(_alive(head_pid), "the head's process is gone")
 
-    # -- keeping a real process out of the rest of the suite ------------------------------------
 
-    def _await(self, predicate, message: str, *, timeout: float = 15.0) -> None:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if predicate():
-                return
-            time.sleep(0.02)
-        self.assertTrue(predicate(), message)
 
-    def _reap(self, root: Path) -> None:
-        """Leave no process behind, whatever the test did or failed to do."""
-        for run_dir in sorted(root.glob("*")) if root.is_dir() else []:
-            for name, group in (("head.pid", True), ("supervisor.pid", False)):
-                try:
-                    raw = (run_dir / name).read_text(encoding="utf-8")
-                    pid = int(json.loads(raw)["pid"] if name.endswith(".pid") and raw.strip().startswith("{") else raw)
-                except (OSError, ValueError, KeyError, TypeError):
-                    continue
-                for number in (signal.SIGTERM, signal.SIGKILL):
-                    try:
-                        os.killpg(pid, number) if group else os.kill(pid, number)
-                    except OSError:
-                        break
+#: What the real children below publish: a worker's report and a reviewer's verdict, in the shape
+#: the product tells a head to write.
+REAL_RESULT = {"status": "done", "summary": "a line was added to README.md", "changed": ["README.md"]}
+REAL_VERDICT = {"verdict": "green", "summary": "the work stands", "findings": []}
+
+
+class RealBackendContractTests(RealHeadFixture):
+    """`run_start` and `run_review` over the **real** head backend, not over a double.
+
+    secretary-1564 left this open and said so: every failing-backend case in this file was
+    hermetic, the Kanboard and the head runtime under those cases were fakes, and the premise that
+    the real backend honours this layer's contract was therefore assumed rather than checked. The
+    three tests below are that premise, executed. Each of them raises a real process on a real
+    terminal under `LocalPtyHeadRuntime`, through this product's own operations, and reads the
+    answer out of the documents those operations publish:
+
+    * a head that **publishes a result** and is then ended by the product that owns it is
+      `finished`, and the result it wrote is in the document;
+    * a head that **exits non-zero on its own** is `process_failed` carrying that exit status, and
+      is told apart from both a success and a run nothing is known about -- the failure case the
+      published web has to draw as a refusal;
+    * a **review is raised by a real worker's result**, in the worker's own workspace, and its
+      verdict is read off the reviewer's own result file.
+
+    Only the binary each head is gets substituted, which this card calls configuration. The record,
+    the ordering, the backend, the workspace, the result file, the exit status, the stop and its
+    confirmation are all real.
+    """
+
+    def test_a_real_head_that_published_a_result_finishes_and_is_ended_by_its_owner(self) -> None:
+        root, backend = self.real_backend()
+        layer = self.layer(runtime_factory=lambda _root: backend)
+        with self.commands(self._publishing(REAL_RESULT)):
+            started = layer.run_start(
+                "secretary-run-1", request_id="req-real-result", profile=REVIEWER_PROFILE
+            )
+        run_id = started["run"]["run_id"]
+        self.assertEqual(started["state"]["value"], "running")
+
+        stored = RunStore(self.data_dir).get(run_id)
+        self.assertEqual(Path(stored.result_path).parent, root / run_id)
+        self._await(
+            lambda: Path(stored.result_path).exists(), "the head never published its result file"
+        )
+
+        # The product owns the process, so the read that sees a published result ends the head.
+        document = layer.run_state(run_id)
+        self.assertEqual(document["state"]["value"], "finished")
+        self.assertTrue(document["state"]["ended"])
+        self.assertEqual(document["state"]["result"]["value"], REAL_RESULT)
+        ended = RunStore(self.data_dir).get(run_id)
+        self.assertFalse(_alive(ended.head_pid), "the head this product owned is gone")
+        self.assertIn(RUN_EXITED, [record.get("kind") for record in _journal_of(root / run_id)])
+
+    def test_a_real_head_that_exits_non_zero_is_a_failure_and_not_a_success(self) -> None:
+        _root, backend = self.real_backend()
+        layer = self.layer(runtime_factory=lambda _root: backend)
+        with self.commands(f"{self.PRODUCT_CHILD} exit 7"):
+            started = layer.run_start(
+                "secretary-run-1", request_id="req-real-failure", profile=REVIEWER_PROFILE
+            )
+        run_id = started["run"]["run_id"]
+        self._await(
+            lambda: layer.run_state(run_id)["state"]["ended"], "the head never ended", timeout=30.0
+        )
+
+        document = layer.run_state(run_id)
+        state = document["state"]
+        # The three things a refusal has to be told apart from, and it is told apart from each.
+        self.assertEqual(state["value"], "process_failed")
+        self.assertTrue(state["ended"])
+        self.assertEqual(state["exit"]["code"], 7)
+        self.assertIn("7", state["reason"])
+        self.assertFalse(state["result"]["present"])
+        self.assertIsNone(state["result"]["verdict"])
+        # And it is on the card's own history as an ending, once.
+        finished = [
+            event
+            for event in self.reads().task_events("secretary-run-1", None)["items"]
+            if event["kind"] == run_events.FINISHED
+        ]
+        self.assertEqual(len(finished), 1)
+        # The journal's own two-valued field says the work did not get done; the state beside it
+        # says what the process did. Neither stands in for the other.
+        self.assertEqual(finished[0]["outcome"], "failure")
+        self.assertEqual(finished[0]["data"]["state"], "process_failed")
+        self.assertEqual(finished[0]["data"]["exit"]["code"], 7)
+
+    def test_a_real_review_is_raised_over_a_real_worker_run_in_its_workspace(self) -> None:
+        root, backend = self.real_backend()
+        layer = self.layer(runtime_factory=lambda _root: backend)
+        with self.commands(self._publishing(REAL_RESULT), self._publishing(REAL_VERDICT)):
+            worker = layer.run_start(
+                "secretary-run-1", request_id="req-real-worker", profile=REVIEWER_PROFILE
+            )["run"]["run_id"]
+            self._await(
+                lambda: layer.run_state(worker)["state"]["ended"],
+                "the worker never ended",
+                timeout=30.0,
+            )
+            review = layer.run_review(
+                request_id="req-real-review", profile=REVIEWER_PROFILE, worker_run_id=worker
+            )
+
+        self.assertEqual(review["kind"], "product_review")
+        review_id = review["review"]["run"]["run_id"]
+        self.assertEqual(review["review"]["run"]["parent_run_id"], worker)
+        # The review reads the work, so it runs where the work is.
+        self.assertEqual(
+            review["review"]["run"]["workspace"], review["worker"]["run"]["workspace"]
+        )
+        prompt = (root / review_id / "REVIEW.md").read_text(encoding="utf-8")
+        self.assertIn(worker, prompt)
+        self.assertIn(review["worker"]["run"]["result_path"], prompt)
+
+        self._await(
+            lambda: Path(review["review"]["run"]["result_path"]).exists(),
+            "the reviewer never published its verdict",
+            timeout=30.0,
+        )
+        settled = layer.run_state(review_id)
+        self.assertEqual(settled["state"]["value"], "finished")
+        self.assertEqual(settled["state"]["result"]["verdict"], "green")
+
+    def _publishing(self, document: dict[str, Any]) -> str:
+        return f"{self.PRODUCT_CHILD} result {shlex.quote(json.dumps(document))}"
+
+
+def _journal_of(run_dir: Path) -> tuple[dict[str, Any], ...]:
+    from triggered_agents.runtime.local_pty_head import head_run_journal
+
+    return head_run_journal(run_dir)
 
 
 def _alive(pid: int) -> bool:
