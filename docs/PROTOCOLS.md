@@ -882,7 +882,8 @@ reference has the form `sprint:ID`, a separate namespace from the `PROJECT-N` ca
 ```bash
 python3 -P -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
   --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
-  --observer HEAD_PROFILE --repository REPO --request-id REQUEST_ID
+  --observer HEAD_PROFILE --repository REPO --request-id REQUEST_ID \
+  [--worker HEAD_PROFILE] [--reviewer HEAD_PROFILE]
 python3 -P -m secretary sprint list --status open
 python3 -P -m secretary sprint show --ref sprint:ID
 python3 -P -m secretary sprint status --ref sprint:ID
@@ -895,8 +896,8 @@ python3 -P -m secretary sprint close --role po --ref sprint:ID --decisions-file 
 ```
 
 Stored fields are the goal, the Definition of Done text, repositories, the owning product, its issues,
-the reserved projects, open/closed/stopped status, the declared observer, a
-budget counter by event type, the current card and a structured resume entry. The six valid budget event
+the reserved projects, open/closed/stopped status, the declared observer, the optional worker and
+reviewer pins, a budget counter by event type, the current card and a structured resume entry. The six valid budget event
 types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task` and `hotfix`. Production derives
 them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, a preempt of
 an active card back to Ready, or a tagged recreation or hotfix creation. The card-event id becomes the
@@ -1209,6 +1210,61 @@ the field because it is damaged or because it was taken before the field existed
 archive tells the two apart. The repair is the same either way — declare the value on that row in
 the export's `state/board/sprints.json` and restore again. So is the repair for an open row whose
 declared head has left the registry.
+
+### The optional executor pins
+
+Beside its observer a sprint may fix the head profile its cards run on, for the worker role in
+`sprint_worker` and for the reviewer role in `sprint_reviewer`. The two are independent, and each has
+three states:
+
+| state | meaning |
+| --- | --- |
+| the field is absent | the owner pinned no profile for that role; the sprint's observer chooses one per card under the current rules |
+| the field holds a profile name | every card of this sprint runs that role on exactly that profile |
+| the field holds anything else | corruption, reported as such; it is never read as "pinned nothing" |
+
+Absence is a decision the model has, not a gap to fill. `sprint show` answers both roles always, as
+`{"state": "unset"}` or `{"state": "pinned", "profile": HEAD}`, and `sprint status` carries the same
+two states beside the live observer state. No read path substitutes `role_defaults`, an empty string
+or a `null`-as-error for the absent state, and nothing infers a pin from what the cards happen to run
+on.
+
+There is no `none` here, and the empty string is not a spelling of the absent state either. `--observer
+none` says a sprint runs without an observer, which is a way a sprint can run; a card that runs without
+a worker is not, so both words are refused at `sprint create` rather than folded into "pinned nothing".
+A role is left unpinned by leaving its option out.
+
+A named profile is resolved against this installation's head snapshot — the same registry and the same
+refusal the declared observer gets — at `sprint create`, before any row, field or audit event exists.
+An unknown profile, a profile that has left the registry and a registry that cannot be read are all
+refused there, and the sprint is not created.
+
+`sprint reopen` does not restate the pins: unlike the observer, which is decided again at every
+transition into `open`, a pin is a property of the sprint that survives its close.
+
+The pins are what the observer is told and what the card guard holds it to. The launch document the
+dispatcher writes for the observer prints both roles in an `## Executors` section — the pinned profile,
+or, for an unpinned role, that the owner fixed none and the observer chooses one per card.
+
+A card of a sprint that pins a role must run that role on that profile, and the constraint has one
+door. Every write of a card's `head` or `review_head` goes through the same check: `task create`, for a
+first card, a later one, or one recreated after a rework or a reslice, and `task edit`, which revises a
+card until it is claimed. Both write the pinned profile when the caller names none — including an edit
+that would clear the field — and both refuse a value naming a different profile with
+`sprint_executor_pinned`, which names the sprint and the pinned profile. A sprint whose row carries an
+unreadable pin refuses both with `sprint_executor_unreadable` rather than writing a card under a
+constraint nobody can read. What the dispatcher records in `resolved_head` when it claims a card is not
+a third door: it launches the profile the card declares and records the one it launched.
+
+A sprint that pins nothing adds no check at all on any of those paths, and a card's actually chosen
+profiles stay readable on the card itself, where they have always been: there is no second routing
+registry and no new resolver.
+
+The pins are part of the durable entity, so they travel its recovery path. The normalized export
+carries a key per role only where the row declares a pin, absence stays absence through the round trip,
+and both fields are compared by the sprint parity check. An exported key that is not a profile name
+stops the restore in the preflight, beside the observer set and before the first backend write, because
+recovering it as "the owner pinned nobody" would turn a constraint the owner set into a free choice.
 
 ### The observer fence
 

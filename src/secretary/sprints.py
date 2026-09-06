@@ -13,14 +13,18 @@ from pathlib import Path
 from typing import Any
 
 from secretary.sprint_observer import (
+    EXECUTOR_FIELDS,
     KIND_HEAD,
+    NONE_SPELLING,
     OBSERVER_FIELD,
     ObserverMetadataError,
     check_observer_profile,
+    encode_executor,
     encode_observer,
-    installed_observer_profiles,
+    installed_head_profiles,
     is_executable,
     parse_observer,
+    stored_executors,
 )
 from secretary.tasks import (
     KanboardClient,
@@ -54,6 +58,7 @@ SPRINT_METADATA = {
     "sprint_resume",
     "sprint_source_audit",
     "sprint_observer",
+    *EXECUTOR_FIELDS.values(),
 }
 SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
 # Charged restart types contribute to total and thresholds.
@@ -581,6 +586,9 @@ class SprintReader:
             "repositories": repositories,
             **_ownership(meta),
             **_observer(meta),
+            # Always both roles, always a state: "the owner pinned nobody" is an answer this
+            # reader gives, never a key it leaves out for the caller to interpret.
+            "executors": stored_executors(meta),
             "status": meta.get("sprint_status") if meta.get("sprint_status") in SPRINT_STATUSES else "open",
             "budget": budget,
             "current_task": meta.get("sprint_current_task") or None,
@@ -668,6 +676,9 @@ class SprintReader:
             "resume_freshness": sprint["resume_freshness"],
             "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
             "observer": observer or {"state": "unknown"},
+            # The declared executor context, beside the live observer state: which profiles this
+            # sprint's cards are pinned to, and where the observer is free to choose.
+            "executors": sprint.get("executors") or stored_executors({}),
             # This sprint's own cards that owe a worker no dispatcher record can name
             # (secretary-1544). Any column of this sprint, not only In progress: the column is what
             # cannot say it, and a sprint whose only visible signal is "3 in progress" reads as
@@ -831,6 +842,8 @@ class SprintWriter:
         reference: str = "",
         request_id: str | None = None,
         observer: dict[str, Any] | None = None,
+        worker: str | None = None,
+        reviewer: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"})
         request_id = request_id or str(uuid.uuid4())
@@ -846,6 +859,8 @@ class SprintWriter:
             reservations=projects or [],
             reference=reference,
             observer=observer,
+            worker=worker,
+            reviewer=reviewer,
         )
         # Lock admission with row creation; resolve request ownership first.
         with sprint_admission_lock(self.data_dir):
@@ -921,6 +936,8 @@ class SprintWriter:
         reference: str,
         require_goal: bool = True,
         observer: dict[str, Any] | None = None,
+        worker: str | None = None,
+        reviewer: str | None = None,
         status: str = "open",
         require_executable_observer: bool = True,
         canonical_repositories: bool = True,
@@ -962,6 +979,7 @@ class SprintWriter:
                 observer,
                 executable=require_executable_observer,
             ),
+            **self._executor_intent(worker=worker, reviewer=reviewer),
         }
 
     def _observer_intent(
@@ -1005,12 +1023,64 @@ class SprintWriter:
             try:
                 check_observer_profile(
                     value,
-                    installed_observer_profiles(self.instance),
+                    installed_head_profiles(self.instance),
                     subject="sprint",
                 )
             except ObserverMetadataError as exc:
                 raise TaskError("validation", exc.message, 2) from None
         return value
+
+    def _executor_intent(self, *, worker: str | None, reviewer: str | None) -> dict[str, str | None]:
+        """The worker and reviewer pins a create writes, or `None` for the role it pins nothing on.
+
+        `None` is the operator saying nothing about the role, and it stays a pin nobody made: no
+        `role_defaults` value is read here, and no field is written for it. Everything else was
+        spelled deliberately and is held to the observer's standard — a profile of this
+        installation's head registry, refused at this boundary with the same error the observer's
+        own unknown profile is refused with, before any row exists.
+
+        `none` and the empty string are refused rather than folded into the absent state. `--observer
+        none` says a sprint runs without an observer, which is a way a sprint can run; a card that
+        runs without a worker is not, so the word means nothing here and answering it with silence
+        would turn a stated intention into a missing field.
+        """
+        pins: dict[str, str | None] = {}
+        profiles: set[str] | None = None
+        for role in EXECUTOR_FIELDS:
+            spelling = {"worker": worker, "reviewer": reviewer}[role]
+            if spelling is None:
+                pins[role] = None
+                continue
+            text = str(spelling)
+            if not text.strip() or text != text.strip():
+                raise TaskError(
+                    "validation",
+                    f"sprint {role} must name a head profile; leave the option out to pin no "
+                    "profile and let the observer choose one per card",
+                    2,
+                )
+            if text == NONE_SPELLING:
+                raise TaskError(
+                    "validation",
+                    f"sprint {role} has no {NONE_SPELLING!r}: a sprint whose cards run without a "
+                    f"{role} is not a thing to declare. Leave the option out to pin no profile and "
+                    "let the observer choose one per card",
+                    2,
+                )
+            if profiles is None:
+                try:
+                    profiles = installed_head_profiles(self.instance)
+                except ObserverMetadataError as exc:
+                    raise TaskError("validation", exc.message, 2) from None
+            if text not in profiles:
+                raise TaskError(
+                    "validation",
+                    f"sprint {role} names head profile {text!r}, which is not a profile of this "
+                    "installation's head registry",
+                    2,
+                )
+            pins[role] = text
+        return pins
 
     def _begin_create(
         self, request_id: str, intent: dict[str, Any]
@@ -1257,6 +1327,12 @@ class SprintWriter:
         # carried no observer at all keeps carrying none, and the strict reader refuses it.
         if intent.get("observer") is not None:
             values[OBSERVER_FIELD] = encode_observer(intent["observer"])
+        # A pinned executor is written with the rest of the fields, for the same reason: the row is
+        # never readable with cards to cut under a pin the sprint was not opened with. A role the
+        # operator pinned nothing on gets no field at all, which is how absence stays absence.
+        for role, field in EXECUTOR_FIELDS.items():
+            if intent.get(role):
+                values[field] = encode_executor(str(intent[role]))
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.
         if intent["product"]:

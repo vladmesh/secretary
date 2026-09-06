@@ -79,11 +79,13 @@ from secretary.infra.env import positive_int
 from secretary.role_env import observer_binding
 from secretary.role_skills import skill_delivery
 from secretary.sprint_observer import (
+    EXECUTOR_FIELDS,
     KIND_HEAD,
     KIND_NONE,
     REASON_UNKNOWN_PROFILE,
     ObserverMetadataError,
     executable_observer,
+    pinned_executor,
 )
 from secretary.tasks import TaskError, is_significant_observer_event
 from triggered_agents.runtime import head as head_ops
@@ -3265,6 +3267,10 @@ def render_observer_prompt(
         "",
         str(sprint.get("status") or "(unknown)"),
         "",
+        "## Executors",
+        "",
+        *_executor_lines(sprint),
+        "",
         "## Current card",
         "",
         current or "(none)",
@@ -3307,6 +3313,26 @@ def render_observer_prompt(
             ]
         )
     return "\n".join(sections)
+
+
+def _executor_lines(sprint: dict[str, Any]) -> list[str]:
+    """What the owner fixed about who runs this sprint's cards, and where the choice is yours.
+
+    Both roles are always printed, and the unpinned one is printed as the freedom it is. A section
+    that simply left the role out would read to the head as "there is no reviewer here", which is
+    the one thing the absent field never means.
+    """
+    lines = []
+    for role in EXECUTOR_FIELDS:
+        profile = pinned_executor(sprint, role)
+        lines.append(
+            f"- {role}: pinned to head profile `{profile}`. Every card you cut for this sprint runs "
+            f"its {role} on it, and a card asking for another profile is refused."
+            if profile
+            else f"- {role}: not pinned. The owner fixed no {role} profile for this sprint, so you "
+            f"choose one per card under the current rules — not a sprint that runs without a {role}."
+        )
+    return lines
 
 
 def observer_launch_prompt() -> str:

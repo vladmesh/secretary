@@ -59,6 +59,7 @@ def add_sprint_subcommands(subparsers) -> None:
     )
     created.add_argument("--ref", default="")
     _add_observer_argument(created)
+    _add_executor_arguments(created)
     created.set_defaults(handler=run_create)
     for name, handler, roles in (
         ("comment", run_comment, ("po", "dispatcher", "worker", "reviewer", "steward", "retro")),
@@ -107,6 +108,24 @@ def _add_observer_argument(command: argparse.ArgumentParser) -> None:
         required=True,
         help="head profile that observes this sprint, or 'none' to run without one",
     )
+
+
+def _add_executor_arguments(command: argparse.ArgumentParser) -> None:
+    """The two optional executor pins, each stated once or not at all.
+
+    Optional in the full sense: an omitted option is not a hidden default. The sprint then pins no
+    profile for that role and its observer chooses one per card under the current rules, which is
+    exactly how every sprint opened before these options existed keeps working.
+
+    There is no `none` to pass. It is not a spelling this contract has, and it is refused rather
+    than read as the absent state.
+    """
+    for role in ("worker", "reviewer"):
+        command.add_argument(
+            f"--{role}",
+            help=f"head profile every card of this sprint runs its {role} on; "
+            "omit it to pin no profile and leave the choice to the observer",
+        )
 
 
 def not_implemented(args: argparse.Namespace) -> int:
@@ -216,6 +235,8 @@ def run_create(args: argparse.Namespace) -> int:
             reference=args.ref,
             request_id=args.request_id,
             observer=observer_choice(args.observer),
+            worker=args.worker,
+            reviewer=args.reviewer,
         ),
     )
 

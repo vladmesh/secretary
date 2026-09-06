@@ -14,6 +14,11 @@ the head registry, no missing-field fallback and no permanent tri-state:
 A historical value is never executable: it is provenance of what happened, not a declaration of
 what to run. An open sprint carrying one is corrupt in exactly the way a missing value is. The
 absent field is not a fifth form — every row carries a value, and a row without one is corrupt.
+
+Beside the observer a sprint may also pin the two executor roles it cuts cards for, and those are a
+different kind of value: optional. See "The optional executor pins" at the bottom of this module —
+the pattern is the observer's (one durable field, parsed here, checked against the same registry),
+the contract is not (there is no `none`, and an absent field is a legal, meaningful state).
 """
 
 from __future__ import annotations
@@ -168,7 +173,7 @@ def executable_observer(sprint: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def installed_observer_profiles(instance: str | Path | None) -> set[str]:
+def installed_head_profiles(instance: str | Path | None) -> set[str]:
     """The head profiles this installation runs off, or `ObserverMetadataError`.
 
     The same snapshot the dispatcher resolves a declared head against, so "valid profile" means one
@@ -178,8 +183,7 @@ def installed_observer_profiles(instance: str | Path | None) -> set[str]:
     if instance is None:
         raise ObserverMetadataError(
             REASON_UNKNOWN_PROFILE,
-            "the head registry is needed to validate an observer profile, and no instance "
-            "directory was given",
+            "the head registry is needed to validate a head profile, and no instance directory was given",
         )
     from secretary.head_registry import HeadRegistryConfigError, installed_heads
 
@@ -205,3 +209,81 @@ def check_observer_profile(value: dict[str, Any], profiles: set[str], *, subject
             f"{subject} declares observer head {profile!r}, which is not a profile of this "
             "installation's head registry",
         )
+
+
+# --- The optional executor pins -----------------------------------------------------------------
+#
+# A sprint may fix the head profile its cards run on, for the worker role and for the reviewer role,
+# independently. Unlike the observer, this value is genuinely optional, and the three states it has
+# are kept apart everywhere:
+#
+#   the field is absent   the owner pinned nothing; the observer picks the profile per card
+#   the field names a     every card of this sprint runs that role on exactly that profile
+#   registry profile
+#   the field holds       corruption; it is reported as such and never read as "pinned nothing"
+#   anything else
+#
+# There is deliberately no `none` here. `--observer none` means "this sprint runs without an
+# observer", which is a thing a sprint can be; a sprint whose cards run without a worker is not, so
+# the word is refused rather than quietly turned into the absent state.
+
+WORKER_FIELD = "sprint_worker"
+REVIEWER_FIELD = "sprint_reviewer"
+# The two executor roles, in the order they are shown, with the field each one is stored in.
+EXECUTOR_FIELDS: dict[str, str] = {"worker": WORKER_FIELD, "reviewer": REVIEWER_FIELD}
+
+EXECUTOR_UNSET = "unset"
+EXECUTOR_PINNED = "pinned"
+EXECUTOR_MALFORMED = "malformed"
+
+
+def executor_unset() -> dict[str, Any]:
+    """No constraint: the owner pinned no profile for this role."""
+    return {"state": EXECUTOR_UNSET}
+
+
+def executor_pinned(profile: str) -> dict[str, Any]:
+    return {"state": EXECUTOR_PINNED, "profile": str(profile)}
+
+
+def executor_malformed() -> dict[str, Any]:
+    return {"state": EXECUTOR_MALFORMED}
+
+
+def parse_executor(raw: Any) -> dict[str, Any]:
+    """The stored pin of one executor role, as one of its three states.
+
+    Absence is decided by the caller from whether the metadata key is there at all, exactly as it is
+    for the observer. What arrives here is a value somebody wrote, so a value that is not a profile
+    name is `malformed` and never `unset`: a corrupt field is not a sprint that chose to pin nothing.
+    """
+    if not isinstance(raw, str):
+        return executor_malformed()
+    if not raw or raw != raw.strip() or raw == NONE_SPELLING:
+        return executor_malformed()
+    return executor_pinned(raw)
+
+
+def encode_executor(profile: str) -> str:
+    """The exact text one pin is stored as, so equality is byte equality."""
+    value = parse_executor(profile)
+    if value["state"] != EXECUTOR_PINNED:
+        raise ValueError(f"not an executor profile: {profile!r}")
+    return str(value["profile"])
+
+
+def stored_executors(meta: dict[str, str]) -> dict[str, dict[str, Any]]:
+    """Both pins as the row holds them, with a state for each role whatever the row carries."""
+    return {
+        role: (parse_executor(meta[field]) if field in meta else executor_unset())
+        for role, field in EXECUTOR_FIELDS.items()
+    }
+
+
+def pinned_executor(sprint: dict[str, Any], role: str) -> str:
+    """The profile this sprint pins for `role`, or `""` when it pins none.
+
+    A malformed value answers `""` to nobody: callers that must fail closed read the state instead.
+    """
+    state = (sprint.get("executors") or {}).get(role) or executor_unset()
+    return str(state.get("profile") or "") if state.get("state") == EXECUTOR_PINNED else ""
