@@ -2652,6 +2652,35 @@ first and refuses while it is still open, then raises a reviewer head in the sam
 the worker's result. **`run_state(run_id)`** reads one run, and is where a run's ending becomes
 durable.
 
+### The lifecycle of a run, and the order it holds
+
+A run passes through `claimed → raising → raised → settled`, and one function moves it between them
+(`secretary.webproto.lifecycle.RunLifecycle.advance`). Every path that can put a process into the
+world and every path that can close a run goes through it; within `secretary.webproto` the
+backend's `start` and `stop` verbs and the run store's `settle` are named in that one module and
+nowhere else, and a test fails if that stops being true.
+
+The order is the contract:
+
+1. **write-ahead.** Before a spawn can be attempted, the record already carries what is needed to
+   *find and stop* the head that spawn will produce: the run directory, the pid path, and a head
+   description addressed by run id. That is `raising`. A failure to bind the handle after a
+   successful spawn therefore cannot orphan anything — the record already points at it.
+2. **ownership is recovered from disk.** The supervised backend addresses a head from the run id
+   and the run's own pid file, and confirms an ending from the launch identity on that path; it
+   consults nothing the spawning process remembers. So the write-ahead record is sufficient on its
+   own to stop the head, and that is checked against the real backend rather than asserted.
+3. **a possibly-live process outranks closing the record.** Closing a run ends its head *first* and
+   settles only on a confirmed ending. An ending that could not be confirmed puts the run in
+   `unresolved`: it reads as `unknown` — never `finished` or `process_failed`, and never terminal —
+   and it stays **unsettled**, which is what the admission gate's sixth condition already refuses a
+   second run over. An unresolved run is a fence and not a dead end: every later `web-run state`
+   retries the same stop from the same record, and the run settles the moment the ending is
+   confirmed.
+
+`phase` is on every run document beside `state`, and the two answer different questions: the phase
+says where the lifecycle is, the state says what the process is doing.
+
 ### What the product owns
 
 The workspace is a detached `git worktree` of the project's own repository, cut by the product at
@@ -2682,7 +2711,8 @@ they build or spawn anything. It decides in this order, and the order is part of
    `validate`, `assessment` and `blocked`, so a product run takes a card only from `issues`;
 5. the dispatcher's durable production state holds no record for the card — and a state file that
    cannot be read refuses too, because "I could not tell" is not "nobody owns it";
-6. this layer holds no unsettled run for the card.
+6. this layer holds no unsettled run for the card — which includes a run whose cleanup could not
+   be confirmed, since such a run is never settled.
 
 Nothing there is a scheduler, a store or an audit of its own: the reservations and the card's state
 are rules that already exist, and the dispatcher's state is read and never written.
@@ -2720,7 +2750,7 @@ process's own exit status rides beside it in `state.exit` rather than as a sixth
 | `process_failed` | `signal: N` | the process was ended by a signal |
 | `process_failed` | none | the process is gone, published nothing, and nothing recorded how it ended |
 | `source_unavailable` | — | the launch identity or the journal could not be read; nothing is proven |
-| `unknown` | — | no evidence yet: no head raised, or no heartbeat published, or a foreign pid |
+| `unknown` | — | no evidence yet: no head raised, or no heartbeat published, or a foreign pid; or a run whose cleanup could not be confirmed (`phase: unresolved`), where nothing establishes what the process is doing |
 
 The evidence is the launch-identity heartbeat, the supervisor's journal and the result file. A
 window, pane or panel is never consulted and is not evidence that a run is alive. The first

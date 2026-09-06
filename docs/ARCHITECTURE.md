@@ -285,6 +285,18 @@ run's two events go onto the board's own audit journal, so the read layer shows 
 history. What is genuinely new is small: a workspace cut with `git worktree` instead of by Orca, a
 durable run record, and one admission gate.
 
+**One place owns the order between a process and the record of it.** A run's phases —
+`claimed → raising → raised → settled` — move in one function, and every path that can spawn or
+close goes through it. The reason is a history rather than a preference: three separate defects of
+this runtime were all the same defect, in which "a process may now exist" and "the durable record
+says so" were ordered by three different pieces of code that were each free to order them
+differently. The invariant that function holds is that the record which can *find and stop* a head
+is durable before a spawn can produce one, that the record alone is enough to stop it (the
+supervised backend addresses a head from the run id and pid path, never from what the spawning
+process remembers), and that a cleanup which could not be confirmed is written as unresolved rather
+than as an ending. An unresolved run is not terminal and not settled, which is exactly what the
+admission gate already refuses a second run over — the fence is an existing rule, not a new one.
+
 **Two durable writes are never assumed to be one.** Raising a head and putting its start on the
 card's history are separate durable facts, and so are settling a run's ending and publishing it. So
 publication is a property every path restores rather than a step of the path that created the run:

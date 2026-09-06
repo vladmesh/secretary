@@ -59,7 +59,7 @@ from secretary.webproto.agents import (
     SOURCE_UNAVAILABLE,
     UNKNOWN,
 )
-from secretary.webproto.runs import ProductRun
+from secretary.webproto.runs import CLAIMED, UNRESOLVED, ProductRun
 
 # Re-exported for the operation layer, which records the journal's path on every run it starts.
 from triggered_agents.runtime.local_pty_head import JOURNAL_NAME as JOURNAL_NAME
@@ -72,6 +72,12 @@ from triggered_agents.runtime.local_pty_head import RUN_EXITED, head_run_journal
 #: The states from which a run never moves again. What `settle` records and what a client polling
 #: a run stops polling on.
 TERMINAL_STATES = (FINISHED, PROCESS_FAILED)
+
+#: Read this module against :mod:`secretary.webproto.lifecycle`: a run's *phase* says where its
+#: lifecycle is and a run's *state* says what its process is doing, and they are not the same
+#: question. Only two phases answer the state question by themselves -- a settled run says its
+#: recorded ending forever, and an unresolved run says `unknown` because nothing established
+#: anything -- and every other phase is decided from the process evidence below.
 
 
 def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
@@ -93,7 +99,23 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
             now=now,
             settled_at=run.settled_at,
         )
-    if not run.raised:
+    if run.phase == UNRESOLVED:
+        # A run whose cleanup was not confirmed. It is not `process_failed`: nothing established
+        # that the process failed, and a terminal value here would free the card for a second run
+        # beside a head that may still be alive. `unknown` is the read layer's own word for "no
+        # evidence establishes this", it is not terminal, and it keeps the run unsettled -- which
+        # is what `admission.admit` already refuses a second run over. The heartbeat and the
+        # journal still travel on `evidence` and `exit`, so an operator sees what *is* known.
+        return _document(
+            UNKNOWN,
+            run.unresolved_reason
+            or "this run's head could not be confirmed stopped, so its ownership is unresolved",
+            exit_status=_exit_status(_journal(run)[0]),
+            result=_result(run),
+            heartbeat=head_process_status(run.pid_file, expected=expected_identity(run)),
+            now=now,
+        )
+    if run.phase == CLAIMED:
         return _document(
             UNKNOWN,
             "this run holds a request and a workspace, and no head has been raised under it yet",

@@ -28,6 +28,7 @@ import yaml
 from secretary.cli import main
 from secretary.config import validate
 from secretary.webproto import admission as admission_module
+from secretary.webproto import lifecycle as lifecycle_module
 from secretary.webproto import ops as ops_module
 from secretary.webproto import run_events, run_state, workspaces
 from secretary.webproto.errors import (
@@ -38,7 +39,7 @@ from secretary.webproto.errors import (
 )
 from secretary.webproto.ops import OperationLayer
 from secretary.webproto.reads import ReadLayer
-from secretary.webproto.runs import ProductRun, RunStore
+from secretary.webproto.runs import RAISED, UNRESOLVED, ProductRun, RunStore, RunStoreError
 from tests.fakes.dispatcher import FakeKanboard
 from triggered_agents.agents.pipeline.heads import Registry
 from triggered_agents.runtime.head.identity import publish_heartbeat
@@ -918,6 +919,226 @@ class EventVisibilityTests(ProductRuntimeFixture):
             path.relative_to(self.data_dir).as_posix() for path in self.data_dir.rglob("*.ndjson")
         )
         self.assertEqual(journals, ["board/events.ndjson"])
+
+
+class LifecycleTests(ProductRuntimeFixture):
+    """The structural half of round 3: one place owns every spawn and every close.
+
+    Three defects of this card had one shape -- "a process may now exist" and "the durable record
+    says so" were ordered differently in three places. These are the checks that there is now one
+    place, that it writes ahead of the spawn, that ownership is recoverable from the record alone,
+    and that a cleanup it could not confirm is never written as a terminal outcome.
+    """
+
+    # -- the one place -------------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _only_inside_advance(self):
+        """Detonate if a spawn or a close is reached with no `RunLifecycle.advance` on the stack.
+
+        The same shape as `test_every_start_path_goes_through_the_one_gate`, over the other
+        invariant: `runtime.start`, `runtime.stop` and `RunStore.settle` are the three verbs that
+        can put a process into the world or end a run, and none of them may be reached around the
+        function that owns the order between them.
+        """
+        depth = [0]
+        seen: list[tuple[str, str]] = []
+        real_advance = lifecycle_module.RunLifecycle.advance
+
+        def advance(layer, run, to, **kwargs):
+            depth[0] += 1
+            seen.append((run.run_id, to))
+            try:
+                return real_advance(layer, run, to, **kwargs)
+            finally:
+                depth[0] -= 1
+
+        def guarded(name, real):
+            def call(*args, **kwargs):
+                if depth[0] == 0:
+                    raise AssertionError(f"{name} was reached outside RunLifecycle.advance")
+                return real(*args, **kwargs)
+
+            return call
+
+        real_start, real_stop = self.runtime.start, self.runtime.stop
+        self.runtime.start = guarded("the backend's start", real_start)
+        self.runtime.stop = guarded("the backend's stop", real_stop)
+        try:
+            with (
+                mock.patch.object(lifecycle_module.RunLifecycle, "advance", advance),
+                mock.patch.object(RunStore, "settle", guarded("RunStore.settle", RunStore.settle)),
+            ):
+                yield seen
+        finally:
+            self.runtime.start, self.runtime.stop = real_start, real_stop
+
+    def test_every_spawning_or_closing_path_goes_through_the_one_place(self) -> None:
+        self._backlog_card("secretary-run-2")
+        with self._only_inside_advance() as seen:
+            # 1. a start that succeeds
+            worker = self.start(request_id="req-one")
+            worker_id = worker["run"]["run_id"]
+            # 2. a read that closes the run on its published result
+            self.runtime.publish_result(worker_id, {"status": "done"})
+            self.layer().run_state(worker_id)
+            # 3. a review, which raises a second head
+            review = self.layer().run_review(
+                request_id="rev-one", profile=REVIEWER_PROFILE, worker_run_id=worker_id
+            )
+            review_id = review["review"]["run"]["run_id"]
+            # 4. a read that closes a run on its deadline
+            self.clock += 3601.0
+            self.layer().run_state(review_id)
+            # 5. a bring-up that fails after the backend has spawned
+            self.runtime.deliver = lambda run, pointer, **options: DeliverReceipt(
+                status=HEAD_GONE, reason="the head is gone"
+            )
+            with self.assertRaises(RuntimeUnavailable):
+                self.start(request_id="req-two", ref="secretary-run-2")
+        phases = {run_id: [to for owner, to in seen if owner == run_id] for run_id, _ in seen}
+        self.assertEqual(phases[worker_id][:2], ["raising", "raised"])
+        self.assertIn("settled", phases[worker_id])
+        self.assertEqual(phases[review_id][:2], ["raising", "raised"])
+        self.assertIn("settled", phases[review_id])
+        broken = RunStore(self.data_dir).by_request("req-two")
+        self.assertEqual(phases[broken.run_id], ["raising", "raised", "settled"])
+
+    def test_the_three_verbs_are_named_in_one_module_of_the_layer(self) -> None:
+        """The static half: no other module of the layer can even reach a spawn or a settle."""
+        import ast
+
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "src" / "secretary" / "webproto").glob("*.py")):
+            if path.name == "lifecycle.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr in {"start", "stop", "settle"}:
+                        offenders.append(f"{path.name}:{node.lineno} .{node.func.attr}()")
+        self.assertEqual(offenders, [])
+
+    # -- write-ahead, and ownership recovered from disk -----------------------------------------
+
+    def test_the_record_can_address_the_head_before_the_spawn_returns(self) -> None:
+        """Criterion of round 3, point 1: the write-ahead exists before a process can.
+
+        Captured at the moment the backend's `start` is entered -- which is the first instant a
+        process can exist -- and read back out of the store rather than out of this process.
+        """
+        captured: list[ProductRun] = []
+        real_start = self.runtime.start
+
+        def start(*args, **kwargs):
+            captured.append(RunStore(self.data_dir).get(kwargs["run_id"]))
+            return real_start(*args, **kwargs)
+
+        self.runtime.start = start
+        document = self.start(request_id="req-ahead")
+        ahead = captured[0]
+        self.assertIsNotNone(ahead, "the run record is durable before the spawn")
+        self.assertEqual(ahead.phase, "raising")
+        self.assertTrue(Path(ahead.run_dir).is_dir(), "the run directory exists before the spawn")
+        self.assertEqual(ahead.pid_file, document["run"]["pid_file"])
+        head = HeadRun.from_json(ahead.head_run)
+        self.assertEqual(head.run_id, ahead.run_id)
+        self.assertEqual(head.pid_file, ahead.pid_file)
+        self.assertEqual(head.role, "worker")
+
+    def test_a_head_is_addressable_from_the_write_ahead_record_alone(self) -> None:
+        """Point 2, against the real backend rather than against the double.
+
+        `LocalPtyHeadRuntime.stop` reaches a head through `_address`, which derives the run
+        directory from `root/run_id`, the socket and journal from that directory, and the pid file
+        from the run's own `pid_file`. Nothing it consults is remembered by the process that
+        spawned. So the record this product writes *before* the spawn is enough to stop the head
+        that spawn produces -- which is what this asserts, by addressing a real backend with a
+        `HeadRun` rebuilt out of the store and nothing else.
+        """
+        from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
+
+        run_id = self.start(request_id="req-address")["run"]["run_id"]
+        stored = RunStore(self.data_dir).get(run_id)
+        backend = LocalPtyHeadRuntime(
+            self.data_dir / "webproto" / "heads",
+            head_process_status=lambda *args, **kwargs: {"state": "dead"},
+        )
+        address = backend._address(HeadRun.from_json(stored.head_run))
+        self.assertIsNotNone(address)
+        self.assertEqual(address.run_dir, Path(stored.run_dir))
+        self.assertEqual(address.pid_file, Path(stored.pid_file))
+        self.assertEqual(address.journal_path, Path(stored.journal_path))
+
+    # -- a cleanup that could not be confirmed --------------------------------------------------
+
+    def _failing_save(self, phase: str = RAISED):
+        """Fail exactly the durable write that binds a raised head, as the reviewer's repro does."""
+        real = RunStore.save
+
+        def save(store, run):
+            if run.phase == phase:
+                raise RunStoreError("disk write failed")
+            return real(store, run)
+
+        return mock.patch.object(RunStore, "save", save)
+
+    def test_a_save_failure_after_a_successful_start_leaves_no_live_head(self) -> None:
+        """The reviewer's scenario, with the cleanup confirmed: no orphan, and the card is free."""
+        with self._failing_save():
+            with self.assertRaises(RuntimeUnavailable) as refused:
+                self.start(request_id="req-lost-save")
+        self.assertIn("disk write failed", str(refused.exception))
+        self.assertEqual(len(self.runtime.starts), 1)
+        run = RunStore(self.data_dir).by_request("req-lost-save")
+        self.assertEqual(self.runtime.stops, [(run.run_id, lifecycle_module.STOP_BRING_UP_FAILED)])
+        self.assertEqual(run.settled_state, "process_failed")
+        # The head was ended and confirmed gone, so the card is genuinely free for the next run.
+        self.assertEqual(self.start(request_id="req-after")["state"]["value"], "running")
+
+    def test_an_unconfirmed_cleanup_is_never_written_as_a_terminal_outcome(self) -> None:
+        """The same scenario with the stop refused: unresolved, `unknown`, and the card is fenced.
+
+        This is the invariant the three point repairs kept missing: a record that settles over a
+        process nobody ended frees the card for a second owner beside a live head.
+        """
+        self.runtime.stop = lambda run, initiator, **options: StopReceipt(
+            status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
+        )
+        with self._failing_save():
+            with self.assertRaises(RuntimeUnavailable):
+                self.start(request_id="req-in-doubt")
+        run = RunStore(self.data_dir).by_request("req-in-doubt")
+        self.assertEqual(run.phase, UNRESOLVED)
+        self.assertFalse(run.settled, "an unconfirmed cleanup is not an ending")
+        self.assertIn("may still be running", run.unresolved_reason)
+
+        # It reads through the layer as `unknown`, never as a terminal outcome.
+        state = self.layer().run_state(run.run_id)["state"]
+        self.assertEqual(state["value"], "unknown")
+        self.assertFalse(state["terminal"])
+
+        # And no second run of the card is admitted while ownership is in doubt.
+        with self.assertRaises(OwnerConflict) as refused:
+            self.start(request_id="req-second")
+        self.assertIn("unsettled product run", str(refused.exception))
+
+    def test_an_unresolved_run_settles_as_soon_as_the_ending_is_confirmed(self) -> None:
+        """An unresolved run is a fence, not a dead end: the next read retries the same stop."""
+        refusing = lambda run, initiator, **options: StopReceipt(  # noqa: E731
+            status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
+        )
+        self.runtime.stop = refusing
+        with self._failing_save():
+            with self.assertRaises(RuntimeUnavailable):
+                self.start(request_id="req-recover")
+        run_id = RunStore(self.data_dir).by_request("req-recover").run_id
+
+        self.runtime.stop = FakeHeadRuntime.stop.__get__(self.runtime, FakeHeadRuntime)
+        settled = self.layer().run_state(run_id)
+        self.assertEqual(settled["state"]["value"], "process_failed")
+        self.assertTrue(settled["state"]["terminal"])
+        self.assertEqual(self.start(request_id="req-after")["state"]["value"], "running")
 
 
 class OrcaAbsenceTests(ProductRuntimeFixture):

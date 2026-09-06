@@ -64,6 +64,28 @@ RESULT_NAME = "result.json"
 DEFAULT_DEADLINE_SECONDS = 60.0 * 60.0
 
 
+#: The phases one product run passes through, in order. They exist because a run is two durable
+#: facts and one process, and the order between them is the whole of its safety:
+#:
+#: ``claimed``     a request id owns a run id and every path it will use. Nothing is provisioned and
+#:                 nothing is spawned, so there is no process this record could fail to own;
+#: ``raising``     the **write-ahead** phase: the run directory exists, the pid path is decided, and
+#:                 the record already carries a head description sufficient to *address and stop* a
+#:                 head from disk alone. A run reaches it immediately before a spawn is attempted,
+#:                 so from here on a process may exist whether or not anything came back;
+#: ``raised``      a head came up and the backend's own record of it is bound to this run;
+#: ``unresolved``  the run should be closed and **could not be confirmed closed**: a head may still
+#:                 be alive under it. Not terminal, deliberately -- see
+#:                 :mod:`secretary.webproto.lifecycle`;
+#: ``settled``     the run reached a terminal state, once and forever.
+CLAIMED = "claimed"
+RAISING = "raising"
+RAISED = "raised"
+UNRESOLVED = "unresolved"
+SETTLED = "settled"
+
+PHASES = (CLAIMED, RAISING, RAISED, UNRESOLVED, SETTLED)
+
 #: The two operations a request id may own. A request id is an idempotency key *of one operation*,
 #: never a name for "whatever this caller asked for last": see :class:`RequestMismatch`.
 START_OPERATION = "run_start"
@@ -134,9 +156,18 @@ class ProductRun:
     supervisor_pid: int = 0
     started_at: float = 0.0
     deadline_at: float = 0.0
-    #: The backend's own record of the head, as `HeadRun.to_json` wrote it. Absent while the
-    #: request id has been claimed and the head has not been raised yet.
+    #: A head record sufficient to address and stop this run's head from disk alone: run id, spec,
+    #: workspace, task ref, role and pid file. Written **before** the spawn (the write-ahead of the
+    #: `raising` phase) and replaced by the backend's own record once the head is up. Absent only
+    #: while the request id has been claimed and nothing has been prepared yet.
     head_run: dict[str, Any] = field(default_factory=dict)
+    #: Where this run is in the order above. The one field that says whether a process may exist.
+    phase: str = CLAIMED
+    #: Whether a head was ever confirmed up under this record. Unlike `phase` it is never unset, so
+    #: a settled run still knows it owes a `product_run.started` event.
+    head_raised: bool = False
+    #: Why this run's ownership could not be resolved, when it could not. Empty otherwise.
+    unresolved_reason: str = ""
     #: Set once, by whoever first observed this run reach a terminal process state.
     settled_at: float = 0.0
     settled_state: str = ""
@@ -151,8 +182,25 @@ class ProductRun:
 
     @property
     def raised(self) -> bool:
-        """Whether a head was ever spawned under this record."""
-        return bool(self.head_run)
+        """Whether a head was ever confirmed up under this record.
+
+        Deliberately not `bool(self.head_run)` any more: the head record is written *before* the
+        spawn now, so its presence says "a head can be addressed", not "a head came up".
+        """
+        return self.head_raised
+
+    @property
+    def addressable(self) -> bool:
+        """Whether this record can address a head at all -- the write-ahead has been written."""
+        return bool(self.head_run) and self.phase in (RAISING, RAISED, UNRESOLVED)
+
+    @property
+    def unresolved(self) -> bool:
+        return self.phase == UNRESOLVED
+
+    def at_phase(self, phase: str, **changes: Any) -> ProductRun:
+        """The same run in another phase. The only way `phase` is ever written."""
+        return replace(self, phase=phase, **changes)
 
     @property
     def settled(self) -> bool:
@@ -180,6 +228,9 @@ class ProductRun:
             "started_at": self.started_at,
             "deadline_at": self.deadline_at,
             "head_run": dict(self.head_run),
+            "phase": self.phase,
+            "head_raised": self.head_raised,
+            "unresolved_reason": self.unresolved_reason,
             "settled_at": self.settled_at,
             "settled_state": self.settled_state,
             "settled_reason": self.settled_reason,
@@ -191,6 +242,7 @@ class ProductRun:
     def from_json(cls, payload: Any) -> ProductRun:
         if not isinstance(payload, dict):
             raise RunStoreError("a product run record is an object, and this is not one")
+        head_run = payload.get("head_run") if isinstance(payload.get("head_run"), dict) else {}
         return cls(
             run_id=_text(payload.get("run_id")),
             request_id=_text(payload.get("request_id")),
@@ -211,7 +263,10 @@ class ProductRun:
             supervisor_pid=_int(payload.get("supervisor_pid")),
             started_at=_float(payload.get("started_at")),
             deadline_at=_float(payload.get("deadline_at")),
-            head_run=payload.get("head_run") if isinstance(payload.get("head_run"), dict) else {},
+            head_run=head_run,
+            phase=_phase(payload, head_run),
+            head_raised=_flag(payload.get("head_raised"), bool(head_run)),
+            unresolved_reason=_text(payload.get("unresolved_reason")),
             settled_at=_float(payload.get("settled_at")),
             settled_state=_text(payload.get("settled_state")),
             settled_reason=_text(payload.get("settled_reason")),
@@ -219,8 +274,27 @@ class ProductRun:
             settled_result=_mapping(payload.get("settled_result")),
         )
 
-    def with_head(self, head_run: dict[str, Any], *, head_pid: int, supervisor_pid: int) -> ProductRun:
-        return replace(self, head_run=dict(head_run), head_pid=head_pid, supervisor_pid=supervisor_pid)
+    def with_head(
+        self,
+        head_run: dict[str, Any],
+        *,
+        phase: str,
+        head_pid: int = 0,
+        supervisor_pid: int = 0,
+        head_raised: bool | None = None,
+    ) -> ProductRun:
+        return replace(
+            self,
+            head_run=dict(head_run),
+            phase=phase,
+            head_pid=head_pid or self.head_pid,
+            supervisor_pid=supervisor_pid or self.supervisor_pid,
+            head_raised=self.head_raised if head_raised is None else head_raised,
+        )
+
+    def in_doubt(self, reason: str) -> ProductRun:
+        """The same run, recorded as one whose ownership could not be resolved."""
+        return replace(self, phase=UNRESOLVED, unresolved_reason=reason)
 
     def settled_as(
         self,
@@ -241,6 +315,8 @@ class ProductRun:
             return self
         return replace(
             self,
+            phase=SETTLED,
+            unresolved_reason="",
             settled_state=state,
             settled_reason=reason,
             settled_at=now,
@@ -447,6 +523,25 @@ def _text(value: Any) -> str:
 
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _phase(payload: dict[str, Any], head_run: dict[str, Any]) -> str:
+    """This record's phase, derived for a record written before phases existed.
+
+    A record from before this field is read by what it already carries: a settlement is `settled`, a
+    head record is `raised`, and anything else is `claimed`. No record is ever read as `raising` or
+    `unresolved`, because neither could have been produced by the code that wrote it.
+    """
+    declared = _text(payload.get("phase"))
+    if declared in PHASES:
+        return declared
+    if _text(payload.get("settled_state")):
+        return SETTLED
+    return RAISED if head_run else CLAIMED
+
+
+def _flag(value: Any, fallback: bool) -> bool:
+    return value if isinstance(value, bool) else fallback
 
 
 def _mapping(value: Any) -> dict[str, Any]:

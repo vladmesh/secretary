@@ -33,6 +33,13 @@ one before it has been answered:
 6. **this layer holds no unsettled run for it.** One product run per card at a time. A settled run
    is history and does not block the next one, which is what lets a review follow its worker.
 
+   This is also the whole of how an *unresolved* run fences a card, and deliberately so. A run
+   whose head could not be confirmed stopped stays unsettled (:mod:`secretary.webproto.lifecycle`),
+   so this condition already refuses the next run over it -- with no second register of ownership
+   and no new rule here. The failure that made this necessary got past this gate only because the
+   code that could not confirm a cleanup settled the run anyway; the repair is that it no longer
+   may, not that this gate learned a new question.
+
 Nothing here is a scheduler, a store or an audit of its own. Every fact it consults already has an
 owner elsewhere, and it consults them in a fixed order rather than re-deriving any of them.
 """

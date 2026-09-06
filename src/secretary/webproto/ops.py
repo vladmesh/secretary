@@ -36,6 +36,12 @@ effort.
 **One owner of a card.** Both start paths go through :func:`secretary.webproto.admission.admit`
 before they build or spawn anything, and neither has a branch around it.
 
+**The order between a process and the record of it is not decided here.** It is decided in
+:mod:`secretary.webproto.lifecycle`, in one function, and this module calls it for every start,
+every review and every close. What stays here is *policy* -- which card may run (`admission`),
+which profile, when a run should be closed -- and what leaves is the order in which a run may be
+raised, bound and ended without ever leaving a live head with no owner.
+
 **A request id owns an operation, and the events of a run are never assumed published.** Two
 properties that read as bookkeeping and are not. A request id is the idempotency key of one
 operation made with one set of inputs, checked against the record it owns, so a review made under a
@@ -64,16 +70,33 @@ from secretary.webproto.admission import Admission, admit
 from secretary.webproto.errors import (
     InstallationUnavailable,
     OwnerConflict,
+    ReadError,
     RunNotFound,
     RuntimeUnavailable,
     ValidationRefused,
 )
+from secretary.webproto.lifecycle import (
+    CLAUDE_JSON,
+    INITIATOR,
+    SETTLE_POLL_SECONDS,
+    SETTLE_QUIET_SECONDS,
+    SETTLE_SECONDS,
+    STOP_BRING_UP_FAILED,
+    STOP_DEADLINE,
+    STOP_ENDED,
+    STOP_RESULT_IN,
+    SUBMIT_KEY,
+    RunLifecycle,
+)
 from secretary.webproto.runs import (
     DEFAULT_DEADLINE_SECONDS,
     HEADS_RELATIVE,
+    RAISED,
+    RAISING,
     RESULT_NAME,
     REVIEW_OPERATION,
     REVIEWER,
+    SETTLED,
     START_OPERATION,
     WORKER,
     ProductRun,
@@ -84,15 +107,24 @@ from secretary.webproto.runs import (
 )
 from secretary.webproto.workspaces import provision, workspace_path
 from triggered_agents.agents.pipeline.heads import HeadRegistryError, load_registry
-from triggered_agents.runtime.codex_preflight import CodexPreflightError, preflight_codex_launch
-from triggered_agents.runtime.head.command import HeadCommandError, render_head_command
-from triggered_agents.runtime.head.operations import NudgePointer
-from triggered_agents.runtime.head.run import HeadRun, HeadRunError, StopInitiator
-from triggered_agents.runtime.head.runtime import HEAD_BUSY
+from triggered_agents.runtime.head.command import HeadCommandError
 from triggered_agents.runtime.head.spec import HeadSpec, HeadSpecError
-from triggered_agents.runtime.head.task_ref import TaskRef
 from triggered_agents.runtime.head_runtime_backends import build_head_runtime
 from triggered_agents.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+
+#: Re-exported so that the names an operator and a test already know keep resolving here, while the
+#: transitions that use them live in one place. See :mod:`secretary.webproto.lifecycle`.
+__all__ = [
+    "CLAUDE_JSON",
+    "INITIATOR",
+    "OperationLayer",
+    "STOP_BRING_UP_FAILED",
+    "STOP_DEADLINE",
+    "STOP_ENDED",
+    "STOP_RESULT_IN",
+    "SUBMIT_KEY",
+    "no_session",
+]
 
 SCHEMA_VERSION = 1
 
@@ -104,37 +136,6 @@ RUN_ENV = "SECRETARY_RUN_ID"
 ROLE_ENV = "SECRETARY_RUN_ROLE"
 REF_ENV = "SECRETARY_RUN_REF"
 WORKSPACE_ENV = "SECRETARY_RUN_WORKSPACE"
-
-#: Who this product says ended a head it owns. A stop names its initiator, and this is ours.
-INITIATOR = "secretary.webproto"
-
-#: Where a Claude head's first-run answers live. The same file and the same environment override the
-#: pipeline's own pane driver uses, so an operator has one place to look and one place to clear.
-CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
-STOP_RESULT_IN = "this run published its result, so the product that owns its process ended it"
-STOP_DEADLINE = "this run passed its deadline without publishing a result"
-
-#: The key an interactive composer reads as "send this", delivered on its own after the line it
-#: sends. Two facts make it a second delivery rather than a suffix, and both were established
-#: against a real Codex TUI:
-#:
-#: * the Enter key of a terminal is a **carriage return**. A TUI in raw mode reads a bare line feed
-#:   — which is all the substrate appends — as a newline *inside* the message being composed, so a
-#:   line delivered that way sits in the composer, gains one blank line per attempt, and the head
-#:   never starts a turn;
-#: * a composer treats one burst of bytes as a **paste**. Text and its carriage return written in a
-#:   single payload are inserted together as text, so the return does not send anything either.
-#:
-#: So the line goes first and the return follows as its own payload, which is the shape a keyboard
-#: has: the message, then Enter.
-SUBMIT_KEY = "\r"
-
-#: How long a bring-up waits for an interactive head to stop printing before it puts the task in
-#: front of it, how much quiet counts as ready, and how often that is asked. A TUI that is drawing
-#: its banner and starting its MCP servers is not ready for a line.
-SETTLE_SECONDS = 90.0
-SETTLE_QUIET_SECONDS = 4.0
-SETTLE_POLL_SECONDS = 0.5
 
 
 def no_session() -> Any:
@@ -330,18 +331,25 @@ class OperationLayer:
         )
         if not created:
             return self._document(run, now=now, state=self._republish(data_dir, run, now=now))
-        with self._closing_a_failed_bring_up(run, store, now=now):
+        lifecycle = self._lifecycle(data_dir, store)
+        with self._closing_before_any_spawn(lifecycle, run, now=now) as prepared:
             workspace = provision(admission.repo, Path(run.workspace), base=admission.default_branch)
             document = self._worker_document(run, admission, instruction=instruction, base=workspace)
-            run = self._raise(
-                run,
-                spec=spec,
-                profile=profile_table,
-                data_dir=data_dir,
-                store=store,
-                document=document,
-                note=f"product run {run.run_id} for {run.ref}",
+            run = prepared(
+                lifecycle.advance(
+                    run, RAISING, now=now, spec=spec, profile=profile_table, document=document
+                )
             )
+        run = lifecycle.advance(
+            run,
+            RAISED,
+            now=now,
+            spec=spec,
+            profile=profile_table,
+            document=document,
+            note=f"product run {run.run_id} for {run.ref}",
+            env=self._environment(run),
+        )
         run_events.publish_started(self._audit(data_dir), run)
         return self._document(run, now=now)
 
@@ -415,17 +423,24 @@ class OperationLayer:
         if not created:
             self._republish(data_dir, run, now=now)
             return self._review_document(run, store, now=now)
-        with self._closing_a_failed_bring_up(run, store, now=now):
+        lifecycle = self._lifecycle(data_dir, store)
+        with self._closing_before_any_spawn(lifecycle, run, now=now) as prepared:
             document = self._review_prompt(run, worker, worker_state)
-            run = self._raise(
-                run,
-                spec=spec,
-                profile=profile_table,
-                data_dir=data_dir,
-                store=store,
-                document=document,
-                note=f"review of product run {worker.run_id} for {run.ref}",
+            run = prepared(
+                lifecycle.advance(
+                    run, RAISING, now=now, spec=spec, profile=profile_table, document=document
+                )
             )
+        run = lifecycle.advance(
+            run,
+            RAISED,
+            now=now,
+            spec=spec,
+            profile=profile_table,
+            document=document,
+            note=f"review of product run {worker.run_id} for {run.ref}",
+            env=self._environment(run),
+        )
         run_events.publish_started(self._audit(data_dir), run)
         return self._review_document(run, store, now=now)
 
@@ -455,21 +470,9 @@ class OperationLayer:
         if run is None:
             raise RunNotFound(f"there is no product run {run_id!r} on this installation")
         state = run_state_reads.observe(run, now=now)
-        if state["value"] == "running":
-            reason = self._reason_to_end(run, state, now=now)
-            if reason:
-                self._stop(run, data_dir, reason)
-                state = run_state_reads.observe(run, now=now)
-        if state["terminal"] and not run.settled:
-            exit_status, result = run_state_reads.terminal_evidence(run)
-            run, _first = store.settle(
-                run.run_id,
-                state["value"],
-                state["reason"],
-                now=now,
-                exit_status=exit_status,
-                result=result,
-            )
+        closing = self._reason_to_close(run, state, now=now)
+        if closing:
+            run = self._lifecycle(data_dir, store).advance(run, SETTLED, now=now, reason=closing)
             state = run_state_reads.observe(run, now=now)
         if run.settled:
             # Not `if first`: an ending is settled once, and *publishing* it is a separate durable
@@ -481,26 +484,49 @@ class OperationLayer:
 
     # -- the pieces the operations are made of ----------------------------------------------
 
-    @contextlib.contextmanager
-    def _closing_a_failed_bring_up(self, run: ProductRun, store: RunStore, *, now: float):
-        """Close the run a failed bring-up opened, so a card is never left owned by nothing.
+    def _lifecycle(self, data_dir: Path, store: RunStore) -> RunLifecycle:
+        """This layer's one lifecycle, built per call exactly as the store and the backend are."""
+        return RunLifecycle(
+            store,
+            self._runtime(data_dir),
+            settle_seconds=self.settle_seconds,
+            settle_quiet_seconds=self.settle_quiet_seconds,
+            settle_poll_seconds=self.settle_poll_seconds,
+        )
 
-        The request id is claimed before the workspace is cut and the head is raised, which is what
-        makes a retry idempotent. The cost of that ordering is a run record that exists while the
-        bring-up is still going, and an unraised record that nothing ever settles would hold the
-        card against every later run — a fence only a human could lift. So a bring-up that fails
-        settles its own run, as `process_failed` and with the failure's own words, before the
-        refusal reaches the caller.
+    @contextlib.contextmanager
+    def _closing_before_any_spawn(self, lifecycle: RunLifecycle, run: ProductRun, *, now: float):
+        """Close a run whose preparation failed, while it provably still holds no process.
+
+        The request id is claimed before the workspace is cut, which is what makes a retry
+        idempotent, and the cost of that ordering is a run record that exists while preparation is
+        still going. An unraised record that nothing ever settles would hold the card against every
+        later run -- a fence only a human could lift -- so a preparation that fails closes its own
+        run before the refusal reaches the caller.
+
+        The close goes through :meth:`RunLifecycle.advance` like every other close, and what it is
+        handed is the newest record preparation produced: the block reports each phase it reaches
+        through `prepared`, so a failure inside the write-ahead closes the record the write-ahead
+        wrote rather than the stale one this block began with. Whether that close may settle is
+        still the lifecycle's decision and not this block's -- a write-ahead that failed after its
+        spawn window opened lands in `unresolved` from here exactly as it would from anywhere.
         """
+        latest = [run]
+
+        def prepared(current: ProductRun) -> ProductRun:
+            latest[0] = current
+            return current
+
         try:
-            yield
+            yield prepared
         except BaseException as exc:
-            with contextlib.suppress(RunStoreError):
-                store.settle(
-                    run.run_id,
-                    run_state_reads.PROCESS_FAILED,
-                    f"this run's head could not be raised: {exc}",
+            with contextlib.suppress(ReadError, RunStoreError):
+                lifecycle.advance(
+                    latest[0],
+                    SETTLED,
                     now=now,
+                    reason=STOP_BRING_UP_FAILED,
+                    failure=f"this run's head could not be raised: {exc}",
                 )
             raise
 
@@ -603,173 +629,6 @@ class OperationLayer:
         except RunStoreError as exc:
             raise RuntimeUnavailable(str(exc)) from None
 
-    def _raise(
-        self,
-        run: ProductRun,
-        *,
-        spec: HeadSpec,
-        profile: dict[str, Any],
-        data_dir: Path,
-        store: RunStore,
-        document: Path,
-        note: str,
-    ) -> ProductRun:
-        """Bring one head up for this run, and record what the backend handed back."""
-        Path(run.run_dir).mkdir(parents=True, exist_ok=True)
-        self._preflight(run, spec=spec, profile=profile)
-        pointer = NudgePointer.at_document(str(document), note)
-        # An adapter that takes its prompt on its command line is launched with it; one that comes
-        # up with an empty composer is pointed at the same document afterwards. The difference is
-        # the adapter's, and `HeadSpec.prompt_after_start` is where the product already records it.
-        prompt = None if spec.prompt_after_start else pointer.text
-        try:
-            rendered = render_head_command(profile, prompt=prompt, workspace=run.workspace, role="")
-        except HeadCommandError as exc:
-            raise ValidationRefused(f"this run's head command could not be rendered: {exc}") from None
-        runtime = self._runtime(data_dir)
-        receipt = runtime.start(
-            spec,
-            run.workspace,
-            TaskRef.card(run.ref, document=str(document)),
-            command=rendered.command,
-            title=f"product-run:{run.run_id}",
-            run_id=run.run_id,
-            role=run.role,
-            env=self._environment(run),
-            subject=f"product-run:{run.run_id}",
-        )
-        if receipt.status == HEAD_BUSY:
-            raise OwnerConflict(f"a head is already up for run {run.run_id}: {receipt.reason}")
-        if not receipt.ok or receipt.run is None:
-            raise RuntimeUnavailable(
-                f"the product runtime could not raise this run's head: {receipt.reason or receipt.status}"
-            )
-        live = receipt.run
-        if spec.prompt_after_start:
-            live = self._point_at_the_task(runtime, live, run, pointer)
-        raised = run.with_head(
-            live.to_json(),
-            head_pid=_pid_of(run),
-            supervisor_pid=_supervisor_pid_of(run),
-        )
-        try:
-            return store.save(raised)
-        except RunStoreError as exc:
-            raise RuntimeUnavailable(str(exc)) from None
-
-    def _point_at_the_task(self, runtime: Any, live: HeadRun, run: ProductRun, pointer) -> HeadRun:
-        """Hand an interactive head its task, once it is actually ready to read one.
-
-        The `start` verb can carry the pointer itself, and for this product it must not: an
-        interactive TUI comes up over several seconds — it draws its banner, starts its MCP servers
-        and only then owns its composer — and a line delivered into it before that lands in the
-        composer *without being submitted*. The delivery is then perfectly true (every byte reached
-        the terminal, and the substrate says so) and the head sits idle with its prompt unsent in
-        front of it, which is exactly the failure this product runtime exists not to have: a run
-        that reads as started and is not.
-
-        So the head is raised bare and then driven the way a keyboard drives one, in four steps:
-
-        1. **wait until it stops printing.** Read through the backend's own `observe`, off the
-           supervisor's count of the bytes the head has produced — the only thing that moves while
-           a TUI draws itself, because no turn is open yet and the journal records none;
-        2. **deliver the line.** It lands in the composer, whole, and sends nothing;
-        3. **wait until the backend says the head is idle again.** The substrate opens a turn of its
-           own for every payload it carries and closes it when the head goes quiet, so a second
-           delivery made straight away is refused `HEAD_BUSY` by a turn that is about the bytes
-           rather than about the agent — and a refusal accepted as success is a prompt nobody sent;
-        4. **deliver `SUBMIT_KEY` as its own payload.** One burst carrying the line and its
-           carriage return is read as a paste and sends nothing, so Enter has to arrive by itself.
-
-        `settle_seconds` bounds both waits. A head that never quietens still gets its line and its
-        Enter, and the receipts are what say whether either landed: holding a run open with nothing
-        in it is not the better failure.
-        """
-        subject = f"product-run:{run.run_id}"
-        self._wait_until_quiet(runtime, live)
-        delivered = runtime.deliver(live, pointer, subject=subject)
-        if not getattr(delivered, "arrived", delivered.ok):
-            raise RuntimeUnavailable(
-                "this run's head came up and its task could not be put in front of it: "
-                f"{delivered.reason or delivered.status}"
-            )
-        live = delivered.run or live
-        self._wait_until_idle(runtime, live)
-        sent = runtime.deliver(live, NudgePointer.line(SUBMIT_KEY), subject=f"{subject}:submit")
-        if not getattr(sent, "arrived", sent.ok):
-            raise RuntimeUnavailable(
-                "this run's head was given its task and could not be told to send it: "
-                f"{sent.reason or sent.status}"
-            )
-        return sent.run or live
-
-    def _wait_until_quiet(self, runtime: Any, live: HeadRun) -> None:
-        """Wait until the head has stopped printing, or until this bring-up's bound runs out."""
-        deadline = time.monotonic() + self.settle_seconds
-        printed = -1
-        steady_since = time.monotonic()
-        while time.monotonic() < deadline:
-            receipt = runtime.observe(live)
-            evidence = receipt.evidence if isinstance(receipt.evidence, dict) else {}
-            current = evidence.get("output_bytes")
-            current = current if isinstance(current, int) else -1
-            if current != printed:
-                printed, steady_since = current, time.monotonic()
-            elif printed > 0 and time.monotonic() - steady_since >= self.settle_quiet_seconds:
-                return
-            time.sleep(self.settle_poll_seconds)
-
-    def _wait_until_idle(self, runtime: Any, live: HeadRun) -> None:
-        """Wait until the backend will take another payload for this head.
-
-        `busy` is the backend's own answer and covers both halves of what would refuse the next
-        delivery: the substrate's turn over the payload just carried, and the turn lease this
-        runtime granted for it. A backend that cannot say (`busy` is `None`) is not waited on —
-        an unknown is not a yes, and the delivery below reports its own refusal if there is one.
-        """
-        deadline = time.monotonic() + self.settle_seconds
-        while time.monotonic() < deadline:
-            if not runtime.observe(live).busy:
-                return
-            time.sleep(self.settle_poll_seconds)
-
-    def _preflight(self, run: ProductRun, *, spec: HeadSpec, profile: dict[str, Any]) -> None:
-        """Prepare the workspace for the head about to be raised into it, on its own runtime.
-
-        The same two preparations the pipeline makes, reached directly rather than through the
-        pane driver that also makes them: Codex' workspace trust is a hard precondition without
-        which the TUI never reaches readiness, and Claude's trust and theme are best-effort.
-        """
-        if spec.adapter == "codex":
-            try:
-                preflight_codex_launch(
-                    profile,
-                    run.workspace,
-                    HeadRun(
-                        run_id=run.run_id,
-                        spec=spec,
-                        workspace=run.workspace,
-                        task_ref=TaskRef.card(run.ref),
-                        role=run.role,
-                    ),
-                )
-            except (CodexPreflightError, HeadRunError) as exc:
-                raise RuntimeUnavailable(
-                    f"this run's Codex head could not be prepared for {run.workspace}: {exc}"
-                ) from None
-            return
-        if spec.adapter == "claude":
-            from triggered_agents.runtime import claude_env
-
-            try:
-                claude_env.ensure_trust(CLAUDE_JSON, run.workspace)
-                claude_env.ensure_theme(CLAUDE_JSON)
-            except claude_env.ClaudeConfigError:
-                # Best-effort, exactly as it is on the pipeline's path: a head that lands on the
-                # trust dialog is a delivery that does not arrive, and that is reported by the
-                # receipt rather than guessed at here.
-                pass
-
     def _environment(self, run: ProductRun) -> dict[str, str]:
         return {
             RESULT_ENV: run.result_path,
@@ -780,29 +639,37 @@ class OperationLayer:
             "SECRETARY_INSTANCE": str(self.instance),
         }
 
-    def _reason_to_end(self, run: ProductRun, state: dict[str, Any], *, now: float) -> str:
-        """Why the product should end the head this run holds, or nothing.
+    def _reason_to_close(self, run: ProductRun, state: dict[str, Any], *, now: float) -> str:
+        """Why this read should close the run, or nothing. The policy half of a close.
+
+        Four answers, and the middle two are why this is a method rather than a condition:
+
+        * a settled run is history and is never closed again;
+        * an **unresolved** run is closed on every read, because that is what resolving it means:
+          the stop is retried from the same durable record, and the run settles the moment the
+          ending is confirmed. A card is therefore not fenced by an unresolved run for any longer
+          than the head under it actually survives;
+        * a running run is closed when its work is done or its time is up;
+        * a run whose process evidence is already terminal is closed so that ending becomes
+          durable, and one whose evidence says `unknown` or `source_unavailable` is not: a source
+          that could not answer is not an ending.
 
         The deadline is the earlier of the one the run was started with and the one this caller is
         configured with, so `--deadline-seconds` on a read shortens a run that is going nowhere and
         can never silently extend one past what its own start promised.
         """
-        if state["result"]["present"]:
-            return STOP_RESULT_IN
-        deadlines = [moment for moment in (run.deadline_at, run.started_at + self.deadline_seconds) if moment]
-        if deadlines and now >= min(deadlines):
-            return STOP_DEADLINE
-        return ""
-
-    def _stop(self, run: ProductRun, data_dir: Path, reason: str) -> None:
-        """End the head this run holds. The product owns the process, so the product ends it."""
-        try:
-            head_run = HeadRun.from_json(run.head_run)
-        except (HeadRunError, ValueError, TypeError) as exc:
-            raise RuntimeUnavailable(
-                f"this run's head record could not be read back, so its process was not ended: {exc}"
-            ) from None
-        self._runtime(data_dir).stop(head_run, StopInitiator(INITIATOR, reason))
+        if run.settled:
+            return ""
+        if run.unresolved:
+            return STOP_ENDED
+        if state["value"] == "running":
+            if state["result"]["present"]:
+                return STOP_RESULT_IN
+            deadlines = [
+                moment for moment in (run.deadline_at, run.started_at + self.deadline_seconds) if moment
+            ]
+            return STOP_DEADLINE if deadlines and now >= min(deadlines) else ""
+        return STOP_ENDED if state["terminal"] else ""
 
     def _worker_run(self, store: RunStore, *, ref: str, worker_run_id: str) -> ProductRun:
         if worker_run_id:
@@ -957,29 +824,3 @@ def _read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError:
         return "(the worker's task document could not be read)"
-
-
-def _pid_of(run: ProductRun) -> int:
-    return _identity_field(run, "pid")
-
-
-def _supervisor_pid_of(run: ProductRun) -> int:
-    """The supervisor's pid, from the file it writes into its own run directory."""
-    try:
-        return int(Path(run.run_dir, "supervisor.pid").read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return 0
-
-
-def _identity_field(run: ProductRun, name: str) -> int:
-    """One integer out of the head's own launch-identity record, or zero when it has not landed.
-
-    Diagnostic: the pid recorded on a run is what an operator greps for, and it is never what
-    decides whether the run is alive — that is the classified heartbeat, in `run_state`.
-    """
-    try:
-        record = json.loads(Path(run.pid_file).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return 0
-    value = record.get(name) if isinstance(record, dict) else None
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0

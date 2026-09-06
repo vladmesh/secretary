@@ -327,6 +327,9 @@ def _run_lines(document: dict[str, Any]):
     run = document["run"]
     state = document["state"]
     yield f"{run['run_id']} {run['role']} {run['ref']} ({run['project']}) on {run['profile']}"
+    yield f"phase: {run['phase']}" + (
+        f" — {run['unresolved_reason']}" if run.get("unresolved_reason") else ""
+    )
     yield f"state: {state['value']} — {state['reason']}"
     exit_status = state["exit"]
     if exit_status["code"] is not None or exit_status["signal"] is not None:
