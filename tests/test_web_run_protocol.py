@@ -34,8 +34,10 @@ from secretary.webproto import admission as admission_module
 from secretary.webproto import lifecycle as lifecycle_module
 from secretary.webproto import ops as ops_module
 from secretary.webproto import run_events, run_state, workspaces
+from secretary.webproto.boundary import GUARDED, IMPLEMENTATION_FAILURES, ProtocolBoundary, operations
 from secretary.webproto.errors import (
     OwnerConflict,
+    ReadError,
     RunNotFound,
     RuntimeUnavailable,
     ValidationRefused,
@@ -415,8 +417,15 @@ class StartTests(ProductRuntimeFixture):
             raise OSError("the supervisor would not come up")
 
         self.runtime.start = refuse
-        with self.assertRaises(OSError):
+        # `RuntimeUnavailable`, not the backend's own `OSError`: since
+        # :mod:`secretary.webproto.boundary` the layer's contract is that a caller sees a protocol
+        # code, and this is the case that class was written for -- "the product runtime could not
+        # raise, reach or record a head". What this test is about is unchanged and asserted below:
+        # the run the failed bring-up opened is closed, and the card is admitted again.
+        with self.assertRaises(RuntimeUnavailable) as refused:
             self.start(request_id="req-broken")
+        self.assertEqual(refused.exception.code, "backend_unavailable")
+        self.assertIn("would not come up", refused.exception.message)
         store = RunStore(self.data_dir)
         broken = store.by_request("req-broken")
         self.assertIsNotNone(broken)
@@ -1495,6 +1504,125 @@ def _alive(pid: int) -> bool:
     return True
 
 
+
+class ErrorContractTests(ProductRuntimeFixture):
+    """The layer's failure vocabulary, kept in one place and checked for every operation.
+
+    `secretary.webproto` promises that what leaves an operation is a typed protocol code, because
+    that promise is what lets each transport hold one code table and one containment branch. Before
+    :mod:`secretary.webproto.boundary` the promise was kept a call site at a time, and `run_list`
+    was the site that forgot: an unreadable run record escaped as `RunStoreError`, past a transport
+    that catches only `ReadError`, and took a whole card page down.
+
+    So this is written the way `OrcaAbsenceTests` is written -- as something a new violation breaks
+    by itself. The roster below is checked against `boundary.operations()`, so an operation added to
+    either layer fails this suite until it is listed and shown to hold the contract; and the
+    contract is then exercised by breaking the durable sources under *every* operation at once,
+    rather than by naming the ones somebody remembered.
+    """
+
+    REF = "secretary-run-1"
+
+    READ_CALLS = {
+        "report": lambda layer: layer.report(),
+        "data_dir": lambda layer: layer.data_dir(),
+        "system_snapshot": lambda layer: layer.system_snapshot(),
+        "task_snapshot": lambda layer: layer.task_snapshot("secretary-run-1"),
+        "task_events": lambda layer: layer.task_events("secretary-run-1", None, limit=10),
+    }
+
+    OPERATION_CALLS = {
+        "report": lambda layer: layer.report(),
+        "data_dir": lambda layer: layer.data_dir(),
+        "store": lambda layer: layer.store(),
+        "run_start": lambda layer: layer.run_start(
+            "secretary-run-1", request_id="contract-start", profile=WORKER_PROFILE
+        ),
+        "run_review": lambda layer: layer.run_review(
+            request_id="contract-review", profile=REVIEWER_PROFILE, ref="secretary-run-1"
+        ),
+        "run_state": lambda layer: layer.run_state("pr-contract"),
+        "run_list": lambda layer: layer.run_list("secretary-run-1"),
+    }
+
+    # -- what the roster is worth -------------------------------------------------------------
+
+    def test_the_roster_names_every_public_operation_of_both_layers(self) -> None:
+        """Adding an operation without covering it here is itself the failure."""
+        self.assertEqual(set(operations(ReadLayer)), set(self.READ_CALLS))
+        self.assertEqual(set(operations(OperationLayer)), set(self.OPERATION_CALLS))
+
+    def test_every_public_operation_leaves_through_the_boundary(self) -> None:
+        for layer in (ReadLayer, OperationLayer):
+            for name in operations(layer):
+                with self.subTest(layer=layer.__name__, operation=name):
+                    self.assertTrue(getattr(getattr(layer, name), GUARDED, False))
+
+    # -- the contract itself ------------------------------------------------------------------
+
+    def _each_operation(self) -> list[tuple[str, Any]]:
+        reads, ops = self.reads(), self.layer()
+        return [(f"reads.{name}", lambda call=call: call(reads)) for name, call in self.READ_CALLS.items()] + [
+            (f"ops.{name}", lambda call=call: call(ops)) for name, call in self.OPERATION_CALLS.items()
+        ]
+
+    def _assert_typed(self, label: str) -> None:
+        for name, call in self._each_operation():
+            with self.subTest(source=label, operation=name):
+                try:
+                    call()
+                except ReadError:
+                    pass  # the contract: a protocol code, whatever it is
+                except Exception as exc:  # noqa: BLE001 -- naming the violation is the point
+                    self.fail(
+                        f"{name} let {type(exc).__module__}.{type(exc).__name__} out of the layer "
+                        f"with {label} broken: {exc}"
+                    )
+
+    def test_an_unreadable_run_record_is_a_protocol_code_from_every_operation(self) -> None:
+        runs = self.data_dir / "webproto" / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        (runs / "pr-broken.json").write_text("{not json", encoding="utf-8")
+        self._assert_typed("an unreadable run record")
+
+    def test_a_run_store_that_is_not_a_directory_is_a_protocol_code_from_every_operation(self) -> None:
+        """The store's own `OSError`, which is a different vocabulary from a parse failure."""
+        webproto = self.data_dir / "webproto"
+        webproto.mkdir(parents=True, exist_ok=True)
+        (webproto / "runs").write_text("not a directory", encoding="utf-8")
+        self._assert_typed("a run store that is a file")
+
+    def test_an_unreadable_event_journal_is_a_protocol_code_from_every_operation(self) -> None:
+        (self.data_dir / "board" / "events.ndjson").mkdir(parents=True, exist_ok=True)
+        self._assert_typed("an event journal that is a directory")
+
+    def test_a_broken_run_store_is_backend_unavailable_and_not_some_other_code(self) -> None:
+        runs = self.data_dir / "webproto" / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        (runs / "pr-broken.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaises(RuntimeUnavailable) as refused:
+            self.layer().run_list(self.REF)
+        self.assertEqual(refused.exception.code, "backend_unavailable")
+        self.assertIn("pr-broken.json", refused.exception.message)
+
+    # -- and what the boundary deliberately does not do ----------------------------------------
+
+    def test_a_defect_of_the_layer_is_not_dressed_as_an_unavailable_backend(self) -> None:
+        """Only the durable sources' vocabularies are translated; a bug travels as a bug."""
+
+        class Faulty(ProtocolBoundary):
+            def operation(self):
+                raise TypeError("this is a defect of the layer, not an unreadable file")
+
+        with self.assertRaises(TypeError):
+            Faulty().operation()
+        self.assertNotIn(TypeError, IMPLEMENTATION_FAILURES)
+
+    def test_the_run_store_error_is_never_the_kind_of_thing_a_caller_sees(self) -> None:
+        self.assertFalse(issubclass(RunStoreError, ReadError))
+        self.assertIn(RunStoreError, IMPLEMENTATION_FAILURES)
+
+
 class OrcaAbsenceTests(ProductRuntimeFixture):
     """Criterion 2, as a check rather than a promise.
 
@@ -1677,6 +1805,9 @@ class WebRunCommandTests(ProductRuntimeFixture):
             code, out, _ = self._run("web-run", "list", "--ref", "secretary-run-1")
             self.assertEqual(code, 0)
             self.assertIn(run_id, out)
+            # The listing carries each run's state, not just its record: an open run that reads
+            # `unknown` must not print the same line as one that is running.
+            self.assertIn("running (open)", out)
 
     def test_an_owner_conflict_exits_on_its_own_status(self) -> None:
         self.reserve_sprint("secretary", "sprint:1427")

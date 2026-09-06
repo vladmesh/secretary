@@ -67,6 +67,7 @@ from secretary.tasks import KanboardClient, TaskAudit
 from secretary.webproto import run_events, sources
 from secretary.webproto import run_state as run_state_reads
 from secretary.webproto.admission import Admission, admit
+from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
     InstallationUnavailable,
     OwnerConflict,
@@ -152,7 +153,7 @@ def no_session() -> Any:
     )
 
 
-class OperationLayer:
+class OperationLayer(ProtocolBoundary):
     """One installation's product runtime, with no knowledge of who is asking.
 
     Construction does no I/O, exactly as `ReadLayer`'s does not: every operation resolves the
@@ -484,6 +485,31 @@ class OperationLayer:
             # lost to one journal failure ever becomes visible again. See :meth:`_republish`.
             state = self._republish(data_dir, run, now=now, state=state) or state
         return self._document(run, now=now, state=state)
+
+    def run_list(self, ref: str) -> dict[str, Any]:
+        """Every product run of one card, each read exactly as :meth:`run_state` reads it.
+
+        A listing rather than a fourth operation: it introduces no fact of its own and settles
+        nothing a single read would not settle, and it is here rather than in a caller so that the
+        CLI group and the web transport cannot come to list a card's runs differently. A card that
+        has never been run has an empty list, which is not a refusal.
+
+        Each item is the whole `product_run` document :meth:`run_state` returns, state included,
+        and that is the point: a listing that kept only the record would leave every reader to
+        guess a state from `settled_state` and `ended`, and an open run that reads `unknown` or
+        `source_unavailable` would be indistinguishable from one that is running. Those are
+        different things, so the listing carries the state that tells them apart rather than
+        dropping it and inviting each caller to invent one.
+        """
+        layer_now = self._clock()
+        store = self.store()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "product_runs",
+            "observed_at": sources.isoformat(layer_now),
+            "ref": ref,
+            "items": [self.run_state(run.run_id) for run in store.for_ref(ref)],
+        }
 
     # -- the pieces the operations are made of ----------------------------------------------
 

@@ -1944,6 +1944,68 @@ steward runs no probes of its own: they cost tokens and would describe a check t
 or missing cache leaves the previous baseline in place rather than clearing it, otherwise a flip would be lost on the
 first successful read.
 
+## The local web transport
+
+`secretary web-serve` serves the dashboard and the card pages over the same `web-read` and
+`web-run` operations the CLI groups use. It is a local developer-facing tool for this slice.
+
+> **Do not publish it.** It has no password, no TLS and no authorisation of any kind, and two of
+> its routes start real heads on this installation, so anybody who can reach the port owns the
+> pipeline. Binding it to a non-loopback address is refused in code; putting it behind a proxy,
+> forwarding its port off the host, or installing it as a unit on a live installation is forbidden
+> until the slice that adds TLS and a password (DoD 5). There is no unit template for it, and none
+> is to be added before that slice.
+
+```bash
+# start it in the foreground; Ctrl-C stops it
+python3 -P -m secretary web-serve --instance INSTANCE
+
+# a second one beside the first, or a different data plane
+python3 -P -m secretary web-serve --instance INSTANCE --port 8788 --data-dir DIR
+
+# head profiles from a registry other than the installation's own
+python3 -P -m secretary web-serve --instance INSTANCE --heads-registry REGISTRY
+```
+
+| flag | default | what it is |
+| --- | --- | --- |
+| `--instance` | required | instance directory or `instance.yaml`, as every other group takes it |
+| `--data-dir` | the instance's own | override the data plane, or `SECRETARY_DATA_DIR` |
+| `--host` | `127.0.0.1` | the address to bind; resolved first, and refused before a socket exists unless every address it resolves to is loopback |
+| `--port` | `8787` | the port to bind |
+| `--heads-registry` | the installation's own | where `--profile` values are resolved, or `TA_HEADS_REGISTRY` |
+| `--offline` | off | collect installation health without inspecting the live host |
+
+**Stopping it.** Ctrl-C in the foreground. It holds no state of its own — the cursor a browser
+watches a card with belongs to that browser — so a stop loses nothing and a restart resumes every
+open page. Stopping it does **not** stop the heads its runs raised: a run is owned by the product
+and is ended by `secretary web-run state --run-id RUN` (or by the same read through the page) when
+its result arrives or its deadline passes, exactly as it is for a run started from the CLI.
+
+**Diagnosing it.** It prints one line per request on stderr, with the status it answered, and the
+same refusal a browser sees is readable directly:
+
+```bash
+curl -s localhost:8787/api/system | python3 -m json.tool | head -40      # the dashboard's document
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/tasks/REF   # 200, 404, 503 …
+python3 -P -m secretary web-read system --instance INSTANCE              # the same read, no HTTP
+```
+
+If a page is missing a section, the page itself says why: an unavailable source is rendered as a
+marked block carrying the reason and the age of what is being shown, and it is never drawn as an
+empty list. That holds for the product-run store too -- an unreadable record under
+`<data-dir>/webproto/runs/` marks that one section and leaves the rest of the card page standing,
+and the JSON route answers 503 `backend_unavailable`; the reason names the file, which is where to
+look. When a document is right and the page is wrong, the transport is at fault; when both
+say the same thing, the source is. `secretary web-read` and `secretary web-run` answer the same
+questions with no HTTP in the way, which is the first place to check.
+
+A port already in use fails the bind with the address and port named. A non-loopback `--host` exits
+2 with `{"error": {"code": "validation", ...}}` naming this rule. The check resolves the name first
+and refuses unless every address it resolves to is loopback, so a host that maps `localhost` (or
+any other name) to a routable address is refused rather than published; the address that resolution
+produced is the one bound, so nothing resolves the name a second time.
+
 ## Units
 
 The current templates and what they are for are documented in

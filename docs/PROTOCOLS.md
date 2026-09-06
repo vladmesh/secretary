@@ -2619,6 +2619,18 @@ already uses; the transport is what turns a code into whatever its protocol says
 | `InvalidCursor` | `validation` | a cursor this layer did not issue, one belonging to another card, or one past the end of the journal — never silently reset to the beginning |
 | `InstallationUnavailable` | `backend_unavailable` | the instance config does not validate, so there is no data plane to read |
 
+**The contract is enforced in one place, for every operation.** A caller of this layer never sees an
+implementation exception -- the run store's `RunStoreError`, an `OSError`, a document that does not
+parse -- because `secretary.webproto.boundary.ProtocolBoundary` wraps every public method of both
+layers at class-creation time and turns those into `backend_unavailable` on the way out. Both layers
+inherit it, so an operation added later is guarded by being public, with no list to keep in step. It
+matters because each transport holds exactly one code table and one containment branch: an untyped
+escape does not become a worse error message, it takes the caller down -- as an unreadable run
+record once took a whole card page down through `run_list`. A defect of the layer itself (a
+`TypeError`, say) is deliberately *not* translated: it travels as what it is.
+`tests/test_web_run_protocol.py:ErrorContractTests` breaks the run store and the journal under every
+operation of both layers, and fails if an operation is added without being covered.
+
 ## Running the pipeline
 
 The other half of `secretary.webproto`, and the half that produces what the read layer shows: three
@@ -2650,7 +2662,10 @@ installation's own.
 it at a task document. **`run_review(request_id, profile, worker_run)`** settles the worker run
 first and refuses while it is still open, then raises a reviewer head in the same workspace, handed
 the worker's result. **`run_state(run_id)`** reads one run, and is where a run's ending becomes
-durable.
+durable. **`run_list(ref)`** lists every product run of one card, each item being the whole
+`product_run` document `run_state` returns -- record and state together, so a reader can tell an
+open run that is `running` from one that reads `unknown` or `source_unavailable` without inventing
+a state of its own.
 
 ### The lifecycle of a run, and the order it holds
 
@@ -2820,6 +2835,83 @@ The same typed exceptions the reads use, plus the two only a mutation can make. 
 | `ValidationRefused` | `validation` | no request id, a request id already owning another operation or another request's inputs, no profile, an unlaunchable profile, one on another backend, or an unregistered project |
 | `OwnerConflict` | `owner_conflict` | somebody else owns this card — an open sprint, the dispatcher's lane, its durable record, an unsettled run of this layer's, or a worker run that has not ended yet |
 | `RuntimeUnavailable` | `backend_unavailable` | the workspace, the head or the run's own record could not be made |
+
+## Serving the pipeline locally
+
+The web transport is the second caller of the two halves above, beside `web-read` and `web-run`,
+and it is a transport in the literal sense: one route is one operation of `secretary.webproto`, and
+it has no snapshot, no state derivation, no liveness rule and no mutation of its own. Why it is a
+second transport and not a second source of truth is in
+[Architecture](ARCHITECTURE.md#the-web-transport); how to run and stop it is in
+[Operations](OPERATIONS.md#the-local-web-transport).
+
+```bash
+python3 -P -m secretary web-serve --instance INSTANCE [--data-dir DIR] \
+  [--host 127.0.0.1] [--port 8787] [--heads-registry REGISTRY] [--offline]
+```
+
+**Loopback only, and this is not a preference.** The service has no password, no TLS and no
+authorisation of any kind, and two of its routes start real heads on this installation, so anybody
+who can reach the port owns the pipeline. `--host` is resolved before a socket exists and is refused
+unless every address it resolves to is loopback -- a name is not an address, so `localhost` on a
+host whose `/etc/hosts` maps it elsewhere is refused like any other routable address, and what is
+bound is the literal address that resolution produced rather than the name. Publishing it — on another interface, behind a
+proxy, or as a unit on a live installation — is forbidden until the slice that adds TLS and a
+password (DoD 5).
+
+### Routes
+
+The table below is the whole externally reachable surface. There is no route that takes a command,
+a script, a path or a module to run, there is no catch-all, and `tests/test_web_transport.py` fails
+if the table grows one. An unrouted path is 404 and an unrouted method on a routed path is 405;
+neither reaches a handler.
+
+| method | route | operation | answers |
+| --- | --- | --- | --- |
+| GET | `/` | `reads.system_snapshot` | the dashboard: health with its reason and age, projects, current cards, running agents |
+| GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`) | one card: state, attempt, heads, product runs, worker and reviewer output, result, event tail |
+| GET | `/api/system` | `reads.system_snapshot` | the dashboard's document |
+| GET | `/api/tasks/{ref}` | `reads.task_snapshot` | the card page's document; `?events=N` sets the tail length |
+| GET | `/api/tasks/{ref}/events` | `reads.task_events` | one page of history; `?cursor=C&limit=N` |
+| GET | `/api/tasks/{ref}/runs` | `ops.run_list` | every product run of one card |
+| GET | `/api/runs/{run_id}` | `ops.run_state` | one run, and where its ending settles |
+| POST | `/api/runs/start` | `ops.run_start` | raise a worker; body `{ref, request_id, profile, instruction?}` |
+| POST | `/api/runs/review` | `ops.run_review` | raise a reviewer; body `{request_id, profile, worker_run_id?, ref?}` |
+
+A POST body is a JSON object and carries only the fields listed. An unknown field is refused rather
+than ignored: a client sending one believes this endpoint does something it does not.
+
+### Protocol code to HTTP status
+
+One table, in `secretary.web.statuses`, and no status number anywhere else in the transport. The
+layer below still knows nothing about HTTP; this is the only place its vocabulary becomes one.
+
+| code | status | when |
+| --- | --- | --- |
+| `not_found` | 404 | the board or the run store answered and holds nothing under that name |
+| `validation` | 400 | the request is wrong: a missing field, an unknown field, a bad page size, a cursor this layer did not issue |
+| `owner_conflict` | 409 | the request is well formed and refused on the state of the world |
+| `backend_unavailable` | 503 | a source this request needs could not be reached at all |
+| anything else | 500 | a code this transport has never heard of — a defect of the transport, not of the client |
+
+Two refusals belong to the transport itself and never reach the layer: 404 for an unrouted path and
+405 for an unrouted method. A refusal on a page route is rendered as a page with the same status,
+so a browser shows the reason rather than a blank body.
+
+### Watching a card over HTTP
+
+The cursor is the client's, and the server keeps no session state at all. A card page renders the
+event tail the snapshot carries and hands the browser that page's `next_cursor`; the browser stores
+its own position and polls `/api/tasks/{ref}/events?cursor=...` from it. So a reload, a second tab
+and a reconnected client resume where that client was — no run is started again, and no recorded
+event is skipped. A cursor this installation will not honour is a 400 (`validation`), exactly as it
+is in the layer: watching stops with the reason on the page, and is never silently reset to the
+beginning of the journal.
+
+Idempotency is the layer's and the transport does not get to weaken it: the request id in a POST is
+the client's, kept across a reload, and `ops.run_start` / `ops.run_review` answer a repeat with the
+run that already exists. A repeated POST therefore raises no second head — which is a test, not a
+description.
 
 ## Knowledge
 
