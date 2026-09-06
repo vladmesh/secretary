@@ -347,5 +347,7 @@ def _review_lines(document: dict[str, Any]):
 
 def _list_lines(document: dict[str, Any]):
     yield f"{document['ref']}: {len(document['items'])} product run(s)"
-    for run in document["items"]:
-        yield f"  {run['run_id']} {run['role']} {run['profile']} {run['settled_state'] or 'open'}"
+    for item in document["items"]:
+        run, state = item["run"], item["state"]
+        over = "over" if state["ended"] else "open"
+        yield f"  {run['run_id']} {run['role']} {run['profile']} {state['value']} ({over}) — {state['reason']}"

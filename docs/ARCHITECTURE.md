@@ -364,7 +364,8 @@ raise a second head even when a browser sends the same command twice.
 
 **Loopback only until DoD 5.** It has no password, no TLS and no authorisation, and its POST routes
 start real heads, so reaching the port is owning the pipeline. A non-loopback bind is refused in
-code before a socket exists, and the service is not published, proxied or enabled as a unit on a
+code before a socket exists -- by resolving the requested name and refusing unless every address it
+resolves to is loopback, since a spelling check would let a host's own mappings publish it -- and the service is not published, proxied or enabled as a unit on a
 live installation until the slice that adds TLS and a password.
 
 Its routes, its code-to-status table and its cursor semantics are in

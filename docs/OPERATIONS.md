@@ -1971,7 +1971,7 @@ python3 -P -m secretary web-serve --instance INSTANCE --heads-registry REGISTRY
 | --- | --- | --- |
 | `--instance` | required | instance directory or `instance.yaml`, as every other group takes it |
 | `--data-dir` | the instance's own | override the data plane, or `SECRETARY_DATA_DIR` |
-| `--host` | `127.0.0.1` | the loopback address to bind; anything else is refused before a socket exists |
+| `--host` | `127.0.0.1` | the address to bind; resolved first, and refused before a socket exists unless every address it resolves to is loopback |
 | `--port` | `8787` | the port to bind |
 | `--heads-registry` | the installation's own | where `--profile` values are resolved, or `TA_HEADS_REGISTRY` |
 | `--offline` | off | collect installation health without inspecting the live host |
@@ -1998,7 +1998,10 @@ say the same thing, the source is. `secretary web-read` and `secretary web-run` 
 questions with no HTTP in the way, which is the first place to check.
 
 A port already in use fails the bind with the address and port named. A non-loopback `--host` exits
-2 with `{"error": {"code": "validation", ...}}` naming this rule.
+2 with `{"error": {"code": "validation", ...}}` naming this rule. The check resolves the name first
+and refuses unless every address it resolves to is loopback, so a host that maps `localhost` (or
+any other name) to a routable address is refused rather than published; the address that resolution
+produced is the one bound, so nothing resolves the name a second time.
 
 ## Units
 

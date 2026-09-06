@@ -1677,6 +1677,9 @@ class WebRunCommandTests(ProductRuntimeFixture):
             code, out, _ = self._run("web-run", "list", "--ref", "secretary-run-1")
             self.assertEqual(code, 0)
             self.assertIn(run_id, out)
+            # The listing carries each run's state, not just its record: an open run that reads
+            # `unknown` must not print the same line as one that is running.
+            self.assertIn("running (open)", out)
 
     def test_an_owner_conflict_exits_on_its_own_status(self) -> None:
         self.reserve_sprint("secretary", "sprint:1427")

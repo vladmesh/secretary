@@ -13,7 +13,9 @@ returns was decided one layer below and translated in exactly one table.
 from __future__ import annotations
 
 import ast
+import ipaddress
 import json
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -21,12 +23,19 @@ from http.client import HTTPConnection
 from pathlib import Path
 from threading import Thread
 from typing import Any, ClassVar
+from unittest import mock
 
 import yaml
 
 from secretary.web import pages
 from secretary.web.app import ROUTES, WebApp
-from secretary.web.server import DEFAULT_HOST, LoopbackOnly, build_server, check_bind
+from secretary.web.server import (
+    DEFAULT_HOST,
+    LoopbackOnly,
+    build_server,
+    check_bind,
+    resolve_bind,
+)
 from secretary.web.statuses import HTTP_STATUS_BY_CODE, UNMAPPED_CODE_STATUS, status_for
 from secretary.webproto import errors as error_module
 from secretary.webproto.errors import (
@@ -551,6 +560,54 @@ class PageTests(TransportFixture):
         self.assertIn("event 0", markup)
         self.assertIn("the card is not finished", markup)
 
+    def test_an_open_run_whose_identity_does_not_match_is_not_drawn_as_a_running_one(self) -> None:
+        """Criterion 3, on the runs this transport itself starts.
+
+        A run whose heartbeat no longer names it -- a reused PID, a heartbeat from another head --
+        is `unknown` and *not over*, which is a different thing from running and a different thing
+        from finished. The page has to say which, so the listing carries the state rather than the
+        record alone.
+        """
+        self._card()
+        started = self.json_of(
+            self.post(
+                "/api/runs/start",
+                {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
+            )
+        )
+        pid_file = Path(started["run"]["pid_file"])
+        heartbeat = json.loads(pid_file.read_text(encoding="utf-8"))
+        heartbeat["run_id"] = "pr-somebody-else"
+        pid_file.write_text(json.dumps(heartbeat, sort_keys=True), encoding="utf-8")
+
+        read = self.json_of(self.get(f"/api/runs/{started['run']['run_id']}"))
+        self.assertEqual(read["state"]["value"], "unknown")
+        self.assertFalse(read["state"]["ended"])
+
+        markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        self.assertIn("state-unknown", markup)
+        self.assertIn("belongs to another process", markup)
+        self.assertIn("(open)", markup)
+
+    def test_a_settled_run_and_an_open_one_read_differently_on_the_page(self) -> None:
+        self._card()
+        started = self.json_of(
+            self.post(
+                "/api/runs/start",
+                {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
+            )
+        )
+        open_markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        self.assertIn("(open)", open_markup)
+        self.assertNotIn("(over)", open_markup)
+
+        result_path = Path(started["run"]["result_path"])
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps({"status": "done"}), encoding="utf-8")
+        self.assertTrue(self.json_of(self.get(f"/api/runs/{started['run']['run_id']}"))["state"]["ended"])
+        settled_markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        self.assertIn("(over)", settled_markup)
+
     def test_a_card_with_no_history_says_so_rather_than_showing_nothing(self) -> None:
         self._card()
         markup = self.text_of(self.get("/tasks/secretary-run-1"))
@@ -592,7 +649,10 @@ class IdempotentPostTests(TransportFixture):
         self.assertEqual(self.json_of(first)["run"]["run_id"], self.json_of(second)["run"]["run_id"])
         self.assertEqual(len(self.runtime.starts), 1)
         listing = self.json_of(self.get("/api/tasks/secretary-run-1/runs"))
-        self.assertEqual([run["run_id"] for run in listing["items"]], [self.json_of(first)["run"]["run_id"]])
+        self.assertEqual(
+            [item["run"]["run_id"] for item in listing["items"]],
+            [self.json_of(first)["run"]["run_id"]],
+        )
 
     def test_a_repeat_naming_other_inputs_is_refused_rather_than_answered(self) -> None:
         self._card()
@@ -671,6 +731,38 @@ class LoopbackTests(TransportFixture):
             with self.subTest(host=host):
                 self.assertTrue(check_bind(host))
         self.assertEqual(DEFAULT_HOST, "127.0.0.1")
+
+    def test_a_name_that_resolves_off_loopback_is_refused_rather_than_bound(self) -> None:
+        """The hole a spelling check leaves: the name is fine, the address it names is not.
+
+        `--host` is a name until something resolves it, and what resolves it is the host's own
+        mappings rather than this program. So the refusal has to be about the addresses, and a
+        name mapped to a routable one must be refused exactly like the literal would be.
+        """
+        routable = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.7.7", 0))]
+        with mock.patch.object(socket, "getaddrinfo", return_value=routable):
+            for host in ("localhost", "localhost.localdomain", "ip6-localhost"):
+                with self.subTest(host=host):
+                    with self.assertRaises(LoopbackOnly) as refused:
+                        check_bind(host)
+                    self.assertIn("192.168.7.7", str(refused.exception))
+                    self.assertIn("DoD 5", str(refused.exception))
+
+    def test_a_name_is_bound_as_the_literal_address_it_resolved_to(self) -> None:
+        """Resolved once, here, and the socket is handed that answer — not the name again."""
+        family, address = resolve_bind("localhost")
+        self.assertIn(family, (socket.AF_INET, socket.AF_INET6))
+        self.assertTrue(ipaddress.ip_address(address).is_loopback)
+        self.assertEqual(check_bind("127.0.0.1"), "127.0.0.1")
+
+    def test_a_name_that_resolves_to_both_loopback_and_a_routable_address_is_refused(self) -> None:
+        mixed = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", 0)),
+        ]
+        with mock.patch.object(socket, "getaddrinfo", return_value=mixed):
+            with self.assertRaises(LoopbackOnly):
+                check_bind("localhost")
 
     def test_the_command_defaults_to_loopback_and_refuses_anything_else(self) -> None:
         from secretary.cli import build_parser

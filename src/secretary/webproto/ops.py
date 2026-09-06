@@ -492,6 +492,13 @@ class OperationLayer:
         nothing a single read would not settle, and it is here rather than in a caller so that the
         CLI group and the web transport cannot come to list a card's runs differently. A card that
         has never been run has an empty list, which is not a refusal.
+
+        Each item is the whole `product_run` document :meth:`run_state` returns, state included,
+        and that is the point: a listing that kept only the record would leave every reader to
+        guess a state from `settled_state` and `ended`, and an open run that reads `unknown` or
+        `source_unavailable` would be indistinguishable from one that is running. Those are
+        different things, so the listing carries the state that tells them apart rather than
+        dropping it and inviting each caller to invent one.
         """
         layer_now = self._clock()
         store = self.store()
@@ -500,7 +507,7 @@ class OperationLayer:
             "kind": "product_runs",
             "observed_at": sources.isoformat(layer_now),
             "ref": ref,
-            "items": [self.run_state(run.run_id)["run"] for run in store.for_ref(ref)],
+            "items": [self.run_state(run.run_id) for run in store.for_ref(ref)],
         }
 
     # -- the pieces the operations are made of ----------------------------------------------

@@ -414,18 +414,27 @@ def _runs(ref: str, runs: dict[str, Any]) -> str:
             + _review_form(ref, worker=None)
         )
     rows = []
-    for run in items:
+    for item in items:
+        # Both facts, never one standing in for the other: `state` is what the evidence says this
+        # run is — running, finished, failed, its source unreadable, or unknown — and `ended` is
+        # whether it is over. A run that reads `unknown` while still open is a run nobody may treat
+        # as running, so it must not look like one here.
+        run = item.get("run") or {}
+        state = item.get("state") or {}
+        value = str(state.get("value") or "unknown")
+        over = "over" if state.get("ended") else "open"
         rows.append(
             [
                 f"<code>{escape(str(run.get('run_id') or ''))}</code>",
                 escape(str(run.get("role") or "")),
                 _or_dash(run.get("profile")),
                 escape(str(run.get("phase") or "")),
-                _or_dash(run.get("settled_state")) + (" (over)" if run.get("ended") else " (open)"),
+                _state_cell(value, str(state.get("reason") or "no reason was recorded"))
+                + f'<div class="age">({escape(over)})</div>',
             ]
         )
-    workers = [run for run in items if run.get("role") == "worker"]
-    return _rows(["run", "role", "profile", "phase", "outcome"], rows) + _review_form(
+    workers = [item.get("run") or {} for item in items if (item.get("run") or {}).get("role") == "worker"]
+    return _rows(["run", "role", "profile", "phase", "state"], rows) + _review_form(
         ref, worker=workers[-1] if workers else None
     )
 

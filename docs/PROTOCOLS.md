@@ -2650,7 +2650,10 @@ installation's own.
 it at a task document. **`run_review(request_id, profile, worker_run)`** settles the worker run
 first and refuses while it is still open, then raises a reviewer head in the same workspace, handed
 the worker's result. **`run_state(run_id)`** reads one run, and is where a run's ending becomes
-durable.
+durable. **`run_list(ref)`** lists every product run of one card, each item being the whole
+`product_run` document `run_state` returns -- record and state together, so a reader can tell an
+open run that is `running` from one that reads `unknown` or `source_unavailable` without inventing
+a state of its own.
 
 ### The lifecycle of a run, and the order it holds
 
@@ -2837,8 +2840,10 @@ python3 -P -m secretary web-serve --instance INSTANCE [--data-dir DIR] \
 
 **Loopback only, and this is not a preference.** The service has no password, no TLS and no
 authorisation of any kind, and two of its routes start real heads on this installation, so anybody
-who can reach the port owns the pipeline. `--host` accepts a loopback address or a loopback name and
-refuses everything else before a socket exists. Publishing it — on another interface, behind a
+who can reach the port owns the pipeline. `--host` is resolved before a socket exists and is refused
+unless every address it resolves to is loopback -- a name is not an address, so `localhost` on a
+host whose `/etc/hosts` maps it elsewhere is refused like any other routable address, and what is
+bound is the literal address that resolution produced rather than the name. Publishing it — on another interface, behind a
 proxy, or as a unit on a live installation — is forbidden until the slice that adds TLS and a
 password (DoD 5).
 

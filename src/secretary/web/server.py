@@ -16,6 +16,7 @@ enabled as a unit on a live installation.
 from __future__ import annotations
 
 import ipaddress
+import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -33,29 +34,51 @@ LOOPBACK_ONLY = (
     "TLS and a password (DoD 5)"
 )
 
-#: Accepted by name because a hostname is not an address until it is resolved, and this refusal must
-#: not depend on what the resolver says today.
-LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
-
 
 class LoopbackOnly(Exception):
     """A bind this transport refuses. Raised before a socket exists, never after."""
 
 
-def check_bind(host: str) -> str:
-    """The address to bind, or a refusal. Loopback literals and loopback names only."""
-    candidate = (host or "").strip()
-    if not candidate:
-        return DEFAULT_HOST
-    if candidate.lower() in LOOPBACK_NAMES:
-        return candidate
+def resolve_bind(host: str) -> tuple[int, str]:
+    """The socket family and the literal address to bind, or a refusal — before any socket exists.
+
+    A name is not an address, and a name is what an operator types. `localhost` is loopback on
+    every host anyone has ever met, but that is a convention of `/etc/hosts` and NSS rather than a
+    property of the spelling: a host may map it, or `localhost.localdomain`, to a routable address,
+    and a check that compared spellings would then hand exactly that address to `socket.bind` and
+    publish a service with no password and no TLS. So the name is resolved here and every address
+    it resolves to must be loopback; one that is not refuses the bind. What is bound afterwards is
+    the literal address this resolution produced, not the name — nothing gets to resolve it a
+    second time, to something else, between the check and the socket.
+    """
+    candidate = (host or "").strip() or DEFAULT_HOST
+    literal = candidate.strip("[]")
     try:
-        address = ipaddress.ip_address(candidate.strip("[]"))
-    except ValueError:
-        raise LoopbackOnly(f"{host!r} is not a loopback address: {LOOPBACK_ONLY}") from None
-    if not address.is_loopback:
-        raise LoopbackOnly(f"{host!r} is not a loopback address: {LOOPBACK_ONLY}")
-    return candidate
+        infos = socket.getaddrinfo(literal, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise LoopbackOnly(f"{host!r} does not resolve to an address ({exc}): {LOOPBACK_ONLY}") from None
+    if not infos:
+        raise LoopbackOnly(f"{host!r} does not resolve to an address: {LOOPBACK_ONLY}")
+    resolved: list[tuple[int, str]] = []
+    for family, _socktype, _proto, _canonname, sockaddr in infos:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            raise LoopbackOnly(f"{host!r} is not an IP address: {LOOPBACK_ONLY}")
+        found = str(sockaddr[0]).partition("%")[0]
+        try:
+            address = ipaddress.ip_address(found)
+        except ValueError:
+            raise LoopbackOnly(f"{host!r} resolves to {found!r}, which is not an address: {LOOPBACK_ONLY}") from None
+        if not address.is_loopback:
+            raise LoopbackOnly(
+                f"{host!r} resolves to {found}, which is not a loopback address: {LOOPBACK_ONLY}"
+            )
+        resolved.append((family, found))
+    return resolved[0]
+
+
+def check_bind(host: str) -> str:
+    """The literal loopback address to bind, or a refusal. See :func:`resolve_bind`."""
+    return resolve_bind(host)[1]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -134,21 +157,26 @@ class WebServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], app: WebApp) -> None:
+    def __init__(
+        self, address: tuple[str, int], app: WebApp, *, family: int = socket.AF_INET
+    ) -> None:
         self.app = app
+        self.address_family = family
         super().__init__(address, _Handler)
 
 
 def build_server(app: WebApp, *, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> WebServer:
     """A bound server, or a refusal — and the refusal comes before the socket."""
-    return WebServer((check_bind(host), int(port)), app)
+    family, address = resolve_bind(host)
+    return WebServer((address, int(port)), app, family=family)
 
 
 def serve(app: WebApp, *, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> int:
     """Bind, announce where to point a browser, and serve until interrupted."""
     server = build_server(app, host=host, port=port)
     bound_host, bound_port = server.server_address[0], server.server_address[1]
-    print(f"secretary web on http://{bound_host}:{bound_port} — {LOOPBACK_ONLY}", file=sys.stderr)
+    shown = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
+    print(f"secretary web on http://{shown}:{bound_port} — {LOOPBACK_ONLY}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
