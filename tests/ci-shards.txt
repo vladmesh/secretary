@@ -106,6 +106,7 @@ unit tests/test_web_read_protocol.py
 unit tests/test_web_run_protocol.py
 unit tests/test_web_sprint_protocol.py
 unit tests/test_web_sprint_transport.py
+unit tests/test_sprint_user_path.py
 integration-board tests/test_standing_agent_entrypoint.py
 unit tests/test_task_commands.py
 unit tests/test_tasks.py
