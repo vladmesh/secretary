@@ -485,6 +485,24 @@ class OperationLayer:
             state = self._republish(data_dir, run, now=now, state=state) or state
         return self._document(run, now=now, state=state)
 
+    def run_list(self, ref: str) -> dict[str, Any]:
+        """Every product run of one card, each read exactly as :meth:`run_state` reads it.
+
+        A listing rather than a fourth operation: it introduces no fact of its own and settles
+        nothing a single read would not settle, and it is here rather than in a caller so that the
+        CLI group and the web transport cannot come to list a card's runs differently. A card that
+        has never been run has an empty list, which is not a refusal.
+        """
+        layer_now = self._clock()
+        store = self.store()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "product_runs",
+            "observed_at": sources.isoformat(layer_now),
+            "ref": ref,
+            "items": [self.run_state(run.run_id)["run"] for run in store.for_ref(ref)],
+        }
+
     # -- the pieces the operations are made of ----------------------------------------------
 
     def _lifecycle(self, data_dir: Path, store: RunStore) -> RunLifecycle:

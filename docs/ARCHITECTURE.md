@@ -335,6 +335,42 @@ already exist, and every path that raises a head goes through it.
 Its operations, their idempotency, the ownership rule and the outcome vocabulary are in
 [Protocols](PROTOCOLS.md#running-the-pipeline).
 
+## The web transport
+
+`secretary.web` serves a dashboard and a card page over HTTP, and it is the *second* transport over
+the layer above rather than a second source of truth. The first is `secretary web-read` /
+`secretary web-run`: argparse in, JSON out, a typed protocol code turned into an exit status in one
+table. This one is the same shape with a different vocabulary — a request line in, JSON or HTML
+out, a protocol code turned into an HTTP status in one table (`secretary.web.statuses`). One route
+is one operation of `secretary.webproto`, listed in `secretary.web.app.ROUTES`, and the transport
+holds no snapshot, no state derivation, no liveness rule and no mutation of its own.
+
+That is the whole reason it is a package beside the layer instead of code inside it. If a page
+needed a fact this installation does not already answer, the repair is a change to the layer, where
+every transport gets it at once — not a query written into a page, which is how two dashboards come
+to disagree about whether a worker is alive. The dependency is one-way and checked: nothing under
+`secretary.web` imports anything of the product except `secretary.webproto`, and nothing under
+`secretary.webproto` imports HTTP, sockets, a framework or a template engine.
+
+**No web dependency was added.** `http.server` from the standard library is enough for a service
+that reads three documents and posts two, and the project's dependency set stays PyYAML, jsonschema
+and cryptography.
+
+**No session state.** The cursor a client watches a card with is the client's, so a reload or a
+reconnection resumes from where that client was, two viewers of one card cannot disturb each other,
+and a restart of the service loses nothing. Idempotency is the layer's: a repeated POST carries the
+client's own request id and is answered with the run that already exists, so the transport cannot
+raise a second head even when a browser sends the same command twice.
+
+**Loopback only until DoD 5.** It has no password, no TLS and no authorisation, and its POST routes
+start real heads, so reaching the port is owning the pipeline. A non-loopback bind is refused in
+code before a socket exists, and the service is not published, proxied or enabled as a unit on a
+live installation until the slice that adds TLS and a password.
+
+Its routes, its code-to-status table and its cursor semantics are in
+[Protocols](PROTOCOLS.md#serving-the-pipeline-locally); running and stopping it is in
+[Operations](OPERATIONS.md#the-local-web-transport).
+
 ## The sprint observer head
 
 An open sprint gets its own observer head. It is neither an interactive session nor a worker: an

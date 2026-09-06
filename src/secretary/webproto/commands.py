@@ -33,7 +33,7 @@ from secretary.webproto.errors import ReadError
 from secretary.webproto.journal import DEFAULT_LIMIT
 from secretary.webproto.ops import OperationLayer
 from secretary.webproto.reads import TASK_SNAPSHOT_EVENTS, ReadLayer
-from secretary.webproto.runs import DEFAULT_DEADLINE_SECONDS, RunStore
+from secretary.webproto.runs import DEFAULT_DEADLINE_SECONDS
 
 #: Exit statuses, the same ones `secretary task` uses for the same two situations.
 EXIT_VALIDATION = 2
@@ -295,17 +295,7 @@ def run_web_run_state(args: argparse.Namespace) -> int:
 
 
 def run_web_run_list(args: argparse.Namespace) -> int:
-    def listing() -> dict[str, Any]:
-        layer = _ops_layer(args)
-        store = RunStore(layer.data_dir())
-        return {
-            "schema_version": 1,
-            "kind": "product_runs",
-            "ref": args.ref,
-            "items": [layer.run_state(run.run_id)["run"] for run in store.for_ref(args.ref)],
-        }
-
-    return _emit_run(args, listing, _list_lines)
+    return _emit_run(args, lambda: _ops_layer(args).run_list(args.ref), _list_lines)
 
 
 def _emit_run(args: argparse.Namespace, operation, render) -> int:
