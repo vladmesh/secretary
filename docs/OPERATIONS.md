@@ -2215,8 +2215,12 @@ systemctl show -p ExecMainStartTimestamp secretary-web.service
 
 The transport must have started *after* the checkout moved; if it did not, the restart did not
 happen and the page is still the old one. `secretary status` prints a third revision — the head
-registry pin, which is the revision the last **completed** upgrade recorded — and on this
-installation it can lag the checkout, because the upgrade stops before its later steps (below).
+registry pin in `~/secretary-instance/heads/source.yaml` — and it answers a different question. It
+is written by the `head-registry` and `head-registry-checkpoint` steps, which run well before `host`
+and before anything else can fail, so a pin naming this revision says the registry was regenerated
+and published, and never that the upgrade finished. The pin also does not move for a rollback made
+by `git switch` alone (below), so a pin ahead of the checkout is exactly what a rollback that did
+not re-run `upgrade` looks like.
 
 `PartOf=` means the front goes down and comes back with the transport, so a request in flight at
 that moment fails rather than waiting; `Restart=always` brings both halves back without further
@@ -2227,10 +2231,12 @@ help, and a reload a second later is served by the new code.
 > units were installed ahead of the host manifest that would own them, so reconcile finds resources
 > in its own namespace it has no record of and refuses to write rather than adopt them. This does
 > not affect the update above: `pull` runs first and has already moved the checkout, so the restart
-> still publishes the new revision. What does not run is everything after `host` — `automations`,
-> `memory` and `verify` — so on a version that changes an automation spec or the memory service,
-> that part of the installation stays where it was and the head-registry pin keeps naming the older
-> revision. Clearing it is a deliberate act, taken once, by the operator:
+> still publishes the new revision. What does not run is everything after `host` — the host
+> resources themselves, `automations`, `memory` and `verify` — so on a version that changes a unit,
+> an automation spec or the memory service, that part of the installation stays where it was. Every
+> step before `host` did run, the head-registry pin among them: after this failure
+> `heads/source.yaml` already names the new revision, so the pin is never evidence that the upgrade
+> completed. Clearing the conflict is a deliberate act, taken once, by the operator:
 >
 > ```bash
 > secretary reconcile adopt --instance ~/secretary-instance \
@@ -2246,13 +2252,14 @@ help, and a reload a second later is served by the new code.
 > from `packaging/systemd` like every other unit — which is the point of adopting and also its cost.
 > The alternative, for a unit the installation should keep its hands off, is to name it in
 > `host.foreign_units` in `instance.yaml`; that tells reconcile the name is somebody else's and is
-> not an adoption. `codegen-product-kit` is an Orca
-> registration in the same state and takes the same two decisions.
+> not an adoption. `codegen-product-kit` is an Orca registration in the same state and takes the
+> same two decisions.
 
 ### Rolling the application back to a previous revision
 
 The rollback is the same restart pointed at an older tree. There is deliberately no `upgrade` flag
-for it: an upgrade only ever fast-forwards.
+for it: an upgrade only ever fast-forwards. Python source alone is an editable install, so moving
+the tree and restarting is the whole rollback:
 
 ```bash
 git -C ~/secretary log --oneline -10     # `git -C ~/secretary reflog` says what was installed when
@@ -2260,12 +2267,29 @@ git -C ~/secretary switch --detach <revision>
 sudo systemctl restart secretary-web.service
 ```
 
-A rollback that also has to undo a dependency or a host change re-materialises without pulling,
-after the switch:
+A rollback that also has to undo a dependency, a skill delivery, a head registry or a host change
+re-materialises the installation onto the older tree, and that has to happen **before** the restart:
+a transport already running keeps the imports and the process state it started with, so restarting
+first and materialising afterwards publishes neither. The order is switch, materialise, restart, and
+the restart is not optional — it is the step that puts the rolled-back revision in front of the
+owner:
 
 ```bash
-secretary upgrade --instance ~/secretary-instance --no-pull
+git -C ~/secretary switch --detach <revision>
+secretary upgrade --instance ~/secretary-instance --no-pull   # must report `status: ok`
+sudo systemctl restart secretary-web.service
 ```
+
+On *this* installation that middle command does not finish. `--no-pull` skips only the pull; the
+run then stops at the same `host` step, with the same `unowned names in our namespace` (verified:
+`upgrade --no-pull --dry-run` here reaches `failed host` after every earlier step). What that means
+for a rollback is worth being exact about, because the command still did most of its work: the
+dependencies, the memory pack, the head registry and its pin, the role worktrees and the role skills
+are rolled back onto the older tree, and the host is **not** — units, automations and the memory
+service stay where the newer version left them, and `verify` never ran. So a host rollback is not
+done until the two web units are adopted (or declared foreign) and the run reports `status: ok`.
+Read the step lines, do not assume: an `upgrade` that ends `status: failed` has rolled back exactly
+the steps printed above the failure.
 
 The checkout is left on a detached HEAD on purpose. `upgrade`'s `pull` step is a `merge --ff-only`
 and refuses a detached or dirty checkout by name, so the next upgrade fails loudly instead of
