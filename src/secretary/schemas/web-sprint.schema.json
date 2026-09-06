@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "web-sprint.schema.json",
+  "title": "Transport-independent sprint operations and reads",
+  "description": "The documents secretary.webproto's sprint layer returns: what a sprint can be built from, what one sprint is doing, and the answer to opening one. Every section carries its own availability, and no failure here is a status number.",
+  "oneOf": [
+    { "$ref": "#/$defs/options" },
+    { "$ref": "#/$defs/sprint" },
+    { "$ref": "#/$defs/created" }
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": ["state", "reason", "observed_at", "data_age_seconds"],
+      "properties": {
+        "state": { "enum": ["available", "unavailable"] },
+        "reason": { "type": ["string", "null"] },
+        "observed_at": { "type": ["string", "null"] },
+        "data_age_seconds": { "type": ["number", "null"] }
+      }
+    },
+    "options": {
+      "type": "object",
+      "description": "What a sprint of this installation can be built from. Each section is read from the source that already owns the rule it feeds, and fails apart from the others.",
+      "required": ["schema_version", "kind", "observed_at", "products", "issues", "projects", "heads"],
+      "properties": {
+        "schema_version": { "type": "integer" },
+        "kind": { "const": "sprint_options" },
+        "observed_at": { "type": "string" },
+        "products": {
+          "type": "object",
+          "required": ["source", "items"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "label", "ref", "projects"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "label": { "type": "string" },
+                  "ref": { "type": "string" },
+                  "projects": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "issues": {
+          "type": "object",
+          "description": "Exactly the issues a create will admit: the open ones, each carrying the product that owns it.",
+          "required": ["source", "items"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["ref", "label", "product", "kind", "priority"],
+                "properties": {
+                  "ref": { "type": "string" },
+                  "label": { "type": "string" },
+                  "product": { "type": "string" },
+                  "kind": { "type": ["string", "null"] },
+                  "priority": { "type": ["string", "null"] }
+                }
+              }
+            }
+          }
+        },
+        "projects": {
+          "type": "object",
+          "required": ["source", "items"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "label", "reserved_by"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "label": { "type": "string" },
+                  "reserved_by": {
+                    "type": ["array", "null"],
+                    "description": "The open sprints holding this project, or null when the reservation index itself could not be established -- which is not the same as being held by nobody.",
+                    "items": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "heads": {
+          "type": "object",
+          "description": "The head profiles this installation runs off, read from its installed registry and never from a constant in the product.",
+          "required": ["source", "items", "observer", "role_defaults", "executor_roles"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "label", "adapter", "model", "effort", "observer", "observer_reason", "role_default_for"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "label": { "type": "string" },
+                  "adapter": { "type": ["string", "null"] },
+                  "model": { "type": ["string", "null"] },
+                  "effort": { "type": ["string", "null"] },
+                  "resource": { "type": ["string", "null"] },
+                  "observer": {
+                    "type": "boolean",
+                    "description": "Whether a sprint may declare this profile as its observer, decided by asking the same check a create makes."
+                  },
+                  "observer_reason": { "type": ["string", "null"] },
+                  "role_default_for": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            },
+            "observer": {
+              "type": "object",
+              "description": "The observer field takes one answer that is not a profile id.",
+              "required": ["none", "default"],
+              "properties": {
+                "none": { "type": "string" },
+                "default": { "type": ["string", "null"] }
+              }
+            },
+            "role_defaults": { "type": "object" },
+            "executor_roles": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "sprint": {
+      "type": "object",
+      "description": "One sprint: what it was opened with, where it is now, and whether its observer is up.",
+      "required": ["schema_version", "kind", "observed_at", "ref", "sprint", "observer"],
+      "properties": {
+        "schema_version": { "type": "integer" },
+        "kind": { "const": "sprint" },
+        "observed_at": { "type": "string" },
+        "ref": { "type": "string" },
+        "sprint": {
+          "type": "object",
+          "required": ["source", "value"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "value": {
+              "type": ["object", "null"],
+              "required": [
+                "ref",
+                "goal",
+                "definition_of_done",
+                "status",
+                "product",
+                "issues",
+                "reservations",
+                "repositories",
+                "current_task",
+                "executors",
+                "resume"
+              ],
+              "properties": {
+                "ref": { "type": "string" },
+                "goal": { "type": "string" },
+                "definition_of_done": { "type": "string" },
+                "status": { "type": "string" },
+                "product": { "type": ["string", "null"] },
+                "issues": { "type": ["array", "null"], "items": { "type": "string" } },
+                "reservations": { "type": ["array", "null"], "items": { "type": "string" } },
+                "repositories": { "type": "array", "items": { "type": "string" } },
+                "current_task": { "type": ["string", "null"] },
+                "executors": {
+                  "type": "object",
+                  "description": "Both executor roles, always, each with one of its three states. An unpinned role is `unset` and never a missing key.",
+                  "additionalProperties": {
+                    "type": "object",
+                    "required": ["state"],
+                    "properties": {
+                      "state": { "enum": ["unset", "pinned", "malformed"] },
+                      "profile": { "type": "string" }
+                    }
+                  }
+                },
+                "resume": { "type": ["object", "null"] },
+                "budget": { "type": ["object", "null"] },
+                "audit": { "type": ["object", "null"] }
+              }
+            }
+          }
+        },
+        "observer": {
+          "type": "object",
+          "required": ["declared", "launch"],
+          "properties": {
+            "declared": {
+              "type": "object",
+              "description": "The observer the sprint row declares, in the three states a row can be in.",
+              "required": ["state", "value", "profile"],
+              "properties": {
+                "state": { "enum": ["declared", "absent", "malformed"] },
+                "value": { "type": ["object", "null"] },
+                "profile": { "type": ["string", "null"] }
+              }
+            },
+            "launch": {
+              "type": "object",
+              "description": "Whether an observer is actually up, read from the dispatcher's durable production state. A terminal is never evidence and is never consulted.",
+              "required": ["source", "state", "reason", "record"],
+              "properties": {
+                "source": { "$ref": "#/$defs/source" },
+                "state": {
+                  "enum": ["not_started", "running", "unavailable", "stopped", "not_declared"]
+                },
+                "reason": { "type": "string" },
+                "record": { "type": ["object", "null"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "created": {
+      "type": "object",
+      "description": "The answer to opening a sprint: the request it was made under, and the sprint as the read above reads it.",
+      "required": ["schema_version", "kind", "observed_at", "request_id", "created", "sprint"],
+      "properties": {
+        "schema_version": { "type": "integer" },
+        "kind": { "const": "sprint_created" },
+        "observed_at": { "type": "string" },
+        "request_id": { "type": "string" },
+        "created": {
+          "type": "boolean",
+          "description": "Whether this call claimed the request. A repeat answers false and creates nothing."
+        },
+        "sprint": { "$ref": "#/$defs/sprint" }
+      }
+    }
+  }
+}

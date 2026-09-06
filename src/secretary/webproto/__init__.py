@@ -67,9 +67,39 @@ the card's own state -- rather than from a scheduler of its own.
 board's own journal, so `task_events` and `task_snapshot` show them with no second history and no
 second outcome store.
 
+**And the sprint half, added by secretary-1569, is the same layer over the other entity.** A run is
+one head on one card; a sprint is the thing that decides which cards there are, and an operator who
+can only start runs cannot open one. So beside the reads and the run operations there is one
+operation and two reads over sprints, with the same properties and no others:
+
+* :meth:`~secretary.webproto.sprint_ops.SprintOperationLayer.sprint_create` -- open one sprint,
+  with the product, goal, definition of done, issues, projects and observer it is opened with, and
+  optionally the worker and reviewer profiles its cards run on;
+* :meth:`~secretary.webproto.sprint_reads.SprintReadLayer.sprint_options` -- what a sprint of this
+  installation can be built from: its products, the issues those products still have open, its
+  registered projects and its installed head profiles with the model and effort each names;
+* :meth:`~secretary.webproto.sprint_reads.SprintReadLayer.sprint_state` -- one sprint as a page
+  watches it, including whether its observer is really up.
+
+Three properties are the point of that half, and each has a test:
+
+**Every rule stays with the writer that owns it.** `SprintWriter.create` decides what a sprint may
+be -- product, open issue of that product, registered projects, reservations, observer, executor
+pins -- and the operation calls it. There is no second admission gate, no second audit and no
+second reservation index here.
+
+**Opening a sprint with an observer *is* starting it.** There is no launch operation, because there
+is no launch action: the production tick raises one head per open sprint that lacks one. A
+scheduler of this layer's own would be a second thing racing it for the same head, so what the
+operation returns instead is the launch state read off the dispatcher's own production state.
+
+**An absent executor pin stays absent.** `None` is the caller saying nothing about a role, and it
+reaches the entity as a field that was never written -- never as an empty string and never as a
+default nobody chose.
+
 `secretary web-read` and `secretary web-run` (:mod:`secretary.webproto.commands`) are the operator's
-way to call all six without a web transport existing at all. They are callers of this layer, not a
-part of it.
+way to call the first six without a web transport existing at all. They are callers of this layer,
+not a part of it.
 """
 
 from __future__ import annotations
@@ -80,6 +110,7 @@ from secretary.webproto.cursor import Cursor
 from secretary.webproto.errors import (
     InstallationUnavailable,
     InvalidCursor,
+    OperationPending,
     OwnerConflict,
     ReadError,
     RunNotFound,
@@ -91,18 +122,22 @@ from secretary.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
 from secretary.webproto.ops import OperationLayer
 from secretary.webproto.reads import SCHEMA_VERSION, ReadLayer
 from secretary.webproto.runs import ProductRun, RunStore
+from secretary.webproto.sprint_ops import SprintOperationLayer
+from secretary.webproto.sprint_reads import SprintReadLayer
+from secretary.webproto.sprint_requests import SprintRequestStore
 
 __all__ = [
     "AGENT_STATES",
     "DEFAULT_LIMIT",
+    "IMPLEMENTATION_FAILURES",
     "LIVENESS_INVARIANT",
     "MAX_LIMIT",
     "SCHEMA_VERSION",
-    "IMPLEMENTATION_FAILURES",
     "Cursor",
     "InstallationUnavailable",
     "InvalidCursor",
     "OperationLayer",
+    "OperationPending",
     "OwnerConflict",
     "ProductRun",
     "ProtocolBoundary",
@@ -111,6 +146,9 @@ __all__ = [
     "RunNotFound",
     "RunStore",
     "RuntimeUnavailable",
+    "SprintOperationLayer",
+    "SprintReadLayer",
+    "SprintRequestStore",
     "TaskNotFound",
     "ValidationRefused",
 ]

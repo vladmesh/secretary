@@ -33,6 +33,7 @@ SCHEMAS = {
     "secret-catalog": "secret-catalog.schema.json",
     "web-read": "web-read.schema.json",
     "web-run": "web-run.schema.json",
+    "web-sprint": "web-sprint.schema.json",
 }
 
 
