@@ -429,18 +429,35 @@ def _sprint_board(client: KanboardClient, *, create: bool) -> int | None:
 
 
 class _AuditOnce:
-    """One committed-audit traversal shared by the sprint summaries of a single operation."""
+    """One committed-audit traversal shared by the sprint summaries of a single operation.
 
-    def __init__(self, data_dir: Path | None) -> None:
+    `events` may be given instead of a directory, for a caller that has already walked the journal
+    and has to keep that walk's failure apart from the board's. The journal is a source of its own:
+    a caller that reads it itself can mark it unavailable without the board pass appearing to have
+    failed, which is what `secretary.webproto.sprint_reads` does.
+    """
+
+    def __init__(self, data_dir: Path | None, *, events: list[dict[str, Any]] | None = None) -> None:
         self._data_dir = data_dir
-        self._events: list[dict[str, Any]] | None = None
+        self._events: list[dict[str, Any]] | None = events
 
     def events(self) -> list[dict[str, Any]]:
+        if self._events is not None:
+            return self._events
         if self._data_dir is None:
             return []
-        if self._events is None:
-            self._events = TaskAudit(self._data_dir).events()
+        self._events = TaskAudit(self._data_dir).events()
         return self._events
+
+
+def audit_traversal(events: list[dict[str, Any]]) -> _AuditOnce:
+    """A traversal over a committed audit somebody has already walked.
+
+    The journal is a source of its own, and a caller that has to be able to say *the journal*
+    refused -- rather than the board it is read beside -- walks it itself and passes the result to
+    `status_views`, which then opens nothing. `secretary.webproto.sprint_reads` is that caller.
+    """
+    return _AuditOnce(None, events=events)
 
 
 def _task_id(raw: dict[str, Any]) -> int:
@@ -610,6 +627,52 @@ class SprintReader:
             result["resume_freshness"] = self._resume_freshness(result, resume)
         return result
 
+    def linked_cards(self) -> dict[str, list[dict[str, Any]]]:
+        """Every Pipeline card grouped by the sprint it is linked to, in one listing.
+
+        One pass for the whole installation, not one per sprint: `TaskReader.list` already reads the
+        board once and batches the metadata of every row, so a caller that needs the cards of many
+        sprints asks for this once and indexes it, exactly as `statuses` does. The Pipeline board is
+        read and never created -- `TaskReader` has no `create` -- so this stays a read.
+        """
+        linked: dict[str, list[dict[str, Any]]] = {}
+        for card in TaskReader(self.client).list():
+            linked.setdefault(str(card.get("sprint") or ""), []).append(card)
+        return linked
+
+    def status_views(
+        self,
+        sprints: list[dict[str, Any]],
+        linked: dict[str, list[dict[str, Any]]],
+        *,
+        observers: dict[str, dict[str, Any]] | None = None,
+        headless: dict[str, dict[str, Any]] | None = None,
+        audit: _AuditOnce | None = None,
+    ) -> list[dict[str, Any]]:
+        """The status view of sprints that have already been read, over cards already listed.
+
+        No board call of its own: it is the assembling half of `statuses`, split out so a caller
+        that has to keep the two reads apart -- a protocol layer marking one source unavailable
+        without blanking the other -- can still get exactly this view rather than deriving a second
+        one beside it. The committed audit is consumed at most once for the whole call.
+
+        `audit` is that split taken one source further: a caller that has already walked the
+        committed journal -- and that has to be able to say *the journal* refused rather than the
+        board -- passes its own traversal in, and this call opens nothing. With none given the
+        journal is walked here, lazily, exactly as `statuses` has always walked it.
+        """
+        audit = audit if audit is not None else _AuditOnce(self.data_dir)
+        result = []
+        for listed in sprints:
+            sprint = {**listed, "cards": linked.get(listed["ref"], [])}
+            sprint["resume_freshness"] = self._resume_freshness(
+                sprint,
+                sprint.get("resume"),
+                audit=audit,
+            )
+            result.append(self._status(sprint, (observers or {}).get(sprint["ref"]), headless or {}))
+        return result
+
     def statuses(
         self,
         *,
@@ -626,22 +689,12 @@ class SprintReader:
         their metadata are one read each, the cards are one listing shared by every sprint, and the
         committed audit is consumed at most once.
         """
-        observers = observers or {}
-        audit = _AuditOnce(self.data_dir)
-        sprints = self.list(create=create)
-        linked: dict[str, list[dict[str, Any]]] = {}
-        for card in TaskReader(self.client).list():
-            linked.setdefault(str(card.get("sprint") or ""), []).append(card)
-        result = []
-        for listed in sprints:
-            sprint = {**listed, "cards": linked.get(listed["ref"], [])}
-            sprint["resume_freshness"] = self._resume_freshness(
-                sprint,
-                sprint.get("resume"),
-                audit=audit,
-            )
-            result.append(self._status(sprint, observers.get(sprint["ref"]), headless or {}))
-        return result
+        return self.status_views(
+            self.list(create=create),
+            self.linked_cards(),
+            observers=observers,
+            headless=headless,
+        )
 
     def status(
         self,
@@ -673,6 +726,10 @@ class SprintReader:
             "current_task": sprint["current_task"],
             "cards": {key: sorted(value) for key, value in sorted(states.items())},
             "budget": sprint["budget"],
+            # The last observer decision itself, beside the freshness verdict on it. Reading one
+            # without the other is what made "what is this sprint doing" a second read: the entry
+            # is already on the row every caller of this view has just read.
+            "resume": sprint.get("resume"),
             "resume_freshness": sprint["resume_freshness"],
             "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
             "observer": observer or {"state": "unknown"},

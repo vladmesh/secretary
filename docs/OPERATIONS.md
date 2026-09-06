@@ -640,7 +640,8 @@ python3 -P -m secretary sprint status --ref sprint:<ID>
 
 After that the sprint is not driven by hand: the production tick launches the observer head (see below),
 communication with a running sprint goes through entries on the entity (`secretary sprint comment`), and
-status is read from data (`secretary sprint status`, `secretary task list --sprint`).
+status is read from data (`secretary sprint status`, `secretary sprint list`, `secretary task list
+--sprint`; see [What is running right now](#what-is-running-right-now)).
 
 The sprint entity goes into the checkpoint as its own set and is restored along with the cards: after a
 recovery the sprint comes back with every field and entry, and does not need to be recreated. The contract is
@@ -650,6 +651,86 @@ Storage split: the goal, Definition of Done text, repositories, status, budget, 
 fields of the entity; a knowledge document holds only the "why" (the context of the moment, the choice of
 goal, the alternatives rejected) plus a pointer to the sprint reference. The document does not duplicate the
 entity's fields.
+
+## What is running right now
+
+Two commands answer it, and both are clients of the same protocol operations, so they cannot
+disagree: `secretary sprint list` for every sprint of the installation at once, and
+`secretary sprint status --ref sprint:ID` for one. Both are reads. Neither starts an executor,
+raises a head or creates a board, and neither is safe to reach for only in an emergency: they are
+what an operator opens first.
+
+```bash
+python3 -P -m secretary sprint list                      # every sprint, with what each is doing
+python3 -P -m secretary sprint list --status open        # only the ones that are open
+python3 -P -m secretary sprint status --ref sprint:1431  # one sprint, plus its own fields
+```
+
+Both print one JSON document. In the listing, `sprints.items` is one entry per sprint; in the
+watched sprint the same object is under `work`. Read an entry in this order:
+
+1. **`status` and `current_task`.** `current_task.live` is the field to read, not `current_task.ref`
+   alone: a closed or stopped sprint keeps the card it ended on, and `live: false` with a reason
+   saying so is how you tell it from a sprint that is working on a card. A sprint that reports
+   `live: true` is one whose observer has cut that card.
+2. **`waiting.state`** — `working`, `waiting`, `blocked`, `ended` or `unknown` — with `waiting.reason`
+   naming what it is standing on: no current card, a card in Blocked with its reason, a card nobody
+   has claimed, a card whose worker no dispatcher record can name, or the record state the card is
+   in. Read `waiting.source` beside it: a blocked or unclaimed current card is the board's own
+   answer and survives a dispatcher state nobody could read, so `unknown` here means specifically
+   that the card sits in an active column and whether a head is behind it could not be established
+   — the reason names the column anyway.
+3. **`checks`** — the mandatory mechanical gate for the current card, as the dispatcher recorded it:
+   `green` (with the attested SHA in `gate.attested_sha`), `not_green` with the reason, `unknown`, or
+   `not_applicable` for a sprint with no current card or one that has ended. Nothing is re-run to
+   answer this; it is the record, read.
+4. **`decision`** — the observer's last resume `entry`, and `freshness` on it. A stale entry is the
+   observer's own error and is visible here without opening a transcript.
+
+### Reading an answer that is only partly available
+
+Every section carries a `source`: `available` with the moment it was read, or `unavailable` with the
+reason and the age of the newest evidence still on disk behind it — and, either way, `source.name`,
+which says **which** source answered it. `unavailable` is never "there is nothing": it is "nobody
+could say", and the two are opposite answers.
+
+A document is assembled from five sources that fail apart, and each failure takes away only what
+that source owns. At the top of both documents, `cards.source`, `journal.source`, `liveness.source`
+and `installation.source` say whether each one answered for the document as a whole; that is what a
+listing with no items still tells you. When one of them is `unavailable`, this is what you have lost
+and what you still have:
+
+| the source that refused | what goes unavailable | what still stands |
+| --- | --- | --- |
+| the sprint board (`sprints`) | everything about the sprint: `items: null` in the listing, and every section of a watched sprint, including `observer.declared: unknown` and `observer.launch: unavailable` | nothing about that sprint — and this is the only failure of which that is true |
+| the Pipeline listing (`cards`) | `cards.states: null` and `decision.freshness` for an open sprint | the sprint row, the current card, the checks, the observer, and `waiting` wherever the dispatcher can settle it |
+| the audit journal (`journal`) | `decision.freshness` for an open sprint, and nothing else at all | the sprint rows, the current card, the cards grouping, the checks, the observer — a lost `board/events.ndjson` costs you exactly one verdict |
+| the production state (`liveness`) | `degraded_cards.items: null`, `checks: unknown`, `observer.launch: unavailable`, and `waiting: unknown` for a card in an active column | the sprint row, the current card, the cards grouping, the observer declaration, and `waiting` wherever the board settles it — a card in Blocked still reports its reason |
+| `instance.yaml` (`installation`) | this installation's own sprint budget thresholds, which fall back to the product's defaults | everything the board and the dispatcher can answer, as long as `--data-dir` was given |
+
+The rule under all of it: a source that refused never takes away an answer another source already
+gave, and never lends its unavailability to a section it did not decide. So a `waiting.state:
+blocked` under an `available` `cards` source is the board's own statement and is as good as it gets,
+whatever the dispatcher is doing, and a `checks.state: not_applicable` on a closed sprint is the
+sprint row's answer even when nothing else on the installation can be read.
+
+Two `unknown`s to read carefully:
+
+- `checks.state: unknown` — either the production state could not be read, or the dispatcher holds no
+  record for that card at all (nobody has claimed it yet). It never means the gate failed. The
+  `source` tells the two apart: `unavailable` for the first, `available` for the second.
+- `waiting.state: unknown` — the card sits in an active column and whether a head is behind it could
+  not be established. The reason names the column anyway.
+
+**A config that does not validate is a source too.** With an explicit `--data-dir` and a reachable
+board, `sprint list` and `sprint status` still answer, and say so in `installation.source`. Without
+`--data-dir` there is nothing left to find the data plane with, and the command exits `1` with
+`backend_unavailable`.
+
+Errors are typed and reach the shell as exit statuses: a sprint nobody holds and a malformed filter
+exit `2` with `not_found` / `validation` on stderr, a source that refused exits `1` with
+`backend_unavailable`. `secretary sprint show --ref` is unchanged and remains the way to read the
+entity's own record, comments included.
 
 ## The two-sprint pilot
 
@@ -1703,8 +1784,8 @@ only on the card, so it moves the board and comments every time it is needed.
 While such a card is unresolved, `secretary status` marks its attempt row `degraded` and fills in
 `headless` (record state, missing handle and heartbeat, how long it has been waiting, the retained
 workspace, branch, dirty flag and candidate SHA); the sprint summary repeats the refs under
-`degraded_cards` — `secretary sprint status --ref <sprint>` reports the same map, from the same
-production state. A card sitting in In progress is not on its own evidence that anything is running.
+`work.degraded_cards.items` — `secretary sprint status --ref <sprint>` reports the same map, from
+the same production state, beside the source that answered it. A card sitting in In progress is not on its own evidence that anything is running.
 
 A confirmed pid says the process is running; it does not say the head is doing anything. A head that finished its
 turn and went back to its prompt holds the same live pid as one that is thinking, which is how a card could sit in

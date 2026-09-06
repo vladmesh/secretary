@@ -74,7 +74,7 @@ second outcome store.
 **And the sprint half, added by secretary-1569, is the same layer over the other entity.** A run is
 one head on one card; a sprint is the thing that decides which cards there are, and an operator who
 can only start runs cannot open one. So beside the reads and the run operations there is one
-operation and two reads over sprints, with the same properties and no others:
+operation and three reads over sprints, with the same properties and no others:
 
 * :meth:`~secretary.webproto.sprint_ops.SprintOperationLayer.sprint_create` -- open one sprint,
   with the product, goal, definition of done, issues, projects and observer it is opened with, and
@@ -83,7 +83,9 @@ operation and two reads over sprints, with the same properties and no others:
   installation can be built from: its products, the issues those products still have open, its
   registered projects and its installed head profiles with the model and effort each names;
 * :meth:`~secretary.webproto.sprint_reads.SprintReadLayer.sprint_state` -- one sprint as a page
-  watches it, including whether its observer is really up.
+  watches it, including whether its observer is really up and what the sprint is doing;
+* :meth:`~secretary.webproto.sprint_reads.SprintReadLayer.sprint_list` -- every sprint of the
+  installation with what each one is doing, in the same sections, from the same one read.
 
 Three properties are the point of that half, and each has a test:
 

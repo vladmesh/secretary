@@ -77,8 +77,8 @@ the sprint's delivery counts — see step 11.
 python3 -P -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json>
 ```
 
-When `sprint status` shows a non-idle `observer.delivery`, its `delivery_id` and `through_event`
-belong to the turn that woke you. Add both to this command:
+When `sprint status` shows a non-idle `observer.launch.record.delivery`, its `delivery_id` and
+`through_event` belong to the turn that woke you. Add both to this command:
 
 ```bash
 python3 -P -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json> \
@@ -105,7 +105,7 @@ solely to prove the acknowledgement—the dispatcher owns redelivery and crash r
 
 Write it so a new head can continue without a transcript: not "carry on as agreed", but concrete refs,
 branches, pull requests, files and checks. An empty or stale entry is visible from outside as an error
-(`resume_freshness` in `sprint status`), and that is your error, not diagnostics.
+(`work.decision.freshness` in `sprint status`), and that is your error, not diagnostics.
 
 ## 1. Recover state
 
@@ -402,7 +402,7 @@ When the Definition of Done is confirmed by a check against the default branch a
    the hotfixes, the important conclusions.
 
    This one entry does report delivery telemetry, and it is the only one that does. Read
-   `observer.delivery` in `sprint status` — `wake_attempts`, `wake_failures`,
+   `observer.launch.record.delivery` in `sprint status` — `wake_attempts`, `wake_failures`,
    `launch_delivery_failures`, `last_failure_reason` — or the delivery-evidence line the dispatcher
    put in your wake message or launch document, and state the actual counts. They are cumulative
    over the sprint and survive acknowledgement and your own predecessors, so they include wakes that

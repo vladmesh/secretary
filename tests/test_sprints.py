@@ -3325,6 +3325,24 @@ class SprintStatusHeadlessCommandTests(SprintFixture):
         )
         return card
 
+    def _worked_card(self, sprint: str) -> str:
+        """One card of this sprint whose worker the dispatcher's record does name."""
+        card = TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+            role="observer",
+            actor="observer",
+            project="secretary",
+            task_type="code",
+            title="a card somebody is working",
+            sprint=sprint,
+        )["task"]["ref"]
+        dispatcher = Path(self.tmp.name) / "dispatcher"
+        dispatcher.mkdir(parents=True, exist_ok=True)
+        (dispatcher / "production-state.json").write_text(
+            json.dumps({"records": {card: {"state": "working", "worker": "head-1"}}}),
+            encoding="utf-8",
+        )
+        return card
+
     def _status_json(self, ref: str) -> dict:
         output, errors = io.StringIO(), io.StringIO()
         with (
@@ -3342,20 +3360,39 @@ class SprintStatusHeadlessCommandTests(SprintFixture):
         ref = self._create(goal="a sprint with a headless card")["sprint"]["ref"]
         card = self._headless_card(ref)
 
-        summary = self._status_json(ref)
+        section = self._status_json(ref)["work"]["degraded_cards"]
 
-        self.assertIn(card, summary["degraded_cards"], "the command must not answer healthy")
-        degraded = summary["degraded_cards"][card]
+        self.assertEqual(section["source"]["state"], "available")
+        self.assertIn(card, section["items"], "the command must not answer healthy")
+        degraded = section["items"][card]
         self.assertEqual(degraded["state"], "adopted")
         self.assertFalse(degraded["handle_known"])
         self.assertEqual(degraded["candidate_sha"], "6cc7ca0c8cdf0719629e1e01bb5c72614983d7ef")
         self.assertEqual(degraded["recovery_error"], "round_already_answered")
 
     def test_the_command_says_nothing_when_every_card_owns_its_worker(self) -> None:
-        """The control: `degraded_cards` empty must mean observed-healthy, not never-asked."""
-        ref = self._create(goal="a sprint whose cards are worked")["sprint"]["ref"]
+        """The control: `degraded_cards` empty must mean observed-healthy, not never-asked.
 
-        self.assertEqual(self._status_json(ref)["degraded_cards"], {})
+        Which the section now says for itself: an empty mapping under an `available` source is the
+        answer "asked, and nothing is degraded", and the production state nobody could read has
+        `items: null` under an `unavailable` one.
+        """
+        ref = self._create(goal="a sprint whose cards are worked")["sprint"]["ref"]
+        self._worked_card(ref)
+
+        section = self._status_json(ref)["work"]["degraded_cards"]
+
+        self.assertEqual(section["source"]["state"], "available")
+        self.assertEqual(section["items"], {})
+
+    def test_a_production_state_nobody_can_read_is_not_an_empty_degraded_list(self) -> None:
+        """And the other half of the same distinction, which the old shape could not express."""
+        ref = self._create(goal="a sprint whose dispatcher state is gone")["sprint"]["ref"]
+
+        section = self._status_json(ref)["work"]["degraded_cards"]
+
+        self.assertEqual(section["source"]["state"], "unavailable")
+        self.assertIsNone(section["items"])
 
 
 class SprintAuditTraversalTests(SprintFixture):
