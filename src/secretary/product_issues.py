@@ -478,14 +478,40 @@ class ProductIssueStore:
         board_id, _ = self._board()
         return all_project_cards(self.client, board_id)
 
-    def _metadata(self, card: dict[str, Any]) -> dict[str, str]:
+    @staticmethod
+    def _card_number(card: dict[str, Any]) -> int:
         number = card.get("id")
         if not isinstance(number, int):
             raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
-        raw = self.client.call("getTaskMetadata", task_id=number) or {}
+        return number
+
+    @staticmethod
+    def _normalized_metadata(raw: Any) -> dict[str, str]:
+        if raw is None:
+            raw = {}
         if not isinstance(raw, dict):
             raise TaskError("backend_error", "Kanboard returned invalid task metadata", 1)
         return {str(key): str(value) for key, value in raw.items()}
+
+    def _metadata(self, card: dict[str, Any]) -> dict[str, str]:
+        number = self._card_number(card)
+        return self._normalized_metadata(self.client.call("getTaskMetadata", task_id=number))
+
+    def _metadata_of(self, cards: list[dict[str, Any]]) -> list[dict[str, str]]:
+        """The metadata of every given card, in card order, read in batches rather than one by one.
+
+        Kanboard has no bulk metadata read, so a whole-board view otherwise pays one round trip per
+        card. A rejected member of a batch raises instead of dropping a card, so a partial answer
+        cannot be reported as a complete catalogue.
+        """
+        numbers = [self._card_number(card) for card in cards]
+        answers = self.client.call_batch(("getTaskMetadata", {"task_id": number}) for number in numbers)
+        return [self._normalized_metadata(answer) for answer in answers]
+
+    def _typed_cards(self) -> list[tuple[dict[str, Any], dict[str, str]]]:
+        """Every board card paired with its metadata, from one board pass and batched reads."""
+        cards = self._cards()
+        return list(zip(cards, self._metadata_of(cards), strict=True))
 
     def _find(self, reference: str, record_type: str) -> tuple[dict[str, Any], dict[str, str]]:
         board_id, _ = self._board()
@@ -548,26 +574,27 @@ class ProductIssueStore:
             "payload": payload,
         }
 
-    def list_products(self) -> list[dict[str, Any]]:
+    def _products_of(
+        self, typed: list[tuple[dict[str, Any], dict[str, str]]]
+    ) -> list[dict[str, Any]]:
         return sorted(
             (
                 self._view(card, meta)
-                for card in self._cards()
-                if (meta := self._metadata(card)).get(META_RECORD_TYPE) == PRODUCT_TYPE
+                for card, meta in typed
+                if meta.get(META_RECORD_TYPE) == PRODUCT_TYPE
             ),
             key=lambda item: str(item["id"]),
         )
 
-    def show_product(self, product_id: str) -> dict[str, Any]:
-        card, meta = self._find(f"product:{product_id}", PRODUCT_TYPE)
-        return self._view(card, meta)
-
-    def list_issues(
-        self, *, product: str | None = None, include_closed: bool = False
+    def _issues_of(
+        self,
+        typed: list[tuple[dict[str, Any], dict[str, str]]],
+        *,
+        product: str | None,
+        include_closed: bool,
     ) -> list[dict[str, Any]]:
         result = []
-        for card in self._cards():
-            meta = self._metadata(card)
+        for card, meta in typed:
             closed = int(card.get("is_active", 1) or 0) == 0
             if (
                 meta.get(META_RECORD_TYPE) == ISSUE_TYPE
@@ -576,6 +603,34 @@ class ProductIssueStore:
             ):
                 result.append(self._view(card, meta))
         return sorted(result, key=lambda item: (item["priority"], item["ref"]))
+
+    def catalogue(
+        self, *, product: str | None = None, include_closed: bool = False
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Both halves of the catalogue off a single board pass.
+
+        A caller that wants products and issues together reads the board once here instead of
+        twice through `list_products` and `list_issues`.
+        """
+        typed = self._typed_cards()
+        return (
+            self._products_of(typed),
+            self._issues_of(typed, product=product, include_closed=include_closed),
+        )
+
+    def list_products(self) -> list[dict[str, Any]]:
+        return self._products_of(self._typed_cards())
+
+    def show_product(self, product_id: str) -> dict[str, Any]:
+        card, meta = self._find(f"product:{product_id}", PRODUCT_TYPE)
+        return self._view(card, meta)
+
+    def list_issues(
+        self, *, product: str | None = None, include_closed: bool = False
+    ) -> list[dict[str, Any]]:
+        return self._issues_of(
+            self._typed_cards(), product=product, include_closed=include_closed
+        )
 
     def show_issue(self, reference: str) -> dict[str, Any]:
         card, meta = self._find(reference, ISSUE_TYPE)
