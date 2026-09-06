@@ -2619,6 +2619,18 @@ already uses; the transport is what turns a code into whatever its protocol says
 | `InvalidCursor` | `validation` | a cursor this layer did not issue, one belonging to another card, or one past the end of the journal — never silently reset to the beginning |
 | `InstallationUnavailable` | `backend_unavailable` | the instance config does not validate, so there is no data plane to read |
 
+**The contract is enforced in one place, for every operation.** A caller of this layer never sees an
+implementation exception -- the run store's `RunStoreError`, an `OSError`, a document that does not
+parse -- because `secretary.webproto.boundary.ProtocolBoundary` wraps every public method of both
+layers at class-creation time and turns those into `backend_unavailable` on the way out. Both layers
+inherit it, so an operation added later is guarded by being public, with no list to keep in step. It
+matters because each transport holds exactly one code table and one containment branch: an untyped
+escape does not become a worse error message, it takes the caller down -- as an unreadable run
+record once took a whole card page down through `run_list`. A defect of the layer itself (a
+`TypeError`, say) is deliberately *not* translated: it travels as what it is.
+`tests/test_web_run_protocol.py:ErrorContractTests` breaks the run store and the journal under every
+operation of both layers, and fails if an operation is added without being covered.
+
 ## Running the pipeline
 
 The other half of `secretary.webproto`, and the half that produces what the read layer shows: three

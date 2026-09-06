@@ -1993,7 +1993,10 @@ python3 -P -m secretary web-read system --instance INSTANCE              # the s
 
 If a page is missing a section, the page itself says why: an unavailable source is rendered as a
 marked block carrying the reason and the age of what is being shown, and it is never drawn as an
-empty list. When a document is right and the page is wrong, the transport is at fault; when both
+empty list. That holds for the product-run store too -- an unreadable record under
+`<data-dir>/webproto/runs/` marks that one section and leaves the rest of the card page standing,
+and the JSON route answers 503 `backend_unavailable`; the reason names the file, which is where to
+look. When a document is right and the page is wrong, the transport is at fault; when both
 say the same thing, the source is. `secretary web-read` and `secretary web-run` answer the same
 questions with no HTTP in the way, which is the first place to check.
 

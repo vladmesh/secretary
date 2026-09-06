@@ -27,7 +27,10 @@ none of them takes an actor.
 templates -- not even indirectly through an import. Failures are typed exceptions
 (:mod:`secretary.webproto.errors`) and availability fields (:mod:`secretary.webproto.sources`),
 never status codes, so the transport is what decides that "not_found" is a 404 or a "no such
-card" message.
+card" message. That is a promise about *every* operation, and it is kept in one place rather than
+one call site at a time: :mod:`secretary.webproto.boundary` wraps every public method of both
+layers, so an implementation failure -- the run store's, the filesystem's, a document that does not
+parse -- becomes `backend_unavailable` on its way out whether or not the operation remembered.
 
 **Sources fail apart.** Each section of each snapshot carries its own availability record with a
 reason and the age of what is being shown instead. A dead Kanboard blanks the card list, not the
@@ -72,6 +75,7 @@ part of it.
 from __future__ import annotations
 
 from secretary.webproto.agents import AGENT_STATES, LIVENESS_INVARIANT
+from secretary.webproto.boundary import IMPLEMENTATION_FAILURES, ProtocolBoundary
 from secretary.webproto.cursor import Cursor
 from secretary.webproto.errors import (
     InstallationUnavailable,
@@ -94,12 +98,14 @@ __all__ = [
     "LIVENESS_INVARIANT",
     "MAX_LIMIT",
     "SCHEMA_VERSION",
+    "IMPLEMENTATION_FAILURES",
     "Cursor",
     "InstallationUnavailable",
     "InvalidCursor",
     "OperationLayer",
     "OwnerConflict",
     "ProductRun",
+    "ProtocolBoundary",
     "ReadError",
     "ReadLayer",
     "RunNotFound",

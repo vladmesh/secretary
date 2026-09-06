@@ -362,6 +362,14 @@ and a restart of the service loses nothing. Idempotency is the layer's: a repeat
 client's own request id and is answered with the run that already exists, so the transport cannot
 raise a second head even when a browser sends the same command twice.
 
+**One error contract, kept in one place.** The web transport holds one table from protocol code to
+HTTP status and catches `ReadError` once, and that is only affordable because the layer guarantees
+nothing else leaves it. The guarantee is structural rather than remembered: both layers inherit
+`secretary.webproto.boundary.ProtocolBoundary`, which wraps every public operation and turns an
+implementation failure into `backend_unavailable`. So an unreadable product-run record marks the
+product-runs section of a card page unavailable, beside a card state, history and result that are
+read from other sources and still shown -- rather than taking the page down.
+
 **Loopback only until DoD 5.** It has no password, no TLS and no authorisation, and its POST routes
 start real heads, so reaching the port is owning the pipeline. A non-loopback bind is refused in
 code before a socket exists -- by resolving the requested name and refusing unless every address it

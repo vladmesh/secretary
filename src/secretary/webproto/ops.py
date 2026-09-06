@@ -67,6 +67,7 @@ from secretary.tasks import KanboardClient, TaskAudit
 from secretary.webproto import run_events, sources
 from secretary.webproto import run_state as run_state_reads
 from secretary.webproto.admission import Admission, admit
+from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
     InstallationUnavailable,
     OwnerConflict,
@@ -152,7 +153,7 @@ def no_session() -> Any:
     )
 
 
-class OperationLayer:
+class OperationLayer(ProtocolBoundary):
     """One installation's product runtime, with no knowledge of who is asking.
 
     Construction does no I/O, exactly as `ReadLayer`'s does not: every operation resolves the

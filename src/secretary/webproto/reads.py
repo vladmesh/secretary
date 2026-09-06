@@ -32,6 +32,7 @@ from secretary.status import collect_status
 from secretary.tasks import KanboardClient, TaskError, TaskReader
 from secretary.webproto import agents as agent_reads
 from secretary.webproto import sources
+from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.cursor import Cursor, decode
 from secretary.webproto.errors import InstallationUnavailable, TaskNotFound
 from secretary.webproto.journal import DEFAULT_LIMIT, EventJournal, EventPage
@@ -51,7 +52,7 @@ TASK_SNAPSHOT_EVENTS = 20
 _SOURCE_FAILURES = (TaskError, HostError, OSError, ValueError, KeyError, TypeError, AssertionError)
 
 
-class ReadLayer:
+class ReadLayer(ProtocolBoundary):
     """One installation, read three ways, with no knowledge of who is asking.
 
     Construction is cheap and does no I/O: every operation reads what it needs when it is called,

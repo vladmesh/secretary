@@ -613,6 +613,40 @@ class PageTests(TransportFixture):
         markup = self.text_of(self.get("/tasks/secretary-run-1"))
         self.assertIn("no event has been recorded for this card.", markup)
 
+    def test_an_unreadable_run_record_marks_one_section_and_leaves_the_page_standing(self) -> None:
+        """Criteria 3 and 7: a dead source is shown on the page, it does not take the page down.
+
+        The run store is one source among several. An unreadable record under
+        `<data>/webproto/runs/` says nothing about the card, its history, its output or its result,
+        so those are still rendered and only the product-runs section is marked unavailable, with
+        the reason the layer gave.
+        """
+        task_id = self._card()
+        self.board.comments[task_id] = [{"date_creation": 1, "comment": "[report:done]\nwhat the worker said"}]
+        self._journal([self._event("secretary-run-1", 0)])
+        runs = self.data_dir / "webproto" / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        (runs / "pr-broken.json").write_text("{not json", encoding="utf-8")
+
+        response = self.get("/tasks/secretary-run-1")
+        self.assertEqual(response.status, 200)
+        markup = self.text_of(response)
+        self.assertIn("could not find out this card's product runs:", markup)
+        self.assertIn("pr-broken.json", markup)
+        # The rest of the page is read from other sources and is still there.
+        self.assertIn("A small task", markup)
+        self.assertIn("what the worker said", markup)
+        self.assertIn("event 0", markup)
+
+    def test_an_unreadable_run_record_is_the_published_backend_unavailable_code(self) -> None:
+        self._card()
+        runs = self.data_dir / "webproto" / "runs"
+        runs.mkdir(parents=True, exist_ok=True)
+        (runs / "pr-broken.json").write_text("{not json", encoding="utf-8")
+        response = self.get("/api/tasks/secretary-run-1/runs")
+        self.assertEqual(response.status, 503)
+        self.assertEqual(self.json_of(response)["error"]["code"], "backend_unavailable")
+
     def test_a_card_the_board_does_not_hold_is_a_404_page(self) -> None:
         response = self.get("/tasks/secretary-absent")
         self.assertEqual(response.status, 404)
