@@ -247,13 +247,51 @@ rather than a new store; agents are the dispatcher's durable production state pl
 heartbeats the head runtime already writes. Building a second collector for any of them would put
 a second answer next to a working one, which is the failure this layer exists to prevent.
 
-Two invariants are enforced rather than documented. It never writes: no operation mutates the
-board, the dispatcher state, the journal or the installation, and none takes an actor. And
-liveness is process state: a pane, terminal or window is not evidence about a head, for the reason
-`secretary head-status` exists — panes outlive, alias and stop drawing the processes behind them.
+Two invariants are enforced rather than documented. The three reads never write: none of them
+mutates the board, the dispatcher state, the journal or the installation, and none takes an actor.
+And liveness is process state: a pane, terminal or window is not evidence about a head, for the
+reason `secretary head-status` exists — panes outlive, alias and stop drawing the processes behind
+them.
 
 The protocol, its schema, its states and its cursor semantics are in
 [Protocols](PROTOCOLS.md#reading-the-pipeline).
+
+## The product runtime
+
+The other half of `secretary.webproto` is what produces what those reads show: the product raises a
+real worker head for a card and a real reviewer head by its result, and it owns the workspace, the
+process, the pid, the logs and the outcome of both.
+
+**Why it does not depend on Orca.** The pipeline's heads are Orca panes: `orca worktree create`
+makes the workspace, Orca's session store holds the pty, Orca's repository inventory knows what
+exists, and Orca's teardown removes it. That is a second lifecycle authority for something the
+product is supposed to own, and it costs three things this layer cannot pay. A pane is not
+evidence of a process — it is aliased, detached and redrawn empty over a working head — so a
+dashboard built on it reports a liveness that is not true. A pane's exit status is lost, so "it
+finished", "it exited 17" and "it was killed" collapse into one "the pane is gone". And a workspace
+Orca owns cannot be handed to a web transport without handing that transport Orca too. So on the
+start path and the result-reading path there is no Orca CLI, no Orca RPC, no terminal and no Orca
+repository inventory, and a test fails if any of them appears.
+
+**What it reuses, rather than rebuilds.** Almost everything. The head's process is held by
+`LocalPtyHeadRuntime`, the supervised backend that already exists, reached through the product's one
+name-to-backend mapping (`head_runtime_backends.build_head_runtime`) with a session factory that
+raises — there is no second supervisor here. Liveness is the same launch-identity heartbeat and the
+same reader the watchdog uses. The exit status is the supervisor's own journal. Which head runs is
+the head registry, and the command is `head.command.render_head_command`; a Codex head goes through
+the same `codex_preflight` the pipeline uses, and a Claude head through the same `claude_env`
+first-run preparation. The card and the project are the identities the pipeline already has. The
+run's two events go onto the board's own audit journal, so the read layer shows them with no second
+history. What is genuinely new is small: a workspace cut with `git worktree` instead of by Orca, a
+durable run record, and one admission gate.
+
+**And one owner of a card.** The production dispatcher takes cards from its own lane and an open
+sprint reserves its projects; a product run must be neither a second owner of an attempt nor an
+intruder in a sprint. One function decides that — `webproto.admission.admit` — out of rules that
+already exist, and every path that raises a head goes through it.
+
+Its operations, their idempotency, the ownership rule and the outcome vocabulary are in
+[Protocols](PROTOCOLS.md#running-the-pipeline).
 
 ## The sprint observer head
 

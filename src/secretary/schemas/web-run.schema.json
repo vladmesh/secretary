@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "web-run.schema.json",
+  "title": "Transport-independent product-run operations",
+  "description": "The documents secretary.webproto's operations return. A run's state values are the read layer's own five; the exit status beside them is the process's, not a sixth name for it.",
+  "oneOf": [
+    {"$ref": "#/$defs/run"},
+    {"$ref": "#/$defs/review"}
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": ["state", "reason", "observed_at", "data_age_seconds"],
+      "properties": {
+        "state": {"enum": ["available", "unavailable"]},
+        "reason": {"type": ["string", "null"]},
+        "observed_at": {"type": ["string", "null"]},
+        "data_age_seconds": {"type": ["number", "null"]}
+      }
+    },
+    "record": {
+      "type": "object",
+      "description": "What this product owns about one run and what a later reader needs to find it.",
+      "required": [
+        "run_id", "request_id", "ref", "project", "role", "profile", "runtime",
+        "workspace", "run_dir", "pid_file", "journal_path", "log_path", "result_path"
+      ],
+      "properties": {
+        "run_id": {"type": "string"},
+        "request_id": {"type": "string"},
+        "ref": {"type": "string"},
+        "project": {"type": "string"},
+        "role": {"enum": ["worker", "reviewer"]},
+        "profile": {"type": "string"},
+        "adapter": {"type": "string"},
+        "runtime": {"type": "string"},
+        "parent_run_id": {"type": "string"},
+        "workspace": {"type": "string"},
+        "run_dir": {"type": "string"},
+        "pid_file": {"type": "string"},
+        "journal_path": {"type": "string"},
+        "log_path": {"type": "string"},
+        "result_path": {"type": "string"},
+        "head_pid": {"type": "integer"},
+        "supervisor_pid": {"type": "integer"},
+        "started_at": {"type": ["string", "null"]},
+        "deadline_at": {"type": ["string", "null"]},
+        "settled_at": {"type": ["string", "null"]},
+        "settled_state": {"type": "string"},
+        "settled_reason": {"type": "string"},
+        "head_run": {"type": "object"}
+      }
+    },
+    "state": {
+      "type": "object",
+      "required": ["value", "reason", "terminal", "source", "exit", "result", "evidence"],
+      "properties": {
+        "value": {"enum": ["running", "finished", "process_failed", "source_unavailable", "unknown"]},
+        "reason": {"type": "string"},
+        "terminal": {"type": "boolean"},
+        "settled_at": {"type": ["string", "null"]},
+        "source": {"$ref": "#/$defs/source"},
+        "exit": {
+          "type": "object",
+          "description": "The head process's own exit status. A normal ending is code 0; a non-zero exit and a process killed by a signal are told apart here rather than by a sixth state.",
+          "required": ["code", "signal", "at"],
+          "properties": {
+            "code": {"type": ["integer", "null"]},
+            "signal": {"type": ["integer", "null"]},
+            "at": {"type": ["number", "null"]}
+          }
+        },
+        "result": {
+          "type": "object",
+          "required": ["present", "value", "reason", "verdict"],
+          "properties": {
+            "present": {"type": "boolean"},
+            "value": {"type": ["object", "null"]},
+            "reason": {"type": ["string", "null"]},
+            "verdict": {"type": ["string", "null"]}
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "required": ["kind", "heartbeat_state", "pid", "detail"],
+          "properties": {
+            "kind": {"const": "process_heartbeat"},
+            "heartbeat_state": {"type": "string"},
+            "pid": {"type": ["integer", "null"]},
+            "detail": {"type": ["string", "null"]}
+          }
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": ["schema_version", "kind", "observed_at", "run", "state", "reads"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "kind": {"const": "product_run"},
+        "observed_at": {"type": "string"},
+        "run": {"$ref": "#/$defs/record"},
+        "state": {"$ref": "#/$defs/state"},
+        "reads": {
+          "type": "object",
+          "description": "How this run is read back through the read layer that already exists. There is no run history and no run outcome store to point at.",
+          "required": ["task_events", "task_snapshot", "events_kind_started", "events_kind_finished"],
+          "properties": {
+            "task_events": {"type": "string"},
+            "task_snapshot": {"type": "string"},
+            "events_kind_started": {"type": "string"},
+            "events_kind_finished": {"type": "string"}
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["schema_version", "kind", "observed_at", "review", "worker"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "kind": {"const": "product_review"},
+        "observed_at": {"type": "string"},
+        "review": {"$ref": "#/$defs/run"},
+        "worker": {"oneOf": [{"$ref": "#/$defs/run"}, {"type": "null"}]}
+      }
+    }
+  }
+}

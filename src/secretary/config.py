@@ -32,6 +32,7 @@ SCHEMAS = {
     "status": "status.schema.json",
     "secret-catalog": "secret-catalog.schema.json",
     "web-read": "web-read.schema.json",
+    "web-run": "web-run.schema.json",
 }
 
 

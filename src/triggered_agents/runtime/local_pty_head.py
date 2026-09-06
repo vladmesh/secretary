@@ -274,6 +274,15 @@ DRAIN_HEAD_NOT_SIGNALLED = (
     "own socket would still admit a payload from somebody else"
 )
 
+#: The substrate's own names for one head's run directory and for the record that carries its exit
+#: status, re-exported here because this module is the one door onto that package. A reader outside
+#: a lifecycle — an operator command, a product runtime asking how a run it owns ended — needs the
+#: exit status of a head whose supervisor is long gone, and `observe` cannot answer that: it is a
+#: question about a process that no longer exists. Re-exporting rather than letting such a reader
+#: import the substrate keeps the one-door property `test_local_pty_head_runtime` asserts.
+JOURNAL_NAME = protocol.JOURNAL_NAME
+RUN_EXITED = local_pty.RUN_EXITED
+
 #: Runtime grace extends, never shortens, the substrate delivery bound.
 DELIVERY_GRACE_SECONDS = 5.0
 
@@ -2414,6 +2423,22 @@ def _has_exited(address: _Address) -> bool:
     the safe direction — this is only ever asked to *confirm* that a head is gone.
     """
     return bool(local_pty.read_tail(address.journal_path).of_kind(local_pty.RUN_EXITED))
+
+
+def head_run_journal(run_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], ...]:
+    """Everything one head's supervisor wrote about it, read from outside its lifecycle.
+
+    The whole journal rather than a bounded tail, because the caller this exists for is asking what
+    a finished run *did* — its `run.exited` and the exit code or signal on it — and a bounded read
+    would answer "I did not see one" for a head that printed enough afterwards. A missing file is an
+    empty journal: a run directory that was swept says nothing, and saying nothing is not a claim
+    that the head never ended.
+
+    `OSError` is deliberately not caught: an unreadable journal is a source failure the caller has
+    to be able to report as one, and returning an empty tuple for it would make "I could not read
+    this" indistinguishable from "there is nothing here".
+    """
+    return local_pty.read_events(Path(run_dir) / protocol.JOURNAL_NAME).events
 
 
 def _last_event_at(address: _Address) -> float:

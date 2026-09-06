@@ -2619,6 +2619,126 @@ already uses; the transport is what turns a code into whatever its protocol says
 | `InvalidCursor` | `validation` | a cursor this layer did not issue, one belonging to another card, or one past the end of the journal — never silently reset to the beginning |
 | `InstallationUnavailable` | `backend_unavailable` | the instance config does not validate, so there is no data plane to read |
 
+## Running the pipeline
+
+The other half of `secretary.webproto`, and the half that produces what the read layer shows: three
+operations that raise a real Codex worker for one card, raise a real Claude reviewer by that
+worker's result, and read a run. They know as little about a transport as the reads do — no HTTP,
+no sockets, no framework — and their failures are typed codes rather than status numbers. Why the
+product runtime does not depend on Orca, and what it reuses instead, is in
+[Architecture](ARCHITECTURE.md#the-product-runtime).
+
+```bash
+python3 -P -m secretary web-run start  --instance I --ref REF --request-id ID --profile P [--instruction TEXT]
+python3 -P -m secretary web-run review --instance I --worker-run RUN --request-id ID --profile P
+python3 -P -m secretary web-run state  --instance I --run-id RUN
+python3 -P -m secretary web-run list   --instance I --ref REF
+```
+
+Every document validates against the packaged `web-run` schema and carries `schema_version`, a
+`kind` of `product_run` or `product_review`, and `observed_at`. Identities are the ones the pipeline
+already has — a card is its reference, a project is its registered id — plus one the runs need of
+their own: a run id, `pr-` prefixed so a product run directory is never mistaken for a pipeline one.
+
+`--profile` is not optional and has no default. Which head a product run raises is installation
+configuration read from the head registry, and the profile has to declare the `local-pty` runtime:
+a profile naming Orca's backend is refused rather than quietly run under a backend it does not
+declare. `--heads-registry` (or `TA_HEADS_REGISTRY`) points one run at a registry other than the
+installation's own.
+
+**`run_start(ref, request_id, profile)`** cuts a workspace, raises a worker head into it and points
+it at a task document. **`run_review(request_id, profile, worker_run)`** settles the worker run
+first and refuses while it is still open, then raises a reviewer head in the same workspace, handed
+the worker's result. **`run_state(run_id)`** reads one run, and is where a run's ending becomes
+durable.
+
+### What the product owns
+
+The workspace is a detached `git worktree` of the project's own repository, cut by the product at
+the project's declared default branch into `<data>/webproto/workspaces/<run-id>`; it carries no
+branch, and nothing here commits, pushes or opens a pull request. The head's process is held by a
+supervisor of the product's own under `<data>/webproto/heads/<run-id>`, which is also where its pid
+file (`head.pid`), its journal (`journal.jsonl`), its supervisor log (`supervisor.log`), its task
+document and its result file (`result.json`) live. The run record is
+`<data>/webproto/runs/<run-id>.json`. Every one of those paths is on the run document, so an
+operator reads a run from the document rather than from this page.
+
+A head is told the path it must write its result to (`SECRETARY_RUN_RESULT`), together with
+`SECRETARY_RUN_ID`, `SECRETARY_RUN_ROLE`, `SECRETARY_RUN_REF` and `SECRETARY_RUN_WORKSPACE`. That
+file is the only place a result may appear, and it is what ends a run: `run_state` that finds it
+ends the head holding it, because the product owns that process. A run that publishes nothing is
+ended at its deadline instead (`--deadline-seconds`, one hour by default).
+
+### One owner of a card
+
+`secretary.webproto.admission.admit` is the single gate, and both start paths go through it before
+they build or spawn anything. It decides in this order, and the order is part of the contract:
+
+1. the board holds the card — otherwise `not_found`;
+2. the card's project is registered here and enabled — otherwise `validation`;
+3. no open sprint reserves that project, read from the same index (`sprints/active-repositories.json`)
+   the board's own write guard authorises against;
+4. the card is not in the production dispatcher's lane: it claims `ready` and holds `in_progress`,
+   `validate`, `assessment` and `blocked`, so a product run takes a card only from `issues`;
+5. the dispatcher's durable production state holds no record for the card — and a state file that
+   cannot be read refuses too, because "I could not tell" is not "nobody owns it";
+6. this layer holds no unsettled run for the card.
+
+Nothing there is a scheduler, a store or an audit of its own: the reservations and the card's state
+are rules that already exist, and the dispatcher's state is read and never written.
+
+### Idempotency
+
+`start` and `review` are idempotent on `--request-id`. The request id is claimed under the run
+store's lock with the run id and every path already decided, before anything is provisioned or
+spawned, so a repeat — a retried command, a reconnected client, a transport that lost its answer —
+finds that record and returns the same run. It never raises a second head and never cuts a second
+workspace. There is no distributed lock: one operator's retry is what this defends against, not a
+cluster.
+
+### What a run ended as
+
+A run's `state.value` is the same five-word vocabulary the read layer uses for an agent, and the
+process's own exit status rides beside it in `state.exit` rather than as a sixth word:
+
+| state | exit | what it means |
+| --- | --- | --- |
+| `running` | — | a live process matches this run's launch identity |
+| `finished` | any | the run published its result and its process has ended |
+| `finished` | `code: 0` | the process ended normally, having published nothing |
+| `process_failed` | `code: N` | the process exited with a non-zero status |
+| `process_failed` | `signal: N` | the process was ended by a signal |
+| `process_failed` | none | the process is gone, published nothing, and nothing recorded how it ended |
+| `source_unavailable` | — | the launch identity or the journal could not be read; nothing is proven |
+| `unknown` | — | no evidence yet: no head raised, or no heartbeat published, or a foreign pid |
+
+The evidence is the launch-identity heartbeat, the supervisor's journal and the result file. A
+window, pane or panel is never consulted and is not evidence that a run is alive. The first
+observation of a terminal state settles the run, and a settled run says the same thing forever even
+after its run directory is swept.
+
+### Where a run is read back
+
+Nowhere new. A run publishes exactly two events, `product_run.started` and `product_run.finished`,
+into the board's own append-only journal, so `secretary web-read events --ref REF` and
+`secretary web-read task --ref REF` show them with their cursors intact. There is no run history and
+no run outcome store to read instead. Both events are idempotent through the audit's own request-id
+ownership, so an ending observed ten times is published once. They are generic audit records rather
+than typed Card events, because a product run moves no card and must not wake a sprint observer.
+
+### Errors
+
+The same typed exceptions the reads use, plus the two only a mutation can make. The CLI prints
+`{"error": {"code", "message"}}` on stderr and exits 2 on `not_found` and `validation`, 3 on
+`owner_conflict`, 1 on `backend_unavailable`.
+
+| exception | code | when |
+| --- | --- | --- |
+| `TaskNotFound` / `RunNotFound` | `not_found` | no such card, or no such run on this installation |
+| `ValidationRefused` | `validation` | no request id, no profile, an unlaunchable profile, one on another backend, or an unregistered project |
+| `OwnerConflict` | `owner_conflict` | somebody else owns this card — an open sprint, the dispatcher's lane, its durable record, an unsettled run of this layer's, or a worker run that has not ended yet |
+| `RuntimeUnavailable` | `backend_unavailable` | the workspace, the head or the run's own record could not be made |
+
 ## Knowledge
 
 Long recoverable documents (brainstorms, decision logs, incident write-ups) live in

@@ -1,12 +1,24 @@
-"""`secretary web-read`: the read layer, callable before any web transport exists.
+"""`secretary web-read` and `secretary web-run`: the layer, callable before any web transport exists.
 
-One command group with one subcommand per operation, so the layer can be exercised, diffed and
-scripted from a shell -- and so the card that adds a real transport starts from a surface an
-operator has already read with their own eyes rather than from an untried API.
+Two command groups side by side, one per half of the layer, with one subcommand per operation --
+so both halves can be exercised, diffed and scripted from a shell, and so the card that adds a real
+transport starts from a surface an operator has already read with their own eyes and driven a real
+Codex worker and a real Claude reviewer through, rather than from an untried API.
 
-This module is the only file under `webproto` that knows a caller exists. It parses arguments,
-prints JSON and maps a typed read error onto an exit status; the layer itself does none of those
-things, which is what keeps a second transport from having to re-implement any of it.
+This module is the only file under `webproto` that knows a caller exists, and it stays the only one
+now that there are two groups: it parses arguments, prints JSON and maps a typed error onto an exit
+status, and the layer itself does none of those things, which is what keeps a second transport from
+having to re-implement any of it.
+
+The operator loop `web-run` makes is the loop a web page will make:
+
+    secretary web-run start  --instance I --ref R --request-id X --profile P
+    secretary web-run state  --instance I --run-id  <run>          # until it is terminal
+    secretary web-run review --instance I --worker-run <run> --request-id Y --profile Q
+    secretary web-run state  --instance I --run-id  <review>
+
+`start` and `review` are idempotent on `--request-id`: running either twice with the same one
+returns the same run and raises no second head.
 """
 
 from __future__ import annotations
@@ -19,7 +31,9 @@ from typing import Any
 
 from secretary.webproto.errors import ReadError
 from secretary.webproto.journal import DEFAULT_LIMIT
+from secretary.webproto.ops import OperationLayer
 from secretary.webproto.reads import TASK_SNAPSHOT_EVENTS, ReadLayer
+from secretary.webproto.runs import DEFAULT_DEADLINE_SECONDS, RunStore
 
 #: Exit statuses, the same ones `secretary task` uses for the same two situations.
 EXIT_VALIDATION = 2
@@ -158,3 +172,187 @@ def _event_lines(snapshot: dict[str, Any]):
     for item in snapshot["items"]:
         yield f"  {item['occurred_at']} {item['kind']} {item['reason'] or item['outcome'] or ''}".rstrip()
     yield f"next cursor: {snapshot['next_cursor']}" + (" (more)" if snapshot["has_more"] else "")
+
+
+# -- `secretary web-run`: the operation half ----------------------------------------------------
+
+#: The same statuses the read group uses for the same situations, plus one. An owner conflict is a
+#: refusal about the state of the world rather than a malformed request, so it gets its own status:
+#: a script can then tell "somebody else has this card" from "I asked wrongly".
+EXIT_CONFLICT = 3
+_RUN_EXIT_BY_CODE = {
+    "not_found": 2,
+    "validation": 2,
+    "backend_unavailable": 1,
+    "owner_conflict": EXIT_CONFLICT,
+}
+
+
+def add_web_run_subcommands(subparsers) -> None:
+    """Register the group beside `web-read`."""
+    group = subparsers.add_parser(
+        "web-run",
+        help="start, review and read a product run without a web transport",
+    )
+    commands = group.add_subparsers(dest="web_run_command")
+
+    start = commands.add_parser("start", help="raise a worker head for one card")
+    _run_common(start)
+    start.add_argument("--ref", required=True, help="the card the run is for")
+    start.add_argument("--request-id", required=True, help="the id this start is idempotent on")
+    start.add_argument("--profile", required=True, help="the head profile, from the head registry")
+    start.add_argument(
+        "--instruction",
+        default="",
+        help="extra instruction added to the run's task document, beside the card's description",
+    )
+    start.set_defaults(handler=run_web_run_start)
+
+    review = commands.add_parser("review", help="raise a reviewer head by a worker run's result")
+    _run_common(review)
+    review.add_argument("--request-id", required=True, help="the id this review is idempotent on")
+    review.add_argument("--profile", required=True, help="the reviewer head profile")
+    review.add_argument("--worker-run", default="", help="the worker run to review")
+    review.add_argument("--ref", default="", help="the card, when the worker run is its latest")
+    review.set_defaults(handler=run_web_run_review)
+
+    state = commands.add_parser("state", help="one run's state, and the place its ending settles")
+    _run_common(state)
+    state.add_argument("--run-id", required=True, help="the run to read")
+    state.set_defaults(handler=run_web_run_state)
+
+    listing = commands.add_parser("list", help="every product run of one card")
+    _run_common(listing)
+    listing.add_argument("--ref", required=True, help="the card whose runs to list")
+    listing.set_defaults(handler=run_web_run_list)
+
+    group.set_defaults(handler=_run_usage)
+
+
+def _run_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    parser.add_argument(
+        "--data-dir",
+        default=os.environ.get("SECRETARY_DATA_DIR"),
+        help="override the instance's configured data directory",
+    )
+    parser.add_argument(
+        "--heads-registry",
+        default=os.environ.get("TA_HEADS_REGISTRY"),
+        help="read head profiles from this registry instead of the installation's own",
+    )
+    parser.add_argument(
+        "--deadline-seconds",
+        type=float,
+        default=DEFAULT_DEADLINE_SECONDS,
+        help="how long a run may take before the product ends the head holding it",
+    )
+    parser.add_argument("--json", action="store_true", help="print the document as JSON")
+
+
+def _run_usage(_args: argparse.Namespace) -> int:
+    print(json.dumps({"error": {"code": "usage", "message": "web-run subcommand required"}}))
+    return EXIT_VALIDATION
+
+
+def _ops_layer(args: argparse.Namespace) -> OperationLayer:
+    return OperationLayer(
+        args.instance,
+        data_dir=args.data_dir,
+        registry_path=args.heads_registry,
+        deadline_seconds=args.deadline_seconds,
+    )
+
+
+def run_web_run_start(args: argparse.Namespace) -> int:
+    return _emit_run(
+        args,
+        lambda: _ops_layer(args).run_start(
+            args.ref,
+            request_id=args.request_id,
+            profile=args.profile,
+            instruction=args.instruction,
+        ),
+        _run_lines,
+    )
+
+
+def run_web_run_review(args: argparse.Namespace) -> int:
+    return _emit_run(
+        args,
+        lambda: _ops_layer(args).run_review(
+            request_id=args.request_id,
+            profile=args.profile,
+            ref=args.ref,
+            worker_run_id=args.worker_run,
+        ),
+        _review_lines,
+    )
+
+
+def run_web_run_state(args: argparse.Namespace) -> int:
+    return _emit_run(args, lambda: _ops_layer(args).run_state(args.run_id), _run_lines)
+
+
+def run_web_run_list(args: argparse.Namespace) -> int:
+    def listing() -> dict[str, Any]:
+        layer = _ops_layer(args)
+        store = RunStore(layer.data_dir())
+        return {
+            "schema_version": 1,
+            "kind": "product_runs",
+            "ref": args.ref,
+            "items": [layer.run_state(run.run_id)["run"] for run in store.for_ref(args.ref)],
+        }
+
+    return _emit_run(args, listing, _list_lines)
+
+
+def _emit_run(args: argparse.Namespace, operation, render) -> int:
+    """Run one operation, print it, and turn a typed refusal into the group's exit status."""
+    try:
+        document = operation()
+    except ReadError as exc:
+        print(json.dumps({"error": exc.to_json()}), file=sys.stderr)
+        return _RUN_EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
+    if args.json:
+        print(json.dumps(document, sort_keys=True))
+        return 0
+    for line in render(document):
+        print(line)
+    return 0
+
+
+def _run_lines(document: dict[str, Any]):
+    run = document["run"]
+    state = document["state"]
+    yield f"{run['run_id']} {run['role']} {run['ref']} ({run['project']}) on {run['profile']}"
+    yield f"state: {state['value']} — {state['reason']}"
+    exit_status = state["exit"]
+    if exit_status["code"] is not None or exit_status["signal"] is not None:
+        yield f"exit: code={exit_status['code']} signal={exit_status['signal']}"
+    result = state["result"]
+    yield f"result: {'published' if result['present'] else 'none'}" + (
+        f", verdict {result['verdict']}" if result["verdict"] else ""
+    )
+    yield f"workspace: {run['workspace']}"
+    yield f"run dir: {run['run_dir']}"
+    yield f"journal: {run['journal_path']}"
+    yield f"pid file: {run['pid_file']} (head pid {run['head_pid']})"
+    yield f"read it back with: {document['reads']['task_snapshot']}"
+
+
+def _review_lines(document: dict[str, Any]):
+    if document.get("worker"):
+        yield "worker:"
+        for line in _run_lines(document["worker"]):
+            yield f"  {line}"
+    yield "review:"
+    for line in _run_lines(document["review"]):
+        yield f"  {line}"
+
+
+def _list_lines(document: dict[str, Any]):
+    yield f"{document['ref']}: {len(document['items'])} product run(s)"
+    for run in document["items"]:
+        yield f"  {run['run_id']} {run['role']} {run['profile']} {run['settled_state'] or 'open'}"

@@ -1,4 +1,4 @@
-"""The transport-independent read layer: what a dashboard, a bot or a CLI all read the same way.
+"""The transport-independent layer: what a dashboard, a bot or a CLI all read and drive the same way.
 
 Sprint 1425 wants an operator dashboard, and after it a Telegram head asking the same questions.
 Both need the same three answers -- what is the system doing, what is this card doing, what has
@@ -17,10 +17,11 @@ So the answers live here, once, and know nothing about who is asking:
 * :func:`~secretary.webproto.reads.ReadLayer.task_events` -- a page of that card's history and an
   opaque cursor to continue from, so a client can keep reading without re-reading.
 
-Four properties are the point of the module, and each has a test:
+Four properties are the point of that half, and each has a test:
 
-**It is read-only.** Nothing here writes to the board, the dispatcher state, the journal or the
-installation. There is no mutation operation, and no operation takes an actor.
+**It is read-only.** Nothing in `reads`, `journal`, `agents` or `cursor` writes to the board, the
+dispatcher state, the journal or the installation. None of the three reads mutates anything, and
+none of them takes an actor.
 
 **It does not know about transports.** No HTTP, no sockets, no framework, no rendering, no
 templates -- not even indirectly through an import. Failures are typed exceptions
@@ -35,8 +36,37 @@ page.
 **Liveness is process state.** A pane, terminal or window is not evidence that an agent is
 running, and :mod:`secretary.webproto.agents` reads none of them.
 
-`secretary web-read` (:mod:`secretary.webproto.commands`) is the operator's way to call all three
-without a web transport existing at all. It is a caller of this layer, not a part of it.
+**And the operations, added by secretary-1562, are the other half of the same layer.** A dashboard
+that can only watch is a dashboard nobody opens twice, so beside the three reads there are three
+operations (:mod:`secretary.webproto.ops`) with the same two properties and no others: they are
+transport-independent, and their failures are typed codes rather than status numbers.
+
+* :meth:`~secretary.webproto.ops.OperationLayer.run_start` -- raise a real worker head for one card,
+  in a workspace this product cut and under a supervisor this product owns;
+* :meth:`~secretary.webproto.ops.OperationLayer.run_review` -- raise a real reviewer head by that
+  worker run's result;
+* :meth:`~secretary.webproto.ops.OperationLayer.run_state` -- read one run, and settle its ending.
+
+Four more properties are the point of that half, and each has a test:
+
+**Secretary owns the run.** The workspace, the process, the pid, the logs and the result belong to
+the product: nothing on the start path or the result-reading path speaks to Orca -- not its CLI,
+not its RPC, not a terminal and not its repository inventory.
+
+**A request id owns a run.** Repeating a start, or reconnecting, returns the same run; it never
+raises a second head or cuts a second workspace.
+
+**One owner of a card.** :mod:`secretary.webproto.admission` is the single gate every start goes
+through, and it is built from rules that already exist -- an open sprint's project reservations and
+the card's own state -- rather than from a scheduler of its own.
+
+**A run's outcome is visible where the card's history already is.** The run's two events go onto the
+board's own journal, so `task_events` and `task_snapshot` show them with no second history and no
+second outcome store.
+
+`secretary web-read` and `secretary web-run` (:mod:`secretary.webproto.commands`) are the operator's
+way to call all six without a web transport existing at all. They are callers of this layer, not a
+part of it.
 """
 
 from __future__ import annotations
@@ -46,11 +76,17 @@ from secretary.webproto.cursor import Cursor
 from secretary.webproto.errors import (
     InstallationUnavailable,
     InvalidCursor,
+    OwnerConflict,
     ReadError,
+    RunNotFound,
+    RuntimeUnavailable,
     TaskNotFound,
+    ValidationRefused,
 )
 from secretary.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
+from secretary.webproto.ops import OperationLayer
 from secretary.webproto.reads import SCHEMA_VERSION, ReadLayer
+from secretary.webproto.runs import ProductRun, RunStore
 
 __all__ = [
     "AGENT_STATES",
@@ -61,7 +97,14 @@ __all__ = [
     "Cursor",
     "InstallationUnavailable",
     "InvalidCursor",
+    "OperationLayer",
+    "OwnerConflict",
+    "ProductRun",
     "ReadError",
     "ReadLayer",
+    "RunNotFound",
+    "RunStore",
+    "RuntimeUnavailable",
     "TaskNotFound",
+    "ValidationRefused",
 ]
