@@ -3139,7 +3139,7 @@ own profiles, each showing the label, model and effort the registry holds.
 | `request_id` | the id this form was served with, hidden in the form and submitted back unchanged |
 | `product`, `goal`, `definition_of_done` | required; an empty one is refused by name before the layer is called |
 | `issues`, `projects` | one value per checked box; at least one of each is required |
-| `observer` | required: a profile the layer marked eligible, or the `none` spelling `heads.observer.none` publishes |
+| `observer` | required, and always a profile the layer marked eligible: the `none` spelling `heads.observer.none` publishes is **not** offered on this route and a crafted one is refused before the layer |
 | `worker`, `reviewer` | two independent optional selects whose default option is empty; an empty one reaches the layer as `None`, and never as the empty string |
 
 **Two kinds of refusal, and they are different kinds of thing.** A field the form itself requires is
@@ -3147,15 +3147,32 @@ answered by the transport, named field by field, because the person is looking a
 sprint may *be* — an unknown profile, a closed issue, an unregistered project, a project another
 open sprint holds — stays a judgement of `SprintWriter.create` reached through the layer, and the
 transport only shows what it was told. Either way the form comes back with every value that was
-submitted still in it, under the same request id.
+submitted still in it — including a value the catalogue no longer offers, which is kept as a marked
+choice rather than dropped, because a form that quietly changed a submitted answer would be asking
+for a repeat of something nobody sent.
 
 **A submission is idempotent because the id is the form's.** It is minted once, when the form is
 served, and travels in the markup the browser holds; a double click, a retried POST and a
 reconnected client therefore all carry the same one and reach the sprint the layer already opened.
 A success is a **303** to `/sprints/{ref}`, so the address bar ends on the sprint and a refresh
-re-reads it rather than re-posting. A partial failure (`OperationPending`) is rendered on the form
-as what it is: the sprint exists, submitting this same form again is safe, and starting over with a
-new form would open a second sprint. No lock is introduced anywhere.
+re-reads it rather than re-posting. No lock is introduced anywhere.
+
+**A refusal decides what happens to that id, and the two answers are opposite.** `sprint_create`
+claims the id together with a digest of the inputs *before* the writer judges them (see
+[Idempotency](#idempotency) above), so a refusal has spent it: a corrected resubmission under the
+same id is answered `validation` for different inputs, and a form that handed that id back would be
+a dead end with no sprint and no way forward.
+
+| what the layer answered | what the form comes back with | why |
+| --- | --- | --- |
+| `OperationPending` | the same id and the same values, and the words "this sprint exists, submitting this form again is safe" | a sprint exists and only that id resumes it; a new form would open a second beside it |
+| any other refusal | a **new** id, every submitted value, and the words "nothing was created" | the id was claimed and refused while nothing durable was created, so the corrected submission is a new request |
+
+**The browser client is narrower than the sprint contract, deliberately.** `observer` here is always
+a profile: `none` opens a sprint the production tick raises no observer for, which on a page whose
+button says "start this sprint" would start nothing. `secretary sprint create --observer none`
+remains the way to open one, rows that already carry it keep working, and `sprint_state` renders
+such a sprint on its page unchanged (`not_declared`).
 
 **There is no "start" button, because there is no start action.** Opening a sprint with an observer
 is the whole of starting it; the sprint page reads where it got to from `observer.launch.state`,

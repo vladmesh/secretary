@@ -29,9 +29,10 @@ from urllib.parse import parse_qs, quote, unquote
 
 from secretary.web import pages
 from secretary.web.statuses import status_for
-from secretary.webproto.errors import ReadError, ValidationRefused
+from secretary.webproto.errors import OperationPending, ReadError, ValidationRefused
 from secretary.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
 from secretary.webproto.reads import TASK_SNAPSHOT_EVENTS
+from secretary.webproto.sprint_reads import NONE_SPELLING
 
 #: The largest request body this transport reads. Every body it accepts is a handful of short
 #: fields, so anything above this is a mistake or an attempt, and reading it would be neither.
@@ -315,11 +316,22 @@ class WebApp:
 
         Success is a redirect and not a rendered page, so the address bar ends up on the sprint and
         a refresh re-reads it rather than re-posting the form.
+
+        **A refusal decides what happens to the request id, and the two answers are opposite.**
+        `sprint_create` claims the id, with a digest of the inputs, *before* the writer judges them
+        (see its docstring): so a refusal that leaves nothing behind has still spent that id, and a
+        corrected resubmission under it would be answered `validation: different inputs` -- a dead
+        end with no sprint and no way forward. A refusal that is not an
+        :class:`~secretary.webproto.errors.OperationPending` therefore comes back on a form carrying
+        a *new* id, because a corrected submission really is a new request and nothing durable was
+        created. An `OperationPending` is the exact opposite and must keep the same id and the same
+        values: a sprint exists, and only that id reaches it.
         """
         _fields(body, SPRINT_FIELDS, "sprint create")
         submitted = _submission(body)
         errors = _incomplete(submitted)
         if errors:
+            # Nothing reached the layer, so this id was never claimed and is still the right one.
             return self._form_again(submitted, errors=errors, status=400)
         try:
             created = self.sprint_ops.sprint_create(
@@ -335,8 +347,12 @@ class WebApp:
                 worker=_pin(submitted["worker"]),
                 reviewer=_pin(submitted["reviewer"]),
             )
-        except ReadError as exc:
+        except OperationPending as exc:
             return self._form_again(submitted, errors={}, status=status_for(exc.code), refusal=exc)
+        except ReadError as exc:
+            return self._form_again(
+                submitted, errors={}, status=status_for(exc.code), refusal=exc, fresh=True
+            )
         reference = str((created.get("sprint") or {}).get("ref") or "")
         return _redirect(f"/sprints/{quote(reference)}")
 
@@ -350,14 +366,26 @@ class WebApp:
         errors: dict[str, str],
         status: int,
         refusal: ReadError | None = None,
+        fresh: bool = False,
     ) -> Response:
         """The form the person just submitted, with what was refused and everything they typed.
+
+        `fresh` mints a new request id for the form, and it is the only thing that ever replaces a
+        value the person's submission carried. It is set exactly when the layer refused without
+        leaving a sprint behind, for the reason :meth:`_sprint_create` gives: that id is spent, and
+        a form that handed it back would let the owner correct a field and be told the correction
+        is a different request. Every other value comes back untouched -- including one the
+        catalogue no longer offers, which the page marks rather than drops, because a form that
+        quietly changed a submitted choice would be asking for a repeat of something else.
 
         The catalogue is read again because the form is rendered again, and a catalogue that cannot
         be read must not replace the refusal on the screen with its own: the reason the submission
         was refused is the thing being answered, so an unreadable catalogue is shown beside it as a
         section that could not be read rather than raised over the top of it.
         """
+        shown = dict(submitted)
+        if fresh:
+            shown["request_id"] = _request_id()
         try:
             options, catalogue = self.sprint_reads.sprint_options(), None
         except ReadError as exc:
@@ -366,10 +394,11 @@ class WebApp:
             status,
             pages.sprint_form(
                 options,
-                submitted=submitted,
+                submitted=shown,
                 errors=errors,
                 refusal=None if refusal is None else refusal.to_json(),
                 catalogue=catalogue,
+                reissued=fresh,
             ),
         )
 
@@ -558,8 +587,24 @@ _REQUIRED: tuple[tuple[str, str], ...] = (
 )
 
 
+#: Why the one answer that is not a profile is not an answer *here*. `none` opens a sprint the
+#: production tick deliberately raises no observer for, so on this route it would be a button
+#: labelled "start" that starts nothing. It stays a legal answer for `secretary sprint create` and
+#: for the rows that already carry it -- the sprint page renders those unchanged -- and what is
+#: narrowed is this client, not the contract. The spelling is the layer's own rather than a word
+#: repeated here, so a layer that ever spelled it differently would be refused under its own name.
+OBSERVER_MUST_BE_A_PROFILE = (
+    "a sprint opened from here names the head that will run it: opening one with no observer means "
+    "nothing is raised for it, which is not what this page's button says. Choose a profile, or open "
+    "such a sprint with `secretary sprint create --observer none`"
+)
+
+
 def _incomplete(submitted: dict[str, Any]) -> dict[str, str]:
-    return {name: reason for name, reason in _REQUIRED if not submitted.get(name)}
+    errors = {name: reason for name, reason in _REQUIRED if not submitted.get(name)}
+    if "observer" not in errors and submitted.get("observer") == NONE_SPELLING:
+        errors["observer"] = OBSERVER_MUST_BE_A_PROFILE
+    return errors
 
 
 def _pin(value: str) -> str | None:

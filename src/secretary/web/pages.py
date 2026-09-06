@@ -750,6 +750,7 @@ def sprint_form(
     errors: dict[str, str],
     refusal: dict[str, Any] | None = None,
     catalogue: str | None = None,
+    reissued: bool = False,
 ) -> str:
     """The "new sprint" form, on this installation's own catalogue and on what was typed into it.
 
@@ -767,7 +768,7 @@ def sprint_form(
         part
         for part in [
             "<h2>new sprint</h2>",
-            _refusal_block(refusal),
+            _refusal_block(refusal, reissued=reissued),
             _errors_block(errors),
             ""
             if catalogue is None
@@ -809,13 +810,18 @@ def sprint_form(
     return _page("new sprint", body, script=_SPRINT_FORM_SCRIPT)
 
 
-def _refusal_block(refusal: dict[str, Any] | None) -> str:
+def _refusal_block(refusal: dict[str, Any] | None, *, reissued: bool = False) -> str:
     """What the layer said about this submission, and what may safely be done about it.
 
-    A part-done create is the one refusal that is not simply "no": a sprint exists, and the only
-    safe move is to submit this same form again, which carries the same request id and therefore
-    picks that sprint up instead of opening a second one. So it is said in those words, with the
-    sprint named where the layer knows which one it is.
+    Two refusals, two opposite instructions, and the page has to give the right one. A part-done
+    create is the one that is not simply "no": a sprint exists, and the only safe move is to submit
+    this same form again, which carries the same request id and therefore picks that sprint up
+    instead of opening a second one.
+
+    Everything else left no sprint behind and has spent its request id below this transport, so the
+    form now carries a new one. That is said out loud rather than done quietly, because it is the
+    difference between "fix the field and send this again" and "send exactly this again", and a
+    person who read the wrong one either opens a second sprint or reaches a dead end.
     """
     if not refusal:
         return ""
@@ -823,7 +829,13 @@ def _refusal_block(refusal: dict[str, Any] | None) -> str:
     data = refusal.get("data") or {}
     action = data.get("action") or {}
     if not action.get("repeat_request"):
-        return f'<p class="refused"><b>this sprint was not opened.</b> {message}</p>'
+        reissue = (
+            " Nothing was created. This form now carries a new request id, so correcting a field "
+            "and submitting it again is a new request and is safe."
+            if reissued
+            else ""
+        )
+        return f'<p class="refused"><b>this sprint was not opened.</b> {message}{reissue}</p>'
     reference = str(action.get("reference") or "")
     named = (
         f' It is <a href="/sprints/{quote(reference)}">{escape(reference)}</a>.' if reference else ""
@@ -868,7 +880,7 @@ def _product_field(products: dict[str, Any], submitted: dict[str, Any], errors: 
     items = list(products.get("items") or [])
     chosen = str(submitted.get("product") or "")
     unavailable = _source_block(products.get("source"), what="which products this installation has")
-    if not items:
+    if not items and not chosen:
         empty = unavailable or '<p class="empty">this installation has no product to open a sprint for.</p>'
         return _field("product", "product", empty, errors)
     options = ['<option value="">choose a product</option>']
@@ -878,6 +890,7 @@ def _product_field(products: dict[str, Any], submitted: dict[str, Any], errors: 
             f'<option value="{escape(value)}"{_selected(value == chosen)}>'
             f"{escape(str(item.get('label') or value))} ({escape(value)})</option>"
         )
+    options += _kept_option(chosen, [str(item.get("id") or "") for item in items])
     control = unavailable + f'<select id="product" name="product">{"".join(options)}</select>'
     return _field("product", "product", control, errors, "the product whose issues this sprint serves")
 
@@ -892,7 +905,7 @@ def _issue_field(issues: dict[str, Any], submitted: dict[str, Any], errors: dict
     items = list(issues.get("items") or [])
     chosen = set(submitted.get("issues") or [])
     unavailable = _source_block(issues.get("source"), what="which issues are open")
-    if not items:
+    if not items and not chosen:
         empty = unavailable or '<p class="empty">no open issue is on this board, so no sprint can serve one.</p>'
         return _field("issues", "issues this sprint serves", empty, errors)
     rows = []
@@ -905,6 +918,7 @@ def _issue_field(issues: dict[str, Any], submitted: dict[str, Any], errors: dict
             f"{escape(ref)} — {escape(str(item.get('label') or ref))} "
             f'<span class="age">({escape(product) or "no product"})</span></label>'
         )
+    rows += _kept_rows("issues", chosen, [str(item.get("ref") or "") for item in items])
     control = unavailable + f'<div class="choices" id="issues">{"".join(rows)}</div>'
     return _field(
         "issues", "issues this sprint serves", control, errors, "the open issues of the product above"
@@ -922,7 +936,7 @@ def _project_field(projects: dict[str, Any], submitted: dict[str, Any], errors: 
     items = list(projects.get("items") or [])
     chosen = set(submitted.get("projects") or [])
     unavailable = _source_block(projects.get("source"), what="which projects are registered")
-    if not items:
+    if not items and not chosen:
         empty = unavailable or '<p class="empty">this installation has no registered project to reserve.</p>'
         return _field("projects", "projects this sprint reserves", empty, errors)
     rows = []
@@ -940,6 +954,7 @@ def _project_field(projects: dict[str, Any], submitted: dict[str, Any], errors: 
             f"<label><input type=\"checkbox\" name=\"projects\" value=\"{escape(value)}\""
             f"{_checked(value in chosen)}> {escape(str(item.get('label') or value))}{note}</label>"
         )
+    rows += _kept_rows("projects", chosen, [str(item.get("id") or "") for item in items])
     control = unavailable + f'<div class="choices">{"".join(rows)}</div>'
     return _field(
         "projects",
@@ -955,23 +970,22 @@ def _observer_field(heads: dict[str, Any], submitted: dict[str, Any], errors: di
 
     Only the profiles the layer marked as observers are offered, because that flag is
     `check_observer_profile` — the create's own check — asked of each profile rather than a rule
-    restated here. Beside them is the one answer that is not a profile: the layer's own spelling
-    for a sprint that runs without an observer.
+    restated here.
+
+    The one answer that is not a profile is deliberately *not* offered. `none` opens a sprint the
+    production tick raises no observer for, so on a page whose button says "start this sprint" it
+    would be an option that starts nothing; it stays a legal answer for `secretary sprint create`
+    and for the rows that already carry it, which the sprint page renders unchanged.
     """
     items = [item for item in (heads.get("items") or []) if item.get("observer")]
     chosen = str(submitted.get("observer") or "")
     unavailable = _source_block(heads.get("source"), what="which head profiles this installation has")
-    none_spelling = str((heads.get("observer") or {}).get("none") or "")
-    if not items and not none_spelling:
+    if not items and not chosen:
         empty = unavailable or '<p class="empty">this installation offers no profile that may observe a sprint.</p>'
         return _field("observer", "observer", empty, errors)
     options = ['<option value="">choose an observer</option>']
     options += [_profile_option(item, chosen) for item in items]
-    if none_spelling:
-        options.append(
-            f'<option value="{escape(none_spelling)}"{_selected(chosen == none_spelling)}>'
-            "no observer — this sprint runs without one</option>"
-        )
+    options += _kept_option(chosen, [str(item.get("id") or "") for item in items])
     control = unavailable + f'<select id="observer" name="observer">{"".join(options)}</select>'
     return _field(
         "observer", "observer", control, errors, "the head that runs this sprint; it is required"
@@ -990,6 +1004,7 @@ def _executor_field(name: str, label: str, heads: dict[str, Any], submitted: dic
     chosen = str(submitted.get(name) or "")
     options = [f'<option value=""{_selected(not chosen)}>{escape(EXECUTOR_CHOICE)}</option>']
     options += [_profile_option(item, chosen) for item in items]
+    options += _kept_option(chosen, [str(item.get("id") or "") for item in items])
     control = f'<select id="{escape(name)}" name="{escape(name)}">{"".join(options)}</select>'
     return _field(
         name,
@@ -1015,6 +1030,30 @@ def _profile_option(item: dict[str, Any], chosen: str) -> str:
         f"{escape(str(item.get('label') or value))} — model {escape(model)}, effort {escape(effort)}"
         f" ({escape(value)})</option>"
     )
+
+
+#: Said beside a value that was submitted and that the catalogue no longer offers. It is kept on
+#: the form rather than dropped for one reason: a form that quietly changed a submitted choice
+#: would then be asking for a repeat of something the person never sent -- which is exactly wrong
+#: after a part-done create, where the safe move is to submit *this* form again unchanged.
+NO_LONGER_OFFERED = "this installation no longer offers this choice"
+
+
+def _kept_option(chosen: str, offered: list[str]) -> list[str]:
+    """The submitted choice as an option of its own, when the catalogue stopped offering it."""
+    if not chosen or chosen in offered:
+        return []
+    return [f'<option value="{escape(chosen)}" selected>{escape(chosen)} — {escape(NO_LONGER_OFFERED)}</option>']
+
+
+def _kept_rows(name: str, chosen: set[str], offered: list[str]) -> list[str]:
+    """The same, for the fields a person ticks rather than picks."""
+    return [
+        f'<label><input type="checkbox" name="{escape(name)}" value="{escape(value)}" checked> '
+        f'{escape(value)} <span class="age">({escape(NO_LONGER_OFFERED)})</span></label>'
+        for value in sorted(chosen)
+        if value not in offered
+    ]
 
 
 def _selected(is_selected: bool) -> str:

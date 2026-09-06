@@ -21,7 +21,8 @@ import unittest
 from http.client import HTTPConnection
 from threading import Thread
 from typing import Any
-from urllib.parse import urlencode
+from unittest import mock
+from urllib.parse import quote, urlencode
 
 from secretary.web.app import ROUTES, WebApp, cross_origin_reason
 from secretary.web.server import build_server
@@ -32,8 +33,11 @@ from secretary.webproto.errors import (
     TaskNotFound,
     ValidationRefused,
 )
+from secretary.webproto.runs import RunStoreError
 from secretary.webproto.sprint_ops import PENDING_REASON
-from secretary.webproto.sprint_requests import SPRINT_CREATE_OPERATION
+from secretary.webproto.sprint_requests import SPRINT_CREATE_OPERATION, SprintRequestStore
+from tests.webproto_sprint_fixtures import OBSERVER_PROFILE as PROTOCOL_OBSERVER
+from tests.webproto_sprint_fixtures import SprintProtocolFixture
 
 OBSERVER_PROFILE = "claude-observer"
 WORKER_PROFILE = "codex-product-worker"
@@ -218,15 +222,24 @@ class FakeSprintReads:
 
 
 class FakeSprintOps:
-    """`sprint_create`, with the layer's idempotency and the layer's refusals, and no board.
+    """`sprint_create`, in the order the real one does it, with the same refusals and no board.
 
-    Three behaviours are modelled because the transport is built on them and a laxer fake would let
-    a defect through:
+    The order is the point and the previous round of this card got it wrong. `SprintOperationLayer`
+    **claims the request id, with a digest of the inputs, before the writer judges anything**, so a
+    refusal spends the id and a resubmission under it carrying corrected inputs is answered
+    `validation: different inputs`. A fake that recorded the request only after validation would be
+    green over exactly the dead end the transport now has to avoid, which is what happened. So four
+    behaviours are modelled here:
 
-    * a request id owns one sprint — a repeat answers from the record and creates nothing;
+    * the claim comes first, before any judgement of the inputs;
     * a repeat naming other inputs is a `validation` refusal rather than somebody else's sprint;
-    * `pending_once` is the partial failure: the row is written, the request does not finish, and
-      the *same* request id repeated afterwards picks that sprint up.
+    * a repeat naming the same inputs answers from the record and creates nothing;
+    * `pending_once` is the partial failure: the row is written and the reference is not recorded,
+      and the same request id repeated afterwards resumes that staged create rather than opening a
+      second sprint.
+
+    `tests/test_web_sprint_transport.py::RealLayerFormTests` stands over the real layer for the
+    same properties, so this fake is a convenience and never the only evidence.
 
     Everything about what a sprint may be stays a judgement of the writer, so the only rule copied
     here is the one criterion 3 is about: an observer that is not a profile of the registry is
@@ -237,6 +250,7 @@ class FakeSprintOps:
         self.reads = reads
         self.calls: list[dict[str, Any]] = []
         self.by_request: dict[str, tuple[str, str]] = {}
+        self.staged: dict[str, str] = {}
         self.created: list[str] = []
         self.pending_once = False
         self.refusal: ReadError | None = None
@@ -272,16 +286,21 @@ class FakeSprintOps:
             "reviewer": reviewer,
         }
         self.calls.append(call)
-        if self.refusal is not None:
-            raise self.refusal
         fingerprint = json.dumps(call, sort_keys=True)
+        # The claim, and it happens before anything below is judged. See the class docstring.
         recorded = self.by_request.get(request_id)
         if recorded is not None:
             if recorded[1] != fingerprint:
                 raise ValidationRefused(
-                    f"request {request_id!r} already names another {SPRINT_CREATE_OPERATION}"
+                    f"request {request_id!r} already names another {SPRINT_CREATE_OPERATION} "
+                    "made with different inputs"
                 )
-            return self._document(recorded[0], request_id=request_id, created=False)
+            if recorded[0]:
+                return self._document(recorded[0], request_id=request_id, created=False)
+        else:
+            self.by_request[request_id] = ("", fingerprint)
+        if self.refusal is not None:
+            raise self.refusal
         known = {head["id"] for head in HEADS if head["observer"]}
         if observer != "none" and observer not in known:
             raise ValidationRefused(
@@ -290,12 +309,17 @@ class FakeSprintOps:
         for pinned in (worker, reviewer):
             if pinned is not None and pinned not in {head["id"] for head in HEADS}:
                 raise ValidationRefused(f"{pinned!r} is not a head profile of this installation")
-        made = f"sprint:{len(self.created) + 1}"
-        self.created.append(made)
-        self.reads.states[made] = sprint_document(
-            made, observer=None if observer == "none" else observer, worker=worker, reviewer=reviewer
-        )
-        self.by_request[request_id] = (made, fingerprint)
+        made = self.staged.get(request_id)
+        if made is None:
+            made = f"sprint:{len(self.created) + 1}"
+            self.created.append(made)
+            self.staged[request_id] = made
+            self.reads.states[made] = sprint_document(
+                made,
+                observer=None if observer == "none" else observer,
+                worker=worker,
+                reviewer=reviewer,
+            )
         if self.pending_once:
             self.pending_once = False
             raise OperationPending(
@@ -311,6 +335,7 @@ class FakeSprintOps:
                     },
                 },
             )
+        self.by_request[request_id] = (made, fingerprint)
         return self._document(made, request_id=request_id, created=True)
 
     def _document(self, reference: str, *, request_id: str, created: bool) -> dict[str, Any]:
@@ -528,6 +553,24 @@ class ObserverFieldTests(SprintTransportFixture):
         self.assertIn(OBSERVER_PROFILE, observer)
         self.assertNotIn(WORKER_PROFILE, observer)
 
+    def test_the_no_observer_answer_is_not_offered_on_this_route(self) -> None:
+        """A sprint with no observer starts nothing, so the button that says "start" cannot offer it.
+
+        It stays a legal answer to `secretary sprint create` and to the rows that already carry it;
+        what is narrowed here is the browser client, not the sprint contract.
+        """
+        observer = self.form().split('<select id="observer"')[1].split("</select>")[0]
+        self.assertNotIn('value="none"', observer)
+        self.assertNotIn("runs without one", observer)
+
+    def test_a_crafted_no_observer_submission_is_refused_before_the_layer(self) -> None:
+        response = self.submit(self.valid(observer="none"))
+        self.assertEqual(response.status, 400)
+        self.assertIn("names the head that will run it", self.text_of(response))
+        self.assertEqual(self.sprint_ops.calls, [])
+        # And the id is untouched, because nothing was claimed: this form is submittable as it is.
+        self.assertIn("observer", self.text_of(response))
+
     def test_an_observer_nobody_chose_is_refused_by_name_and_opens_nothing(self) -> None:
         response = self.submit(self.valid(observer=""))
         self.assertEqual(response.status, 400)
@@ -545,6 +588,9 @@ class ObserverFieldTests(SprintTransportFixture):
         self.assertEqual(self.sprint_ops.created, [])
         # And what reached the layer was the profile that was submitted, not another one.
         self.assertEqual(self.sprint_ops.calls[-1]["observer"], "a-profile-that-was-deleted")
+        # It also comes back on the form, marked: a page that dropped it would be showing a
+        # submission nobody made.
+        self.assertIn('value="a-profile-that-was-deleted" selected', markup)
 
 
 # -- criterion 4: the two optional pins -------------------------------------------------------------
@@ -633,6 +679,14 @@ class FormRefusalTests(SprintTransportFixture):
         self.assertEqual(self.request_id_of(markup), fields["request_id"])
 
     def test_a_refusal_the_layer_made_is_shown_on_the_form_with_the_values_still_in_it(self) -> None:
+        """The refusal and every value come back; the request id deliberately does not.
+
+        This assertion is the reverse of the one this file carried in the previous round, and the
+        reversal is the fix. The layer claims the request id before the writer judges the inputs,
+        so an id that has been refused is spent: a form handing it back would let the owner correct
+        a field and be told the correction is a different request, with no sprint and no way on.
+        Nothing durable was created, so a corrected submission really is a new request.
+        """
         self.sprint_ops.refusal = OwnerConflict("an open sprint already reserves secretary")
         fields = self.valid(goal="A goal that survives a conflict")
         response = self.submit(fields)
@@ -640,7 +694,31 @@ class FormRefusalTests(SprintTransportFixture):
         markup = self.text_of(response)
         self.assertIn("an open sprint already reserves secretary", markup)
         self.assertIn("A goal that survives a conflict", markup)
-        self.assertEqual(self.request_id_of(markup), fields["request_id"])
+        self.assertNotEqual(self.request_id_of(markup), fields["request_id"])
+        self.assertIn("new request id", markup)
+
+    def test_the_corrected_form_a_refusal_returns_can_actually_be_submitted(self) -> None:
+        """The dead end this round exists to remove, end to end over the transport."""
+        first = self.submit(self.valid(observer="a-profile-that-was-deleted"))
+        self.assertEqual(first.status, 400)
+        offered = self.text_of(first)
+        # What comes back is submittable: the values, a fresh id, and the choice that is gone still
+        # visible rather than silently swapped for one nobody picked.
+        self.assertIn("a-profile-that-was-deleted", offered)
+        self.assertIn("no longer offers this choice", offered)
+        corrected = self.valid(request_id=self.request_id_of(offered), observer=OBSERVER_PROFILE)
+        second = self.submit(corrected)
+        self.assertEqual(second.status, 303)
+        self.assertEqual(self.sprint_ops.created, ["sprint:1"])
+
+    def test_reusing_the_burnt_request_id_is_what_the_form_no_longer_asks_for(self) -> None:
+        """Why the id is reissued: the layer refuses the corrected inputs under the old one."""
+        fields = self.valid(observer="a-profile-that-was-deleted")
+        self.assertEqual(self.submit(fields).status, 400)
+        again = self.submit(self.valid(request_id=fields["request_id"], observer=OBSERVER_PROFILE))
+        self.assertEqual(again.status, 400)
+        self.assertIn("different inputs", self.text_of(again))
+        self.assertEqual(self.sprint_ops.created, [])
 
     def test_a_refusal_shown_over_an_unreadable_catalogue_is_still_the_refusal(self) -> None:
         self.sprint_ops.refusal = OwnerConflict("an open sprint already reserves secretary")
@@ -927,6 +1005,168 @@ class CrossOriginTests(SprintTransportFixture):
             "GET", "/sprints/new", headers={"Origin": "https://attacker.example", "Host": self.HOST}
         )
         self.assertEqual(response.status, 200)
+
+
+# -- the same user path, over the real layer ------------------------------------------------------
+
+
+class RealLayerFormTests(SprintProtocolFixture):
+    """The form and the create over the real `SprintOperationLayer`, its real request store and the
+    repository's board fixture — no fake of the layer anywhere.
+
+    This class exists because the previous round's fake differed from the layer in the one place it
+    was written for: the real operation claims the request id *before* the writer judges the inputs,
+    the fake recorded it after, and a dead end on the user path was therefore green. What is pinned
+    here is the behaviour of the two together, so a transport that stopped matching the layer's
+    order fails whatever a fake believes.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.app = WebApp(RecordingOps(), RecordingOps(), self.reads(), self.ops())
+
+    # -- driving it --------------------------------------------------------------------------
+
+    def form(self) -> str:
+        response = self.app.handle("GET", "/sprints/new")
+        self.assertEqual(response.status, 200)
+        return response.body.decode("utf-8")
+
+    def request_id_of(self, markup: str) -> str:
+        found = re.search(r'name="request_id" value="([^"]+)"', markup)
+        assert found is not None, "the form carries no request id"
+        return found.group(1)
+
+    def fields(self, **overrides: Any) -> list[tuple[str, str]]:
+        values: dict[str, Any] = {
+            "request_id": self.request_id_of(self.form()),
+            "product": "secretary",
+            "goal": "Open a sprint from the browser",
+            "definition_of_done": "the form works end to end",
+            "issues": ["issue:open"],
+            "projects": ["secretary"],
+            "observer": PROTOCOL_OBSERVER,
+            "worker": "",
+            "reviewer": "",
+        }
+        values.update(overrides)
+        flat: list[tuple[str, str]] = []
+        for name, value in values.items():
+            if isinstance(value, (list, tuple)):
+                flat += [(name, one) for one in value]
+            else:
+                flat.append((name, value))
+        return flat
+
+    def submit(self, fields: list[tuple[str, str]]):
+        return self.app.handle("POST", "/sprints", body=urlencode(fields).encode("utf-8"))
+
+    def replace(self, fields: list[tuple[str, str]], name: str, value: str) -> list[tuple[str, str]]:
+        return [(key, value if key == name else held) for key, held in fields]
+
+    # -- the catalogue this form is served on --------------------------------------------------
+
+    def test_the_form_is_this_installations_own_catalogue(self) -> None:
+        markup = self.form()
+        self.assertIn("issue:open", markup)
+        self.assertIn(PROTOCOL_OBSERVER, markup)
+        self.assertIn('value="secretary"', markup)
+        # The one answer that is not a profile is not offered on this route.
+        observer = markup.split('<select id="observer"')[1].split("</select>")[0]
+        self.assertNotIn('value="none"', observer)
+
+    def test_a_valid_submission_opens_one_sprint_on_the_board(self) -> None:
+        response = self.submit(self.fields())
+        self.assertEqual(response.status, 303)
+        rows = self.sprint_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(response.headers["Location"], f"/sprints/{quote(str(rows[0]['reference']))}")
+
+    # -- the defect this round repairs ----------------------------------------------------------
+
+    def test_a_refused_profile_leaves_a_form_that_can_actually_be_submitted(self) -> None:
+        """The reviewer's scenario, on the real layer, from the refusal to the sprint.
+
+        `SprintOperationLayer.sprint_create` claims the id and the digest of the inputs before
+        `SprintWriter.create` refuses the unknown profile, so the id is spent while no sprint
+        exists. The form that comes back therefore carries a new one — and the profile that is gone
+        stays visible on it, because a page that swapped it for a current profile would be showing
+        a submission nobody made.
+        """
+        first = self.fields(observer="retired-observer")
+        refused = self.submit(first)
+        self.assertEqual(refused.status, 400)
+        markup = refused.body.decode("utf-8")
+        self.assertIn("retired-observer", markup)
+        self.assertIn("no longer offers this choice", markup)
+        self.assertIn("Open a sprint from the browser", markup)
+        self.assertEqual(self.sprint_rows(), [])
+
+        reissued = self.request_id_of(markup)
+        self.assertNotEqual(reissued, dict(first)["request_id"])
+        corrected = self.replace(
+            self.replace(first, "observer", PROTOCOL_OBSERVER), "request_id", reissued
+        )
+        opened = self.submit(corrected)
+        self.assertEqual(opened.status, 303)
+        self.assertEqual(len(self.sprint_rows()), 1)
+
+    def test_the_burnt_request_id_is_exactly_what_the_layer_refuses(self) -> None:
+        """Why the id is reissued rather than kept: the real store says so."""
+        first = self.fields(observer="retired-observer")
+        self.assertEqual(self.submit(first).status, 400)
+        again = self.submit(self.replace(first, "observer", PROTOCOL_OBSERVER))
+        self.assertEqual(again.status, 400)
+        self.assertIn("different inputs", again.body.decode("utf-8"))
+        self.assertEqual(self.sprint_rows(), [])
+
+    def test_a_partial_failure_keeps_the_id_and_the_repeat_reaches_the_same_sprint(self) -> None:
+        """The opposite case, and it must stay opposite: a sprint exists, so the id is not touched.
+
+        The failure is injected where the real layer has one — the reference is written under the
+        request id after the writer returns — so what is exercised is the layer's own pending path
+        and not a fake of it.
+        """
+        fields = self.fields()
+        with mock.patch.object(
+            SprintRequestStore, "record_reference", side_effect=RunStoreError("the disk went away")
+        ):
+            pending = self.submit(fields)
+        self.assertEqual(pending.status, 503)
+        markup = pending.body.decode("utf-8")
+        self.assertIn("this sprint exists and the request that opened it did not finish", markup)
+        self.assertIn("Submitting this form again is safe", markup)
+        self.assertEqual(self.request_id_of(markup), dict(fields)["request_id"])
+        self.assertEqual(len(self.sprint_rows()), 1)
+
+        repeated = self.submit(fields)
+        self.assertEqual(repeated.status, 303)
+        self.assertEqual(len(self.sprint_rows()), 1, "the repeat resumed the sprint that exists")
+
+    def test_a_crafted_no_observer_submission_never_reaches_the_board(self) -> None:
+        response = self.submit(self.fields(observer="none"))
+        self.assertEqual(response.status, 400)
+        self.assertIn("names the head that will run it", response.body.decode("utf-8"))
+        self.assertEqual(self.sprint_rows(), [])
+
+    def test_a_sprint_that_already_runs_without_an_observer_still_reads_on_its_page(self) -> None:
+        """Narrowing the browser client narrows nothing about the sprints that exist."""
+        created = self.ops().sprint_create(
+            request_id="cli-1",
+            actor="operator",
+            product="secretary",
+            goal="A sprint the CLI opened without an observer",
+            definition_of_done="it exists",
+            issues=["issue:open"],
+            projects=["secretary"],
+            observer="none",
+        )
+        reference = str(created["sprint"]["ref"])
+        page = self.app.handle("GET", f"/sprints/{reference}")
+        self.assertEqual(page.status, 200)
+        markup = page.body.decode("utf-8")
+        self.assertIn("no observer — this sprint declared none", markup)
+        self.assertIn("A sprint the CLI opened without an observer", markup)
 
 
 if __name__ == "__main__":
