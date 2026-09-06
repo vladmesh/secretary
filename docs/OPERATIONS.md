@@ -2255,11 +2255,17 @@ help, and a reload a second later is served by the new code.
 > not an adoption. `codegen-product-kit` is an Orca registration in the same state and takes the
 > same two decisions.
 
-### Rolling the application back to a previous revision
+### Taking the slice down, and rolling the application back a revision
 
-The rollback is the same restart pointed at an older tree. There is deliberately no `upgrade` flag
-for it: an upgrade only ever fast-forwards. Python source alone is an editable install, so moving
-the tree and restarting is the whole rollback:
+Two different things, and the common one is the first. **Taking the published slice down** is
+`sudo systemctl stop secretary-web-front.service`: public access ends there, the transport and the
+pipeline keep running, and *Rolling back to before this front existed* below carries that all the
+way to removing the units. Nothing in the application has to move for it.
+
+**Rolling the application back a revision** is for when the slice must stay published and the code
+behind it has to go back. The product is an editable install, so for a revision that differs only in
+Python source that is moving the tree and restarting, in that order — the restart last, because a
+transport already running keeps the imports and process state it started with:
 
 ```bash
 git -C ~/secretary log --oneline -10     # `git -C ~/secretary reflog` says what was installed when
@@ -2267,33 +2273,30 @@ git -C ~/secretary switch --detach <revision>
 sudo systemctl restart secretary-web.service
 ```
 
-A rollback that also has to undo a dependency, a skill delivery, a head registry or a host change
-re-materialises the installation onto the older tree, and that has to happen **before** the restart:
-a transport already running keeps the imports and the process state it started with, so restarting
-first and materialising afterwards publishes neither. The order is switch, materialise, restart, and
-the restart is not optional — it is the step that puts the rolled-back revision in front of the
-owner:
+The two limits of that procedure are worth stating plainly, because `upgrade` does not close either
+one and an operator who assumes it does gets a running transport that does not match its tree:
 
-```bash
-git -C ~/secretary switch --detach <revision>
-secretary upgrade --instance ~/secretary-instance --no-pull   # must report `status: ok`
-sudo systemctl restart secretary-web.service
-```
+- **`upgrade --no-pull` does not reinstall dependencies for a checkout moved by hand.** `--no-pull`
+  skips the pull, and the pull is the step that records which paths moved; with nothing recorded,
+  `dependencies` sees no dependency manifest movement and reports `unchanged` (`step_pull` and
+  `step_dependencies` in `src/secretary/upgrade.py`). Going back to a revision whose requirements
+  differ therefore leaves the newer packages in `.venv`. Reinstalling from the tree you selected is
+  a separate, deliberate operator action, not something the upgrade did for you:
 
-On *this* installation that middle command does not finish. `--no-pull` skips only the pull; the
-run then stops at the same `host` step, with the same `unowned names in our namespace` (verified:
-`upgrade --no-pull --dry-run` here reaches `failed host` after every earlier step). What that means
-for a rollback is worth being exact about, because the command still did most of its work: the
-dependencies, the memory pack, the head registry and its pin, the role worktrees and the role skills
-are rolled back onto the older tree, and the host is **not** — units, automations and the memory
-service stay where the newer version left them, and `verify` never ran. So a host rollback is not
-done until the two web units are adopted (or declared foreign) and the run reports `status: ok`.
-Read the step lines, do not assume: an `upgrade` that ends `status: failed` has rolled back exactly
-the steps printed above the failure.
+  ```bash
+  ~/secretary/.venv/bin/python -m pip install -e "$HOME/secretary[dev]"
+  sudo systemctl restart secretary-web.service
+  ```
+
+- **The host is not rolled back on this installation.** `upgrade --no-pull` stops at the same `host`
+  step as any other run here (the known conflict above), so units, automations and the memory
+  service stay where the newer version left them, and `verify` never runs. An `upgrade` that ends
+  `status: failed` did exactly the steps printed above the failure and no more: read those lines
+  rather than assuming the run rolled the installation back.
 
 The checkout is left on a detached HEAD on purpose. `upgrade`'s `pull` step is a `merge --ff-only`
 and refuses a detached or dirty checkout by name, so the next upgrade fails loudly instead of
-quietly fast-forwarding a host somebody deliberately pinned. Coming back is explicit:
+quietly fast-forwarding a checkout somebody deliberately pinned. Coming back is explicit:
 
 ```bash
 git -C ~/secretary switch main
