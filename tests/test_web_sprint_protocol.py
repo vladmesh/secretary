@@ -652,7 +652,56 @@ class LayerPropertyTests(SprintProtocolFixture):
 
 
 
-class SprintListTests(SprintProtocolFixture):
+class SprintWorkFixture(SprintProtocolFixture):
+    """The pieces both work-document suites drive: one sprint, one card, and where the card is.
+
+    A base rather than an inheritance between the two suites, so that neither re-runs the other's
+    cases to get at a helper.
+    """
+
+    def _entry(self, document: dict, reference: str) -> dict:
+        return next(item for item in document["sprints"]["items"] if item["ref"] == reference)
+
+    def _card(self, sprint: str) -> str:
+        """One Pipeline card of this sprint, created the way the observer creates one."""
+        from secretary.tasks import TaskWriter
+        from tests.observer_identity import bind_observer
+
+        bind_observer(self, sprint)
+        return str(
+            TaskWriter(self.board, data_dir=self.data_dir).create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="the current card",
+                sprint=sprint,
+            )["task"]["ref"]
+        )
+
+    def _move(self, card: str, column: str) -> None:
+        """Put one card in a Pipeline column, the way the dispatcher's own moves leave it."""
+        pipeline = self.board.projects["Pipeline"]
+        column_id = next(
+            entry["id"] for entry in self.board.columns[pipeline] if entry["title"] == column
+        )
+        row = next(task for task in self.board.tasks if task.get("reference") == card)
+        row["column_id"] = column_id
+
+    def _blocked(self, card: str, reason: str) -> None:
+        """The board's own statement that a card is held, with the reason recorded on it."""
+        self._move(card, "Blocked")
+        task_id = next(task["id"] for task in self.board.tasks if task.get("reference") == card)
+        self.board.metadata[int(task_id)]["blocked_by"] = reason
+
+    def _current_task(self, sprint: str, card: str) -> None:
+        from secretary.sprints import SprintWriter
+
+        SprintWriter(self.board, data_dir=self.data_dir, instance=self.instance).set_current_task(
+            role="observer", actor="observer", reference=sprint, task_reference=card
+        )
+
+class SprintListTests(SprintWorkFixture):
     """The listing: every sprint at once, and no sprint described as something it is not.
 
     Two defects of the live installation are pinned here as cases rather than as prose. Both were
@@ -661,9 +710,6 @@ class SprintListTests(SprintProtocolFixture):
     observer as `not_started` -- a sprint that ended described as one waiting for its head to come
     up.
     """
-
-    def _entry(self, document: dict, reference: str) -> dict:
-        return next(item for item in document["sprints"]["items"] if item["ref"] == reference)
 
     def test_the_listing_answers_every_sprint_with_what_it_is_doing(self) -> None:
         open_sprint = self.reference_of(self.create())
@@ -806,6 +852,10 @@ class SprintListTests(SprintProtocolFixture):
         reference = self.reference_of(self.create())
         card = self._card(reference)
         self._current_task(reference, card)
+        # In progress on purpose: this is the one column the board cannot settle by itself, so the
+        # `unknown` below really is the dispatcher's answer missing rather than a board answer being
+        # hidden. The Blocked and Ready cases are `WaitingSourceIsolationTests`.
+        self._move(card, "In progress")
         (self.data_dir / "dispatcher" / "production-state.json").write_text("{", encoding="utf-8")
 
         document = self.reads().sprint_list()
@@ -814,6 +864,9 @@ class SprintListTests(SprintProtocolFixture):
         self.assertEqual(document["liveness"]["source"]["state"], "unavailable")
         self.assertEqual(entry["checks"]["state"], sprint_reads_module.CHECKS_UNKNOWN)
         self.assertEqual(entry["waiting"]["state"], sprint_reads_module.WAITING_UNKNOWN)
+        # And it says what the board did establish, so the `unknown` is not read as "nothing at all
+        # is known about this card".
+        self.assertIn("in progress", entry["waiting"]["reason"])
         self.assertIsNone(entry["degraded_cards"]["items"])
         self.assertEqual(entry["observer"]["launch"]["state"], OBSERVER_UNAVAILABLE)
         # And the board's answers are untouched.
@@ -847,31 +900,157 @@ class SprintListTests(SprintProtocolFixture):
             "a read of the listing wrote to the board",
         )
 
-    # -- fixture pieces ------------------------------------------------------------------------
 
-    def _card(self, sprint: str) -> str:
-        """One Pipeline card of this sprint, created the way the observer creates one."""
-        from secretary.tasks import TaskWriter
-        from tests.observer_identity import bind_observer
+class WaitingSourceIsolationTests(SprintWorkFixture):
+    """One source that refused must not take away an answer another source already gave.
 
-        bind_observer(self, sprint)
-        return str(
-            TaskWriter(self.board, data_dir=self.data_dir).create(
-                role="observer",
-                actor="observer",
-                project="secretary",
-                task_type="code",
-                title="the current card",
-                sprint=sprint,
-            )["task"]["ref"]
-        )
+    Round 1 of this card had `_waiting` ask whether the dispatcher's production state was readable
+    *before* it looked at the Pipeline listing it had already read, so an unreadable
+    `production-state.json` turned a card the board held in Blocked -- with its reason on it -- into
+    `unknown`. That is the collapse `webproto/sources.py` exists to prevent, stated there as: "there
+    are no running agents" and "the file that would say so could not be read" are different answers.
 
-    def _current_task(self, sprint: str, card: str) -> None:
-        from secretary.sprints import SprintWriter
+    The cases below fix the order in place. They inherit `SprintListTests` for its fixture helpers
+    and run over both operations, because the two share `_work` and a repair that reached only one
+    of them would be no repair at all.
+    """
 
-        SprintWriter(self.board, data_dir=self.data_dir, instance=self.instance).set_current_task(
-            role="observer", actor="observer", reference=sprint, task_reference=card
-        )
+    def _work(self, reference: str) -> list[tuple[str, dict]]:
+        """The same sprint's work sections, from the listing and from the watched page."""
+        return [
+            ("sprint_list", self._entry(self.reads().sprint_list(), reference)),
+            ("sprint_state", self.reads().sprint_state(reference)["work"]),
+        ]
+
+    def _sprint_on_a_card(self) -> tuple[str, str]:
+        reference = self.reference_of(self.create())
+        card = self._card(reference)
+        self._current_task(reference, card)
+        return reference, card
+
+    def _break_production(self) -> None:
+        (self.data_dir / "dispatcher" / "production-state.json").write_text("{", encoding="utf-8")
+
+    def test_a_blocked_current_card_is_reported_even_with_no_production_state(self) -> None:
+        """The reviewer's reproduction, as a case: board available, dispatcher unreadable."""
+        reference, card = self._sprint_on_a_card()
+        self._blocked(card, "waiting for an operator")
+        self._break_production()
+
+        for operation, work in self._work(reference):
+            with self.subTest(operation=operation):
+                waiting = work["waiting"]
+                self.assertEqual(waiting["state"], sprint_reads_module.WAITING_BLOCKED)
+                self.assertIn("waiting for an operator", waiting["reason"])
+                # Sourced from the listing that established it, not from the state that refused.
+                self.assertEqual(waiting["source"]["state"], "available")
+                # And the sections that really do need the dispatcher still say it is missing.
+                self.assertEqual(work["checks"]["state"], sprint_reads_module.CHECKS_UNKNOWN)
+                self.assertIsNone(work["degraded_cards"]["items"])
+                self.assertEqual(work["cards"]["states"], {"blocked": [card]})
+
+    def test_a_blocked_current_card_reads_the_same_when_the_dispatcher_does_answer(self) -> None:
+        """The control: the board's answer is not a fallback used only when something failed."""
+        reference, card = self._sprint_on_a_card()
+        self._blocked(card, "waiting for an operator")
+        self._production({}, {card: {"state": "claimed"}})
+
+        for operation, work in self._work(reference):
+            with self.subTest(operation=operation):
+                self.assertEqual(work["waiting"]["state"], sprint_reads_module.WAITING_BLOCKED)
+                self.assertIn("waiting for an operator", work["waiting"]["reason"])
+
+    def test_a_blocked_card_with_no_recorded_reason_says_that_rather_than_nothing(self) -> None:
+        reference, card = self._sprint_on_a_card()
+        self._move(card, "Blocked")
+        self._break_production()
+
+        waiting = self._entry(self.reads().sprint_list(), reference)["waiting"]
+
+        self.assertEqual(waiting["state"], sprint_reads_module.WAITING_BLOCKED)
+        self.assertIn("no reason recorded on the card", waiting["reason"])
+
+    def test_a_card_nobody_has_claimed_is_waiting_even_with_no_production_state(self) -> None:
+        """The same rule at the sibling branch: Ready is the board saying nothing is running."""
+        reference, card = self._sprint_on_a_card()
+        self._move(card, "Ready")
+        self._break_production()
+
+        for operation, work in self._work(reference):
+            with self.subTest(operation=operation):
+                waiting = work["waiting"]
+                self.assertEqual(waiting["state"], sprint_reads_module.WAITING_WAITING)
+                self.assertEqual(waiting["source"]["state"], "available")
+                self.assertIn("nothing has claimed it", waiting["reason"])
+
+    def test_a_finished_current_card_is_the_sprint_waiting_for_its_next_cut(self) -> None:
+        reference, card = self._sprint_on_a_card()
+        self._move(card, "Done")
+        self._break_production()
+
+        waiting = self._entry(self.reads().sprint_list(), reference)["waiting"]
+
+        self.assertEqual(waiting["state"], sprint_reads_module.WAITING_WAITING)
+        self.assertIn("cut the next card", waiting["reason"])
+
+    def test_an_active_column_with_no_record_still_prefers_what_the_board_settled(self) -> None:
+        """The dispatcher answered, and holds no record: the column is the better answer where it
+        has one, and the bare "no record" is what is left where it does not."""
+        reference, card = self._sprint_on_a_card()
+        self._move(card, "Ready")
+        self._production({}, {})
+
+        ready = self._entry(self.reads().sprint_list(), reference)["waiting"]
+        self.assertEqual(ready["state"], sprint_reads_module.WAITING_WAITING)
+        self.assertIn("nothing has claimed it", ready["reason"])
+        self.assertEqual(ready["source"]["state"], "available")
+
+        self._move(card, "In progress")
+        active = self._entry(self.reads().sprint_list(), reference)["waiting"]
+        self.assertEqual(active["state"], sprint_reads_module.WAITING_WAITING)
+        self.assertIn("holds no record", active["reason"])
+
+    def test_a_dispatcher_record_still_decides_an_active_column(self) -> None:
+        """The board deliberately settles nothing here: a column is not evidence of a head."""
+        reference, card = self._sprint_on_a_card()
+        self._move(card, "In progress")
+        self._production({}, {card: {"state": "reviewing"}})
+
+        waiting = self._entry(self.reads().sprint_list(), reference)["waiting"]
+
+        self.assertEqual(waiting["state"], sprint_reads_module.WAITING_WORKING)
+        self.assertIn("reviewing", waiting["reason"])
+
+    def test_a_sprint_the_board_could_not_read_says_so_and_claims_nothing_else(self) -> None:
+        self.create()
+        original = self.board.call
+
+        def refuse(method: str, **params: Any) -> Any:
+            if method == "getAllTasks" and params.get("project_id") == self.board.projects[SPRINT_BOARD_NAME]:
+                raise TaskError("backend_error", "the sprint board is unavailable", 1)
+            return original(method, **params)
+
+        self.board.call = refuse  # type: ignore[method-assign]
+        work = self.reads().sprint_state("sprint:1")["work"]
+
+        for section in ("current_task", "decision", "cards", "degraded_cards", "checks", "waiting"):
+            with self.subTest(section=section):
+                self.assertEqual(work[section]["source"]["state"], "unavailable", section)
+        self.assertEqual(work["waiting"]["state"], sprint_reads_module.WAITING_UNKNOWN)
+        self.assertEqual(work["checks"]["state"], sprint_reads_module.CHECKS_UNKNOWN)
+
+    def test_an_ended_sprint_answers_from_its_own_row_whatever_the_dispatcher_does(self) -> None:
+        """A closed sprint is closed: the section may not borrow an unrelated unavailability."""
+        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+        self._break_production()
+
+        work = self.reads().sprint_state("sprint:1001")["work"]
+
+        for section in ("waiting", "checks", "current_task"):
+            with self.subTest(section=section):
+                self.assertEqual(work[section]["source"]["state"], "available", section)
+        self.assertEqual(work["waiting"]["state"], sprint_reads_module.WAITING_ENDED)
+        self.assertEqual(work["checks"]["state"], sprint_reads_module.CHECKS_NOT_APPLICABLE)
 
 
 class SprintReadCommandTests(SprintProtocolFixture):

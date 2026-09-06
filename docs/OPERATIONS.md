@@ -674,8 +674,12 @@ watched sprint the same object is under `work`. Read an entry in this order:
    saying so is how you tell it from a sprint that is working on a card. A sprint that reports
    `live: true` is one whose observer has cut that card.
 2. **`waiting.state`** — `working`, `waiting`, `blocked`, `ended` or `unknown` — with `waiting.reason`
-   naming what it is standing on: no current card, a card in Blocked with its reason, a card whose
-   worker no dispatcher record can name, or the record state the card is in.
+   naming what it is standing on: no current card, a card in Blocked with its reason, a card nobody
+   has claimed, a card whose worker no dispatcher record can name, or the record state the card is
+   in. Read `waiting.source` beside it: a blocked or unclaimed current card is the board's own
+   answer and survives a dispatcher state nobody could read, so `unknown` here means specifically
+   that the card sits in an active column and whether a head is behind it could not be established
+   — the reason names the column anyway.
 3. **`checks`** — the mandatory mechanical gate for the current card, as the dispatcher recorded it:
    `green` (with the attested SHA in `gate.attested_sha`), `not_green` with the reason, `unknown`, or
    `not_applicable` for a sprint with no current card or one that has ended. Nothing is re-run to

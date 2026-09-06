@@ -703,8 +703,14 @@ class SprintReadLayer(ProtocolBoundary):
         for the current code state of that card, and it is cleared on every fresh entry to validate.
         Nothing is re-run here and no CI backend is called; a read establishes what is recorded, and
         says so when nothing records it.
+
+        The order is the same rule `_waiting` follows, and for the same reason: the two answers the
+        sprint row settles on its own -- a sprint that has ended, and one with no current card --
+        are given first and carry the `sprints` source, so a dispatcher state nobody could read
+        neither changes them nor lends them its own unavailability. Only the states that really are
+        the dispatcher's to say are sourced from `liveness`.
         """
-        card = {"source": read.liveness.to_json(), "card": current, "gate": None}
+        card = {"card": current, "gate": None}
         if view is None:
             # The sprint itself could not be read, so neither its status nor its current card is
             # established, and there is nothing here to be `not_applicable` about.
@@ -717,15 +723,18 @@ class SprintReadLayer(ProtocolBoundary):
         if status in SPRINT_TERMINAL_STATUSES:
             return {
                 **card,
+                "source": read.sprints.to_json(),
                 "state": CHECKS_NOT_APPLICABLE,
                 "reason": f"{reference} is {status}: no card of it is running checks",
             }
         if current is None:
             return {
                 **card,
+                "source": read.sprints.to_json(),
                 "state": CHECKS_NOT_APPLICABLE,
                 "reason": f"{reference} has no current card, so no card's checks are due",
             }
+        card = {**card, "source": read.liveness.to_json()}
         if read.production is None:
             return {**card, "state": CHECKS_UNKNOWN, "reason": read.liveness.reason}
         record = read.record(current)
@@ -762,8 +771,31 @@ class SprintReadLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """Where this sprint stands, and what it is standing on.
 
-        Decided from what has already been read and never from a fresh source: the sprint's own
-        status, the board state of its current card, and the dispatcher's record for that card.
+        Decided from what has already been read and never from a fresh source, and in the order the
+        sources can actually answer in, which is the point of the ordering rather than an accident
+        of it: **a source that refused never shadows an answer another source already gave.** Each
+        branch below is reached only when every source that could have answered more definitely has
+        been asked, and each carries the source that decided it:
+
+        * the sprint row alone decides `ended` (closed), `blocked` (stopped, with the stop reason)
+          and the `waiting` of a sprint with no current card. Nothing the Pipeline or the dispatcher
+          could say would change any of those, so they are answered first and sourced from `sprints`;
+        * the Pipeline listing decides `blocked` for a current card standing in Blocked -- the
+          board's own statement, with the card's `blocked_by` -- before anything is asked of the
+          dispatcher at all, readable or not, and sourced from `cards`. Its other two answers, the
+          `waiting` of a card in Ready, Issues or Done, are used wherever the dispatcher has nothing
+          to add: it could not be read, or it holds no record for the card;
+        * only what is left needs the dispatcher: whether an active column really has a head behind
+          it. A column is not evidence of that (`docs/OPERATIONS.md`, "A card sitting in In progress
+          is not on its own evidence that anything is running"), so `working`, the degraded
+          `blocked` and the `unknown` of an unreadable production state are its answers and carry
+          `liveness` -- and that `unknown` is now the answer only to the part the board could not
+          settle, naming the column it did establish.
+
+        Round 1 of this card had the production-availability branch above the board ones, so an
+        unreadable dispatcher state hid a blocked reason the Pipeline listing had already
+        established at the listing's fixed cost. That is the collapse `sources.py` exists to
+        prevent, and `WaitingSourceIsolationTests` is what holds the order now.
         """
         if view is None:
             return {"source": read.sprints.to_json(), "state": WAITING_UNKNOWN, "reason": read.sprints.reason}
@@ -785,8 +817,28 @@ class SprintReadLayer(ProtocolBoundary):
                 "state": WAITING_WAITING,
                 "reason": f"{reference} has no current card: nobody has cut one for it",
             }
+        card = self._current_card(reference, current, read)
+        settled = _board_wait(current, card)
+        board = (
+            None
+            if settled is None
+            else {"source": read.cards.to_json(), "state": settled[0], "reason": settled[1]}
+        )
+        # A card the board holds in Blocked is blocked, and no dispatcher record makes it less so:
+        # this is the board's own statement of why the sprint is standing still, and it is answered
+        # before anything is asked of the production state -- readable or not.
+        if board is not None and board["state"] == WAITING_BLOCKED:
+            return board
         if read.production is None:
-            return {"source": read.liveness.to_json(), "state": WAITING_UNKNOWN, "reason": read.liveness.reason}
+            # The rest of the board's answers are used exactly here, where the dispatcher cannot
+            # improve on them: "nobody has claimed it" and "the card is done" are established by the
+            # column, and returning `unknown` instead would hide an answer this document already
+            # holds behind a source that has nothing to do with it.
+            return board or {
+                "source": read.liveness.to_json(),
+                "state": WAITING_UNKNOWN,
+                "reason": _unsettled_reason(current, card, read.liveness.reason),
+            }
         degraded = (view.get("degraded_cards") or {}).get(current)
         if degraded is not None:
             return {
@@ -797,16 +849,11 @@ class SprintReadLayer(ProtocolBoundary):
                     f"({degraded.get('state') or 'no record state'})"
                 ),
             }
-        blocked = _blocked_card(read.linked.get(reference) or [], current)
-        if blocked is not None and read.cards.state == sources.AVAILABLE:
-            return {
-                "source": read.cards.to_json(),
-                "state": WAITING_BLOCKED,
-                "reason": f"{current} stands in Blocked: {blocked}",
-            }
         record = read.record(current)
         if record is None:
-            return {
+            # Same rule once more: with no record to describe the card, the column is the better
+            # answer where it settles one, and the bare "no record" is what is left when it does not.
+            return board or {
                 "source": read.liveness.to_json(),
                 "state": WAITING_WAITING,
                 "reason": (
@@ -818,6 +865,26 @@ class SprintReadLayer(ProtocolBoundary):
             "state": WAITING_WORKING,
             "reason": f"the dispatcher record for {current} is {record.get('state') or 'unnamed'!s}",
         }
+
+    def _current_card(
+        self, reference: str, current: str, read: _SprintPass
+    ) -> dict[str, Any] | None:
+        """The sprint's current card as the Pipeline listing has it, or `None` when it does not.
+
+        `None` covers both "the listing could not be read" and "the listing holds no such card", and
+        the caller treats them the same way on purpose: neither establishes anything about the card,
+        and the sections that say why a source could not answer are `cards` and `liveness`.
+        """
+        if read.cards.state != sources.AVAILABLE:
+            return None
+        return next(
+            (
+                entry
+                for entry in read.linked.get(reference) or []
+                if isinstance(entry, dict) and str(entry.get("ref") or "") == current
+            ),
+            None,
+        )
 
     def _observer(
         self, reference: str, sprint: dict[str, Any] | None, read: _SprintPass, *, now: float
@@ -944,19 +1011,56 @@ def _not_green_reason(gate: dict[str, Any], card: str) -> str:
     )
 
 
-def _blocked_card(cards: list[dict[str, Any]], reference: str) -> str | None:
-    """Why the named card is blocked, when the board says it is, and `None` when it does not."""
-    card = next(
-        (
-            entry
-            for entry in cards
-            if isinstance(entry, dict) and str(entry.get("ref") or "") == reference
-        ),
-        None,
-    )
-    if card is None or str(card.get("state") or "") != "blocked":
+#: Board states of a current card that settle where its sprint stands on their own. `blocked` is the
+#: board's own statement that the card is held, with the reason recorded on it; the other three are
+#: columns in which the board itself says nothing is running -- a card nobody has claimed, and one
+#: whose work is finished and is waiting for the next cut. Deliberately not here: `in_progress`,
+#: `validate` and `assessment`, because a column is not evidence that a head is behind it, which is
+#: the whole lesson of `degraded_cards` (secretary-1544).
+_BOARD_SETTLED_STATES = ("blocked", "ready", "issues", "done")
+
+
+def _board_wait(reference: str, card: dict[str, Any] | None) -> tuple[str, str] | None:
+    """Where the Pipeline listing alone puts the sprint, or `None` when it does not settle it.
+
+    Answered before the dispatcher's production state is consulted, and independently of whether
+    that state can be read at all: this is established at the listing's own cost, and an unrelated
+    source that refused must not take it away.
+    """
+    if card is None:
         return None
-    return str(card.get("blocked_by") or "") or "no reason recorded on the card"
+    state = str(card.get("state") or "")
+    if state == "blocked":
+        reason = str(card.get("blocked_by") or "") or "no reason recorded on the card"
+        return WAITING_BLOCKED, f"{reference} stands in Blocked: {reason}"
+    if state in ("ready", "issues"):
+        return (
+            WAITING_WAITING,
+            f"{reference} stands in {state.replace('_', ' ')} and nothing has claimed it yet",
+        )
+    if state == "done":
+        return (
+            WAITING_WAITING,
+            f"{reference} is done: the sprint is waiting for its observer to cut the next card",
+        )
+    return None
+
+
+def _unsettled_reason(reference: str, card: dict[str, Any] | None, refusal: str | None) -> str:
+    """Why the dispatcher was needed here, and what the board did say before it refused.
+
+    The board's column is named when it is known, precisely so that the `unknown` does not read as
+    "nothing at all is known about this card": what could not be established is narrower than that,
+    and it is the part only the production state answers.
+    """
+    refused = refusal or "the dispatcher production state could not be read"
+    if card is None:
+        return refused
+    state = str(card.get("state") or "") or "an unnamed column"
+    return (
+        f"{reference} stands in {state.replace('_', ' ')}, which is not on its own evidence that "
+        f"anything is running on it, and {refused}"
+    )
 
 
 def _profile_label(profile_id: str, profile: dict[str, Any]) -> str:

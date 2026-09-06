@@ -43,6 +43,17 @@ read of the dispatcher's production state — whatever the number of sprints. Do
 
 `secretary sprint show` is unchanged.
 
+**Source isolation in `work.waiting` and `work.checks`.** An answer one source has already given is
+never shadowed by a different source that refused. A current card the Pipeline listing holds in
+Blocked reports `blocked` with its `blocked_by`, sourced from `cards`, even when
+`dispatcher/production-state.json` cannot be read; a card in Ready, Issues or Done reports `waiting`
+from the board wherever the dispatcher has nothing to add. `unknown` is left for what only the
+production state can settle — whether an active column really has a head behind it — and its reason
+names the column the board did establish. `checks` answers `not_applicable` from the sprint row for
+a sprint that has ended or has no current card, rather than under the production state's
+availability. The order is documented in [PROTOCOLS](PROTOCOLS.md#what-a-sprint-is-doing) and held
+by `tests/test_web_sprint_protocol.py::WaitingSourceIsolationTests`.
+
 **Also changed.** `SprintReader.statuses` is now `list` + `linked_cards` + `status_views`, which is
 the same call in three public pieces so a caller that must keep the two board reads apart can still
 get exactly this view instead of deriving a second one. Its per-sprint view gained the `resume`

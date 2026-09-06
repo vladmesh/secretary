@@ -3073,8 +3073,32 @@ answer "what is this sprint doing" differently. Every section names the source t
 | `decision` | the sprint row, and the Pipeline listing for the verdict | the last observer resume `entry`, and its `freshness` |
 | `cards` | the Pipeline listing | this sprint's cards grouped by board state; `states` is null when the listing failed |
 | `degraded_cards` | the production state | cards in an active column with no worker the dispatcher can name |
-| `checks` | the production state | the mandatory checks of the current card: `green`, `not_green`, `unknown`, `not_applicable` |
-| `waiting` | whichever of the three answered | where the sprint stands: `working`, `waiting`, `blocked`, `ended`, `unknown` |
+| `checks` | the sprint row for `not_applicable`, the production state otherwise | the mandatory checks of the current card: `green`, `not_green`, `unknown`, `not_applicable` |
+| `waiting` | whichever of the three settles it, in that order | where the sprint stands: `working`, `waiting`, `blocked`, `ended`, `unknown` |
+
+**Which source may answer `waiting`, and in what order.** A source that refused never shadows an
+answer another source has already given, so the sections are decided in the order the sources can
+settle them, and each answer carries the one that decided it:
+
+| answer | source | when |
+| --- | --- | --- |
+| `ended` | the sprint row | the sprint is closed |
+| `blocked` | the sprint row | the sprint is stopped, with its stop reason |
+| `waiting` | the sprint row | the sprint has no current card |
+| `blocked` | the Pipeline listing | the current card stands in Blocked, with its `blocked_by` — answered before the production state is consulted at all, readable or not |
+| `waiting` | the Pipeline listing | the current card is in Ready, Issues or Done, and the dispatcher has nothing to add: its state could not be read, or it holds no record for the card |
+| `blocked` | the production state | the current card stands in an active column with no worker the dispatcher can name |
+| `waiting` | the production state | the dispatcher holds no record for a card in an active column |
+| `working` | the production state | the dispatcher's record for the current card, and the state it is in |
+| `unknown` | the production state | the card is in an active column and the production state could not be read — the reason still names the column, because that much *was* established |
+| `unknown` | the sprint row | the sprint board could not be read, so there is no sprint here to be waiting |
+
+A column is deliberately not evidence that a head is behind it (`docs/OPERATIONS.md`, "A card
+sitting in In progress is not on its own evidence that anything is running"), which is why the board
+settles Blocked, Ready, Issues and Done and nothing else. `checks` follows the same rule at its own
+two board-settled answers: a sprint that has ended and one with no current card are
+`not_applicable` from the sprint row, and never `not_applicable` under an unavailable production
+state's source.
 
 `current_task.live` is the fix for the second half of the same defect above: a finished sprint's
 current card is a fact worth keeping — it is where the sprint got to — so it is kept and it is
