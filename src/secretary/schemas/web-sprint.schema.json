@@ -2,12 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "web-sprint.schema.json",
   "title": "Transport-independent sprint operations and reads",
-  "description": "The documents secretary.webproto's sprint layer returns: what a sprint can be built from, what every sprint of the installation is doing, what one sprint is doing, and the answer to opening one. Every section carries the availability of the source that answered it and names that source, and no section is assembled anywhere but secretary.webproto.section -- so a source that refused can neither answer nor take away an answer another source gave. No failure here is a status number.",
+  "description": "The documents secretary.webproto's sprint layer returns: what a sprint can be built from, what every sprint of the installation is doing, what one sprint is doing, the answer to opening one, and the answer to commenting on one together with what durable state says happened to that comment. Every section carries the availability of the source that answered it and names that source, and no section is assembled anywhere but secretary.webproto.section -- so a source that refused can neither answer nor take away an answer another source gave. No failure here is a status number.",
   "oneOf": [
     { "$ref": "#/$defs/options" },
     { "$ref": "#/$defs/sprint" },
     { "$ref": "#/$defs/listing" },
-    { "$ref": "#/$defs/created" }
+    { "$ref": "#/$defs/created" },
+    { "$ref": "#/$defs/comment_delivery" },
+    { "$ref": "#/$defs/commented" }
   ],
   "$defs": {
     "source": {
@@ -426,6 +428,128 @@
           "description": "Whether this call claimed the request. A repeat answers false and creates nothing."
         },
         "sprint": { "$ref": "#/$defs/sprint" }
+      }
+    },
+    "comment_delivery": {
+      "type": "object",
+      "description": "What happened to one saved sprint comment: whether the committed audit holds it, where the dispatcher's observer delivery machinery has got it to, and what neither of those means.",
+      "required": ["schema_version", "kind", "observed_at", "ref", "comment_id", "comment", "delivery", "acceptance", "cards", "journal", "liveness", "installation"],
+      "properties": {
+        "schema_version": { "type": "integer" },
+        "kind": { "const": "sprint_comment_delivery" },
+        "observed_at": { "type": "string" },
+        "ref": { "type": "string" },
+        "comment_id": {
+          "type": "string",
+          "description": "The durable identifier the write answered with: the committed audit event id of the comment, and never a board row number."
+        },
+        "comment": {
+          "type": "object",
+          "description": "Whether the committed audit holds this comment on this sprint. `absent` is the journal's own answer that no such event is on it; `unknown` is a journal nobody could read, and the two are never spelled the same way.",
+          "required": ["source", "id", "state", "occurred_at", "role", "reason"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "id": {
+              "type": ["string", "null"],
+              "description": "Which comment the answer is about. Narration and not a claim: it is carried even when the source that would say refused."
+            },
+            "state": { "enum": ["saved", "absent", "unknown"] },
+            "occurred_at": { "type": ["string", "null"] },
+            "role": { "type": ["string", "null"], "description": "The role that wrote it, as the audit event's actor has it." },
+            "reason": { "type": ["string", "null"] }
+          }
+        },
+        "delivery": {
+          "type": "object",
+          "description": "Where the dispatcher's own observer delivery machinery has got this comment to, derived from the relation between the comment's audit event and the delivery cursors and from nothing else. A technical fact about a batch, and never a statement that the observer read, accepted or took the comment into account -- see `acceptance`.",
+          "required": ["source", "state", "reason", "batch"],
+          "properties": {
+            "source": { "$ref": "#/$defs/source" },
+            "state": {
+              "enum": ["saved", "waiting", "handed_over", "error", "unknown"],
+              "description": "saved: no delivery batch carries it yet. waiting: a batch that carries it is held for an idle head, or was sent and is not acknowledged. handed_over: the batch carrying it was acknowledged. error: that batch failed and is deferred for retry, with the recorded reason. unknown: the production state could not be read, holds no observer record for this sprint, or holds a cursor the committed audit cannot place -- never folded into any of the other four."
+            },
+            "reason": { "type": ["string", "null"] },
+            "batch": {
+              "type": ["object", "null"],
+              "description": "The part of the observer's delivery record this answer stands on, or null when there is no record to stand on. Nothing of the dispatcher's internals is published beyond these fields.",
+              "required": ["stage", "delivery_id", "through_event", "acknowledged_through", "acknowledged_delivery_id", "wake_attempts", "wake_failures", "launch_delivery_failures", "last_failure_reason", "evidence"],
+              "properties": {
+                "stage": { "enum": ["idle", "waiting_for_idle", "delivery_intent", "awaiting_ack", "retry_deferred"] },
+                "delivery_id": { "type": ["string", "null"] },
+                "through_event": { "type": ["string", "null"] },
+                "acknowledged_through": { "type": ["string", "null"] },
+                "acknowledged_delivery_id": { "type": ["string", "null"] },
+                "wake_attempts": { "type": "integer" },
+                "wake_failures": { "type": "integer" },
+                "launch_delivery_failures": { "type": "integer" },
+                "last_failure_reason": { "type": ["string", "null"] },
+                "evidence": {
+                  "type": ["string", "null"],
+                  "description": "The one delivery-evidence line `delivery_evidence_summary` composes, so this document and the head that reports its own delivery history cannot disagree."
+                }
+              }
+            }
+          }
+        },
+        "acceptance": {
+          "type": "object",
+          "description": "What this document deliberately does not establish. It is read from no source: it is this product saying, in the answer itself, that delivery is not acceptance, and naming the deferred issue that would establish acceptance.",
+          "required": ["established", "issue", "reason"],
+          "properties": {
+            "established": {
+              "const": false,
+              "description": "Always false, and there is no spelling that makes it true: no operation, state or field of this contract says the observer read, accepted or took a comment into account."
+            },
+            "issue": { "type": "string" },
+            "reason": { "type": "string" }
+          }
+        },
+        "cards": {
+          "type": "object",
+          "description": "The Pipeline listing, said once for the document as every sprint document says it.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        },
+        "journal": {
+          "type": "object",
+          "description": "The committed audit journal the comment and the delivery cursors are placed in, said once for the document.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        },
+        "liveness": {
+          "type": "object",
+          "description": "The dispatcher's production state, where the delivery cursors live, said once for the document.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        },
+        "installation": {
+          "type": "object",
+          "description": "The installation config this document was read under, which refuses like any other source.",
+          "required": ["source"],
+          "properties": { "source": { "$ref": "#/$defs/source" } }
+        }
+      }
+    },
+    "commented": {
+      "type": "object",
+      "description": "The answer to commenting on a sprint: the request it was made under, whether this call saved the comment or found it already saved, the durable identifier of the comment, and the delivery read above.",
+      "required": ["schema_version", "kind", "observed_at", "request_id", "ref", "comment_id", "saved", "delivery"],
+      "properties": {
+        "schema_version": { "type": "integer" },
+        "kind": { "const": "sprint_comment" },
+        "observed_at": { "type": "string" },
+        "request_id": { "type": "string" },
+        "ref": { "type": "string" },
+        "comment_id": {
+          "type": "string",
+          "description": "The committed audit event id of the comment. Stable across repeats of the same request id, and the identifier a later read takes back; never a board row number a caller has to interpret."
+        },
+        "saved": {
+          "type": "boolean",
+          "description": "Whether this call saved the comment. A repeat of the same request id answers false and writes nothing -- no second comment, no second event, and therefore no second observer wake or head launch."
+        },
+        "delivery": { "$ref": "#/$defs/comment_delivery" }
       }
     }
   }

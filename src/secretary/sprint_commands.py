@@ -1,13 +1,15 @@
 """CLI handlers for sprint entities.
 
-Two of these are clients rather than implementations. `sprint list` and `sprint status` do not read
-a board or decide what a sprint's state is: they call the named operations of
-:mod:`secretary.webproto.sprint_reads`, print the document those return, and map a typed protocol
-code onto the exit status `secretary web-read` already uses. Until this card they built a
+Four of these are clients rather than implementations. `sprint list` and `sprint status` do not read
+a board or decide what a sprint's state is; `sprint comment` does not decide what a comment is or
+when a repeat is a repeat; `sprint comment-delivery` decides nothing about delivery at all. All four
+call the named operations of :mod:`secretary.webproto.sprint_reads` and
+:mod:`secretary.webproto.sprint_ops`, print the document those return, and map a typed protocol code
+onto the exit status `secretary web-read` already uses. Until secretary-1573 the two reads built a
 `SprintReader` of their own beside the layer, which is how one surface could answer a question
 differently from the other; what is left here is argument parsing, output and that mapping.
 
-The writes below are unchanged: they go to `SprintWriter`, which owns every rule about what a
+The remaining writes are unchanged: they go to `SprintWriter`, which owns every rule about what a
 sprint may become.
 """
 
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
@@ -24,8 +27,9 @@ from secretary.sprint_observer import observer_choice
 from secretary.sprints import BUDGET_RECORDED_EVENT_TYPES, SprintReader, SprintWriter
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
 from secretary.tasks import KanboardClient, TaskError
-from secretary.webproto.commands import _EXIT_BY_CODE, EXIT_BACKEND
+from secretary.webproto.commands import _EXIT_BY_CODE, _RUN_EXIT_BY_CODE, EXIT_BACKEND
 from secretary.webproto.errors import ReadError
+from secretary.webproto.sprint_ops import SPRINT_COMMENT_ROLES, SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
 
 
@@ -73,8 +77,22 @@ def add_sprint_subcommands(subparsers) -> None:
     _add_observer_argument(created)
     _add_executor_arguments(created)
     created.set_defaults(handler=run_create)
+    delivery = commands.add_parser(
+        "comment-delivery",
+        help="what happened to one saved sprint comment, as far as durable state can say",
+    )
+    delivery.add_argument("--ref", required=True)
+    delivery.add_argument(
+        "--comment-id",
+        required=True,
+        help="the identifier `sprint comment` answered with",
+    )
+    _add_data_dir_args(delivery)
+    delivery.set_defaults(handler=run_comment_delivery)
     for name, handler, roles in (
-        ("comment", run_comment, ("po", "dispatcher", "worker", "reviewer", "steward", "retro")),
+        # The roles the writer admits, taken from the layer rather than spelled a second time:
+        # a command offering a role the operation refuses would be offering a dead end.
+        ("comment", run_comment, SPRINT_COMMENT_ROLES),
         ("current-task", run_current_task, ("po", "dispatcher", "observer", "steward")),
         ("budget", run_budget, ("po", "dispatcher", "steward")),
         ("resume", run_resume, ("po", "dispatcher", "observer", "steward")),
@@ -191,11 +209,36 @@ def _operation(args: argparse.Namespace, operation: Callable[[SprintReadLayer], 
     layer = SprintReadLayer(
         args.instance, data_dir=Path(explicit).expanduser() if explicit else None
     )
+    return _answer(lambda: operation(layer), _EXIT_BY_CODE)
+
+
+def _sprint_operation(
+    args: argparse.Namespace, operation: Callable[[SprintOperationLayer], object]
+) -> int:
+    """Run one mutating protocol operation, and answer exactly as the read client does.
+
+    A second builder rather than a second rule: the operation layer is what decides everything about
+    a comment, and this command's whole knowledge of it is which operation to call, what to print,
+    and the typed-code-to-exit-status table `_operation` already uses.
+    """
+    explicit = getattr(args, "data_dir", None)
+    layer = SprintOperationLayer(
+        args.instance, data_dir=Path(explicit).expanduser() if explicit else None
+    )
+    # The mutation table and not the read one: `owner_conflict` is a refusal about the state of the
+    # world -- the sprint is closed -- and `web-run` already gives it its own status so a script can
+    # tell it from a malformed request. It is also the status this command answered a closed sprint
+    # with before it became a client, so nothing an operator scripts against moves.
+    return _answer(lambda: operation(layer), _RUN_EXIT_BY_CODE)
+
+
+def _answer(call: Callable[[], object], statuses: dict[str, int]) -> int:
+    """One protocol answer on stdout, or one typed refusal on stderr with its exit status."""
     try:
-        document = operation(layer)
+        document = call()
     except ReadError as exc:
         print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
-        return _EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
+        return statuses.get(exc.code, EXIT_BACKEND)
     print(json.dumps(document, sort_keys=True, separators=(",", ":")))
     return 0
 
@@ -257,15 +300,33 @@ def run_create(args: argparse.Namespace) -> int:
 
 
 def run_comment(args: argparse.Namespace) -> int:
-    return _write(
+    """`secretary sprint comment`, as a client of the named operation and nothing more.
+
+    The body is read before the layer is called so that an unreadable file is this command's own
+    usage refusal rather than a protocol code; the request id is minted here when the operator gave
+    none, which is a convenience of the command and not a rule -- the operation requires one, and a
+    person retrying a comment types the same `--request-id` to get the same one back.
+    """
+    try:
+        body = _read_body(args.body_file)
+    except TaskError as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        return exc.exit_code
+    return _sprint_operation(
         args,
-        lambda writer: writer.comment(
-            role=args.role,
+        lambda layer: layer.sprint_comment(
+            request_id=args.request_id or str(uuid.uuid4()),
             actor=args.actor or args.role,
             reference=args.ref,
-            body=_read_body(args.body_file),
-            request_id=args.request_id,
+            body=body,
+            role=args.role,
         ),
+    )
+
+
+def run_comment_delivery(args: argparse.Namespace) -> int:
+    return _operation(
+        args, lambda layer: layer.sprint_comment_delivery(args.ref, args.comment_id)
     )
 
 

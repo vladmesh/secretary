@@ -1,10 +1,11 @@
 """The read half of the sprint surface: what a sprint can be built from, and what sprints are doing.
 
-Three reads, and they are the halves of one screen plus the page in front of it. Before a sprint
+Four reads, and they are the halves of one screen plus the page in front of it. Before a sprint
 exists a client has to be able to *offer* the choices this installation actually has -- its
 products, the issues those products still have open, the projects it has registered, and the head
-profiles it runs off -- after it exists somebody has to watch it, and somebody standing in front of
-the whole installation has to be able to ask what is being worked on right now. None of the three is
+profiles it runs off -- after it exists somebody has to watch it, somebody standing in front of
+the whole installation has to be able to ask what is being worked on right now, and a PO who left a
+comment on a running sprint has to be able to ask what happened to it. None of the four is
 a new fact. Every value below is read from the source that already owns it:
 
 * products and issues from :class:`secretary.product_issues.ProductIssueStore`, the store
@@ -75,6 +76,20 @@ established.
 tick -- an open sprint with no observer record gets one -- and this read never launches, never
 looks at a terminal and never counts a pane. It reads the record, and the record's own heartbeat
 classification, exactly as `secretary sprint status` does.
+
+**And so is delivery.** :meth:`SprintReadLayer.sprint_comment_delivery` answers where one saved
+comment stands by placing its committed audit event against the delivery cursors
+`secretary.dispatcher_observer` already keeps -- `acknowledged_through`, the batch stage and
+`through_event`. It opens no second cursor, keeps no second store and schedules nothing: redelivery
+belongs to the production tick, and this reports what that tick recorded. Delivery is a *batch*
+fact, never a per-comment one, which is why the answer is a relation between two ids rather than a
+field somebody would have to write per comment.
+
+**Delivery is not acceptance, and this module never says otherwise.** Whether the observer read a
+comment, agreed with it or took it into account is a semantic acknowledgement this product does not
+have. It is deferred by the owner and tracked as :data:`ACCEPTANCE_ISSUE`; no state, field or
+sentence below implies it, and the document says so in words (:data:`ACCEPTANCE_NOTICE`) exactly
+where a reader might otherwise infer it.
 """
 
 from __future__ import annotations
@@ -88,7 +103,12 @@ from typing import Any
 
 from secretary.config import InstanceReport, validate_instance
 from secretary.dispatch.headless import headless_cards
-from secretary.dispatcher_observer import observer_snapshot
+from secretary.dispatcher_observer import (
+    DeliveryStage,
+    ObserverDelivery,
+    delivery_evidence_summary,
+    observer_snapshot,
+)
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.product_issues import ProductIssueStore, registered_projects
 from secretary.sprint_observer import (
@@ -200,6 +220,61 @@ OBSERVER_DECLARATION_STATES = (
     OBSERVER_ABSENT,
     OBSERVER_MALFORMED,
     OBSERVER_UNKNOWN,
+)
+
+#: Whether the committed audit holds one comment of one sprint. `absent` is the journal's own
+#: answer that no such event is on it; `unknown` is a journal nobody could read, and the two are
+#: never spelled the same way for the reason every other section keeps them apart.
+COMMENT_SAVED = "saved"
+COMMENT_ABSENT = "absent"
+COMMENT_UNKNOWN = "unknown"
+
+COMMENT_STATES = (COMMENT_SAVED, COMMENT_ABSENT, COMMENT_UNKNOWN)
+
+#: Where one saved comment stands in the observer's *technical* delivery, and nothing beyond it.
+#:
+#: Delivery is a batch fact: the dispatcher's cursor is `through_event` over this installation's
+#: committed event stream, and no cursor is per comment. So the answer is the relation between this
+#: comment's event and those cursors -- at or before `acknowledged_through` the batch carrying it
+#: was acknowledged; after it the comment belongs to the current or a later batch, at whatever
+#: stage that batch is in.
+#:
+#: **None of these five says the observer read, accepted or took the comment into account.** That
+#: is a semantic acknowledgement this product does not have; it is deferred and tracked as
+#: :data:`ACCEPTANCE_ISSUE`, and :data:`ACCEPTANCE_NOTICE` says so on every document that carries
+#: one of these states.
+DELIVERY_SAVED = "saved"
+DELIVERY_WAITING = "waiting"
+DELIVERY_HANDED_OVER = "handed_over"
+DELIVERY_ERROR = "error"
+#: And the fifth, which is never folded into any of the other four: the dispatcher's production
+#: state could not be read, it holds no observer record for this sprint, or a cursor it does hold
+#: names an event the committed audit cannot place. "Nobody could say where this comment is" and
+#: "it is still waiting" are repaired by different people.
+DELIVERY_UNKNOWN = "unknown"
+
+DELIVERY_STATES = (
+    DELIVERY_SAVED,
+    DELIVERY_WAITING,
+    DELIVERY_HANDED_OVER,
+    DELIVERY_ERROR,
+    DELIVERY_UNKNOWN,
+)
+
+#: The delivery stages that mean a batch has been fixed and sent, or is being retried. `idle` is no
+#: batch at all and `waiting_for_idle` is a batch with no upper bound yet, so both are answered
+#: without a `through_event`.
+_ACTIVE_STAGES = (DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK, DeliveryStage.RETRY_DEFERRED)
+
+#: The deferred mechanism, named on the document rather than only in the documentation. A reader who
+#: might otherwise take `handed_over` for "the observer has taken this into account" is told, in the
+#: answer itself, that this product does not establish that and where the work to establish it is.
+ACCEPTANCE_ISSUE = "issue:cf5c9f03ee0f92d3d347"
+ACCEPTANCE_NOTICE = (
+    "Delivery is not acceptance. Nothing in this document says the sprint's observer read this "
+    "comment, agreed with it, or took it into account: what is established here is that the comment "
+    "is saved and where the dispatcher's own delivery machinery has got it to. A semantic "
+    f"acknowledgement is deferred by the owner and tracked as {ACCEPTANCE_ISSUE}."
 )
 
 #: Failures a source read may answer with instead of a value, caught per section exactly as the
@@ -621,6 +696,108 @@ class SprintSections(SectionSet):
             },
         )
 
+    # -- one comment, and what happened to it ------------------------------------------------
+
+    def comment(self, read: SourceSet, reference: str, comment_id: str) -> Section:
+        """Whether the committed audit holds this comment on this sprint, and nothing more.
+
+        The subject is an identifier, not a source: which comment is asked about comes from the
+        caller, and the only thing that may answer is the journal the write landed in. A journal
+        that could not be read leaves `unknown` -- never `absent`, which is the affirmative claim
+        that the write is not on a file nobody has seen.
+        """
+
+        def from_journal(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+            event = _comment_event(events, reference, comment_id)
+            if event is None:
+                return {
+                    "id": comment_id,
+                    "state": COMMENT_ABSENT,
+                    "occurred_at": None,
+                    "role": None,
+                    "reason": (
+                        f"the committed audit holds no comment {comment_id} on {reference}"
+                    ),
+                }
+            actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+            return {
+                "id": comment_id,
+                "state": COMMENT_SAVED,
+                "occurred_at": str(event.get("occurred_at") or "") or None,
+                "role": str(actor.get("role") or "") or None,
+                "reason": f"the committed audit holds this comment on {reference}",
+            }
+
+        return read.decide(
+            rule(SOURCE_JOURNAL, from_journal),
+            blank={
+                "id": None,
+                "state": COMMENT_UNKNOWN,
+                "occurred_at": None,
+                "role": None,
+                "reason": None,
+            },
+            # `id` is which comment the answer would have been about, not a claim about it.
+            narrates=("reason", "id"),
+            unresolved=lambda reading: {
+                "id": comment_id,
+                "state": COMMENT_UNKNOWN,
+                "occurred_at": None,
+                "role": None,
+                "reason": reading.source.reason,
+            },
+        )
+
+    def delivery(self, read: SourceSet, reference: str, comment_id: str) -> Section:
+        """Where the dispatcher's own delivery machinery has got this comment to, and no further.
+
+        Two sources and both are needed for the four answers that are about a batch: the committed
+        audit places this comment and the dispatcher's cursors in one order, and the production
+        state is where those cursors live. Neither is asked to do the other's job -- a journal that
+        answered and holds no such comment settles the question on its own, because no cursor of any
+        record could then be placed against it.
+
+        Nothing here delivers. No head is woken, no retry is scheduled and no byte of the
+        dispatcher's state is written: redelivery is the production tick's, and this is a read of
+        what that tick has already recorded. And nothing here is a semantic acknowledgement --
+        see :data:`ACCEPTANCE_NOTICE`.
+        """
+
+        def not_in_the_journal(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+            if _comment_event(events, reference, comment_id) is not None:
+                return None
+            return {
+                "state": DELIVERY_UNKNOWN,
+                "reason": (
+                    f"the committed audit holds no comment {comment_id} on {reference}, so there is "
+                    "nothing here to place against the observer's delivery cursors"
+                ),
+                "batch": None,
+            }
+
+        def from_dispatcher(
+            events: list[dict[str, Any]], production: _Production
+        ) -> dict[str, Any] | None:
+            row = production.observers.get(reference)
+            carried = (row or {}).get("delivery")
+            delivery = (
+                ObserverDelivery.from_json(carried) if isinstance(carried, dict) else None
+            )
+            state, reason = _delivery_state(
+                events, _event_position(events, comment_id), delivery, reference=reference
+            )
+            return {
+                "state": state,
+                "reason": reason,
+                "batch": None if delivery is None else _delivery_batch(delivery),
+            }
+
+        return read.decide(
+            Rule(SOURCE_JOURNAL, (SOURCE_JOURNAL,), not_in_the_journal),
+            Rule(SOURCE_LIVENESS, (SOURCE_JOURNAL, SOURCE_LIVENESS), from_dispatcher),
+            blank={"state": DELIVERY_UNKNOWN, "reason": None, "batch": None},
+        )
+
     # -- the catalogue -----------------------------------------------------------------------
 
     def products(self, read: SourceSet) -> Section:
@@ -859,6 +1036,50 @@ class SprintReadLayer(ProtocolBoundary):
                 "sprint": SECTIONS.sprint(sprint),
                 "observer": self._observer(sprint),
                 "work": self._work(sprint),
+                **self._marks(read),
+            }
+        )
+
+    def sprint_comment_delivery(self, ref: str, comment_id: str) -> dict[str, Any]:
+        """What happened to one saved comment, as far as durable state can say -- and no further.
+
+        The read half of the PO comment scenario. It answers two separate facts and never lets one
+        stand in for the other: whether the comment is on the committed audit (`comment`), and where
+        the dispatcher's observer delivery machinery has got it to (`delivery`). It answers a third
+        thing by refusing to: `acceptance` says in words that neither of those is the observer
+        having read, accepted or taken the comment into account, and names the deferred issue that
+        would establish it.
+
+        It is a read in the full sense of this layer. It wakes nothing, nudges nothing, retries
+        nothing, launches no head and writes nothing to the dispatcher's state -- redelivery belongs
+        to the production tick, and this reports what that tick has already recorded.
+        """
+        now = self._clock()
+        reference = str(ref or "")
+        if not reference:
+            raise TaskNotFound("a sprint reference is required")
+        identifier = str(comment_id or "")
+        if not identifier:
+            raise ValidationRefused(
+                "reading what happened to a comment needs the identifier the write answered with"
+            )
+        report, installation = self._installation(now=now)
+        read = self._read_once(report, installation, self.data_dir(report), now=now)
+        row, _view = _find(read, reference)
+        if row is None and read.answered(SOURCE_SPRINTS):
+            raise TaskNotFound(f"the board holds no sprint {reference!r}")
+        return render(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "sprint_comment_delivery",
+                "observed_at": sources.isoformat(now),
+                "ref": reference,
+                "comment_id": identifier,
+                "comment": SECTIONS.comment(read, reference, identifier),
+                "delivery": SECTIONS.delivery(read, reference, identifier),
+                # Not a section, because it is not read from anything: it is this product saying
+                # what its own answer does not mean, and it says it whatever every source did.
+                "acceptance": {"established": False, "issue": ACCEPTANCE_ISSUE, "reason": ACCEPTANCE_NOTICE},
                 **self._marks(read),
             }
         )
@@ -1367,6 +1588,137 @@ def _unsettled_reason(read: SourceSet, refusal: str | None) -> str:
     )
 
 
+def _comment_event(
+    events: list[dict[str, Any]], reference: str, comment_id: str
+) -> dict[str, Any] | None:
+    """The committed `commented` event of this sprint under this identifier, or nothing.
+
+    All three have to match. An event id alone would let a caller ask about one sprint's comment and
+    be answered about another sprint's write, and the identifier this layer publishes is the audit
+    event id precisely because the audit is what makes it durable.
+    """
+    if not comment_id:
+        return None
+    for event in events:
+        if (
+            str(event.get("event_id") or "") == comment_id
+            and str(event.get("ref") or "") == reference
+            and str(event.get("kind") or "") == "commented"
+        ):
+            return event
+    return None
+
+
+def _event_position(events: list[dict[str, Any]], event_id: str) -> int:
+    """Where one event stands in the committed stream, or `-1` when the stream does not hold it.
+
+    The whole stream and never one sprint's slice: the dispatcher's delivery cursors are ids of
+    events of this installation, not of this sprint, so a narrowed stream could not place them.
+    """
+    if not event_id:
+        return -1
+    for index, event in enumerate(events):
+        if str(event.get("event_id") or "") == event_id:
+            return index
+    return -1
+
+
+def _delivery_state(
+    events: list[dict[str, Any]],
+    comment_at: int,
+    delivery: ObserverDelivery | None,
+    *,
+    reference: str,
+) -> tuple[str, str]:
+    """One comment's technical delivery, from the cursors the dispatcher already keeps.
+
+    The mapping, stated once and in one place:
+
+    * **no observer record** for this sprint, or a cursor the committed audit cannot place --
+      `unknown`. Neither is "not delivered": nothing here establishes where the comment is;
+    * `acknowledged_through` at or after this comment's event -- `handed_over`. The batch that
+      carried it was acknowledged by the head that was woken for it. That is delivery evidence and
+      deliberately nothing more (:data:`ACCEPTANCE_NOTICE`);
+    * `waiting_for_idle` -- `waiting`. A batch is owed and is held until the head is idle; it
+      carries every event after the acknowledged cursor, so it carries this comment;
+    * `delivery_intent` or `awaiting_ack` whose `through_event` is at or after this comment --
+      `waiting`. The batch was fixed and sent and has not been acknowledged;
+    * `retry_deferred` over the same range -- `error`, with the failure the record recorded. The
+      dispatcher owns the retry; this says what it recorded, never what to do about it;
+    * anything else -- `saved`. `idle`, or an active batch fixed *before* this comment arrived,
+      which is the ordinary case: an event appended after a delivery intent is deliberately left
+      for the next batch.
+    """
+    if delivery is None:
+        return DELIVERY_UNKNOWN, (
+            f"the dispatcher's production state holds no observer record for {reference}, so nothing "
+            "here says whether a delivery batch has carried this comment"
+        )
+    acknowledged = delivery.acknowledged_through
+    if acknowledged:
+        at = _event_position(events, acknowledged)
+        if at < 0:
+            return DELIVERY_UNKNOWN, (
+                f"the acknowledged delivery cursor {acknowledged} names an event the committed audit "
+                "does not hold, so this comment cannot be placed against it"
+            )
+        if at >= comment_at:
+            return DELIVERY_HANDED_OVER, (
+                f"the observer of {reference} acknowledged a delivery batch through {acknowledged}, "
+                "which is this comment's event or a later one; that is technical delivery of the "
+                "batch and not a statement that the comment was read, accepted or taken into account"
+            )
+    if delivery.stage == DeliveryStage.WAITING_FOR_IDLE:
+        return DELIVERY_WAITING, (
+            f"a delivery batch for {reference} is held until its observer head is idle: "
+            f"{delivery.reason or 'no reason recorded'}"
+        )
+    if delivery.stage in _ACTIVE_STAGES and delivery.through_event:
+        at = _event_position(events, delivery.through_event)
+        if at < 0:
+            return DELIVERY_UNKNOWN, (
+                f"the active delivery cursor {delivery.through_event} names an event the committed "
+                "audit does not hold, so this comment cannot be placed against it"
+            )
+        if at >= comment_at:
+            if delivery.stage == DeliveryStage.RETRY_DEFERRED:
+                return DELIVERY_ERROR, (
+                    "the delivery batch carrying this comment failed and is deferred for retry: "
+                    + (delivery.last_failure_reason or "no reason recorded")
+                    + "; the dispatcher owns the redelivery"
+                )
+            return DELIVERY_WAITING, (
+                f"the delivery batch carrying this comment is {delivery.stage.value} and has not "
+                "been acknowledged"
+            )
+    return (
+        DELIVERY_SAVED,
+        f"this comment is saved and no delivery batch of {reference}'s observer carries it yet",
+    )
+
+
+def _delivery_batch(delivery: ObserverDelivery) -> dict[str, Any]:
+    """The part of one observer's delivery record this answer stands on, and nothing more.
+
+    Copied out rather than passed through, exactly as `_gate` copies the mechanical gate: the record
+    is the dispatcher's internal state, and a document handing all of it to a reader would publish
+    those internals as a contract. `evidence` is `delivery_evidence_summary`, the same line the head
+    that has to report its delivery history is given, so the two cannot disagree.
+    """
+    return {
+        "stage": delivery.stage.value,
+        "delivery_id": delivery.delivery_id or None,
+        "through_event": delivery.through_event or None,
+        "acknowledged_through": delivery.acknowledged_through or None,
+        "acknowledged_delivery_id": delivery.acknowledged_delivery_id or None,
+        "wake_attempts": delivery.wake_attempts,
+        "wake_failures": delivery.wake_failures,
+        "launch_delivery_failures": delivery.launch_delivery_failures,
+        "last_failure_reason": delivery.last_failure_reason or None,
+        "evidence": delivery_evidence_summary(delivery) or None,
+    }
+
+
 def _profile_label(profile_id: str, profile: dict[str, Any]) -> str:
     """A name a person can pick from, composed from what the registry actually holds.
 
@@ -1500,11 +1852,23 @@ def _reason(exc: Exception) -> str:
 #: Re-exported so a caller reading a sprint document does not have to know which module spells the
 #: metadata field the declaration lives in.
 __all__ = [
+    "ACCEPTANCE_ISSUE",
+    "ACCEPTANCE_NOTICE",
     "CHECKS_GREEN",
     "CHECKS_NOT_APPLICABLE",
     "CHECKS_NOT_GREEN",
     "CHECKS_UNKNOWN",
     "CHECK_STATES",
+    "COMMENT_ABSENT",
+    "COMMENT_SAVED",
+    "COMMENT_STATES",
+    "COMMENT_UNKNOWN",
+    "DELIVERY_ERROR",
+    "DELIVERY_HANDED_OVER",
+    "DELIVERY_SAVED",
+    "DELIVERY_STATES",
+    "DELIVERY_UNKNOWN",
+    "DELIVERY_WAITING",
     "OBSERVER_ABSENT",
     "OBSERVER_DECLARATION_STATES",
     "OBSERVER_DECLARED",
