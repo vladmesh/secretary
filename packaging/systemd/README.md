@@ -25,5 +25,12 @@ name it cannot prove it owns.
 
 `secretary-dispatcher-production.timer` launches a one-shot `production-tick`.
 `secretary-memory.service` serves MCP on the configured local endpoint and loads the instance
-embedding model. Scheduler-backed roles must have exactly one owner; do not enable both systemd and
+embedding model. `secretary-web.service` runs the web transport on `127.0.0.1:8787` — that host is
+not a default the unit may relax — and `secretary-web-front.service` runs the archive Caddy that
+terminates TLS, checks the owner's password and proxies to it. The front is `PartOf` the transport,
+so the pair starts, stops and restarts together, and its configuration is not a template here: it
+carries a bcrypt hash and is rendered from the secret store by `secretary web-front render` into
+`<data-dir>/webfront/Caddyfile` with mode 0600. The distribution's own `caddy.service` is masked on
+this installation so that installing the package can never start an unconfigured public listener;
+see [Operations](../../docs/OPERATIONS.md#the-published-web-front). Scheduler-backed roles must have exactly one owner; do not enable both systemd and
 Orca Automations for the same role.

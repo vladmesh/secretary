@@ -1629,7 +1629,9 @@ class DoctorHostCliTests(unittest.TestCase):
             "    memory: {enabled: false}\n"
             "    retro: {enabled: false}\n"
             "    steward: {enabled: false}\n"
-            "    steward-deep-sweep: {enabled: false}\n",
+            "    steward-deep-sweep: {enabled: false}\n"
+            "    web: {enabled: false}\n"
+            "    web-front: {enabled: false}\n",
             encoding="utf-8",
         )
         return instance, data

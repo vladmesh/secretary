@@ -1947,14 +1947,19 @@ first successful read.
 ## The local web transport
 
 `secretary web-serve` serves the dashboard and the card pages over the same `web-read` and
-`web-run` operations the CLI groups use. It is a local developer-facing tool for this slice.
+`web-run` operations the CLI groups use. It is the private half of the published service: it
+answers on loopback and nothing else, and everything that reaches it from outside this host came
+through the front.
 
-> **Do not publish it.** It has no password, no TLS and no authorisation of any kind, and two of
-> its routes start real heads on this installation, so anybody who can reach the port owns the
-> pipeline. Binding it to a non-loopback address is refused in code; putting it behind a proxy,
-> forwarding its port off the host, or installing it as a unit on a live installation is forbidden
-> until the slice that adds TLS and a password (DoD 5). There is no unit template for it, and none
-> is to be added before that slice.
+> **It is never published directly.** It has no password, no TLS and no authorisation of any kind,
+> and two of its routes start real heads on this installation, so anybody who can reach the port
+> owns the pipeline. Binding it to a non-loopback address is refused in code, and that refusal is
+> what makes the guarded front the only way in from off this host — do not weaken it, and do not
+> forward the port. Outside access is [the published web front](#the-published-web-front), which
+> terminates TLS, checks a password and proxies to `127.0.0.1`.
+
+On this installation the transport runs as `secretary-web.service` on `127.0.0.1:8787`; the command
+below is how to run a second one by hand, against another data plane or on another port.
 
 ```bash
 # start it in the foreground; Ctrl-C stops it
@@ -2005,6 +2010,165 @@ A port already in use fails the bind with the address and port named. A non-loop
 and refuses unless every address it resolves to is loopback, so a host that maps `localhost` (or
 any other name) to a routable address is refused rather than published; the address that resolution
 produced is the one bound, so nothing resolves the name a second time.
+
+
+## The published web front
+
+`secretary-web-front.service` is how the owner reaches the pipeline from a browser: Caddy, installed
+from the Ubuntu archive, terminating TLS and checking a password, proxying to the loopback transport
+above. No authentication is implemented in this product; `basicauth` does it, and the bcrypt hash it
+checks comes out of the installation's secret store.
+
+**The address.** `https://5uoc.l.time4vps.cloud/`, and `https://109.235.67.14/` or
+`https://[2a02:7b40:6deb:430e::1]/` if the name is not resolving. The account is `owner`. Plain
+`http://` on those addresses redirects to `https://` and serves nothing.
+
+**What the browser shows the first time.** There is no domain to buy a public certificate for, so
+the certificate is issued by Caddy's own CA, which no browser trusts by default. The first visit is
+a full-page warning — Firefox says *Warning: Potential Security Risk Ahead*, Chrome says
+*Your connection is not private* with `NET::ERR_CERT_AUTHORITY_INVALID`. That warning is about who
+signed the certificate, not about the encryption: the connection is TLS either way, and the password
+prompt appears after it is accepted. Continuing past it (*Advanced* → *Accept the risk* /
+*Proceed*) is the expected path and costs nothing but the warning on each new browser profile.
+
+**Trusting the root, to lose the warning.** The CA's root certificate lives on this host at
+`~/secretary-data/webfront/caddy/pki/authorities/local/root.crt`. The front never installs it into
+anything — a service does not get to rewrite trust stores — so trusting it is a deliberate act:
+
+```bash
+# copy it to the machine the browser runs on
+scp dev@109.235.67.14:secretary-data/webfront/caddy/pki/authorities/local/root.crt secretary-root.crt
+```
+
+Then import `secretary-root.crt` as a trusted **certificate authority**: Firefox has
+*Settings → Privacy & Security → Certificates → View Certificates → Authorities → Import* with
+*Trust this CA to identify websites*; Chrome and Safari on macOS take it through Keychain Access
+(*System* keychain, then set *Always Trust*); Chrome on Linux uses
+*Settings → Privacy and security → Security → Manage certificates → Authorities*. After that the
+warning is gone for this host and for nothing else. Skipping this entirely is a legitimate choice:
+the padlock is what changes, not the protection of the password.
+
+### Setting or reading the password
+
+The password and its hash live in the secret store, so neither is in the repository, in an argument,
+in a log or in a report. A value never travels through argv:
+
+```bash
+# the owner types their own, and it is read from stdin
+python3 -P -m secretary web-front set-password --instance ~/secretary-instance --stdin
+
+# or the product generates one from `secrets` and stores it
+python3 -P -m secretary web-front set-password --instance ~/secretary-instance --generate
+```
+
+Reading back the one that is set — this writes a mode-0600 env file outside the repository and
+prints nothing itself:
+
+```bash
+python3 -P -m secretary secret materialize --instance ~/secretary-instance --target file
+cat ~/secretary-data/webfront/owner-password.env      # SECRETARY_WEB_FRONT_PASSWORD=...
+```
+
+A new password takes effect after a render and a restart:
+
+```bash
+python3 -P -m secretary web-front render --instance ~/secretary-instance \
+  --site https://5uoc.l.time4vps.cloud --site https://109.235.67.14 \
+  --site 'https://[2a02:7b40:6deb:430e::1]'
+sudo systemctl restart secretary-web-front.service
+```
+
+### Starting, updating and stopping
+
+```bash
+sudo systemctl status secretary-web.service secretary-web-front.service
+sudo systemctl restart secretary-web-front.service       # after a render
+sudo systemctl stop secretary-web-front.service          # off the public interfaces, now
+python3 -P -m secretary status --instance ~/secretary-instance   # both units, enabled and active
+```
+
+The two units are one service in two halves: the front is `PartOf=secretary-web.service`, so
+restarting the transport restarts the front with it and stopping the transport stops the front
+rather than leaving a proxy pointed at nothing. Both are `Restart=always` with a three-second delay.
+The front is rolled out by `secretary reconcile apply` like every other unit; its configuration is
+not, because it carries a password hash — that file is written by `web-front render` under
+`~/secretary-data/webfront/` with mode 0600 and is never tracked.
+
+`ExecStartPre` runs `caddy validate` on the configuration, so a broken render fails the unit start
+instead of taking the front down while it is running.
+
+### Auditing what is exposed
+
+The question "is anything reachable without the password" is answerable on the host, against the
+file that is actually running, without a request:
+
+```bash
+python3 -P -m secretary web-front check --instance ~/secretary-instance
+```
+
+It parses the configuration, asks it about every route the transport publishes, and prints
+`"unguarded": []` when there is none. It exits 3 with the routes named when there is. The same
+predicate runs in `tests/test_web_front.py` on every branch.
+
+The negative check over the wire, which is what an unauthorised client actually gets — 401 and no
+body, on a page, on JSON and on the event stream:
+
+```bash
+for path in / /tasks/secretary-1 /api/system /api/tasks/secretary-1 \
+            /api/tasks/secretary-1/events /api/runs/x; do
+  printf '%s ' "$path"
+  curl -sk -o /dev/null -w '%{http_code} %{size_download}\n' "https://109.235.67.14$path"
+done
+curl -sk -o /dev/null -w '%{http_code}\n' -X POST -d '{}' https://109.235.67.14/api/runs/start
+```
+
+Every line must read `401 0`. A `200` on any of them is an incident: stop the front
+(`sudo systemctl stop secretary-web-front.service`), which removes the public listener immediately
+and leaves the pipeline running, then find out why.
+
+### Rolling back to before this front existed
+
+Nothing about the pipeline depends on either unit, so the rollback is to stop them and it is
+complete. In increasing order of permanence:
+
+```bash
+# 1. off the public interfaces, this second; the transport and the pipeline keep running
+sudo systemctl stop secretary-web-front.service
+
+# 2. rehearse or run guarded on loopback only — the same file, one line different
+python3 -P -m secretary web-front render --instance ~/secretary-instance \
+  --site https://5uoc.l.time4vps.cloud --bind 127.0.0.1
+sudo systemctl restart secretary-web-front.service
+
+# 3. permanently: disable both halves, then let reconcile remove the units
+sudo systemctl disable --now secretary-web-front.service secretary-web.service
+```
+
+For 3, set `host.components.web.enabled: false` and `host.components.web-front.enabled: false` in
+`instance.yaml` and run `secretary reconcile apply`; the units leave the desired state and the host
+with it. The rendered configuration and Caddy's storage are under `~/secretary-data/webfront/` and
+can be deleted; the password and its hash stay in the secret store until
+`secretary secret remove --id web-front-password` and `--id web-front-password-hash` drop them. The
+Caddy package itself is `sudo apt-get remove caddy`, and `caddy.service` — the distribution's own
+unit, masked here on purpose so that installing the package never started an unconfigured public
+listener — is unmasked with `sudo systemctl unmask caddy.service`.
+
+### When it is unreachable
+
+Work outwards from the host, because most of the answers are local:
+
+| symptom | what it means | what to do |
+| --- | --- | --- |
+| connection refused / times out from outside | the front is not listening, or the network is in the way | `ss -ltn '( sport = :443 )'` on the host; `sudo systemctl status secretary-web-front.service` |
+| the unit is `activating (auto-restart)` | `caddy validate` refused the configuration | `journalctl -u secretary-web-front.service -n 50` names the line; re-render |
+| the unit failed with `permission denied` binding 443 | the capability is not in effect | `systemctl cat secretary-web-front.service` must show `AmbientCapabilities=CAP_NET_BIND_SERVICE` |
+| a certificate warning that will not go away | expected without a trusted root | see *Trusting the root* above; it is a warning, not a failure |
+| 401 with the right password | the running configuration is older than the store | re-render and restart; `web-front check` prints the file the unit reads |
+| 502 after the password | the loopback transport is down | `sudo systemctl status secretary-web.service`, then `curl -s localhost:8787/api/system` |
+| a page loads but a section is marked unavailable | a source below the transport refused | that is the transport's own diagnosis; see *Diagnosing it* above |
+
+SSH is the fallback and is untouched by any of this: nothing in this slice changes `sshd`, and no
+firewall rule was added or removed. If the front is wedged, `ssh dev@109.235.67.14` and stop it.
 
 ## Units
 

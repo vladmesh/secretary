@@ -5,12 +5,13 @@ holds PyYAML, jsonschema and cryptography, and a dashboard that reads three docu
 does not need more. `ThreadingHTTPServer` is enough: requests are short, each one is a handful of
 file reads, and a browser that opens two connections must not deadlock behind one.
 
-**Where this may listen is not a preference.** The service has no password, no TLS and no
-authorisation of any kind, and its POST routes start real heads on this installation. Anybody who
-can reach the port therefore owns the pipeline. So a non-loopback address is refused here, in code,
-with a message naming the slice that would make it safe (DoD 5: TLS and a password). Until that
-slice exists this is a developer-facing local tool: it is not published, not proxied and not
-enabled as a unit on a live installation.
+**Where this may listen is not a preference, and DoD 5 did not change that.** The service has no
+password, no TLS and no authorisation of any kind, and its POST routes start real heads on this
+installation. Anybody who can reach the port therefore owns the pipeline. So a non-loopback address
+is refused here, in code, and the slice that published this installation kept the refusal exactly
+as it was rather than relaxing it: the front (:mod:`secretary.webfront`) terminates TLS and checks
+a password and then proxies to `127.0.0.1`, so this refusal is what makes the front the only way in
+from off this host. Weakening it would not add a feature; it would add a second, unguarded door.
 """
 
 from __future__ import annotations
@@ -29,9 +30,9 @@ DEFAULT_PORT = 8787
 #: Why a non-loopback bind is refused, quoted verbatim into the refusal and into OPERATIONS.md.
 LOOPBACK_ONLY = (
     "this service has no password, no TLS and no authorisation, and its routes start real heads on "
-    "this installation, so it binds a loopback address only. Publishing it -- to another interface, "
-    "through a proxy, or as a unit on a live installation -- is forbidden until the slice that adds "
-    "TLS and a password (DoD 5)"
+    "this installation, so it binds a loopback address only. External access is published by the "
+    "guarded front instead (`secretary web-front`, DoD 5), which terminates TLS, checks a password "
+    "and proxies here; this refusal is what makes that front the only way in"
 )
 
 
