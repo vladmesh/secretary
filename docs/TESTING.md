@@ -263,3 +263,41 @@ PYTHONPATH=src python3 -m unittest -v \
   tests.test_restore.RestoreTests.test_interruption_after_group_effect_resumes_without_another_move \
   tests.test_restore.RestoreTests.test_sanitized_four_group_failed_state_is_reconciled_once
 ```
+
+## The published web path
+
+Four files cover the path an owner walks from a browser — the front, the transport, the read
+operations and the product runtime beneath them. Each is a plain unit test in the `unit` suite;
+none of them contacts a live board, a live Orca or the network.
+
+| file | what it holds this path to |
+| --- | --- |
+| `tests/test_web_front.py` | that no published route is answered without the password — the predicate is run over the shipped renderer *and* over hand-written counter-examples that must be reported, so a green result means it can fail and did not — plus the rendered configuration's own refusals (a non-https site, a non-bcrypt hash, an upstream off the host) and the two units being one service in two halves |
+| `tests/test_web_transport.py` | the route table being the whole surface and one route being one operation; the code-to-status table; the cursor a client keeps, which is what makes a reload and a reconnection resume rather than restart; a repeated POST raising no second head; the loopback refusal, name resolution included; and what a card page draws — an unavailable source as a marked block rather than an empty list, an open run apart from a settled one, a reviewer's verdict, and a failed run as a failure carrying its exit status rather than as a run with nothing to show |
+| `tests/test_web_read_protocol.py` | the three read operations, their honest sources and their protocol codes |
+| `tests/test_web_run_protocol.py` | the product runtime: the admission gate and the order it decides in, the run lifecycle, the five outcomes told apart from the two facts (`value` and `ended`), event visibility through the card's own history, and the absence of Orca on every path |
+
+Two suites in that last file raise **real** processes on real terminals under the real
+`LocalPtyHeadRuntime`, because two claims cannot be stood in for by a double:
+
+* `RealHeadOwnershipTests` — a head is raised through the product's own start path, the handle is
+  thrown away, and a `HeadRun` rebuilt out of the *write-ahead* record stops it; the ending is
+  confirmed from the launch identity, the supervisor's journal and the process table;
+* `RealBackendContractTests` — that the real backend honours `run_start` and `run_review`: a head
+  that publishes a result is `finished` and is ended by the product that owns it, a head that exits
+  non-zero is `process_failed` carrying that status and is on the card's history once, and a review
+  is raised by a real worker's result in the worker's own workspace and its verdict is read off its
+  own result file. Which binary each head is, is the one substitution; everything else is real.
+
+```console
+PYTHONPATH=src python3 -m unittest -v \
+  tests.test_web_front tests.test_web_transport \
+  tests.test_web_read_protocol tests.test_web_run_protocol
+```
+
+What no automated suite can answer is whether the *installed* service works, because that is a fact
+about this host rather than about the code: a real card, a real Codex worker, a real Claude reviewer
+and a real refusal, over HTTPS through the front and with the owner's password. That walk-through is
+in [Operations](OPERATIONS.md#running-a-card-through-the-installed-service), and the unauthorised
+half of it — 401 and no body on every published route — is the `curl` loop under
+[*Auditing what is exposed*](OPERATIONS.md#auditing-what-is-exposed).

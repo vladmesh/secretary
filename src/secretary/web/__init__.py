@@ -15,11 +15,12 @@ Two properties are the point, and both have tests:
 surface, and every route is one layer call. There is no endpoint that takes a command, a script, a
 path or a module name to run, and `tests/test_web_transport.py` fails if the table grows one.
 
-**Loopback only, until DoD 5.** This service has no password, no TLS and no authorisation of any
-kind, so anybody who can reach the port owns the pipeline: it starts runs. Until the slice that adds
-those exists, binding it to anything but a loopback address is refused in code
-(:mod:`secretary.web.server`), not merely discouraged in a document, and it is not enabled as a unit
-on a live installation.
+**Loopback only, and it stayed that way once the pipeline was published.** This service has no
+password, no TLS and no authorisation of any kind, so anybody who can reach the port owns the
+pipeline: it starts runs. Binding it to anything but a loopback address is refused in code
+(:mod:`secretary.web.server`), not merely discouraged in a document. It now runs as a unit on a live
+installation, and that refusal is exactly what makes the guarded front (:mod:`secretary.webfront`)
+the only way in from off the host rather than one of two doors.
 """
 
 from __future__ import annotations

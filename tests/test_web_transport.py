@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import ipaddress
 import json
+import os
 import socket
 import subprocess
 import tempfile
@@ -53,7 +54,7 @@ from secretary.webproto.reads import ReadLayer
 from tests.fakes.dispatcher import FakeKanboard
 from triggered_agents.agents.pipeline.heads import Registry
 from triggered_agents.runtime.head.identity import publish_heartbeat
-from triggered_agents.runtime.head.local_pty import RUN_STARTED
+from triggered_agents.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
 from triggered_agents.runtime.head.run import HeadRun
 from triggered_agents.runtime.head.runtime import (
     HEAD_OK,
@@ -66,6 +67,7 @@ from triggered_agents.runtime.head.runtime import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 WORKER_PROFILE = "codex-product-worker"
+REVIEWER_PROFILE = "claude-product-reviewer"
 PROFILES = {
     WORKER_PROFILE: {
         "resource": "openai-sub",
@@ -74,16 +76,37 @@ PROFILES = {
         "effort": "default",
         "runtime": "local-pty",
         "fallback": [],
-    }
+    },
+    REVIEWER_PROFILE: {
+        "resource": "claude-sub",
+        "adapter": "claude",
+        "model": "opus",
+        "effort": "high",
+        "runtime": "local-pty",
+        "fallback": [],
+    },
 }
 
 
 def _registry() -> Registry:
     return Registry(
-        resources={"openai-sub": {"account": "a"}},
+        resources={"openai-sub": {"account": "a"}, "claude-sub": {"account": "b"}},
         profiles={key: dict(value) for key, value in PROFILES.items()},
         role_defaults={},
     )
+
+
+def _dead_pid() -> int:
+    """A pid that names no process, so a heartbeat pointing at it classifies as dead."""
+    ceiling = int(Path("/proc/sys/kernel/pid_max").read_text(encoding="utf-8").strip())
+    for candidate in range(ceiling - 1, 1, -1):
+        try:
+            os.kill(candidate, 0)
+        except ProcessLookupError:
+            return candidate
+        except PermissionError:
+            continue
+    raise unittest.SkipTest("this host has no free pid to prove a dead heartbeat with")
 
 
 class FakeHeadRuntime:
@@ -607,6 +630,104 @@ class PageTests(TransportFixture):
         self.assertTrue(self.json_of(self.get(f"/api/runs/{started['run']['run_id']}"))["state"]["ended"])
         settled_markup = self.text_of(self.get("/tasks/secretary-run-1"))
         self.assertIn("(over)", settled_markup)
+
+    def test_a_reviewer_verdict_is_on_the_card_page_and_not_only_in_the_json(self) -> None:
+        """The one thing a card page is opened to find out about a review.
+
+        Two reviews that both ended normally read identically in the state column -- `finished`,
+        over -- and differ in exactly one place: the word the reviewer wrote. A page that stopped at
+        the state would answer "did the reviewer run" while being asked "what did it say".
+        """
+        self._card()
+        worker = self._settled_run("web-worker", {"status": "done", "summary": "a line was added"})
+        review = self.json_of(
+            self.post(
+                "/api/runs/review",
+                {
+                    "ref": "secretary-run-1",
+                    "request_id": "web-review",
+                    "profile": REVIEWER_PROFILE,
+                    "worker_run_id": worker,
+                },
+            )
+        )
+        self._publish(review["review"]["run"], {"verdict": "red", "summary": "it does not stand"})
+
+        markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        self.assertIn("verdict", markup)
+        self.assertIn("red", markup)
+        self.assertIn("it does not stand", markup)
+        self.assertIn("a line was added", markup)
+
+    def test_a_failed_run_reads_as_a_failure_and_not_as_a_run_with_nothing_to_show(self) -> None:
+        """Criterion 4 of secretary-1566, as the page renders it.
+
+        A head that exited non-zero produced no result, and "produced no result" is what an open
+        run that has not got there yet also has. Those are not the same thing, so the page says the
+        failure, its exit status, and that the head published nothing -- and never the empty words
+        an unstarted run gets.
+        """
+        self._card()
+        started = self.json_of(
+            self.post(
+                "/api/runs/start",
+                {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
+            )
+        )
+        open_markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        self.assertIn("this run has produced nothing yet.", open_markup)
+
+        self._exited(started["run"], exit_code=7)
+        read = self.json_of(self.get(f"/api/runs/{started['run']['run_id']}"))
+        self.assertEqual(read["state"]["value"], "process_failed")
+
+        markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        self.assertIn("state-process_failed", markup)
+        self.assertIn("exit status 7", markup)
+        self.assertIn("the head published no result", markup)
+        self.assertNotIn("this run has produced nothing yet.", markup)
+
+    # -- the pieces those two are made of --------------------------------------------------------
+
+    def _settled_run(self, request_id: str, result: dict[str, Any]) -> str:
+        """A worker run that published `result` and has therefore been settled by a read."""
+        started = self.json_of(
+            self.post(
+                "/api/runs/start",
+                {"ref": "secretary-run-1", "request_id": request_id, "profile": WORKER_PROFILE},
+            )
+        )
+        self._publish(started["run"], result)
+        return started["run"]["run_id"]
+
+    def _publish(self, run: dict[str, Any], document: dict[str, Any]) -> None:
+        """Write a head's own result where it was told to, and let the layer settle the run."""
+        path = Path(run["result_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document), encoding="utf-8")
+        self.assertTrue(self.json_of(self.get(f"/api/runs/{run['run_id']}"))["state"]["ended"])
+
+    def _exited(self, run: dict[str, Any], *, exit_code: int) -> None:
+        """The supervisor's own record of a head that is gone, and a heartbeat that says so."""
+        with Path(run["journal_path"]).open("a", encoding="utf-8") as journal:
+            journal.write(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "seq": 2,
+                        "kind": RUN_EXITED,
+                        "run_id": run["run_id"],
+                        "at": 2.0,
+                        "exit_code": exit_code,
+                        "signal": None,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        heartbeat = json.loads(Path(run["pid_file"]).read_text(encoding="utf-8"))
+        heartbeat["pid"] = _dead_pid()
+        Path(run["pid_file"]).write_text(json.dumps(heartbeat, sort_keys=True), encoding="utf-8")
 
     def test_a_card_with_no_history_says_so_rather_than_showing_nothing(self) -> None:
         self._card()

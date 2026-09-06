@@ -2918,6 +2918,27 @@ the client's, kept across a reload, and `ops.run_start` / `ops.run_review` answe
 run that already exists. A repeated POST therefore raises no second head — which is a test, not a
 description.
 
+### What a card page says about a product run
+
+One row per run, and two of its columns answer two different questions that a single word would
+collapse.
+
+| column | what it is |
+| --- | --- |
+| `state` | what the run's *process* did: one of `running`, `finished`, `process_failed`, `source_unavailable`, `unknown`, with the reason the evidence gave and `(open)` or `(over)` beside it |
+| `outcome` | what the run *produced*: the verdict when the result carries one (`state.result.verdict`), the head's own result summary, and the exit status or signal the supervisor recorded |
+
+Neither is derived from the other, and neither is derived by the page: both come straight out of the
+`product_run` document, which is the same document `/api/runs/{run_id}` returns. Three readings that
+must stay distinguishable, and are:
+
+* a run that **finished** and published a result shows the result, and a review shows its verdict —
+  `green` and `red` are two normal endings and differ nowhere else;
+* a run that **failed** shows `process_failed`, the exit status it carried, and that the head
+  published no result;
+* a run that is still **open** has produced nothing *yet*, which is said in its own words rather
+  than in the words of a run that finished empty.
+
 
 ## Publishing the pipeline: the guarded front
 

@@ -435,12 +435,60 @@ def _runs(ref: str, runs: dict[str, Any]) -> str:
                 escape(str(run.get("phase") or "")),
                 _state_cell(value, str(state.get("reason") or "no reason was recorded"))
                 + f'<div class="age">({escape(over)})</div>',
+                _outcome_cell(state),
             ]
         )
     workers = [item.get("run") or {} for item in items if (item.get("run") or {}).get("role") == "worker"]
-    return _rows(["run", "role", "profile", "phase", "state"], rows) + _review_form(
+    return _rows(["run", "role", "profile", "phase", "state", "outcome"], rows) + _review_form(
         ref, worker=workers[-1] if workers else None
     )
+
+
+def _outcome_cell(state: dict[str, Any]) -> str:
+    """What this run produced: the verdict it carries, its result, and the status it exited with.
+
+    The state word beside this says how a run *ended*; this says what came of it, and the two are
+    not the same question. A reviewer run that ended normally and a reviewer run that ended
+    normally having called the work `red` read identically in the state column, which is the one
+    thing a card page is read to find out — so the verdict is drawn here, off `state.result.verdict`
+    (the field :func:`secretary.webproto.run_state.verdict_of` already publishes), and never
+    re-derived from the result body by this module.
+
+    The rule of this file applies unchanged: a result that is absent and a result that could not be
+    read are different things and say different words. An open run has produced nothing yet and
+    says exactly that, rather than borrowing the vocabulary of a run that finished empty.
+    """
+    result = state.get("result") or {}
+    exit_status = state.get("exit") or {}
+    parts: list[str] = []
+    verdict = result.get("verdict")
+    if verdict:
+        parts.append(f'<div><b>verdict</b> <span class="state">{escape(str(verdict))}</span></div>')
+    if result.get("present"):
+        summary = _summary_of(result.get("value"))
+        parts.append(f'<div>the head published a result{escape(summary)}</div>')
+    elif result.get("reason"):
+        parts.append(f'<div class="reason">{escape(str(result["reason"]))}</div>')
+    elif state.get("ended"):
+        parts.append('<div class="reason">the head published no result</div>')
+    else:
+        parts.append('<div class="empty">this run has produced nothing yet.</div>')
+    if exit_status.get("code") is not None:
+        parts.append(f'<div class="age">exit status {escape(str(exit_status["code"]))}</div>')
+    elif exit_status.get("signal") is not None:
+        parts.append(f'<div class="age">ended by signal {escape(str(exit_status["signal"]))}</div>')
+    return "".join(parts)
+
+
+def _summary_of(value: Any) -> str:
+    """The one line a head's own result offers about itself, when it offers one."""
+    if not isinstance(value, dict):
+        return ""
+    for name in ("summary", "status"):
+        text = value.get(name)
+        if isinstance(text, str) and text.strip():
+            return ": " + text.strip()
+    return ""
 
 
 def _review_form(ref: str, worker: dict[str, Any] | None) -> str:
