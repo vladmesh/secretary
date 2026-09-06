@@ -45,12 +45,18 @@ import json
 from typing import Any, Callable, TypeVar
 
 from secretary.webproto.errors import ReadError, RuntimeUnavailable
-from secretary.webproto.runs import RunStoreError
+from secretary.webproto.store_io import RunStoreError
 
-#: The durable sources' own vocabularies. `RunStoreError` is the run store's; `OSError` and
-#: `json.JSONDecodeError` are what any file under `<data>/` speaks when it cannot be read or does
-#: not parse. Every one of them, reaching a caller, means "a source refused", never "you asked
-#: wrongly", so every one of them becomes `backend_unavailable`.
+#: The durable sources' own vocabularies. `RunStoreError` is what every store of this layer
+#: speaks -- read or written, run store or sprint request index -- because every write goes through
+#: :func:`secretary.webproto.store_io.write_document`, which is where the atomic writer's own
+#: `RuntimeError` stops; `OSError` and `json.JSONDecodeError` are what any file under `<data>/`
+#: speaks when it cannot be read or does not parse. Every one of them, reaching a caller, means "a
+#: source refused", never "you asked wrongly", so every one of them becomes `backend_unavailable`.
+#:
+#: `RuntimeError` is deliberately *not* here, and that is exactly why `store_io` exists: adding it
+#: would make a `TypeError`'s bare cousin -- a defect of this layer -- indistinguishable from a full
+#: disk, so the disk is translated at the seam instead of the vocabulary being widened here.
 IMPLEMENTATION_FAILURES: tuple[type[BaseException], ...] = (RunStoreError, OSError, json.JSONDecodeError)
 
 #: Set on a wrapped operation, so a test can tell a guarded operation from an unguarded one without

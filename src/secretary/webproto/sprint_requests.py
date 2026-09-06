@@ -19,11 +19,14 @@ whose own staged transaction resumes the row it already began. This record's `re
 therefore a *shortcut* -- a repeat that finds it answers without touching the writer at all -- and
 never the only thing standing between a repeat and a second sprint.
 
-The failure vocabulary is the run store's on purpose. `RunStoreError` and `RequestMismatch` are
+The failure vocabulary is the layer's own on purpose. `RunStoreError` and `RequestMismatch` are
 already what this layer's durable stores speak, already in
 :data:`secretary.webproto.boundary.IMPLEMENTATION_FAILURES`, and already translated by the
 boundary; a private exception type here would mean a second entry in that tuple and a second thing
-for the next operation to remember.
+for the next operation to remember. For the same reason the write itself goes through
+:func:`secretary.webproto.store_io.write_document` -- the one seam where this layer meets the
+filesystem -- rather than calling the atomic writer directly: a store that called it directly would
+raise the writer's own `RuntimeError`, which the boundary translates for nobody.
 """
 
 from __future__ import annotations
@@ -35,8 +38,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from secretary._fsutil import file_lock, write_text_atomic
-from secretary.webproto.runs import RequestMismatch, RunStoreError
+from secretary._fsutil import file_lock
+from secretary.webproto.runs import RequestMismatch
+from secretary.webproto.store_io import RunStoreError, write_document
 
 #: The one operation a record here can be claimed under today. It is stored rather than assumed for
 #: the same reason `RunStore` stores it: a request id is the idempotency key of *one* operation, and
@@ -183,7 +187,7 @@ class SprintRequestStore:
             return completed
 
     def _write(self, record: SprintRequest) -> None:
-        write_text_atomic(self._path(record.request_id), json.dumps(record.to_json(), sort_keys=True, indent=2))
+        write_document(self._path(record.request_id), json.dumps(record.to_json(), sort_keys=True, indent=2))
 
 
 def _text(value: Any) -> str:

@@ -106,6 +106,7 @@ from secretary.webproto.runs import (
     RunStoreError,
     request_fingerprint,
 )
+from secretary.webproto.store_io import write_document
 from secretary.webproto.workspaces import provision, workspace_path
 from triggered_agents.agents.pipeline.heads import HeadRegistryError, load_registry
 from triggered_agents.runtime.head.command import HeadCommandError
@@ -796,11 +797,18 @@ class OperationLayer(ProtocolBoundary):
         return self._write_document(run, "REVIEW.md", body)
 
     def _write_document(self, run: ProductRun, name: str, body: str) -> Path:
+        """One document a head is pointed at, written through this layer's one file seam.
+
+        Through the seam rather than with its own `write_text` for the reason
+        :mod:`secretary.webproto.store_io` exists: there is one place this package writes a file
+        and one vocabulary it fails in, and a path that wrote its own would be the next one to
+        raise something nothing translates. The local refusal stays, because *which* write failed
+        is worth saying and the seam cannot know it.
+        """
         path = Path(run.run_dir) / name
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body, encoding="utf-8")
-        except OSError as exc:
+            write_document(path, body)
+        except RunStoreError as exc:
             raise RuntimeUnavailable(f"this run's task document could not be written: {exc}") from None
         return path
 

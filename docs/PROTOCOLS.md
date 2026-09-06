@@ -2687,6 +2687,19 @@ record once took a whole card page down through `run_list`. A defect of the laye
 `tests/test_web_run_protocol.py:ErrorContractTests` breaks the run store and the journal under every
 operation of both layers, and fails if an operation is added without being covered.
 
+**And a file this layer writes is written in one place, for the same reason.** That promise holds
+only while every failure a durable source can raise is in the boundary's vocabulary, and one was
+not: `secretary._fsutil.write_text_atomic` turns its `OSError` into a `RuntimeError`, which is
+deliberately *outside* that vocabulary because it is what a defect of the layer travels as. A full
+disk under any store therefore escaped raw, past every `except RunStoreError` and past a transport
+that catches `ReadError`. Widening the vocabulary would hide real defects and repairing it at one
+store would leave the next one to rediscover it, so every write in the package goes through
+`secretary.webproto.store_io.write_document`, which is where the writer's `RuntimeError` becomes
+`RunStoreError` and therefore `backend_unavailable`. `write_text_atomic` itself is unchanged: a
+dozen callers outside this layer already catch its `RuntimeError` on purpose.
+`tests/test_web_run_protocol.py:FileWriteSeamTests` scans the package and fails if any module of it
+writes a file another way.
+
 ## Running the pipeline
 
 The other half of `secretary.webproto`, and the half that produces what the read layer shows: three

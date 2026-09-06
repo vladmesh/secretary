@@ -25,6 +25,7 @@ from secretary.config import validate
 from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
 from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.webproto import sprint_reads as sprint_reads_module
+from secretary.webproto import store_io
 from secretary.webproto.boundary import GUARDED, operations
 from secretary.webproto.errors import (
     OperationPending,
@@ -333,14 +334,32 @@ class IdempotencyTests(SprintProtocolFixture):
         which is exactly the window criterion 4 names. The repeat therefore arrives with a claimed
         request that names no sprint, hands the same id down to the writer, and gets back the
         sprint the first attempt already created rather than a new one.
+
+        The failure is injected at the *filesystem*, not at `record_reference`. An earlier version
+        of this test patched that method to raise `RunStoreError`, which is the exception the
+        operation already catches, so by construction it could never see what the real write does:
+        `write_text_atomic` raises a bare `RuntimeError`, which the boundary deliberately does not
+        translate, and a full disk here escaped as that raw exception instead of the typed answer
+        below. The seam this now goes through
+        (:func:`secretary.webproto.store_io.write_document`) is what makes the two agree.
         """
-        broken = mock.patch.object(
-            SprintRequestStore,
-            "record_reference",
-            side_effect=RunStoreError("the request index is unwritable"),
-        )
-        with broken, self.assertRaises(OperationPending) as pending:
+        real = store_io.write_text_atomic
+
+        def refuse_the_reference(path, payload):
+            # The claim write carries no reference yet; the write that records which sprint this
+            # request produced does. So this fails exactly the second one, with the message the
+            # atomic writer really raises when the filesystem refuses it.
+            if '"reference": "sprint:' in payload:
+                raise RuntimeError(f"could not write export file {path}: [Errno 28] No space left on device")
+            return real(path, payload)
+
+        with (
+            mock.patch.object(store_io, "write_text_atomic", refuse_the_reference),
+            self.assertRaises(OperationPending) as pending,
+        ):
             self.create()
+        # Typed, and not the writer's own vocabulary: a caller that catches `ReadError` catches it.
+        self.assertIsInstance(pending.exception, ReadError)
         self.assertEqual(pending.exception.code, "backend_unavailable")
         self.assertEqual(pending.exception.data["reason"], PENDING_REASON)
         action = pending.exception.data["action"]

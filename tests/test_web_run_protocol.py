@@ -12,6 +12,7 @@ secretary-1562 as a check, and it covers both the imports and the calls.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
@@ -34,7 +35,7 @@ from secretary.config import validate
 from secretary.webproto import admission as admission_module
 from secretary.webproto import lifecycle as lifecycle_module
 from secretary.webproto import ops as ops_module
-from secretary.webproto import run_events, run_state, workspaces
+from secretary.webproto import run_events, run_state, store_io, workspaces
 from secretary.webproto.boundary import GUARDED, IMPLEMENTATION_FAILURES, ProtocolBoundary, operations
 from secretary.webproto.errors import (
     OwnerConflict,
@@ -1801,6 +1802,94 @@ class ErrorContractTests(ProductRuntimeFixture):
     def test_the_run_store_error_is_never_the_kind_of_thing_a_caller_sees(self) -> None:
         self.assertFalse(issubclass(RunStoreError, ReadError))
         self.assertIn(RunStoreError, IMPLEMENTATION_FAILURES)
+
+    def test_a_filesystem_that_refuses_a_run_record_is_a_code_and_not_a_bare_error(self) -> None:
+        """The atomic writer's `RuntimeError` is the one durable failure the boundary cannot see.
+
+        `secretary._fsutil.write_text_atomic` turns its `OSError` into a `RuntimeError`, and
+        `RuntimeError` is deliberately outside `IMPLEMENTATION_FAILURES` -- it is what a defect of
+        this layer travels as. So a full disk under the run store escaped as a raw exception, past
+        every `except RunStoreError` and past a transport that catches `ReadError`. It is
+        translated at the one seam this layer writes files through
+        (:func:`secretary.webproto.store_io.write_document`), and this is that hole under
+        `run_start`, which has had it since secretary-1562.
+        """
+
+        def full_disk(path, payload):
+            raise RuntimeError(f"could not write export file {path}: [Errno 28] No space left on device")
+
+        with (
+            mock.patch.object(store_io, "write_text_atomic", full_disk),
+            self.assertRaises(ReadError) as refused,
+        ):
+            self.layer().run_start(self.REF, request_id="contract-disk", profile=WORKER_PROFILE)
+        self.assertEqual(refused.exception.code, "backend_unavailable")
+        # And nothing was left behind: no record, and no head raised under one.
+        self.assertEqual(self.layer().store().for_ref(self.REF), [])
+        self.assertEqual(self.runtime.starts, [])
+
+
+class FileWriteSeamTests(unittest.TestCase):
+    """One place this layer writes a file, checked by scanning the package rather than remembered.
+
+    The boundary's promise is that an operation is guarded by the act of being public, with no list
+    to keep in step. That holds only while every durable failure the layer can raise is in its
+    vocabulary, and the atomic writer's `RuntimeError` was not. Repairing that at a call site would
+    leave the next store to rediscover it, so the repair is a seam -- and a seam with a way around
+    it is not a seam, which is what this scan is for.
+    """
+
+    WRITERS = frozenset(
+        {"write_text_atomic", "write_json", "write_ndjson", "write_text", "write_bytes", "stage_text"}
+    )
+    WRITE_MODES = frozenset("wax+")
+
+    def _calls(self, tree) -> list[tuple[int, str, list]]:
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            name = function.attr if isinstance(function, ast.Attribute) else getattr(function, "id", "")
+            found.append((node.lineno, name, node.args))
+        return found
+
+    def test_every_file_this_layer_writes_goes_through_the_one_seam(self) -> None:
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "src" / "secretary" / "webproto").glob("*.py")):
+            if path.name == "store_io.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for line, name, args in self._calls(tree):
+                if name in self.WRITERS:
+                    offenders.append(f"{path.name}:{line}: {name}")
+                if name == "open" and args:
+                    mode = args[0].value if isinstance(args[0], ast.Constant) else ""
+                    if isinstance(mode, str) and set(mode) & self.WRITE_MODES:
+                        offenders.append(f"{path.name}:{line}: open({mode!r})")
+        self.assertEqual(offenders, [])
+
+    #: Every module of the layer that puts a file on disk, so the scan above cannot pass by the
+    #: layer having stopped writing anything. A fourth one is welcome; a fourth one that writes its
+    #: own way is what the scan refuses.
+    SEAM_CALLERS = ("ops.py", "runs.py", "sprint_requests.py")
+
+    def test_the_seam_is_where_this_layer_actually_writes(self) -> None:
+        writers: set[str] = set()
+        for path in sorted((REPO_ROOT / "src" / "secretary" / "webproto").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            if any(name == "write_document" for _line, name, _args in self._calls(tree)):
+                writers.add(path.name)
+        self.assertLessEqual(set(self.SEAM_CALLERS), writers)
+
+    def test_the_seam_answers_a_refused_write_in_the_layers_own_vocabulary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "occupied"
+            target.mkdir()
+            # A path that is a directory is a write the filesystem really refuses, so this is the
+            # helper's own `RuntimeError` and not a simulated one.
+            with self.assertRaises(RunStoreError):
+                store_io.write_document(target, "{}")
 
 
 class OrcaAbsenceTests(ProductRuntimeFixture):
