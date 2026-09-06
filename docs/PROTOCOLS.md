@@ -2396,8 +2396,9 @@ for, and each is a field rather than an assumption a reader has to bring:
    per-sprint pause and no operation that takes a sprint. Every document carries `extent`
    (`{"scope": "pipeline", "per_sprint": false, …}`), read from no source at all, so it is stated
    even on a document where every source refused — which is when a reader most needs it. The scope
-   read lists *every* open sprint of the installation for the same reason, and says in words that
-   the cards it lists are the sprints' cards and not the whole of what a pause reaches.
+   read lists *every* open sprint of the installation for the same reason, and *every* card on the
+   Pipeline board — each with the sprint that holds it, or `null` where none does — because a drain
+   stops the dispatcher claiming a card whether or not a sprint holds it.
 2. **A drain stops no running head.** It stops claiming Ready cards, dispatching background roles
    and raising an observer for a sprint opened during the pause; a card already in flight rides its
    cycle to the end. `modes.drain.does_not_stop` says it, and the heads a drain leaves alone are
@@ -2417,12 +2418,20 @@ for, and each is a field rather than an assumption a reader has to bring:
 
 **The scope read is the new one, and it is a read.** `pause_scope` answers, before any command is
 issued: that the pause is pipeline-wide, which dispatcher and which files a command would write
-(`target.pause_file`, `target.state_file`, `target.legacy_mirror_file`), which sprints are open and
-which of their cards they hold, which heads are running right now, and — separately — what a drain
-does not stop and what a freeze would. It sets no flag, takes no tick lock, stops or starts no head,
+(`target.pause_file`, `target.state_file`, `target.legacy_mirror_file`), which sprints are open,
+which cards are on the Pipeline board and which sprint holds each of them, which heads are running
+right now, and — separately — what a drain does not stop and what a freeze would. It sets no flag, takes no tick lock, stops or starts no head,
 wakes nothing and writes nothing; that is pinned by a snapshot of the whole data plane taken around
 the call (`tests/test_web_pause_protocol.py::ReadsWriteNothingTests`), exactly as secretary-1575
 pinned its own read.
+
+**The cards it lists are every card, and it costs no extra read.** The Pipeline is listed once for
+the document, and the scope publishes what that listing holds rather than filtering it down to the
+open sprints' cards: a card no sprint holds is inside a pipeline-wide pause exactly as much as one
+that is, and "there are others" would not be the scope. The one thing on that board that is *not*
+listed is a Product or an Issue record — the board's own rule is that such a record never takes a
+claim or a task transition, whatever column it sits in (`secretary.tasks._TYPED_RECORD_TYPES`), so a
+pause reaches none of them and listing one would be the same misdescription in the other direction.
 
 **The repeat and conflict contract.** The pause is idempotent in its own mode, by
 `dispatcher_pause_ops`' own rule, so these operations carry no request index: a repeated `pause_drain`
@@ -2443,7 +2452,7 @@ refusal is not an action at all and never reaches a document.
 | `pause` | `<data_dir>/dispatcher/pause.json` | whether the pipeline is paused, in what mode, by whom, since when, and what a resume would put back |
 | `liveness` | `<data_dir>/dispatcher/production-state.json` | which dispatcher this is and which heads are behind its cards and sprints |
 | `sprints` | the sprint board, one pass | which sprints are open |
-| `cards` | the Pipeline, one listing | which cards those sprints hold |
+| `cards` | the Pipeline, one listing | which cards exist and which sprint holds each of them |
 
 | section | may be answered by | what it says with its input missing |
 | --- | --- | --- |
@@ -2452,7 +2461,7 @@ refusal is not an action at all and never reaches a document.
 | `state` | `pause` | every field `null`, `paused` included, sourced `pause` |
 | `heads` | `liveness` | `cards: null` and `observers: null`, never `[]` |
 | `sprints` | `sprints` | `items: null`, never `[]` — an empty list would claim no sprint is inside a pipeline-wide pause |
-| `cards` | `cards`, which also needs `sprints` | `items: null` |
+| `cards` | `cards` | `items: null`, never `[]`. It does not need `sprints`: which cards exist is the listing's own answer, so an unreadable sprint board does not take the card list with it |
 
 A pause flag that cannot be read is this source refusing, and the refusal says the consequence the
 product has already decided for that case: **every production tick reads an unreadable flag as a
@@ -2461,14 +2470,37 @@ as a claim that the pipeline is paused — `paused` stays `null`, because a flag
 establishes neither answer. `secretary backup create` reads that document and treats an
 unestablished pause state as paused, because a backup must own the freeze it takes.
 
-The fault matrix — the flag unreadable, the production state unreadable, and both together, plus an
-unreadable sprint board — is `tests/test_web_pause_protocol.py::SourceIsolationTests`.
+**A durable file that parses can still fail to answer, and that is the same refusal.** A pause flag
+whose `stopped_worker` is the number `1`, or a production record whose `attempt_round` is the string
+`"not-an-integer"`, is readable JSON that cannot be converted into the state these documents report.
+Every such conversion happens *inside the source read*, so it becomes an unavailable source rather
+than an exception past the seam, and the set of failures that means "this source could not answer"
+is one tuple both this layer and the sprint layer import
+(`secretary.webproto.sources.SOURCE_FAILURES`) rather than two hand-kept lists. The semantically
+corrupt flag gets its own reason and never borrows the unreadable-flag sentence above: that file
+parses, so the tick still reads it and behaves by it, and what could not be established is what the
+flag says here.
+
+The fault matrix — the flag unreadable and the flag unusable, the production state unreadable and
+unconvertible, each alone and in combination, plus an unreadable sprint board — is
+`tests/test_web_pause_protocol.py::SourceIsolationTests`.
 
 **The commands are clients.** `secretary pause drain`, `secretary resume`, `secretary pause-status`
 and the new `secretary pause-scope` call these operations, print the document, and map the typed code
 onto the exit status `secretary web-run` already uses: `validation`/`not_found` → 2,
 `owner_conflict` → 3 (which is what a `pause_conflict` has always exited with), `backend_unavailable`
-→ 1. They hold no rule of their own. `secretary pause freeze` deliberately does **not** go through
+→ 1. They hold no rule of their own.
+
+**An installation whose config does not validate is `validation`, and that is a compatibility
+promise.** These commands reached the dispatcher through `runtime_from_args`, whose `invalid_instance`
+is a `DispatcherError` with exit status 2, so that is the status they still answer with — mapping the
+configuration refusal to `backend_unavailable` would have moved a status a script reads today. It is
+also the honest code: the caller named an installation that is not one, and no durable source of this
+installation refused. The one behaviour that did move is in the other direction: with an explicit
+`--data-dir` and a config that does not validate, the two *reads* now answer from the flag and the
+dispatcher state and report `installation` as an unavailable source, where the old path refused. No
+refusal changed its status; a caller that supplied the missing information gains an answer, exactly
+as the sprint reads decided for the same case. `secretary pause freeze` deliberately does **not** go through
 the layer — there is no freeze operation to route it to — and keeps the path it always had, so the
 two spellings reach two implementations and no argument of the soft one can produce a freeze.
 

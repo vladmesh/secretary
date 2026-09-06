@@ -53,20 +53,55 @@ class ScopeReadTests(PauseProtocolFixture):
         self.assertEqual(document["dispatcher"]["kind"], "production")
         self.assertEqual(document["dispatcher"]["phase"], "production")
 
-    def test_the_scope_lists_every_open_sprint_and_the_cards_they_hold(self) -> None:
+    def test_the_scope_lists_every_open_sprint(self) -> None:
         """Every open sprint, because the flag is one and covers all of them."""
         first = self.reference_of(self.create())
         second = self.add_sprint_row("sprint:900", goal="a second open sprint")
         self.add_sprint_row("sprint:901", status="closed", goal="a sprint that ended")
-        self.link_card(EXISTING_CARD, second, state="in_progress")
 
         document = self.pause_reads().pause_scope()
         self.assertEqual([item["ref"] for item in document["sprints"]["items"]], sorted([first, second]))
         self.assertEqual(document["sprints"]["other_sprints"], 1)
+
+    def test_the_scope_names_every_card_on_the_board_and_not_only_the_linked_ones(self) -> None:
+        """A drain stops the dispatcher claiming a card whether or not a sprint holds it.
+
+        So the scope names every card, with the sprint that holds it where one does. Listing only
+        the sprint-linked cards and saying "there are others" is not the scope; it is the admission
+        that the scope was not shown.
+        """
+        sprint = self.add_sprint_row("sprint:900", goal="a second open sprint")
+        self.link_card(EXISTING_CARD, sprint, state="in_progress")
+        self.add_card("secretary-77", state="ready")
+        self.add_card("secretary-78", state="blocked", sprint="sprint:901")
+
+        document = self.pause_reads().pause_scope()
         self.assertEqual(
             document["cards"]["items"],
-            [{"ref": EXISTING_CARD, "sprint": second, "state": "in_progress"}],
+            [
+                {"ref": EXISTING_CARD, "sprint": sprint, "state": "in_progress"},
+                # No sprint holds it, and the relationship is null rather than absent or empty.
+                {"ref": "secretary-77", "sprint": None, "state": "ready"},
+                # Held by a sprint that is not open: still a card a drain stops claiming.
+                {"ref": "secretary-78", "sprint": "sprint:901", "state": "blocked"},
+            ],
         )
+        # And the Product and Issue records that live on the same board are not cards: the board's
+        # own rule is that such a record never takes a claim, so a pause reaches none of them.
+        listed = {item["ref"] for item in document["cards"]["items"]}
+        self.assertEqual(listed & {"product:secretary", "issue:open", "issue:foreign"}, set())
+
+    def test_the_card_list_costs_no_extra_board_pass(self) -> None:
+        """Removing a filter, not adding a read: the Pipeline is listed once for the document."""
+        self.add_card("secretary-77")
+        before = len(self.board.calls)
+        self.pause_reads().pause_scope()
+        listings = [
+            method
+            for method, params in self.board.calls[before:]
+            if method == "getAllTasks" and params.get("project_id") == 7
+        ]
+        self.assertEqual(len(listings), 1)
 
     def test_the_scope_says_a_drain_stops_no_running_head_and_lists_the_heads_it_leaves(self) -> None:
         self.tracked_head()
@@ -230,6 +265,70 @@ class SourceIsolationTests(PauseProtocolFixture):
         self.assert_available(document, "state")
         self.assert_available(document, "heads")
 
+    def test_a_flag_that_parses_but_is_not_a_pause_state_refuses_as_a_source(self) -> None:
+        """Semantic corruption, which is the half a narrower catch let escape as a TypeError."""
+        self.create()
+        self.tracked_head()
+        self.corrupt_pause_flag(stopped_worker=1)
+        document = self.pause_reads().pause_scope()
+
+        source = self.assert_unavailable(document, "state")
+        self.assertEqual(source["name"], "pause")
+        self.assertIn("does not hold a pause state", source["reason"])
+        # And it does not borrow the unreadable-flag sentence: this file parses, so the tick still
+        # reads it and behaves by it. What is unestablished is what the flag says here.
+        self.assertNotIn("reads an unreadable flag as a freeze", source["reason"])
+        self.assertIsNone(document["state"]["paused"])
+        self.assert_available(document, "heads")
+        self.assert_available(document, "sprints")
+
+    def test_a_production_state_that_parses_but_holds_an_unconvertible_record_refuses(self) -> None:
+        self.create()
+        self.pause_ops().pause_drain(actor="operator", reason="host maintenance")
+        self.corrupt_production_state()
+        document = self.pause_reads().pause_scope()
+
+        for name in ("heads", "dispatcher"):
+            source = self.assert_unavailable(document, name)
+            self.assertEqual(source["name"], "liveness")
+            self.assertIn("production state could not be read", source["reason"])
+        self.assertIsNone(document["heads"]["cards"])
+        self.assert_available(document, "state")
+        self.assertEqual(document["state"]["mode"], DRAIN)
+
+    def test_both_semantically_corrupt_leaves_no_claim_at_all(self) -> None:
+        self.create()
+        self.corrupt_pause_flag(stopped_reviewer={"not": "a list"})
+        self.corrupt_production_state()
+        document = self.pause_reads().pause_scope()
+
+        self.assert_unavailable(document, "state")
+        self.assert_unavailable(document, "heads")
+        self.assert_unavailable(document, "dispatcher")
+        self.assertIsNone(document["state"]["paused"])
+        self.assertIsNone(document["dispatcher"]["kind"])
+        self.assertEqual(document["extent"]["scope"], "pipeline")
+        self.assert_available(document, "cards")
+
+    def test_both_reads_survive_every_semantic_fault_the_same_way(self) -> None:
+        """The two documents answer the same way, and the state read is not the softer of the two."""
+        self.corrupt_pause_flag(stopped_worker=1)
+        self.corrupt_production_state()
+        for document in (self.pause_reads().pause_state(), self.pause_reads().pause_scope()):
+            with self.subTest(kind=document["kind"]):
+                self.assertEqual(document["sources"]["pause"]["source"]["state"], "unavailable")
+                self.assertEqual(document["sources"]["liveness"]["source"]["state"], "unavailable")
+
+    def test_the_layers_catch_the_same_source_failures_from_one_place(self) -> None:
+        """One rule about what a refused source may raise, not two hand-kept lists."""
+        from secretary.webproto import pause_reads, sprint_reads
+        from secretary.webproto import sources as source_module
+
+        self.assertIs(pause_reads._SOURCE_FAILURES, source_module.SOURCE_FAILURES)
+        self.assertIs(sprint_reads._SOURCE_FAILURES, source_module.SOURCE_FAILURES)
+        for failure in (ValueError, TypeError, KeyError, OSError):
+            self.assertIn(failure, source_module.SOURCE_FAILURES)
+
     def test_every_section_names_the_source_that_answered_it(self) -> None:
         self.create()
         self.tracked_head()
@@ -253,7 +352,13 @@ class SourceIsolationTests(PauseProtocolFixture):
                 self.assertTrue(getattr(builder, "__webproto_section__", False))
         produced = pause_reads.SECTIONS.state(
             pause_reads.SourceSet(
-                [pause_reads.Reading(pause_reads.SOURCE_PAUSE, pause_reads.sources.available(self.clock), {})]
+                [
+                    pause_reads.Reading(
+                        pause_reads.SOURCE_PAUSE,
+                        pause_reads.sources.available(self.clock),
+                        pause_reads._flag_state({}),
+                    )
+                ]
             )
         )
         self.assertIsInstance(produced, Section)
@@ -523,6 +628,32 @@ class CommandClientTests(PauseProtocolFixture):
         status, document = self._run(dispatcher_commands.run_pause, mode="drain", reason=None)
         self.assertEqual(status, 2)
         self.assertEqual(document["error"]["code"], "usage")
+
+    def test_an_invalid_instance_keeps_the_exit_status_it_always_had(self) -> None:
+        """Criterion 8 on the configuration refusal, which used to be the dispatcher's own exit 2.
+
+        Before these commands were clients, every one of them reached the dispatcher through
+        `runtime_from_args`, whose `invalid_instance` is a `DispatcherError` with exit status 2. A
+        script reading that status must keep reading it, so the layer's typed code for a config that
+        does not validate is `validation` and not `backend_unavailable`. No layer is substituted
+        here: these run the real handlers over a real broken installation.
+        """
+        from secretary import dispatcher_commands
+
+        broken = self.tmp / "broken-instance"
+        broken.mkdir()
+        (broken / "instance.yaml").write_text("version: 1\nname: broken\n", encoding="utf-8")
+        commands = (
+            ("pause drain", dispatcher_commands.run_pause, {"mode": "drain"}),
+            ("resume", dispatcher_commands.run_resume, {}),
+            ("pause-status", dispatcher_commands.run_pause_status, {}),
+            ("pause-scope", dispatcher_commands.run_pause_scope, {}),
+        )
+        for name, handler, extra in commands:
+            with self.subTest(command=name):
+                with mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+                    status = handler(self._args(instance=str(broken), data_dir=None, **extra))
+                self.assertEqual(status, 2)
 
     def test_pause_freeze_does_not_go_through_the_soft_path(self) -> None:
         """Criterion 5 at the command: the two spellings reach two implementations."""

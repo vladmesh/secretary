@@ -47,12 +47,7 @@ from secretary.dispatcher_pause_ops import resume as _resume
 from secretary.dispatcher_types import DispatcherError, HostError
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
-from secretary.webproto.errors import (
-    InstallationUnavailable,
-    OwnerConflict,
-    RuntimeUnavailable,
-    ValidationRefused,
-)
+from secretary.webproto.errors import OwnerConflict, RuntimeUnavailable, ValidationRefused
 from secretary.webproto.pause_reads import (
     DRAIN,
     DRAIN_CONTRACT,
@@ -74,12 +69,19 @@ PAUSE_RESUME_OPERATION = "pause_resume"
 #: -- a drain, an actor, a reason -- and it is refused on the state of the world: the pipeline is
 #: already paused in the other mode. The same request made after a resume is admitted, exactly as a
 #: comment on a closed sprint is.
+#: `invalid_instance` and `invalid_heads` are `validation` for a compatibility reason, and it is the
+#: one this card had to be told twice: these three commands reached the dispatcher through
+#: `runtime_from_args`, whose refusal of a config that does not validate is a `DispatcherError` with
+#: exit status 2, and an operator or script reading that status must keep reading it now that the
+#: command is a client of this layer. It is also the honest code: the caller named an installation
+#: that is not one, which is a malformed request and not a durable source of this installation
+#: refusing.
 _CODES: dict[str, Any] = {
     "validation": ValidationRefused,
     "usage": ValidationRefused,
     "pause_conflict": OwnerConflict,
-    "invalid_instance": InstallationUnavailable,
-    "invalid_heads": InstallationUnavailable,
+    "invalid_instance": ValidationRefused,
+    "invalid_heads": ValidationRefused,
 }
 
 

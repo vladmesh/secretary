@@ -1767,9 +1767,11 @@ It answers, in one document and without changing anything:
 - **which dispatcher and which files** a command would write (`target`): the flag
   `<data_dir>/dispatcher/pause.json`, the production state beside it, and the legacy mirror the
   background roles read;
-- **which sprints are open and which cards they hold** (`sprints`, `cards`), plus how many sprints of
-  the installation are not open. The cards listed are those sprints' cards; a pause reaches every card
-  on the board, including ones no open sprint holds, and the extent statement says so;
+- **which sprints are open** (`sprints`), plus how many sprints of the installation are not open;
+- **which cards are on the board** (`cards`) — every one of them, each with the sprint that holds it
+  or `null` where none does. A drain stops the dispatcher claiming a Ready card whether or not a
+  sprint holds it, so the list is the board and not the sprints' share of it. Product and Issue
+  records are not listed: such a record never takes a claim, so a pause reaches none of them;
 - **which heads are running right now** (`heads`), per card and per sprint observer;
 - **what a drain does not stop, and what a freeze would** (`modes`). These are two different
   commands, side by side, so the choice is made with both in view.

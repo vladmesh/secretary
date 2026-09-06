@@ -17,9 +17,11 @@ auto-resume TTL — and no second flag, lock or store was added. See
 [OPERATIONS](OPERATIONS.md#read-the-scope-first-then-decide).
 
 **New command.** `secretary pause-scope --instance INSTANCE` prints the scope read: that the pause is
-pipeline-wide, which dispatcher and which files a command would write, which sprints are open and
-which of their cards they hold, which heads are running, and — separately — what a drain does not stop
-versus what a freeze would. It is a read: no flag, no lock, no head, no wake, no write.
+pipeline-wide, which dispatcher and which files a command would write, which sprints are open, every
+card on the Pipeline board with the sprint that holds it (`null` where none does), which heads are
+running, and — separately — what a drain does not stop versus what a freeze would. It is a read: no
+flag, no lock, no head, no wake, no write. Product and Issue records are not listed as cards: such a
+record never takes a claim, so a pause reaches none of them.
 
 **`secretary pause-status` output has changed shape.** It is now a client of `pause_state` and prints
 that document. The fields moved into sections that each name the source that answered them: `paused`,
@@ -39,6 +41,19 @@ exits `3`, a validation refusal `2`, an unavailable backend `1`.
 `pause_drain` takes no mode, and no default, fallback, retry or convenience path turns a request for a
 soft pause into a freeze. The freeze command keeps the implementation and the output it had, and the
 existing refusal to change mode while paused is preserved.
+
+**A config that does not validate keeps exiting 2.** The pause commands reached the dispatcher
+through `runtime_from_args`, whose `invalid_instance` exits 2, so the layer's typed code for it is
+`validation` and the status is unchanged on all four commands. In the other direction: with an
+explicit `--data-dir`, `pause-status` and `pause-scope` now answer from the flag and the dispatcher
+state and report `installation` as an unavailable source, where the old path refused — a caller that
+supplied the missing information gains an answer, and no refusal changed its status.
+
+**A durable file that parses but cannot be converted is an unavailable source, not an exception.** A
+pause flag whose `stopped_worker` is a number, or a production record whose `attempt_round` is not an
+integer, marks its source unavailable and leaves every other section standing. The set of failures
+that means "this source could not answer" now lives in one place both the pause and the sprint reads
+import, `secretary.webproto.sources.SOURCE_FAILURES`.
 
 **Nothing says a soft pause stops a head, or that a pause is per sprint.** Every document carries an
 `extent` object stating that the pause is one pipeline-wide flag with no per-sprint form — including a

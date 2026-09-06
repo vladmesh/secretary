@@ -25,8 +25,36 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.head_registry import HeadRegistryConfigError
+from secretary.sprint_observer import ObserverMetadataError
+from secretary.tasks import TaskError
+
 AVAILABLE = "available"
 UNAVAILABLE = "unavailable"
+
+#: What a source read may answer with instead of a value, in one place every layer reads it from.
+#:
+#: The list is deliberately wider than "the file was not there" or "the bytes were not JSON". A
+#: durable document of this installation can be perfectly readable and still not be convertible into
+#: the state a read reports -- a production record whose `attempt_round` is the string
+#: `"not-an-integer"`, a pause flag whose `stopped_worker` is the number `1` -- and the conversion
+#: raises `ValueError`, `TypeError` or `KeyError` where a missing file raises `OSError`. Reaching a
+#: caller, every one of them means the same thing: *this source could not answer*. So each becomes an
+#: unavailable `Reading` rather than an exception, and the section built from it claims nothing.
+#:
+#: It lives here rather than in each layer because it is one rule about sources, and two hand-kept
+#: lists of "what a refused source can raise" drift the first time a new durable document is read
+#: through one of them. `secretary.webproto.sprint_reads` and `secretary.webproto.pause_reads` both
+#: catch exactly this tuple.
+SOURCE_FAILURES: tuple[type[BaseException], ...] = (
+    TaskError,
+    HeadRegistryConfigError,
+    ObserverMetadataError,
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+)
 
 
 def isoformat(moment: float) -> str:

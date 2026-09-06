@@ -86,6 +86,42 @@ class PauseProtocolFixture(SprintProtocolFixture):
         task["column_id"] = columns[state]
         self.board.call("saveTaskMetadata", task_id=int(task["id"]), values={"sprint_ref": sprint})
 
+    def add_card(self, reference: str, *, state: str = "ready", sprint: str | None = None) -> None:
+        """One more Pipeline card, linked to a sprint or held by none."""
+        columns = {"ready": 2, "in_progress": 3, "validate": 4, "blocked": 5, "done": 6}
+        task_id = int(
+            self.board.call(
+                "createTask",
+                project_id=7,
+                title=reference,
+                column_id=columns[state],
+                reference=reference,
+            )
+        )
+        values: dict[str, str] = {"record_type": "task", "project": "secretary"}
+        if sprint is not None:
+            values["sprint_ref"] = sprint
+        self.board.call("saveTaskMetadata", task_id=task_id, values=values)
+
+    def corrupt_pause_flag(self, **fields: Any) -> None:
+        """A pause flag that is valid JSON and still cannot be read as a pause state."""
+        payload = {"version": 1, "mode": "drain", "since": "2026-09-06T00:00:00Z", **fields}
+        self.pause_file().parent.mkdir(parents=True, exist_ok=True)
+        self.pause_file().write_text(json.dumps(payload), encoding="utf-8")
+
+    def corrupt_production_state(self) -> None:
+        """A production state that is valid JSON and still holds a record nothing can convert."""
+        self.production_path().write_text(
+            json.dumps(
+                {
+                    "phase": "production",
+                    "observers": {},
+                    "records": {EXISTING_CARD: {"state": "claimed", "attempt_round": "not-an-integer"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def tracked_head(self, reference: str = EXISTING_CARD, **record: Any) -> None:
         """A dispatcher record for one card with a live worker head on it."""
         self._production(

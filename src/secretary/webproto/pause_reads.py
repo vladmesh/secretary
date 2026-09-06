@@ -66,11 +66,11 @@ from secretary.dispatcher_pause import (
 from secretary.dispatcher_pause_ops import head_lines
 from secretary.dispatcher_production import ProductionState
 from secretary.sprints import SprintReader
-from secretary.tasks import KanboardClient, TaskError
+from secretary.tasks import _TYPED_RECORD_TYPES, KanboardClient
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
-from secretary.webproto.errors import InstallationUnavailable
-from secretary.webproto.section import Reading, Rule, Section, SectionSet, SourceSet, render, rule
+from secretary.webproto.errors import ValidationRefused
+from secretary.webproto.section import Reading, Section, SectionSet, SourceSet, render, rule
 
 SCHEMA_VERSION = 1
 
@@ -142,17 +142,32 @@ FREEZE_CONTRACT = {
     ),
 }
 
-#: Failures a source read may answer with instead of a value, caught per source exactly as the
-#: sprint reads catch theirs.
-_SOURCE_FAILURES = (TaskError, OSError, ValueError, KeyError, TypeError)
+#: What is on the Pipeline board but is not a card a pause reaches. The board's own distinction,
+#: taken from where it is already made: a Product or an Issue is a record that never takes a claim
+#: or a task transition, whatever column it currently sits in.
+NOT_A_CARD = frozenset(_TYPED_RECORD_TYPES)
+
+#: Failures a source read may answer with instead of a value. The same tuple the sprint reads catch,
+#: from the one place both layers read it -- see :data:`secretary.webproto.sources.SOURCE_FAILURES`
+#: for why it is wider than "the file was not there" and why it is not kept twice.
+_SOURCE_FAILURES = sources.SOURCE_FAILURES
 
 
 @dataclass(frozen=True, slots=True)
 class _Dispatcher:
-    """The dispatcher's production state, read once and classified once for the whole document."""
+    """The dispatcher's production state, read once and converted once for the whole document.
 
-    payload: dict[str, Any]
-    records: dict[str, Any]
+    Converted *in the source read* and not in a section, and that is the point of the class: a
+    production state can be perfectly readable JSON and still not be convertible into the records
+    this reports -- an `attempt_round` of `"not-an-integer"` is the case that made this a defect --
+    and a conversion left inside a section would raise past `SourceSet.decide` instead of marking
+    the source unavailable. Everything that can fail happens where the failure becomes a refusal.
+    """
+
+    phase: str
+    owner: str
+    heads: list[dict[str, Any]]
+    observers: list[dict[str, Any]]
 
 
 class PauseSections(SectionSet):
@@ -197,9 +212,9 @@ class PauseSections(SectionSet):
                 SOURCE_LIVENESS,
                 lambda live: {
                     "kind": "production",
-                    "phase": str(live.payload.get("phase") or "new"),
-                    "owner": str(live.payload.get("owner") or ""),
-                    "tracked_cards": len(live.records),
+                    "phase": live.phase,
+                    "owner": live.owner,
+                    "tracked_cards": len(live.heads),
                 },
             ),
             blank={"kind": None, "phase": None, "owner": None, "tracked_cards": None},
@@ -211,33 +226,15 @@ class PauseSections(SectionSet):
     def state(self, read: SourceSet) -> Section:
         """Whether the pipeline is paused, and everything the flag itself says about it.
 
-        Every field is the flag's, decided by the rules that already own them:
-        `normalize_pause_mode` for the mode, `on_resume_text` for what a resume would put back, and
-        `auto_resume_status` for whether the pause will lift itself.
+        Every field is the flag's, decided by the rules that already own them and applied in the
+        source read (:func:`_flag_state`): `normalize_pause_mode` for the mode, `on_resume_text` for
+        what a resume would put back, and `auto_resume_status` for whether the pause will lift
+        itself. The conversion is there rather than here so a flag that is readable JSON but holds
+        the wrong shapes -- `stopped_worker: 1` -- refuses as a source instead of raising past the
+        seam. This publishes what it produced.
         """
-
-        def from_flag(state: dict[str, Any]) -> dict[str, Any]:
-            mode = normalize_pause_mode(state.get("mode"))
-            stopped_worker = list(state.get("stopped_worker") or [])
-            stopped_reviewer = list(state.get("stopped_reviewer") or [])
-            mirror = state.get("legacy_mirror")
-            return {
-                "paused": bool(mode),
-                "mode": mode or None,
-                "since": str(state.get("since") or "") or None,
-                "actor": str(state.get("actor") or "") or None,
-                "pause_reason": str(state.get("reason") or "") or None,
-                "stopped_worker": stopped_worker,
-                "stopped_reviewer": stopped_reviewer,
-                "stopped_observer": list(state.get("stopped_observer") or []),
-                "excluded_worker": list(state.get("excluded_worker") or []),
-                "on_resume": on_resume_text(mode, stopped_worker, stopped_reviewer),
-                "auto_resume": auto_resume_status(state),
-                "legacy_mirror": mirror if isinstance(mirror, dict) else {},
-            }
-
         return read.decide(
-            rule(SOURCE_PAUSE, from_flag),
+            rule(SOURCE_PAUSE, dict),
             blank={
                 "paused": None,
                 "mode": None,
@@ -265,13 +262,7 @@ class PauseSections(SectionSet):
         none of these; that is said in :data:`DRAIN_CONTRACT` and not in a field name here.
         """
         return read.decide(
-            rule(
-                SOURCE_LIVENESS,
-                lambda live: {
-                    "cards": head_lines(live.records),
-                    "observers": observer_snapshot(live.payload),
-                },
-            ),
+            rule(SOURCE_LIVENESS, lambda live: {"cards": live.heads, "observers": live.observers}),
             blank={"cards": None, "observers": None},
             narrates=(),
         )
@@ -304,31 +295,80 @@ class PauseSections(SectionSet):
         )
 
     def cards(self, read: SourceSet) -> Section:
-        """The cards the open sprints hold, from the one Pipeline listing.
+        """Every card on the Pipeline board, with the sprint that holds it where one does.
 
-        Deliberately not "the cards a pause affects": that is every card on the board, and this
-        section would be read as an exhaustive list if it tried to be one. It is the cards of the
-        sprints named above, and :data:`PIPELINE_WIDE` says in words that the scope is wider.
+        The whole board and not the open sprints' cards, because the whole board is the scope: a
+        drain stops the dispatcher claiming a Ready card whether or not a sprint holds it, so a card
+        no open sprint holds is inside the pause exactly as much as one that is. Saying "there are
+        others" while listing only the linked ones is not the scope; it is the admission that the
+        scope was not shown.
+
+        It costs no extra board call. The Pipeline listing is read once for the document and this
+        publishes what it holds, rather than filtering it down to the sprints named beside it.
+
+        Product and Issue records are not cards here, and that is the board's own rule rather than
+        a judgement of this read: they live on the same board and in a column, but a Product or an
+        Issue never takes a claim or a task transition
+        (`secretary.tasks._TYPED_RECORD_TYPES`), so a pause reaches no such record and listing one
+        as inside its scope would be the same misdescription in the other direction.
+
+        The sprint is the relationship the listing itself carries, and it is `null` for a card no
+        sprint holds -- never the empty string, and never omitted.
         """
 
-        def from_listing(rows: list[dict[str, Any]], linked: dict[str, list[dict[str, Any]]]):
+        def from_listing(linked: dict[str, list[dict[str, Any]]]):
             items = [
                 {
                     "ref": str(card.get("ref") or ""),
-                    "sprint": reference,
+                    "sprint": str(group) or None,
                     "state": str(card.get("state") or ""),
                 }
-                for reference in (str(row.get("ref") or "") for row in _open(rows))
-                for card in linked.get(reference) or []
-                if isinstance(card, dict)
+                for group, cards in linked.items()
+                for card in cards
+                if isinstance(card, dict) and card.get("record_type") not in NOT_A_CARD
             ]
-            return {"items": sorted(items, key=lambda entry: (entry["sprint"], entry["ref"]))}
+            return {"items": sorted(items, key=lambda entry: entry["ref"])}
 
         return read.decide(
-            Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), from_listing),
+            rule(SOURCE_CARDS, from_listing),
             blank={"items": None},
             narrates=(),
         )
+
+
+def _flag_state(state: dict[str, Any]) -> dict[str, Any]:
+    """The pause flag as the `state` section publishes it, from the rules that already own it.
+
+    Called inside the source read, so every conversion that can fail on a semantically corrupt flag
+    fails where the failure becomes an unavailable source rather than an exception past the seam.
+    """
+    mode = normalize_pause_mode(state.get("mode"))
+    stopped_worker = _refs(state.get("stopped_worker"))
+    stopped_reviewer = _refs(state.get("stopped_reviewer"))
+    mirror = state.get("legacy_mirror")
+    return {
+        "paused": bool(mode),
+        "mode": mode or None,
+        "since": str(state.get("since") or "") or None,
+        "actor": str(state.get("actor") or "") or None,
+        "pause_reason": str(state.get("reason") or "") or None,
+        "stopped_worker": stopped_worker,
+        "stopped_reviewer": stopped_reviewer,
+        "stopped_observer": _refs(state.get("stopped_observer")),
+        "excluded_worker": _refs(state.get("excluded_worker")),
+        "on_resume": on_resume_text(mode, stopped_worker, stopped_reviewer),
+        "auto_resume": auto_resume_status(state),
+        "legacy_mirror": mirror if isinstance(mirror, dict) else {},
+    }
+
+
+def _refs(value: Any) -> list[str]:
+    """One of the flag's head lists. A value that is not a list of references is not one."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(entry, str) for entry in value):
+        raise TypeError(f"a pause flag head list is not a list of references: {value!r}")
+    return list(value)
 
 
 def _open(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -446,7 +486,7 @@ class PauseReadLayer(ProtocolBoundary):
     def report(self) -> InstanceReport:
         report, refused = self._installation(now=self._clock())
         if report is None:
-            raise InstallationUnavailable(str(refused.source.reason))
+            raise ValidationRefused(str(refused.source.reason))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:
@@ -462,6 +502,13 @@ class PauseReadLayer(ProtocolBoundary):
         The same shape the sprint reads use, for the same reason: with an explicit data directory a
         config that does not validate takes away only what it owns, and the flag and the
         dispatcher's state are still read. Without one there is nothing left to locate them with.
+
+        The refusal is `validation` and not `backend_unavailable`, and that is a compatibility
+        promise rather than a taste: `secretary pause-status` reached this installation through
+        `runtime_from_args`, whose `invalid_instance` is a `DispatcherError` with exit status 2, and
+        an operator or a script that reads that status must keep reading it now that the command is
+        a client of this layer. A config that does not validate is the caller naming an installation
+        that is not one; nothing of this installation refused.
         """
         report = validate_instance(self.instance)
         if report.ok and report.data_dir is not None:
@@ -472,7 +519,7 @@ class PauseReadLayer(ProtocolBoundary):
             else "this instance config names no data directory"
         )
         if self._data_dir is None:
-            raise InstallationUnavailable(reason)
+            raise ValidationRefused(reason)
         return None, Reading(
             SOURCE_INSTALLATION,
             sources.unavailable(reason, now=now, evidence=report.instance_path),
@@ -501,8 +548,17 @@ class PauseReadLayer(ProtocolBoundary):
         read: an unreadable flag is treated as a freeze by every tick until it is repaired.
         """
         flag = ProductionPause(data_dir)
-        state = flag.load()
-        if state.get("corrupt"):
+        try:
+            state = flag.load()
+            unreadable = bool(state.get("corrupt"))
+            value = None if unreadable else _flag_state(state)
+        except _SOURCE_FAILURES as exc:
+            unreadable, value, cause = False, None, exc
+        else:
+            cause = None
+        if unreadable:
+            # The file itself could not be read or parsed, which is the case `ProductionPause.load`
+            # already decided the pipeline's behaviour for.
             return Reading(
                 SOURCE_PAUSE,
                 sources.unavailable(
@@ -513,7 +569,22 @@ class PauseReadLayer(ProtocolBoundary):
                 ),
                 None,
             )
-        return Reading(SOURCE_PAUSE, sources.available(now), state)
+        if cause is not None:
+            # A different fault, and it must not borrow the sentence above: the file parses, so the
+            # tick keeps reading the same flag and behaving by it. What is unestablished is what the
+            # flag says here, not what the pipeline does.
+            return Reading(
+                SOURCE_PAUSE,
+                sources.unavailable(
+                    f"the pause flag parses but does not hold a pause state: {flag.path} "
+                    f"({_reason(cause)}). The production tick reads the same file, so what could "
+                    "not be established here is what the flag says, not the pipeline's behaviour",
+                    now=now,
+                    evidence=flag.path,
+                ),
+                None,
+            )
+        return Reading(SOURCE_PAUSE, sources.available(now), value)
 
     def _production(self, data_dir: Path, *, now: float) -> Reading:
         """The dispatcher's durable production state, read once for the document.
@@ -523,18 +594,27 @@ class PauseReadLayer(ProtocolBoundary):
         is "nobody could say which heads are up", never "no head is up".
         """
         state = ProductionState(data_dir)
-        payload = state.load()
-        if str(payload.get("phase") or "") == "unavailable":
+        try:
+            payload = state.load()
+            if str(payload.get("phase") or "") == "unavailable":
+                raise ValueError("the state is not readable JSON")
+            value = _Dispatcher(
+                phase=str(payload.get("phase") or "new"),
+                owner=str(payload.get("owner") or ""),
+                heads=head_lines(state.records(payload)),
+                observers=observer_snapshot(payload),
+            )
+        except _SOURCE_FAILURES as exc:
             return Reading(
                 SOURCE_LIVENESS,
                 sources.unavailable(
-                    f"the dispatcher production state could not be read: {state.path}",
+                    f"the dispatcher production state could not be read: {state.path} ({_reason(exc)})",
                     now=now,
                     evidence=state.path,
                 ),
                 None,
             )
-        return Reading(SOURCE_LIVENESS, sources.available(now), _Dispatcher(payload, state.records(payload)))
+        return Reading(SOURCE_LIVENESS, sources.available(now), value)
 
     def _boards(
         self, data_dir: Path, report: InstanceReport | None, *, now: float
