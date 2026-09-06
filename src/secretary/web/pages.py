@@ -1,4 +1,4 @@
-"""The two pages, rendered from the layer's own documents and from nothing else.
+"""The pages, rendered from the layer's own documents and from nothing else.
 
 Every value on a page comes out of a `web-read` or `web-run` document. Nothing here recomputes a
 state, decides whether an agent is alive, or fills a gap with a plausible value — a section whose
@@ -12,13 +12,21 @@ would tell an operator that the pipeline is idle at the exact moment it has lost
 
 The pages are server-rendered, so what a source said is in the markup rather than assembled later
 by a script that may not run. The only thing the script does is tail a card's events from a cursor
-the client itself holds.
+the client itself holds, and narrow the issue list to the product a sprint form has selected -- both
+of which leave a page that works when it does not run.
+
+The sprint form obeys the same rule twice over. Every choice on it is an entry of `sprint_options`,
+so a registry or a board that holds something else offers something else, and nothing about a
+product, an issue, a project or a head profile is written into this module. And a refused
+submission is rendered from the very object that was submitted, so what a person typed comes back
+on the screen exactly as they typed it.
 """
 
 from __future__ import annotations
 
 from html import escape
 from typing import Any
+from urllib.parse import quote
 
 TITLE = "secretary"
 
@@ -67,6 +75,17 @@ ol.events li { border-top: 1px solid var(--line); padding: .3rem 0; }
 ol.events time { font-family: ui-monospace, monospace; color: var(--dim); margin-right: .5rem; }
 pre { white-space: pre-wrap; overflow-x: auto; }
 code { font-family: ui-monospace, monospace; }
+form.sprint { display: block; }
+form.sprint .field { margin: .9rem 0; }
+form.sprint textarea { width: 100%; min-height: 4.5rem; }
+form.sprint select { min-width: 22rem; max-width: 100%; }
+form.sprint .choices { border: 1px solid var(--line); padding: .4rem .6rem; max-height: 14rem; overflow-y: auto; }
+form.sprint .choices label { display: block; font-size: inherit; color: inherit; padding: .1rem 0; }
+form.sprint .hint { color: var(--dim); font-size: .8rem; }
+.bad-field { color: var(--warn); font-size: .85rem; }
+.refused { border-left: 3px solid var(--warn); background: #b3541e14; padding: .5rem .75rem; margin: .5rem 0; }
+.pending { border-left: 3px solid var(--warn); background: #b3541e14; padding: .5rem .75rem; margin: .5rem 0; }
+.launch { font-weight: 600; }
 """
 
 
@@ -209,6 +228,9 @@ def dashboard(snapshot: dict[str, Any]) -> str:
                 empty="no agent is running.",
                 table=_agent_table(list(agents.get("items") or []), with_ref=True),
             ),
+            "</section>",
+            "<section><h2>sprints</h2>",
+            '<p><a href="/sprints/new">open a new sprint</a></p>',
             "</section>",
             "<section><h2>start a run</h2>",
             _start_form(list(projects.get("items") or []), list(tasks.get("items") or [])),
@@ -683,3 +705,506 @@ if (reviewForm) reviewForm.addEventListener('submit', async (event) => {
   feedback.textContent = 'review run ' + answer.review.run.run_id + ' — ' + answer.review.state.value;
 });
 """
+
+
+# -- the sprint form ------------------------------------------------------------------------------
+
+#: What the observer's launch state is called on the page, in words. The colour is a second reading
+#: of the same fact and never the only one: three of these -- saved and not yet raised, really
+#: running, and nothing could be established -- are the three an operator opens this page to tell
+#: apart, and a page that drew them as three shades would be unreadable to half the people who open
+#: it and to every screen reader. The words come from here; the sentence beside them is the layer's
+#: own reason and is never rewritten.
+LAUNCH_WORDS: dict[str, str] = {
+    "not_started": "saved — no observer is up for it yet",
+    "running": "running — an observer head is up",
+    "unavailable": "not established — this could not be read at all",
+    "stopped": "stopped — an observer was raised for it and is not alive",
+    "not_declared": "no observer — this sprint declared none, so none is raised",
+}
+
+#: Said under the submit button, because it is the one thing about this form that surprises people:
+#: there is no second "start" action anywhere. See `secretary.webproto.sprint_ops`.
+START_NOTICE = (
+    "starting a sprint is opening it with an observer: there is no separate launch action, and the "
+    "production tick raises one observer head for each open sprint that has none"
+)
+
+#: The word on the empty option of the two executor selects, and the answer that leaves the role
+#: unpinned. Submitting it sends the layer nothing about that role at all.
+EXECUTOR_CHOICE = "the observer chooses"
+
+
+def redirect(location: str) -> str:
+    """The body of a 303. A browser follows the header; anything that does not gets the link."""
+    return _page(
+        "opened",
+        f'<p>this sprint is open. <a href="{escape(location)}">{escape(location)}</a></p>',
+    )
+
+
+def sprint_form(
+    options: dict[str, Any] | None,
+    *,
+    submitted: dict[str, Any],
+    errors: dict[str, str],
+    refusal: dict[str, Any] | None = None,
+    catalogue: str | None = None,
+    reissued: bool = False,
+) -> str:
+    """The "new sprint" form, on this installation's own catalogue and on what was typed into it.
+
+    `options` is a `sprint_options` document, or `None` when the catalogue could not be read at all
+    while a refusal was being shown — the refusal is the thing being answered, so it is rendered
+    over a form that says its choices are missing rather than replaced by a page about the
+    catalogue.
+    """
+    options = options or {}
+    heads = options.get("heads") or {}
+    products = options.get("products") or {}
+    issues = options.get("issues") or {}
+    projects = options.get("projects") or {}
+    body = "\n".join(
+        part
+        for part in [
+            "<h2>new sprint</h2>",
+            _refusal_block(refusal, reissued=reissued),
+            _errors_block(errors),
+            ""
+            if catalogue is None
+            else f'<p class="unavailable"><b>could not find out what this installation offers:</b> '
+            f"{escape(catalogue)}</p>",
+            '<form class="sprint" id="sprint-form" method="post" action="/sprints">',
+            f'<input type="hidden" name="request_id" value="{escape(str(submitted.get("request_id") or ""))}">',
+            _product_field(products, submitted, errors),
+            _issue_field(issues, submitted, errors),
+            _project_field(projects, submitted, errors),
+            _text_field(
+                "goal",
+                "goal",
+                submitted,
+                errors,
+                hint="what this sprint is for, in the owner's own words",
+            ),
+            _text_field(
+                "definition_of_done",
+                "definition of done",
+                submitted,
+                errors,
+                hint="what would make this sprint done",
+            ),
+            _observer_field(heads, submitted, errors),
+            _executor_field("worker", "worker", heads, submitted),
+            _executor_field("reviewer", "reviewer", heads, submitted),
+            '<button type="submit">start this sprint</button>',
+            "</form>",
+            f'<p class="hint empty">{escape(START_NOTICE)}</p>',
+            (
+                '<p class="hint empty">this form carries one request id for as long as it is open, '
+                "so a double click, a retry and a reconnection all reach the same sprint rather "
+                "than opening a second one.</p>"
+            ),
+        ]
+        if part
+    )
+    return _page("new sprint", body, script=_SPRINT_FORM_SCRIPT)
+
+
+def _refusal_block(refusal: dict[str, Any] | None, *, reissued: bool = False) -> str:
+    """What the layer said about this submission, and what may safely be done about it.
+
+    Two refusals, two opposite instructions, and the page has to give the right one. A part-done
+    create is the one that is not simply "no": a sprint exists, and the only safe move is to submit
+    this same form again, which carries the same request id and therefore picks that sprint up
+    instead of opening a second one.
+
+    Everything else left no sprint behind and has spent its request id below this transport, so the
+    form now carries a new one. That is said out loud rather than done quietly, because it is the
+    difference between "fix the field and send this again" and "send exactly this again", and a
+    person who read the wrong one either opens a second sprint or reaches a dead end.
+    """
+    if not refusal:
+        return ""
+    message = escape(str(refusal.get("message") or "this submission was refused"))
+    data = refusal.get("data") or {}
+    action = data.get("action") or {}
+    if not action.get("repeat_request"):
+        reissue = (
+            " Nothing was created. This form now carries a new request id, so correcting a field "
+            "and submitting it again is a new request and is safe."
+            if reissued
+            else ""
+        )
+        return f'<p class="refused"><b>this sprint was not opened.</b> {message}{reissue}</p>'
+    reference = str(action.get("reference") or "")
+    named = (
+        f' It is <a href="/sprints/{quote(reference)}">{escape(reference)}</a>.' if reference else ""
+    )
+    return (
+        '<p class="pending"><b>this sprint exists and the request that opened it did not finish.</b> '
+        f"{message}{named} Submitting this form again is safe: it carries the same request id, so it "
+        "picks up the sprint that already exists rather than opening a second one. Do not start over "
+        "with a new form.</p>"
+    )
+
+
+def _errors_block(errors: dict[str, str]) -> str:
+    if not errors:
+        return ""
+    items = "".join(
+        f"<li><b>{escape(name.replace('_', ' '))}</b>: {escape(reason)}</li>"
+        for name, reason in errors.items()
+    )
+    return (
+        '<div class="refused"><b>this form is not complete, so nothing was opened.</b>'
+        f"<ul>{items}</ul></div>"
+    )
+
+
+def _field(name: str, label: str, control: str, errors: dict[str, str], hint: str = "") -> str:
+    said = f'<p class="bad-field">{escape(errors[name])}</p>' if name in errors else ""
+    note = f'<p class="hint">{escape(hint)}</p>' if hint else ""
+    return (
+        f'<div class="field"><label for="{escape(name)}">{escape(label)}</label>'
+        f"{note}{control}{said}</div>"
+    )
+
+
+def _text_field(name: str, label: str, submitted: dict[str, Any], errors: dict[str, str], *, hint: str) -> str:
+    value = escape(str(submitted.get(name) or ""))
+    control = f'<textarea id="{escape(name)}" name="{escape(name)}">{value}</textarea>'
+    return _field(name, label, control, errors, hint)
+
+
+def _product_field(products: dict[str, Any], submitted: dict[str, Any], errors: dict[str, str]) -> str:
+    items = list(products.get("items") or [])
+    chosen = str(submitted.get("product") or "")
+    unavailable = _source_block(products.get("source"), what="which products this installation has")
+    if not items and not chosen:
+        empty = unavailable or '<p class="empty">this installation has no product to open a sprint for.</p>'
+        return _field("product", "product", empty, errors)
+    options = ['<option value="">choose a product</option>']
+    for item in items:
+        value = str(item.get("id") or "")
+        options.append(
+            f'<option value="{escape(value)}"{_selected(value == chosen)}>'
+            f"{escape(str(item.get('label') or value))} ({escape(value)})</option>"
+        )
+    options += _kept_option(chosen, [str(item.get("id") or "") for item in items])
+    control = unavailable + f'<select id="product" name="product">{"".join(options)}</select>'
+    return _field("product", "product", control, errors, "the product whose issues this sprint serves")
+
+
+def _issue_field(issues: dict[str, Any], submitted: dict[str, Any], errors: dict[str, str]) -> str:
+    """The open issues, each carrying the product that owns it.
+
+    The product is on every row rather than only in a script's memory: the list is narrowed to the
+    selected product by the page's own script, and when that script does not run the whole list is
+    there with each row saying whose it is, which is a usable form rather than a blank one.
+    """
+    items = list(issues.get("items") or [])
+    chosen = set(submitted.get("issues") or [])
+    unavailable = _source_block(issues.get("source"), what="which issues are open")
+    if not items and not chosen:
+        empty = unavailable or '<p class="empty">no open issue is on this board, so no sprint can serve one.</p>'
+        return _field("issues", "issues this sprint serves", empty, errors)
+    rows = []
+    for item in items:
+        ref = str(item.get("ref") or "")
+        product = str(item.get("product") or "")
+        rows.append(
+            f'<label data-product="{escape(product)}">'
+            f'<input type="checkbox" name="issues" value="{escape(ref)}"{_checked(ref in chosen)}> '
+            f"{escape(ref)} — {escape(str(item.get('label') or ref))} "
+            f'<span class="age">({escape(product) or "no product"})</span></label>'
+        )
+    rows += _kept_rows("issues", chosen, [str(item.get("ref") or "") for item in items])
+    control = unavailable + f'<div class="choices" id="issues">{"".join(rows)}</div>'
+    return _field(
+        "issues", "issues this sprint serves", control, errors, "the open issues of the product above"
+    )
+
+
+def _project_field(projects: dict[str, Any], submitted: dict[str, Any], errors: dict[str, str]) -> str:
+    """The registered projects, each saying whether an open sprint already holds it.
+
+    `reserved_by` is three answers and not two: a list of sprints, an empty list, and `null` for a
+    reservation index nobody could read. The third is said in its own words, because "held by
+    nobody" and "nobody could say" would otherwise look identical on the one row where the
+    difference decides whether a create is about to be refused.
+    """
+    items = list(projects.get("items") or [])
+    chosen = set(submitted.get("projects") or [])
+    unavailable = _source_block(projects.get("source"), what="which projects are registered")
+    if not items and not chosen:
+        empty = unavailable or '<p class="empty">this installation has no registered project to reserve.</p>'
+        return _field("projects", "projects this sprint reserves", empty, errors)
+    rows = []
+    for item in items:
+        value = str(item.get("id") or "")
+        reserved = item.get("reserved_by")
+        if reserved is None:
+            held = "whether an open sprint holds it could not be established"
+        elif reserved:
+            held = "an open sprint already holds it: " + ", ".join(str(one) for one in reserved)
+        else:
+            held = ""
+        note = f' <span class="age">({escape(held)})</span>' if held else ""
+        rows.append(
+            f"<label><input type=\"checkbox\" name=\"projects\" value=\"{escape(value)}\""
+            f"{_checked(value in chosen)}> {escape(str(item.get('label') or value))}{note}</label>"
+        )
+    rows += _kept_rows("projects", chosen, [str(item.get("id") or "") for item in items])
+    control = unavailable + f'<div class="choices">{"".join(rows)}</div>'
+    return _field(
+        "projects",
+        "projects this sprint reserves",
+        control,
+        errors,
+        "a project an open sprint already holds is refused by the board, not by this page",
+    )
+
+
+def _observer_field(heads: dict[str, Any], submitted: dict[str, Any], errors: dict[str, str]) -> str:
+    """The observer, which is the one head an operator must name, chosen and never typed.
+
+    Only the profiles the layer marked as observers are offered, because that flag is
+    `check_observer_profile` — the create's own check — asked of each profile rather than a rule
+    restated here.
+
+    The one answer that is not a profile is deliberately *not* offered. `none` opens a sprint the
+    production tick raises no observer for, so on a page whose button says "start this sprint" it
+    would be an option that starts nothing; it stays a legal answer for `secretary sprint create`
+    and for the rows that already carry it, which the sprint page renders unchanged.
+    """
+    items = [item for item in (heads.get("items") or []) if item.get("observer")]
+    chosen = str(submitted.get("observer") or "")
+    unavailable = _source_block(heads.get("source"), what="which head profiles this installation has")
+    if not items and not chosen:
+        empty = unavailable or '<p class="empty">this installation offers no profile that may observe a sprint.</p>'
+        return _field("observer", "observer", empty, errors)
+    options = ['<option value="">choose an observer</option>']
+    options += [_profile_option(item, chosen) for item in items]
+    options += _kept_option(chosen, [str(item.get("id") or "") for item in items])
+    control = unavailable + f'<select id="observer" name="observer">{"".join(options)}</select>'
+    return _field(
+        "observer", "observer", control, errors, "the head that runs this sprint; it is required"
+    )
+
+
+def _executor_field(name: str, label: str, heads: dict[str, Any], submitted: dict[str, Any]) -> str:
+    """One optional pin, whose first and default answer is that the observer picks the head.
+
+    The empty option is not decoration: it is submitted as the empty string and the transport turns
+    it into `None`, which is how the row is written with no field for this role at all. That is a
+    different thing from a role pinned to a profile and a different thing again from one pinned to
+    nothing, and the three must not be able to look alike here.
+    """
+    items = list(heads.get("items") or [])
+    chosen = str(submitted.get(name) or "")
+    options = [f'<option value=""{_selected(not chosen)}>{escape(EXECUTOR_CHOICE)}</option>']
+    options += [_profile_option(item, chosen) for item in items]
+    options += _kept_option(chosen, [str(item.get("id") or "") for item in items])
+    control = f'<select id="{escape(name)}" name="{escape(name)}">{"".join(options)}</select>'
+    return _field(
+        name,
+        f"{label} (optional)",
+        control,
+        {},
+        f"leave this as “{EXECUTOR_CHOICE}” and the role stays unpinned",
+    )
+
+
+def _profile_option(item: dict[str, Any], chosen: str) -> str:
+    """One head profile as a person picks it: what it is called, its model and its effort.
+
+    None of the three is composed here from a rule about naming: `label`, `model` and `effort` are
+    fields of the profile the registry actually holds, and a profile that pins neither says so in
+    the words the layer used rather than showing an empty column.
+    """
+    value = str(item.get("id") or "")
+    model = str(item.get("model") or "") or "the adapter's default model"
+    effort = str(item.get("effort") or "") or "the adapter's default effort"
+    return (
+        f'<option value="{escape(value)}"{_selected(value == chosen)}>'
+        f"{escape(str(item.get('label') or value))} — model {escape(model)}, effort {escape(effort)}"
+        f" ({escape(value)})</option>"
+    )
+
+
+#: Said beside a value that was submitted and that the catalogue no longer offers. It is kept on
+#: the form rather than dropped for one reason: a form that quietly changed a submitted choice
+#: would then be asking for a repeat of something the person never sent -- which is exactly wrong
+#: after a part-done create, where the safe move is to submit *this* form again unchanged.
+NO_LONGER_OFFERED = "this installation no longer offers this choice"
+
+
+def _kept_option(chosen: str, offered: list[str]) -> list[str]:
+    """The submitted choice as an option of its own, when the catalogue stopped offering it."""
+    if not chosen or chosen in offered:
+        return []
+    return [f'<option value="{escape(chosen)}" selected>{escape(chosen)} — {escape(NO_LONGER_OFFERED)}</option>']
+
+
+def _kept_rows(name: str, chosen: set[str], offered: list[str]) -> list[str]:
+    """The same, for the fields a person ticks rather than picks."""
+    return [
+        f'<label><input type="checkbox" name="{escape(name)}" value="{escape(value)}" checked> '
+        f'{escape(value)} <span class="age">({escape(NO_LONGER_OFFERED)})</span></label>'
+        for value in sorted(chosen)
+        if value not in offered
+    ]
+
+
+def _selected(is_selected: bool) -> str:
+    return " selected" if is_selected else ""
+
+
+def _checked(is_checked: bool) -> str:
+    return " checked" if is_checked else ""
+
+
+_SPRINT_FORM_SCRIPT = """
+// The only thing this does is narrow the issue list to the product that is selected. Every row is
+// already on the page with the product that owns it, so a browser that does not run this shows the
+// whole list rather than an empty one.
+const product = document.getElementById('product');
+const issues = document.getElementById('issues');
+function narrow() {
+  if (!product || !issues) return;
+  for (const row of issues.querySelectorAll('label')) {
+    const owned = !product.value || row.dataset.product === product.value;
+    row.hidden = !owned;
+    if (!owned) row.querySelector('input').checked = false;
+  }
+}
+if (product) { product.addEventListener('change', narrow); narrow(); }
+"""
+
+
+# -- the sprint page ------------------------------------------------------------------------------
+
+
+def sprint(document: dict[str, Any]) -> str:
+    """One sprint: what it was opened with, what it pinned, and whether its observer is up."""
+    ref = str(document.get("ref") or "")
+    sprint_section = document.get("sprint") or {}
+    value = sprint_section.get("value")
+    observer = document.get("observer") or {}
+    body = "\n".join(
+        part
+        for part in [
+            f'<p class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</p>',
+            "<section><h2>sprint</h2>",
+            _source_block(sprint_section.get("source"), what="what this sprint is"),
+            _sprint_fields(value),
+            "</section>",
+            "<section><h2>observer</h2>",
+            _observer_section(observer),
+            "</section>",
+            "<section><h2>the heads its cards run on</h2>",
+            _executor_section((value or {}).get("executors") or {}),
+            "</section>",
+            "<section><h2>current card</h2>",
+            _current_task(value),
+            "</section>",
+            "<section><h2>the observer's last resume</h2>",
+            _resume((value or {}).get("resume")),
+            "</section>",
+        ]
+        if part
+    )
+    return _page(f"sprint {ref}", body)
+
+
+def _sprint_fields(value: dict[str, Any] | None) -> str:
+    if value is None:
+        return '<p class="empty">no sprint was read, so there is nothing to show here.</p>'
+    return _rows(
+        ["", ""],
+        [
+            ["reference", _or_dash(value.get("ref"))],
+            ["status", f'<span class="state">{_or_dash(value.get("status"))}</span>'],
+            ["goal", f"<pre>{escape(str(value.get('goal') or ''))}</pre>"],
+            ["definition of done", f"<pre>{escape(str(value.get('definition_of_done') or ''))}</pre>"],
+            ["product", _or_dash(value.get("product"))],
+            ["issues", _listed(value.get("issues"), "this sprint declares no issue")],
+            ["projects", _listed(value.get("reservations"), "this sprint reserves no project")],
+            ["repositories", _listed(value.get("repositories"), "this sprint names no repository")],
+        ],
+    )
+
+
+def _listed(values: Any, empty: str) -> str:
+    items = [str(one) for one in (values or []) if str(one)]
+    if not items:
+        return f'<span class="empty">{escape(empty)}</span>'
+    return ", ".join(escape(one) for one in items)
+
+
+def _observer_section(observer: dict[str, Any]) -> str:
+    """The declared observer, and separately whether one is up. Two sources, said apart."""
+    declared = observer.get("declared") or {}
+    launch = observer.get("launch") or {}
+    state = str(launch.get("state") or "")
+    words = LAUNCH_WORDS.get(state, "this launch state is one this page does not know")
+    profile = declared.get("profile")
+    if profile:
+        said = escape(str(profile))
+    elif declared.get("state") == "malformed":
+        said = '<span class="empty">this sprint carries an observer value that is not one of the known forms</span>'
+    elif (declared.get("value") or {}).get("kind") == "none":
+        said = '<span class="empty">this sprint declared no observer</span>'
+    else:
+        said = '<span class="empty">the row of this sprint carries no observer field</span>'
+    record = launch.get("record") or {}
+    rows = [
+        ["declared observer", said],
+        [
+            "state",
+            (
+                f'<span class="launch state state-{escape(state)}">{escape(words)}</span>'
+                f'<div class="reason">{escape(str(launch.get("reason") or "no reason was recorded"))}</div>'
+            ),
+        ],
+    ]
+    if record:
+        rows.append(["the head the dispatcher holds", _or_dash(record.get("head"))])
+        rows.append(["its heartbeat", _or_dash(record.get("heartbeat_state"))])
+    return _source_block(launch.get("source"), what="whether this sprint's observer is up") + _rows(
+        ["", ""], rows
+    )
+
+
+def _executor_section(executors: dict[str, Any]) -> str:
+    """Both roles, always, and each in the state it is really in.
+
+    A role nobody pinned is not a blank cell: it is the observer's to choose, which is a decision
+    somebody made, and the page says so in those words.
+    """
+    rows = []
+    for role in ("worker", "reviewer"):
+        entry = executors.get(role) if isinstance(executors.get(role), dict) else {}
+        state = str(entry.get("state") or "")
+        if state == "pinned":
+            said = f"pinned to {escape(str(entry.get('profile') or ''))}"
+        elif state == "malformed":
+            said = "this row carries a pin that is not a profile"
+        else:
+            said = escape(EXECUTOR_CHOICE)
+        rows.append([escape(role), said])
+    return _rows(["role", "which head runs it"], rows)
+
+
+def _current_task(value: dict[str, Any] | None) -> str:
+    current = (value or {}).get("current_task")
+    if not current:
+        return '<p class="empty">the observer has cut no card for this sprint yet.</p>'
+    return f"<p>{_link(str(current))}</p>"
+
+
+def _resume(resume: Any) -> str:
+    if not isinstance(resume, dict) or not resume:
+        return '<p class="empty">the observer has recorded no resume for this sprint yet.</p>'
+    rows = [[escape(str(name).replace("_", " ")), f"<pre>{escape(str(resume[name]))}</pre>"] for name in sorted(resume)]
+    return _rows(["", ""], rows)

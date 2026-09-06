@@ -3109,6 +3109,9 @@ neither reaches a handler.
 | --- | --- | --- | --- |
 | GET | `/` | `reads.system_snapshot` | the dashboard: health with its reason and age, projects, current cards, running agents |
 | GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`) | one card: state, attempt, heads, product runs, worker and reviewer output, result, event tail |
+| GET | `/sprints/new` | `sprint_reads.sprint_options` | the "new sprint" form, on this installation's own products, open issues, projects and head profiles |
+| POST | `/sprints` | `sprint_ops.sprint_create` | open one sprint from that form; 303 to its page, or the form again with what was refused |
+| GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: what it was opened with, its pins, its current card, its last resume, and whether its observer is up |
 | GET | `/api/system` | `reads.system_snapshot` | the dashboard's document |
 | GET | `/api/tasks/{ref}` | `reads.task_snapshot` | the card page's document; `?events=N` sets the tail length |
 | GET | `/api/tasks/{ref}/events` | `reads.task_events` | one page of history; `?cursor=C&limit=N` |
@@ -3117,8 +3120,91 @@ neither reaches a handler.
 | POST | `/api/runs/start` | `ops.run_start` | raise a worker; body `{ref, request_id, profile, instruction?}` |
 | POST | `/api/runs/review` | `ops.run_review` | raise a reviewer; body `{request_id, profile, worker_run_id?, ref?}` |
 
-A POST body is a JSON object and carries only the fields listed. An unknown field is refused rather
-than ignored: a client sending one believes this endpoint does something it does not.
+A POST body is a JSON object and carries only the fields listed, except on `/sprints`, which takes
+the submitted form (`application/x-www-form-urlencoded`) whose fields are `request_id`, `product`,
+`goal`, `definition_of_done`, `issues`, `projects`, `observer`, `worker` and `reviewer`. Either way
+an unknown field is refused rather than ignored: a client sending one believes this endpoint does
+something it does not.
+
+### Opening a sprint from a browser
+
+The two sprint pages are a client of the contract above and decide nothing of their own. Every
+choice on the form is an entry of `sprint_options`, so a board or a registry holding something else
+offers something else, and no product, issue, project or profile is written into the transport.
+Nothing is typed from memory: the observer and the two optional pins are selects over the registry's
+own profiles, each showing the label, model and effort the registry holds.
+
+| field | what it carries |
+| --- | --- |
+| `request_id` | the id this form was served with, hidden in the form and submitted back unchanged |
+| `product`, `goal`, `definition_of_done` | required; an empty one is refused by name before the layer is called |
+| `issues`, `projects` | one value per checked box; at least one of each is required |
+| `observer` | required, and always a profile the layer marked eligible: the `none` spelling `heads.observer.none` publishes is **not** offered on this route and a crafted one is refused before the layer |
+| `worker`, `reviewer` | two independent optional selects whose default option is empty; an empty one reaches the layer as `None`, and never as the empty string |
+
+**Two kinds of refusal, and they are different kinds of thing.** A field the form itself requires is
+answered by the transport, named field by field, because the person is looking at the form. What a
+sprint may *be* — an unknown profile, a closed issue, an unregistered project, a project another
+open sprint holds — stays a judgement of `SprintWriter.create` reached through the layer, and the
+transport only shows what it was told. Either way the form comes back with every value that was
+submitted still in it — including a value the catalogue no longer offers, which is kept as a marked
+choice rather than dropped, because a form that quietly changed a submitted answer would be asking
+for a repeat of something nobody sent.
+
+**A submission is idempotent because the id is the form's.** It is minted once, when the form is
+served, and travels in the markup the browser holds; a double click, a retried POST and a
+reconnected client therefore all carry the same one and reach the sprint the layer already opened.
+A success is a **303** to `/sprints/{ref}`, so the address bar ends on the sprint and a refresh
+re-reads it rather than re-posting. No lock is introduced anywhere.
+
+**A refusal decides what happens to that id, and the two answers are opposite.** `sprint_create`
+claims the id together with a digest of the inputs *before* the writer judges them (see
+[Idempotency](#idempotency) above), so a refusal has spent it: a corrected resubmission under the
+same id is answered `validation` for different inputs, and a form that handed that id back would be
+a dead end with no sprint and no way forward.
+
+| what the layer answered | what the form comes back with | why |
+| --- | --- | --- |
+| `OperationPending` | the same id and the same values, and the words "this sprint exists, submitting this form again is safe" | a sprint exists and only that id resumes it; a new form would open a second beside it |
+| any other refusal | a **new** id, every submitted value, and the words "nothing was created" | the id was claimed and refused while nothing durable was created, so the corrected submission is a new request |
+
+**The browser client is narrower than the sprint contract, deliberately.** `observer` here is always
+a profile: `none` opens a sprint the production tick raises no observer for, which on a page whose
+button says "start this sprint" would start nothing. `secretary sprint create --observer none`
+remains the way to open one, rows that already carry it keep working, and `sprint_state` renders
+such a sprint on its page unchanged (`not_declared`).
+
+**There is no "start" button, because there is no start action.** Opening a sprint with an observer
+is the whole of starting it; the sprint page reads where it got to from `observer.launch.state`,
+whose five states it renders in words — not in colour alone — so that "saved and no observer yet",
+"an observer is up" and "this could not be read at all" cannot be confused on the page an operator
+opens to tell them apart.
+
+### Who may make a mutation
+
+Every POST is checked once, in `WebApp.handle`, before a handler is chosen and therefore before any
+operation of the layer can run. A rule written per route is a rule the next route forgets, so there
+is exactly one and it covers `/api/runs/start` and `/api/runs/review` as much as `/sprints`.
+
+The rule is the one a browser makes checkable. A browser sends `Origin` on every request whose
+method is not GET or HEAD — on its own pages' requests as much as on somebody else's — so a POST
+whose `Origin` names an authority other than the `Host` it was addressed to came from a page this
+service did not serve, and is refused **403** before any operation runs. Two properties of the shape
+are load-bearing:
+
+* **no `Origin` at all is not a browser**, and it keeps working: `secretary web-run`, `curl` and the
+  diagnostics in [Operations](OPERATIONS.md#the-local-web-transport) send none, and cross-origin is
+  a browser's problem precisely because a browser is what attaches somebody's credentials to a
+  request they did not make. `Origin: null` is refused, because that *is* a browser saying its page
+  came from somewhere opaque;
+* **the comparison is authority, never scheme**: the front terminates TLS and proxies to
+  `127.0.0.1` over plain HTTP, so a genuine `https://host` origin arrives at a process that would
+  call itself `http`. Comparing schemes would refuse every real request through the published front.
+
+Reads are not asked: a GET is a read of this service whoever linked to it, and the password at the
+front is what decides whether it may be read at all. `Content-Security-Policy` carries the same
+rule from the other side — `form-action 'self'`, so a page served here may submit to this service
+and to nowhere else.
 
 ### Protocol code to HTTP status
 

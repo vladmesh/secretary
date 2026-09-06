@@ -25,6 +25,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, ClassVar
 from unittest import mock
+from urllib.parse import urlencode
 
 import yaml
 
@@ -51,6 +52,8 @@ from secretary.webproto.errors import (
 )
 from secretary.webproto.ops import OperationLayer
 from secretary.webproto.reads import ReadLayer
+from secretary.webproto.sprint_ops import SprintOperationLayer
+from secretary.webproto.sprint_reads import SprintReadLayer
 from tests.fakes.dispatcher import FakeKanboard
 from triggered_agents.agents.pipeline.heads import Registry
 from triggered_agents.runtime.head.identity import publish_heartbeat
@@ -290,7 +293,17 @@ class TransportFixture(unittest.TestCase):
         return OperationLayer(self.instance, **options)
 
     def app(self, **kwargs) -> WebApp:
-        return WebApp(self.reads(), self.ops(**kwargs))
+        return WebApp(self.reads(), self.ops(**kwargs), self.sprint_reads(), self.sprint_ops())
+
+    def sprint_reads(self, **kwargs) -> SprintReadLayer:
+        options = {"data_dir": self.data_dir, "board_client": self.board, "clock": lambda: self.clock}
+        options.update(kwargs)
+        return SprintReadLayer(self.instance, **options)
+
+    def sprint_ops(self, **kwargs) -> SprintOperationLayer:
+        options = {"data_dir": self.data_dir, "board_client": self.board, "clock": lambda: self.clock}
+        options.update(kwargs)
+        return SprintOperationLayer(self.instance, **options)
 
     def get(self, path: str, *, query: str = "", app: WebApp | None = None):
         return (app or self.app()).handle("GET", path, query=query)
@@ -346,26 +359,43 @@ class StatusMappingTests(unittest.TestCase):
         self.assertEqual(status_for("a-code-from-the-future"), UNMAPPED_CODE_STATUS)
         self.assertEqual(UNMAPPED_CODE_STATUS, 500)
 
+    #: A body each POST route would be answered on, so that a refusal is the layer's and not this
+    #: test's. Both encodings are here because both are published: a program sends the JSON object,
+    #: and a browser sends the form the sprint page serves.
+    BODIES: ClassVar[dict[str, bytes]] = {
+        "json": json.dumps({"ref": "secretary-1", "request_id": "r", "profile": "p"}).encode("utf-8"),
+        "form": urlencode(
+            [
+                ("request_id", "r"),
+                ("product", "secretary"),
+                ("goal", "a goal"),
+                ("definition_of_done", "a definition of done"),
+                ("issues", "issue:1"),
+                ("projects", "secretary"),
+                ("observer", "claude-observer"),
+                ("worker", ""),
+                ("reviewer", ""),
+            ]
+        ).encode("utf-8"),
+    }
+
     def test_every_route_answers_a_refusal_with_the_status_of_its_code(self) -> None:
         for error, status in self.CODES.items():
-            app = WebApp(RaisingLayer(error), RaisingLayer(error))
+            app = WebApp(*(RaisingLayer(error) for _ in range(4)))
             for route in ROUTES:
                 path = route.pattern.replace("{ref}", "secretary-1").replace("{run_id}", "pr-1")
-                body = json.dumps({"ref": "secretary-1", "request_id": "r", "profile": "p"}).encode("utf-8")
                 with self.subTest(code=error.code, route=route.pattern):
-                    response = app.handle(route.method, path, body=body)
+                    response = app.handle(route.method, path, body=self.BODIES[route.body])
                     self.assertEqual(response.status, status)
 
     def test_a_refused_json_route_answers_the_protocol_code_itself(self) -> None:
-        app = WebApp(
-            RaisingLayer(OwnerConflict("somebody else has this card")), RaisingLayer(OwnerConflict("x"))
-        )
+        app = WebApp(*(RaisingLayer(OwnerConflict("somebody else has this card")) for _ in range(4)))
         response = app.handle("GET", "/api/tasks/secretary-1")
         self.assertEqual(response.status, 409)
         self.assertEqual(json.loads(response.body)["error"]["code"], "owner_conflict")
 
     def test_a_refused_page_stays_a_page_and_carries_the_same_status(self) -> None:
-        app = WebApp(RaisingLayer(TaskNotFound("no such card")), RaisingLayer(TaskNotFound("x")))
+        app = WebApp(*(RaisingLayer(TaskNotFound("no such card")) for _ in range(4)))
         response = app.handle("GET", "/tasks/secretary-1")
         self.assertEqual(response.status, 404)
         self.assertIn("text/html", response.content_type)
@@ -378,6 +408,9 @@ class RouteTableTests(TransportFixture):
     PUBLISHED: ClassVar[set[tuple[str, str]]] = {
         ("GET", "/"),
         ("GET", "/tasks/{ref}"),
+        ("GET", "/sprints/new"),
+        ("POST", "/sprints"),
+        ("GET", "/sprints/{ref}"),
         ("GET", "/api/system"),
         ("GET", "/api/tasks/{ref}"),
         ("GET", "/api/tasks/{ref}/events"),
@@ -394,7 +427,7 @@ class RouteTableTests(TransportFixture):
     def test_every_route_is_one_operation_of_the_layer_below(self) -> None:
         for route in ROUTES:
             with self.subTest(route=route.pattern):
-                self.assertRegex(route.operation, r"^(reads|ops)\.[a-z_]+$")
+                self.assertRegex(route.operation, r"^(reads|ops|sprint_reads|sprint_ops)\.[a-z_]+$")
 
     def test_there_is_no_endpoint_that_runs_something_it_was_given(self) -> None:
         """A route that took a command, a script or a path to execute would be the whole hole."""
@@ -546,7 +579,15 @@ class PageTests(TransportFixture):
 
                 return refuse
 
-        response = self.get("/", app=WebApp(self.reads(board_client=SilentBoard()), self.ops()))
+        response = self.get(
+            "/",
+            app=WebApp(
+                self.reads(board_client=SilentBoard()),
+                self.ops(),
+                self.sprint_reads(board_client=SilentBoard()),
+                self.sprint_ops(board_client=SilentBoard()),
+            ),
+        )
         self.assertEqual(response.status, 200)
         self.assertIn("could not find out which cards the pipeline is carrying", self.text_of(response))
 
