@@ -2182,6 +2182,129 @@ not, because it carries a password hash — that file is written by `web-front r
 `ExecStartPre` runs `caddy validate` on the configuration, so a broken render fails the unit start
 instead of taking the front down while it is running.
 
+### Updating the published application to `main`
+
+Restarting the front republishes the same application: Caddy holds the password and the TLS, and
+every page comes out of `secretary-web.service`, which runs the product out of the configured
+checkout (`~/secretary`, installed into its own virtualenv in editable mode). The code a card page
+renders is therefore whatever that checkout held **when the transport process started**, and neither
+half notices a checkout that moved underneath it.
+
+`secretary upgrade` moves the checkout and re-materialises the installation onto it, but the only
+service it restarts is memory. Nothing in it restarts the transport, so an upgrade on its own leaves
+the front publishing the code of the previous process — a merged page change stays invisible, and
+the JSON routes below it can already answer with fields the page does not draw. Updating the
+published application is the upgrade and then one restart:
+
+```bash
+secretary upgrade --instance ~/secretary-instance      # `pull` fast-forwards ~/secretary onto main
+sudo systemctl restart secretary-web.service           # the front is PartOf= and comes with it
+```
+
+Run the upgrade as the installation owner and out of the installed checkout
+(`/home/dev/secretary/.venv/bin/secretary`), not out of a task workspace: without `--product-root`
+an upgrade materialises the *configured* checkout, and running the module from a candidate worktree
+is how unmerged work reaches the homes the running heads read.
+
+What is installed afterwards is two facts, and both are worth printing:
+
+```bash
+git -C ~/secretary rev-parse --short HEAD
+systemctl show -p ExecMainStartTimestamp secretary-web.service
+```
+
+The transport must have started *after* the checkout moved; if it did not, the restart did not
+happen and the page is still the old one. `secretary status` prints a third revision — the head
+registry pin, which is the revision the last **completed** upgrade recorded — and on this
+installation it can lag the checkout, because the upgrade stops before its later steps (below).
+
+`PartOf=` means the front goes down and comes back with the transport, so a request in flight at
+that moment fails rather than waiting; `Restart=always` brings both halves back without further
+help, and a reload a second later is served by the new code.
+
+> **Known: `upgrade` stops at its `host` step on this installation**, with `unowned names in our
+> namespace: codegen-product-kit, secretary-web-front.service, secretary-web.service`. The two web
+> units were installed ahead of the host manifest that would own them, so reconcile finds resources
+> in its own namespace it has no record of and refuses to write rather than adopt them. This does
+> not affect the update above: `pull` runs first and has already moved the checkout, so the restart
+> still publishes the new revision. What does not run is everything after `host` — `automations`,
+> `memory` and `verify` — so on a version that changes an automation spec or the memory service,
+> that part of the installation stays where it was and the head-registry pin keeps naming the older
+> revision. Clearing it is a deliberate act, taken once, by the operator:
+>
+> ```bash
+> secretary reconcile adopt --instance ~/secretary-instance \
+>   --logical-id systemd:unit:secretary-web.service --yes
+> secretary reconcile adopt --instance ~/secretary-instance \
+>   --logical-id systemd:unit:secretary-web-front.service --yes
+> ```
+>
+> Adoption verifies before it records: the installed unit file must be byte-for-byte the file this
+> product ships, so a hand-edited unit under our prefix is refused by name and stays a conflict
+> rather than being adopted silently. A recorded adoption lands in
+> `~/secretary-data/host-managed.json`, after which reconcile owns the two units and re-renders them
+> from `packaging/systemd` like every other unit — which is the point of adopting and also its cost.
+> The alternative, for a unit the installation should keep its hands off, is to name it in
+> `host.foreign_units` in `instance.yaml`; that tells reconcile the name is somebody else's and is
+> not an adoption. `codegen-product-kit` is an Orca
+> registration in the same state and takes the same two decisions.
+
+### Rolling the application back to a previous revision
+
+The rollback is the same restart pointed at an older tree. There is deliberately no `upgrade` flag
+for it: an upgrade only ever fast-forwards.
+
+```bash
+git -C ~/secretary log --oneline -10     # `git -C ~/secretary reflog` says what was installed when
+git -C ~/secretary switch --detach <revision>
+sudo systemctl restart secretary-web.service
+```
+
+A rollback that also has to undo a dependency or a host change re-materialises without pulling,
+after the switch:
+
+```bash
+secretary upgrade --instance ~/secretary-instance --no-pull
+```
+
+The checkout is left on a detached HEAD on purpose. `upgrade`'s `pull` step is a `merge --ff-only`
+and refuses a detached or dirty checkout by name, so the next upgrade fails loudly instead of
+quietly fast-forwarding a host somebody deliberately pinned. Coming back is explicit:
+
+```bash
+git -C ~/secretary switch main
+sudo systemctl restart secretary-web.service
+```
+
+### A snapshot of the whole thing, in one go
+
+Everything worth knowing about the published slice, in one block, with no password in it and nothing
+written to the installation:
+
+```bash
+{
+  date -Is
+  git -C ~/secretary rev-parse HEAD
+  git -C ~/secretary status --porcelain
+  systemctl show -p ActiveState -p SubState -p ExecMainStartTimestamp \
+    secretary-web.service secretary-web-front.service
+  ss -ltnp '( sport = :8787 or sport = :443 )'
+  secretary status --instance ~/secretary-instance
+  secretary web-front check --instance ~/secretary-instance
+  for path in / /api/system /api/tasks/secretary-1/events; do
+    printf '%s ' "$path"
+    curl -sk -o /dev/null -w '%{http_code} %{size_download}\n' "https://109.235.67.14$path"
+  done
+} 2>&1 | tee ~/secretary-data/webfront/snapshot-$(date -u +%Y%m%dT%H%M%SZ).txt
+```
+
+In order: the revision the transport serves and whether that tree is clean, whether both halves are
+up and when they started, that the transport is on `127.0.0.1:8787` and only Caddy is on `443`, the
+installation's own view including the head-registry pin, that no route is published unguarded, and
+what an unauthorised client actually gets over the wire. `web-front check` and the `curl` loop are
+the two halves of the same question — the configuration that is running, and the answers it gives —
+and neither of them needs the password.
+
 ### Auditing what is exposed
 
 The question "is anything reachable without the password" is answerable on the host, against the
