@@ -3094,15 +3094,24 @@ refusal its shape; this gives the rule a seam:
   tries to answer under a source that refused fails there instead of shipping;
 * a section that **cannot answer when every source answered** is a hole in its own rules, and is
   raised as a defect of the layer rather than reported as an unavailable installation;
-* and a **section cannot be hand-built**: the document is rendered by the same module, which refuses
-  any mapping carrying a source that was not decided there. `SectionSet` closes the other side —
-  every public method of `SprintSections` is wrapped at class creation and must answer with a
-  decided section, exactly as `ProtocolBoundary` wraps every public operation.
+* and **a section carries where it came from**, which is what the two places that consume one check.
+  `render` refuses a plain mapping wearing a source, *and* refuses a section this module did not
+  decide; `SectionSet` closes the other side — every public method of `SprintSections` is wrapped at
+  class creation and must answer with a section `decide` or `mark` produced, exactly as
+  `ProtocolBoundary` wraps every public operation. Being of the right type is deliberately not the
+  credential: a builder returning a directly constructed section under an unavailable source was
+  accepted by both for being one, and published the claim this seam exists to prevent.
 
 So a section added next month is covered by the act of being a section, and there is no list to keep
-in step. `tests/test_web_sprint_protocol.py::SectionSeamTests` pins it, including a section that
-tries to claim under a refusal and one assembled outside the seam; the per-section behaviour is
-`SourceIsolationMatrixTests`, which asserts every source refusing alone and in combination.
+in step. **The promise, stated exactly:** a section built by calling the constructor cannot be
+returned from a builder and cannot reach a document. An author who reaches into the module for its
+private provenance sentinel can still mint one — that is forging rather than forgetting, and no seam
+in this language prevents it; what is prevented is the section written the ordinary way that claims
+more than its source gave. `tests/test_web_sprint_protocol.py::SectionSeamTests` pins all of it,
+including a section that tries to claim under a refusal, one assembled outside the seam, and the
+directly constructed one — that last case fails if either provenance check is removed. The
+per-section behaviour is `SourceIsolationMatrixTests`, which asserts every source refusing alone and
+in combination.
 
 **The sources, and the precedence they are consulted in.** The order is what a refusal is attributed
 in, because it is the order in which the chain needs them:

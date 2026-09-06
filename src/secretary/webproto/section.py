@@ -40,12 +40,23 @@ inventing an attribution for it: with every consulted source available and no ru
 section's rules are not total, which is a defect of this layer and not a fact about the
 installation.
 
-**And the document seam.** :func:`render` turns the assembled tree into JSON, and refuses any plain
-mapping that carries a `source` of this shape: the only way to put a source-bearing thing into a
-document is to make it a `Section`. :class:`SectionSet` closes the same loop on the other side --
-every public method of a subclass is wrapped at class creation and must return a `Section`, exactly
-as `ProtocolBoundary` wraps every public operation. A section added next month is guarded by being a
+**And the document seam.** A section is consumed in exactly two places, and both ask where it came
+from. :func:`render` turns the assembled tree into JSON: it refuses a plain mapping carrying a
+`source` of this shape, *and* it refuses a `Section` this module did not decide. :class:`SectionSet`
+closes the same loop on the other side -- every public method of a subclass is wrapped at class
+creation and must answer with a section that `decide` or `mark` produced, exactly as
+`ProtocolBoundary` wraps every public operation. A section added next month is guarded by being a
 public method of the set, and there is no list to keep in step.
+
+The provenance is what makes that true rather than merely stated. Being a `Section` is not the
+credential: a builder that returned `Section(read.source("liveness"), {"state": "working"},
+"liveness")` under an unavailable liveness source was accepted by both places, for being the right
+type, and published the exact claim this module exists to prevent. So a section carries `minted`,
+which only :func:`_minted` sets, which only `decide` and `mark` call. **The promise, stated exactly:**
+a section built by calling the constructor cannot be returned from a builder and cannot reach a
+document. An author who reaches into this module for the private sentinel can still mint one -- that
+is forging rather than forgetting, and no seam in this language prevents it; what is prevented is
+the section written the ordinary way that claims more than its source gave.
 
 `SectionContractError` is a `RuntimeError` on purpose, and deliberately outside
 `boundary.IMPLEMENTATION_FAILURES`: it is a defect of this layer, not a source that refused, and
@@ -119,6 +130,21 @@ def rule(
     return Rule(answers, tuple(needs) if needs else (answers,), produce)
 
 
+#: Proof that a section was assembled by this module, carried by the section itself.
+#:
+#: A private object and deliberately not a boolean or a string: a flag is set by anybody who
+#: constructs the dataclass, and this is never exported, never written to a document and never
+#: reachable from a value a caller passes in. So `minted is _MINTED` answers exactly one question --
+#: did :meth:`SourceSet.decide` or :meth:`SourceSet.mark` make this? -- and answers it for an
+#: instance somebody built by calling the constructor with three arguments, which is what a section
+#: written by hand looks like.
+#:
+#: What it does *not* claim: an author who deliberately reaches into this module for the sentinel
+#: can still mint one. That is forging, not forgetting, and the rule this seam exists to enforce is
+#: that a section written the ordinary way cannot claim more than its source gave.
+_MINTED = object()
+
+
 @dataclass(frozen=True, slots=True)
 class Section:
     """One section: the source that answered it, named, and the fields it answered with.
@@ -127,14 +153,32 @@ class Section:
     same four fields -- `available`, no reason, the moment of the read -- so without it a reader
     cannot tell an answer the board established from one the dispatcher established, and "every
     section names the source that answered it" would hold only for the sources that failed.
+
+    `minted` is where this object says where it came from. An instance built by calling this
+    constructor carries nothing, is not :attr:`trusted`, and is refused by `guard` and by `render` --
+    the two places a section is consumed. Without that, a section written by hand was accepted by
+    both merely for being a `Section`, and a builder that returned
+    `Section(read.source("liveness"), {"state": "working"}, "liveness")` under an unavailable
+    liveness source published exactly the claim this module exists to prevent.
     """
 
     source: sources.Source
     fields: Mapping[str, Any]
     name: str
+    minted: Any = None
+
+    @property
+    def trusted(self) -> bool:
+        """Whether this section was decided here, rather than assembled by a caller."""
+        return self.minted is _MINTED
 
     def to_json(self) -> dict[str, Any]:
         return render(self)
+
+
+def _minted(source: sources.Source, fields: Mapping[str, Any], name: str) -> Section:
+    """The only place a trusted section is made. `decide` and `mark` are its only callers."""
+    return Section(source, fields, name, _MINTED)
 
 
 class SourceSet:
@@ -179,7 +223,7 @@ class SourceSet:
 
     def mark(self, key: str) -> Section:
         """One source's availability, said for the document as a whole and claiming nothing."""
-        return Section(self.source(key), {}, key)
+        return _minted(self.source(key), {}, key)
 
     def replacing(self, key: str, value: Any) -> SourceSet:
         """This set with one source's value narrowed -- the same reading, for one subject of it.
@@ -219,7 +263,7 @@ class SourceSet:
             produced = one.produce(*(self.value(key) for key in one.needs))
             if produced is None:
                 continue
-            return Section(self.source(one.answers), self._checked(produced, blank), one.answers)
+            return _minted(self.source(one.answers), self._checked(produced, blank), one.answers)
         refused = next(
             (key for key in self._order if key in consulted and not self.answered(key)), None
         )
@@ -235,7 +279,7 @@ class SourceSet:
                 raise SectionContractError(
                     f"{refused!r} did not answer, so this section may not claim {name}={fields[name]!r}"
                 )
-        return Section(reading.source, fields, refused)
+        return _minted(reading.source, fields, refused)
 
     @staticmethod
     def _checked(produced: Mapping[str, Any], blank: Mapping[str, Any]) -> dict[str, Any]:
@@ -255,6 +299,11 @@ def render(node: Any) -> Any:
     one thing this module exists to prevent.
     """
     if isinstance(node, Section):
+        if not node.trusted:
+            raise SectionContractError(
+                f"the {node.name!r} section was not decided by this seam, so it may not be published; "
+                "a document's sections are built by SourceSet.decide"
+            )
         return {
             "source": {**node.source.to_json(), "name": node.name},
             **{key: render(value) for key, value in node.fields.items()},
@@ -290,6 +339,11 @@ def guard(function: Callable[..., Any]) -> Callable[..., Any]:
                 f"{function.__name__!r} is a section and must answer with one, not "
                 f"{type(produced).__name__}"
             )
+        if not produced.trusted:
+            raise SectionContractError(
+                f"{function.__name__!r} assembled its section itself; a section is decided by "
+                "SourceSet.decide, which is what holds the invariant over it"
+            )
         return produced
 
     setattr(builder, GUARDED, True)
@@ -309,7 +363,8 @@ class SectionSet:
     """A class whose public methods each assemble one section of a document.
 
     Subclassing is the whole mechanism, exactly as with `boundary.ProtocolBoundary`: every public
-    method defined in the body is wrapped at class creation and must answer with a `Section`, so a
+    method defined in the body is wrapped at class creation and must answer with a section that
+    `SourceSet.decide` or `SourceSet.mark` decided -- not merely with something of that type -- so a
     section added tomorrow is covered by being one. Helpers stay private and are untouched.
     """
 

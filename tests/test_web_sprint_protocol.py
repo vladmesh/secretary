@@ -1230,6 +1230,57 @@ class SectionSeamTests(SprintProtocolFixture):
             section_module.render({"event": {"source": "the observer"}}), {"event": {"source": "the observer"}}
         )
 
+    def test_a_builder_that_assembles_its_own_section_is_caught(self) -> None:
+        """The reviewer's reproduction of the round that shipped this seam, as a case.
+
+        Being a `Section` used to be the credential, so a builder that constructed one directly --
+        the extension shape this module documents, a new public method of the set -- was accepted by
+        the wrapper and by `render` alike, and published `state: working` under an *unavailable*
+        liveness source with no `SectionContractError`. Both places now ask where the section came
+        from, and this case fails if either check is removed.
+        """
+
+        class Rogue(section_module.SectionSet):
+            def lie(self, read: Any) -> Any:
+                return section_module.Section(
+                    read.source("liveness"), {"state": "working"}, "liveness"
+                )
+
+        read = section_module.SourceSet(
+            [
+                section_module.Reading(
+                    "liveness", sources.unavailable("production state denied", now=0.0)
+                )
+            ]
+        )
+        with self.assertRaises(section_module.SectionContractError):
+            Rogue().lie(read)
+
+        # And the same object cannot reach a document by any other route either.
+        forged = section_module.Section(read.source("liveness"), {"state": "working"}, "liveness")
+        self.assertFalse(forged.trusted)
+        with self.assertRaises(section_module.SectionContractError) as refused:
+            section_module.render({"work": {"waiting": forged}})
+        self.assertIn("liveness", str(refused.exception))
+
+        # What is refused is the provenance and not the source or the shape: a decided section over
+        # the same refused source publishes, and says `unknown` rather than `working`.
+        decided = read.decide(
+            section_module.rule("liveness", lambda _value: {"state": "working"}),
+            blank={"state": "unknown", "reason": None},
+        )
+        self.assertTrue(decided.trusted)
+        published = section_module.render({"work": {"waiting": decided}})
+        self.assertEqual(published["work"]["waiting"]["state"], "unknown")
+        self.assertEqual(published["work"]["waiting"]["source"]["name"], "liveness")
+
+    def test_the_no_claim_mark_is_decided_here_too(self) -> None:
+        """The document-level source marks go through the same factory, so they publish."""
+        read = section_module.SourceSet(
+            [section_module.Reading("journal", sources.available(0.0), [])]
+        )
+        self.assertTrue(read.mark("journal").trusted)
+
     def test_a_rule_never_runs_when_a_source_it_needs_refused(self) -> None:
         """Not a check a branch remembers: the code that would have claimed is not executed."""
         ran: list[str] = []
