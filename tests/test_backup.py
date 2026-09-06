@@ -304,6 +304,44 @@ class BackupTests(unittest.TestCase):
             )
             self.assertNotIn("--exclude-workspace", calls[1])
 
+    def test_pipeline_status_reads_the_pause_protocol_document(self):
+        """`pause-status` answers with the layer's `pause_state` document (secretary-1576)."""
+        from secretary.backup import _pause_summary
+
+        self.assertEqual(
+            _pause_summary(
+                {
+                    "kind": "pause_state",
+                    "state": {
+                        "paused": True,
+                        "mode": "freeze",
+                        "actor": "secretary-backup",
+                        "pause_reason": "secretary backup create",
+                    },
+                }
+            ),
+            {
+                "paused": True,
+                "mode": "freeze",
+                "actor": "secretary-backup",
+                "reason": "secretary backup create",
+            },
+        )
+        self.assertFalse(_pause_summary({"kind": "pause_state", "state": {"paused": False}})["paused"])
+
+    def test_a_pause_state_nobody_could_read_counts_as_paused(self):
+        """A backup owns the freeze it takes, so an unestablished pause state is not "free".
+
+        The `state` section of the document is null in every field when the pause flag could not be
+        read, and the production tick treats such a flag as a freeze. Reading that as "not paused"
+        would have a backup freeze on top of a state it cannot see.
+        """
+        from secretary.backup import _pause_summary
+
+        for document in ({}, {"state": {"paused": None, "mode": None}}, {"state": None}):
+            with self.subTest(document=document):
+                self.assertTrue(_pause_summary(document)["paused"])
+
     def test_pipeline_pause_appends_exclude_workspace(self):
         calls: list[list[str]] = []
 

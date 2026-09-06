@@ -1,4 +1,16 @@
-"""CLI handlers for the production dispatcher."""
+"""CLI handlers for the production dispatcher.
+
+`pause`, `resume` and `pause-status` are clients rather than implementations, in the sense
+`sprint list`, `sprint status` and `sprint comment` are: the soft pause, the resume and the pause
+state read go through the named operations of :mod:`secretary.webproto.pause_ops` and
+:mod:`secretary.webproto.pause_reads`, and what is left here is argument parsing, the document on
+stdout, and the typed-code-to-exit-status table `secretary web-run` already uses -- so the exit
+status a script reads for a refusal is unchanged.
+
+`pause freeze` is deliberately not routed through that layer. The layer exposes no freeze operation
+at all, because a freeze stops live heads and must never be reachable as a variant of the soft path;
+the freeze path is the one that was here before and is unchanged.
+"""
 
 from __future__ import annotations
 
@@ -13,8 +25,12 @@ from secretary.dispatcher import (
     HostError,
     runtime_from_args,
 )
-from secretary.dispatcher_pause import PAUSE_MODES
+from secretary.dispatcher_pause import PAUSE_MODES, normalize_pause_mode
 from secretary.tasks import TaskError
+from secretary.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND
+from secretary.webproto.errors import ReadError
+from secretary.webproto.pause_ops import PauseOperationLayer
+from secretary.webproto.pause_reads import DRAIN, PauseReadLayer
 
 
 def add_dispatcher_subcommands(subparsers) -> None:
@@ -74,6 +90,14 @@ def add_pause_commands(subparsers) -> None:
     status = subparsers.add_parser("pause-status", help="read the production dispatcher's pause state")
     add_common(status)
     status.set_defaults(handler=run_pause_status)
+
+    scope = subparsers.add_parser(
+        "pause-scope",
+        help="read what a pause would reach before issuing one: the flag, the open sprints and "
+        "cards inside the pipeline-wide scope, and the heads a drain would leave running",
+    )
+    add_common(scope)
+    scope.set_defaults(handler=run_pause_scope)
 
 
 def add_head_status_command(subparsers) -> None:
@@ -157,10 +181,19 @@ def run_dispatcher_production_run(args: argparse.Namespace) -> int:
 
 
 def run_pause(args: argparse.Namespace) -> int:
+    """The soft pause through the named operation; the freeze through the path it always had.
+
+    The split is the point. `pause_drain` takes no mode and there is no freeze operation beside it,
+    so no argument, default or fallback of this command can turn a request for a soft pause into a
+    freeze: the two spellings reach two different implementations, and the freeze one is the
+    deliberate `pause freeze` an operator types.
+    """
     reason = (args.reason or "").strip() or _read_optional(args.reason_file).strip()
     if not reason:
         print(json.dumps({"error": {"code": "usage", "message": "pause requires --reason or --reason-file"}}))
         return 2
+    if normalize_pause_mode(args.mode) == DRAIN:
+        return _answer(lambda: _pause_operations(args).pause_drain(actor=args.actor, reason=reason))
     return _run_production(
         args,
         lambda runtime: runtime.pause_pipeline(
@@ -173,11 +206,44 @@ def run_pause(args: argparse.Namespace) -> int:
 
 
 def run_resume(args: argparse.Namespace) -> int:
-    return _run_production(args, lambda runtime: runtime.resume_pipeline(actor=args.actor))
+    return _answer(lambda: _pause_operations(args).pause_resume(actor=args.actor))
 
 
 def run_pause_status(args: argparse.Namespace) -> int:
-    return _run_production(args, lambda runtime: runtime.pause_status())
+    return _answer(lambda: _pause_reads(args).pause_state())
+
+
+def run_pause_scope(args: argparse.Namespace) -> int:
+    return _answer(lambda: _pause_reads(args).pause_scope())
+
+
+def _pause_operations(args: argparse.Namespace) -> PauseOperationLayer:
+    return PauseOperationLayer(
+        args.instance,
+        data_dir=args.data_dir,
+        host_mode=args.host_mode,
+        owner=args.owner,
+    )
+
+
+def _pause_reads(args: argparse.Namespace) -> PauseReadLayer:
+    return PauseReadLayer(args.instance, data_dir=args.data_dir)
+
+
+def _answer(call) -> int:
+    """One protocol document on stdout, or one typed refusal on stderr with its exit status.
+
+    The statuses are `web-run`'s, which are the ones these commands already answered with: a
+    `pause_conflict` is an `owner_conflict` and keeps the exit status 3 it has always had, a
+    validation refusal keeps 2, and anything a durable source refused keeps 1.
+    """
+    try:
+        document = call()
+    except ReadError as exc:
+        print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
+        return _RUN_EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
+    print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+    return 0
 
 
 def run_head_status(args: argparse.Namespace) -> int:

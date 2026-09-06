@@ -263,11 +263,22 @@ def pause_status(runtime: Any) -> dict[str, Any]:
         # a freeze a person set is a maintenance window and is held until they resume it.
         "auto_resume": auto_resume_status(state),
         "legacy_mirror": state.get("legacy_mirror") if isinstance(state.get("legacy_mirror"), dict) else {},
-        "heads": [_head_line(ref, record) for ref, record in sorted(records.items())],
+        "heads": head_lines(records),
         "observers": observer_snapshot(payload),
         "warnings": warnings,
     }
     return out
+
+
+def head_lines(records: dict[str, DispatcherRecord]) -> list[dict[str, Any]]:
+    """One line per tracked card, in reference order: the rule for what a missing head means.
+
+    Public because it is a rule and there is one of it. The protocol layer
+    (:mod:`secretary.webproto.pause_reads`) reports the same lines from the same durable records,
+    and a second walk over those records there would be a second answer to "is that head gone
+    because a freeze stopped it".
+    """
+    return [_head_line(ref, record) for ref, record in sorted(records.items())]
 
 
 def _head_line(ref: str, record: DispatcherRecord) -> dict[str, Any]:

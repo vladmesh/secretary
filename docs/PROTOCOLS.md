@@ -2352,6 +2352,7 @@ inference from request ids, prose, timestamps or live state.
 The pause is shared across the pipeline and sits on top of the product dispatcher:
 
 ```bash
+python3 -P -m secretary pause-scope  --instance INSTANCE          # what a pause would reach
 python3 -P -m secretary pause drain|freeze --instance INSTANCE --reason "why"
 python3 -P -m secretary resume --instance INSTANCE
 python3 -P -m secretary pause-status --instance INSTANCE
@@ -2373,6 +2374,103 @@ A freeze set by an automation on the configured allowlist expires after a config
 default): the tick checks this before skipping on freeze and lifts the pause through the ordinary `resume`
 under the same tick lock. A freeze set by a person holds until an explicit `resume`. A frozen tick moves no
 cards but still writes and pushes the checkpoint.
+
+### The pause as protocol operations
+
+The same pause, reachable through the transport-independent layer
+(`secretary.webproto.pause_ops`, `secretary.webproto.pause_reads`) rather than only through a CLI —
+two operations and two reads, with every rule still in `secretary.dispatcher_pause_ops`. The layer
+adds no rule, no second flag, no second lock and no store of its own.
+
+| operation | inputs | answers with | errors |
+| --- | --- | --- | --- |
+| `pause_drain` | `actor`, `reason` | a `pause_command` document | `validation` (empty actor or reason), `owner_conflict` (already paused in the other mode), `backend_unavailable` |
+| `pause_resume` | `actor` | a `pause_command` document, with `restored` | `backend_unavailable` |
+| `pause_state` | — | a `pause_state` document | `backend_unavailable` (no data directory could be located) |
+| `pause_scope` | — | a `pause_scope` document | `backend_unavailable` (the same) |
+
+**Four properties of the pause, preserved and stated on every document.** They are what the read is
+for, and each is a field rather than an assumption a reader has to bring:
+
+1. **The pause is pipeline-wide.** One flag, one file, every `production-tick`. There is no
+   per-sprint pause and no operation that takes a sprint. Every document carries `extent`
+   (`{"scope": "pipeline", "per_sprint": false, …}`), read from no source at all, so it is stated
+   even on a document where every source refused — which is when a reader most needs it. The scope
+   read lists *every* open sprint of the installation for the same reason, and says in words that
+   the cards it lists are the sprints' cards and not the whole of what a pause reaches.
+2. **A drain stops no running head.** It stops claiming Ready cards, dispatching background roles
+   and raising an observer for a sprint opened during the pause; a card already in flight rides its
+   cycle to the end. `modes.drain.does_not_stop` says it, and the heads a drain leaves alone are
+   reported under `heads` as `running`. No field of these documents is named as though a drain
+   stopped one: the `stopped_worker`, `stopped_reviewer` and `stopped_observer` lists are what a
+   *freeze* fills, and a drain leaves all three empty.
+3. **A freeze is a different command and is never an implicit upgrade.** This layer exposes no
+   freeze operation; `modes.freeze.operation` is `null` for exactly that reason. `pause_drain` takes
+   no mode, has no default, fallback, retry or convenience flag, and hands the literal `drain` down.
+   The existing refusal to change mode while paused is preserved: asking for a drain while the
+   pipeline is frozen is `owner_conflict` and writes nothing.
+4. **A resume puts back what a freeze stopped**, and says which. `restored` carries `resumed_mode`
+   and the `relaunched`, `parked` and `skipped` lists `resume` itself produced, plus
+   `observers_resumed`. After a drain those lists are empty and the statement says why — a drain
+   stopped nothing, so there was nothing to put back — which is a different fact from a resume that
+   failed to bring a head back.
+
+**The scope read is the new one, and it is a read.** `pause_scope` answers, before any command is
+issued: that the pause is pipeline-wide, which dispatcher and which files a command would write
+(`target.pause_file`, `target.state_file`, `target.legacy_mirror_file`), which sprints are open and
+which of their cards they hold, which heads are running right now, and — separately — what a drain
+does not stop and what a freeze would. It sets no flag, takes no tick lock, stops or starts no head,
+wakes nothing and writes nothing; that is pinned by a snapshot of the whole data plane taken around
+the call (`tests/test_web_pause_protocol.py::ReadsWriteNothingTests`), exactly as secretary-1575
+pinned its own read.
+
+**The repeat and conflict contract.** The pause is idempotent in its own mode, by
+`dispatcher_pause_ops`' own rule, so these operations carry no request index: a repeated `pause_drain`
+answers `action: "noop"` with `changed: false` and writes nothing at all, and the flag keeps naming
+the pause that is actually held — including its original actor and reason. A `pause_resume` of a
+pipeline that was not paused answers the same way. A `pause_drain` while the pipeline is *frozen* is
+not a repeat: it is `owner_conflict`, because the request is well formed and refused on the state of
+the world, and the same request after a `resume` is admitted. The three outcomes are therefore always
+distinguishable: `action` is `paused`, `noop` or `resumed`, `changed` is the boolean of that, and a
+refusal is not an action at all and never reaches a document.
+
+**The sources, and the precedence they are consulted in.** Every section goes through
+`SourceSet.decide` or `mark`, and a refused source reaches no claim:
+
+| source | what it is | what it alone can settle |
+| --- | --- | --- |
+| `installation` | `instance.yaml`, validated | where this installation keeps its data, and therefore which files a pause acts on |
+| `pause` | `<data_dir>/dispatcher/pause.json` | whether the pipeline is paused, in what mode, by whom, since when, and what a resume would put back |
+| `liveness` | `<data_dir>/dispatcher/production-state.json` | which dispatcher this is and which heads are behind its cards and sprints |
+| `sprints` | the sprint board, one pass | which sprints are open |
+| `cards` | the Pipeline, one listing | which cards those sprints hold |
+
+| section | may be answered by | what it says with its input missing |
+| --- | --- | --- |
+| `target` | `installation` | every field `null` — it is the answer to "which flag", so it survives a flag nobody can read |
+| `dispatcher` | `liveness` | `kind: null`, never "production" under a state nobody read |
+| `state` | `pause` | every field `null`, `paused` included, sourced `pause` |
+| `heads` | `liveness` | `cards: null` and `observers: null`, never `[]` |
+| `sprints` | `sprints` | `items: null`, never `[]` — an empty list would claim no sprint is inside a pipeline-wide pause |
+| `cards` | `cards`, which also needs `sprints` | `items: null` |
+
+A pause flag that cannot be read is this source refusing, and the refusal says the consequence the
+product has already decided for that case: **every production tick reads an unreadable flag as a
+freeze** (`ProductionPause.load`) until it is repaired. That is stated in the source's `reason`, not
+as a claim that the pipeline is paused — `paused` stays `null`, because a flag nobody could read
+establishes neither answer. `secretary backup create` reads that document and treats an
+unestablished pause state as paused, because a backup must own the freeze it takes.
+
+The fault matrix — the flag unreadable, the production state unreadable, and both together, plus an
+unreadable sprint board — is `tests/test_web_pause_protocol.py::SourceIsolationTests`.
+
+**The commands are clients.** `secretary pause drain`, `secretary resume`, `secretary pause-status`
+and the new `secretary pause-scope` call these operations, print the document, and map the typed code
+onto the exit status `secretary web-run` already uses: `validation`/`not_found` → 2,
+`owner_conflict` → 3 (which is what a `pause_conflict` has always exited with), `backend_unavailable`
+→ 1. They hold no rule of their own. `secretary pause freeze` deliberately does **not** go through
+the layer — there is no freeze operation to route it to — and keeps the path it always had, so the
+two spellings reach two implementations and no argument of the soft one can produce a freeze.
 
 ## Connecting a project
 

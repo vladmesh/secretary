@@ -4,6 +4,47 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-06 — the pause is reachable as a protocol operation, and its scope is readable first (secretary-1576, sprint:1431)
+
+**Two new protocol operations and two new reads.** `pause_drain(actor, reason)` sets the pipeline-wide
+soft pause; `pause_resume(actor)` lifts whatever pause is set and reports what it put back;
+`pause_state()` is the pause state read; `pause_scope()` answers what a pause command would reach
+*before* it is issued. Documents are `kind: pause_command`, `pause_state` and `pause_scope`, published
+as the `web-pause` schema. Every rule stays in `secretary.dispatcher_pause_ops` — the tick lock, the
+same-mode no-op, the `pause_conflict` refusal, the head stop and relaunch, the legacy mirror and the
+auto-resume TTL — and no second flag, lock or store was added. See
+[PROTOCOLS](PROTOCOLS.md#the-pause-as-protocol-operations) and
+[OPERATIONS](OPERATIONS.md#read-the-scope-first-then-decide).
+
+**New command.** `secretary pause-scope --instance INSTANCE` prints the scope read: that the pause is
+pipeline-wide, which dispatcher and which files a command would write, which sprints are open and
+which of their cards they hold, which heads are running, and — separately — what a drain does not stop
+versus what a freeze would. It is a read: no flag, no lock, no head, no wake, no write.
+
+**`secretary pause-status` output has changed shape.** It is now a client of `pause_state` and prints
+that document. The fields moved into sections that each name the source that answered them: `paused`,
+`mode`, `since`, `actor`, `stopped_worker`/`stopped_reviewer`/`stopped_observer`, `on_resume` and
+`auto_resume` are under `state`; the per-card head lines are `heads.cards` and the sprint observers
+are `heads.observers`; the flag path is `target.pause_file`. The pause's own reason is `state.pause_reason`,
+so it is never confused with the `reason` a refused source carries. `secretary backup create` reads the
+new shape and treats a pause state it could not establish as paused.
+
+**`secretary pause drain` and `secretary resume` output has changed shape too.** They print the
+`pause_command` document: what the command did (`action` is `paused`, `noop` or `resumed`, with
+`changed` as the boolean), the `restored` lists for a resume, any warnings, and the pause state read
+inside the same answer. Exit statuses are unchanged: a `pause_conflict` is `owner_conflict` and still
+exits `3`, a validation refusal `2`, an unavailable backend `1`.
+
+**`secretary pause freeze` is untouched.** There is deliberately no freeze operation in the layer:
+`pause_drain` takes no mode, and no default, fallback, retry or convenience path turns a request for a
+soft pause into a freeze. The freeze command keeps the implementation and the output it had, and the
+existing refusal to change mode while paused is preserved.
+
+**Nothing says a soft pause stops a head, or that a pause is per sprint.** Every document carries an
+`extent` object stating that the pause is one pipeline-wide flag with no per-sprint form — including a
+document where every source refused — and a `modes` object stating what a drain does not stop and what
+a freeze would. A drain leaves the `stopped_*` lists empty and the running heads reported as running.
+
 ## 2026-09-06 — a PO comment is saved, identified, and honestly reported as delivered (secretary-1575, sprint:1431)
 
 **Two new protocol operations.** `sprint_comment(request_id, actor, reference, body, role)` puts one
