@@ -2696,6 +2696,16 @@ finds that record and returns the same run. It never raises a second head and ne
 workspace. There is no distributed lock: one operator's retry is what this defends against, not a
 cluster.
 
+A request id is the idempotency key of **one operation made with one set of inputs**, and not a
+name for whatever that caller asked for last. The record the id owns carries the operation
+(`run_start` or `run_review`) and a digest of the request's own inputs — the card reference, the
+profile and the instruction for a start; the card reference, the worker run and the profile for a
+review — and a repeat that disagrees with either is refused with `validation` rather than answered.
+Reusing a worker's start id on `review` therefore says so, instead of returning a `product_review`
+document whose run is the worker's own while no reviewer was ever raised; and a start repeated for
+a different card is refused instead of silently answering about the first one. The digest is what
+is stored, so nothing a caller supplies becomes a path or a readable field of the installation.
+
 ### What a run ended as
 
 A run's `state.value` is the same five-word vocabulary the read layer uses for an agent, and the
@@ -2714,8 +2724,9 @@ process's own exit status rides beside it in `state.exit` rather than as a sixth
 
 The evidence is the launch-identity heartbeat, the supervisor's journal and the result file. A
 window, pane or panel is never consulted and is not evidence that a run is alive. The first
-observation of a terminal state settles the run, and a settled run says the same thing forever even
-after its run directory is swept.
+observation of a terminal state settles the run — recording the state, the reason, the exit status
+and the result together — and a settled run says the same thing forever, exit status and result
+included, even after its run directory is swept.
 
 ### Where a run is read back
 
@@ -2726,6 +2737,19 @@ no run outcome store to read instead. Both events are idempotent through the aud
 ownership, so an ending observed ten times is published once. They are generic audit records rather
 than typed Card events, because a product run moves no card and must not wake a sprint observer.
 
+Publication is a property every path restores, not a step of the path that created the run. Raising
+a head and publishing its start are two durable writes, and so are settling an ending and
+publishing it: a journal that is briefly unavailable between them would otherwise lose the event
+forever, because the retry idempotency invites finds the run record and returns it. So a `start` or
+`review` that hands back an existing run, and every `run_state` of a settled run, republish what
+that run owes before answering — and a failure to publish is reported rather than swallowed, so a
+caller never reads a success for a launch or an ending that is not on the history. It costs nothing
+when the events are already there: both are pure functions of the run record, `occurred_at`
+included, so a replay rebuilds the record the journal already holds and it is recognised rather
+than refused. That is also why the ending records the exit status and the result it was read off,
+in the run record beside the state and the reason: a terminal event re-derived from a run directory
+would differ once that directory was swept, which is exactly when the recovery is needed.
+
 ### Errors
 
 The same typed exceptions the reads use, plus the two only a mutation can make. The CLI prints
@@ -2735,7 +2759,7 @@ The same typed exceptions the reads use, plus the two only a mutation can make. 
 | exception | code | when |
 | --- | --- | --- |
 | `TaskNotFound` / `RunNotFound` | `not_found` | no such card, or no such run on this installation |
-| `ValidationRefused` | `validation` | no request id, no profile, an unlaunchable profile, one on another backend, or an unregistered project |
+| `ValidationRefused` | `validation` | no request id, a request id already owning another operation or another request's inputs, no profile, an unlaunchable profile, one on another backend, or an unregistered project |
 | `OwnerConflict` | `owner_conflict` | somebody else owns this card — an open sprint, the dispatcher's lane, its durable record, an unsettled run of this layer's, or a worker run that has not ended yet |
 | `RuntimeUnavailable` | `backend_unavailable` | the workspace, the head or the run's own record could not be made |
 

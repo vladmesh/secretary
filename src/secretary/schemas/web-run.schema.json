@@ -48,6 +48,8 @@
         "settled_at": {"type": ["string", "null"]},
         "settled_state": {"type": "string"},
         "settled_reason": {"type": "string"},
+        "settled_exit": {"type": "object", "description": "The exit status this run's ending was read off, recorded with the ending so it outlives the run directory."},
+        "settled_result": {"type": "object", "description": "The result document this run's ending was read off, recorded with the ending for the same reason."},
         "head_run": {"type": "object"}
       }
     },

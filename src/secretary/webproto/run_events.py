@@ -24,6 +24,14 @@ the run's own start or settle time and not the clock at the moment of the call �
 a byte-identical event and the journal recognises it as the one it already holds instead of
 refusing it as a different payload under a taken id.
 
+That determinism is a requirement and not a nicety, because publication is *retried*: the operation
+layer republishes both events on every path that hands back a run it did not just create, so an
+event lost to one journal failure becomes visible again. It is also why `state` here must be the
+settled document — which :mod:`secretary.webproto.run_state` derives from the run record alone,
+exit status and result included — rather than one re-read from a run directory. An event whose
+payload changed when the run directory was swept would be refused as a different payload under a
+taken request id, precisely when the retry is what is needed.
+
 The records are deliberately *generic* audit records rather than typed board protocol events. A
 typed event is a Card lifecycle transition, and a product run is not one: it moves no card, and
 `is_significant_card_event` must go on reading it as machinery telemetry rather than waking a

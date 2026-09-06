@@ -79,12 +79,16 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
     if run.settled:
         # A settled run is history and says the same thing forever. Re-deriving it would let a run
         # that was `finished` at noon read as `source_unavailable` at midnight because its run
-        # directory had been swept.
+        # directory had been swept -- and the exit status and result are part of "the same thing",
+        # so they come from the record the settle wrote and not from files that may be gone. That
+        # is also what makes this run's terminal event deterministic: the document below is a pure
+        # function of the record, so republishing the event after a journal failure rebuilds the
+        # identical record rather than a second, differing one.
         return _document(
             run.settled_state,
             run.settled_reason,
-            exit_status=_exit_status(_journal(run)[0]),
-            result=_result(run),
+            exit_status=settled_exit(run),
+            result=settled_result(run),
             heartbeat={"state": "settled"},
             now=now,
             settled_at=run.settled_at,
@@ -117,6 +121,29 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
         heartbeat=heartbeat,
         now=now,
     )
+
+
+def terminal_evidence(run: ProductRun) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The exit status and result behind an ending, in the shape a settle records them.
+
+    Read once, at the moment the ending is settled, because that is the last moment they are
+    guaranteed to be there: after it they are the record's, not the filesystem's.
+    """
+    return _exit_status(_journal(run)[0]), _result(run)
+
+
+def settled_exit(run: ProductRun) -> dict[str, Any]:
+    """The exit status recorded with this run's ending, or the empty one for an ending without."""
+    recorded = run.settled_exit
+    return dict(recorded) if isinstance(recorded, dict) and recorded else _empty_exit()
+
+
+def settled_result(run: ProductRun) -> dict[str, Any]:
+    """The result recorded with this run's ending, or "there was none"."""
+    recorded = run.settled_result
+    if isinstance(recorded, dict) and recorded:
+        return dict(recorded)
+    return {"present": False, "value": None, "reason": None}
 
 
 def expected_identity(run: ProductRun) -> dict[str, str]:

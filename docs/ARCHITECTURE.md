@@ -285,6 +285,17 @@ run's two events go onto the board's own audit journal, so the read layer shows 
 history. What is genuinely new is small: a workspace cut with `git worktree` instead of by Orca, a
 durable run record, and one admission gate.
 
+**Two durable writes are never assumed to be one.** Raising a head and putting its start on the
+card's history are separate durable facts, and so are settling a run's ending and publishing it. So
+publication is a property every path restores rather than a step of the path that created the run:
+an idempotent repeat, and every read of a settled run, republish what that run owes before
+answering. The events are pure functions of the run record — which is why the ending records the
+exit status and the result it was read off, rather than re-deriving them from a run directory a
+sweep may have removed — so a replay rebuilds the record the journal already holds instead of a
+second, differing one. For the same reason a request id owns an *operation and its inputs* and not
+just a run: an idempotency key that could be reused across two different commands would hand a
+caller a document about a run that answers a different question.
+
 **And one owner of a card.** The production dispatcher takes cards from its own lane and an open
 sprint reserves its projects; a product run must be neither a second owner of an attempt nor an
 intruder in a sprint. One function decides that — `webproto.admission.admit` — out of rules that

@@ -14,11 +14,14 @@ watchdog, the reconciler, the orphan sweep. So it lives under its own directory 
 plane, and the dispatcher's state is read (by :mod:`secretary.webproto.admission`) and never
 written.
 
-**A request id owns a run, and it owns it from before the head exists.** The record is written
+**A request id owns one run of one operation, and it owns it from before the head exists.** The record is written
 under the store's lock the moment a request id is accepted, with the run id and the workspace path
 already decided, and only then is anything spawned. That ordering is what makes a repeat of the
 same start command return the same run rather than a second process beside the first: the second
-caller finds the record and stops, whether the first caller had finished spawning or not.
+caller finds the record and stops, whether the first caller had finished spawning or not. What the
+record owns is the *request* and not the id alone: it carries the operation it was made under and a
+fingerprint of the inputs, so a repeat that disagrees with either is refused as a
+:class:`RequestMismatch` instead of handing back a document about somebody else's run.
 
 **Nothing here decides what a run's state is.** The record holds evidence — a pid file, a run
 directory, a result path — and :mod:`secretary.webproto.run_state` reads that evidence when it is
@@ -61,8 +64,40 @@ RESULT_NAME = "result.json"
 DEFAULT_DEADLINE_SECONDS = 60.0 * 60.0
 
 
+#: The two operations a request id may own. A request id is an idempotency key *of one operation*,
+#: never a name for "whatever this caller asked for last": see :class:`RequestMismatch`.
+START_OPERATION = "run_start"
+REVIEW_OPERATION = "run_review"
+
+
 class RunStoreError(RuntimeError):
     """The store could not be read or written. Never a statement about a run."""
+
+
+class RequestMismatch(RunStoreError):
+    """This request id already owns a different operation, or the same one over a different request.
+
+    Idempotency is a promise about a *retry*: the same operation, made again with the same inputs,
+    produces the run the first attempt produced instead of a second one. It is not a promise that
+    any later command carrying that id inherits the first one's run -- that would let a review
+    request return the worker's own document, with `role == "worker"` and no parent run, while no
+    reviewer was ever raised and the caller was told one was. So the record a request id owns
+    carries the operation it was made under and a fingerprint of the request itself, and a repeat
+    that disagrees with either is refused here rather than silently aliased.
+    """
+
+
+def request_fingerprint(operation: str, request: dict[str, Any]) -> str:
+    """The immutable identity of one request: its operation and the inputs it was made with.
+
+    A digest rather than the values themselves, for the same reason the request index is digested:
+    nothing a caller supplies becomes a path or a readable field of this installation.
+    """
+    payload = json.dumps(
+        {"operation": operation, "request": {key: _text(value) for key, value in request.items()}},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -106,6 +141,13 @@ class ProductRun:
     settled_at: float = 0.0
     settled_state: str = ""
     settled_reason: str = ""
+    #: The evidence that ending was read off, recorded with it. A settled run is history, and
+    #: history that is re-derived from files a sweep may since have removed is not history: it is a
+    #: run that was `finished` with exit 0 at noon and reads as finished with no exit at midnight.
+    #: Keeping the two here is also what makes this run's `product_run.finished` event
+    #: deterministic, so republishing it after a journal failure rebuilds the identical record.
+    settled_exit: dict[str, Any] = field(default_factory=dict)
+    settled_result: dict[str, Any] = field(default_factory=dict)
 
     @property
     def raised(self) -> bool:
@@ -141,6 +183,8 @@ class ProductRun:
             "settled_at": self.settled_at,
             "settled_state": self.settled_state,
             "settled_reason": self.settled_reason,
+            "settled_exit": dict(self.settled_exit),
+            "settled_result": dict(self.settled_result),
         }
 
     @classmethod
@@ -171,12 +215,22 @@ class ProductRun:
             settled_at=_float(payload.get("settled_at")),
             settled_state=_text(payload.get("settled_state")),
             settled_reason=_text(payload.get("settled_reason")),
+            settled_exit=_mapping(payload.get("settled_exit")),
+            settled_result=_mapping(payload.get("settled_result")),
         )
 
     def with_head(self, head_run: dict[str, Any], *, head_pid: int, supervisor_pid: int) -> ProductRun:
         return replace(self, head_run=dict(head_run), head_pid=head_pid, supervisor_pid=supervisor_pid)
 
-    def settled_as(self, state: str, reason: str, *, now: float) -> ProductRun:
+    def settled_as(
+        self,
+        state: str,
+        reason: str,
+        *,
+        now: float,
+        exit_status: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> ProductRun:
         """The same run, marked as having reached a terminal state, once and never again.
 
         Idempotent by construction: a run that already carries a settlement keeps the first one. The
@@ -185,7 +239,14 @@ class ProductRun:
         """
         if self.settled:
             return self
-        return replace(self, settled_state=state, settled_reason=reason, settled_at=now)
+        return replace(
+            self,
+            settled_state=state,
+            settled_reason=reason,
+            settled_at=now,
+            settled_exit=dict(exit_status or {}),
+            settled_result=dict(result or {}),
+        )
 
 
 class RunStore:
@@ -234,8 +295,16 @@ class RunStore:
             raise RunStoreError(f"the product run record at {path} could not be read: {exc}") from None
         return ProductRun.from_json(payload)
 
-    def by_request(self, request_id: str) -> ProductRun | None:
-        """The run a request id already owns, if it owns one."""
+    def by_request(
+        self, request_id: str, *, operation: str = "", fingerprint: str = ""
+    ) -> ProductRun | None:
+        """The run a request id already owns, if it owns one *and this is the same request*.
+
+        `operation` and `fingerprint` are what make the answer a retry rather than an alias: a
+        caller that names them gets the run back only when the record agrees with both, and a
+        :class:`RequestMismatch` otherwise. Naming neither reads the record as it stands, which is
+        what a reader that is not making a request -- a listing, a repair -- wants.
+        """
         path = self._request_path(request_id)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -243,7 +312,21 @@ class RunStore:
             return None
         except (OSError, ValueError) as exc:
             raise RunStoreError(f"the product run request index at {path} could not be read: {exc}") from None
-        run_id = _text(payload.get("run_id")) if isinstance(payload, dict) else ""
+        if not isinstance(payload, dict):
+            raise RunStoreError(f"the product run request index at {path} is not an object")
+        owned_operation = _text(payload.get("operation"))
+        owned_fingerprint = _text(payload.get("fingerprint"))
+        if operation and owned_operation and owned_operation != operation:
+            raise RequestMismatch(
+                f"request id {request_id!r} already owns a {owned_operation} run; a request id is "
+                f"the idempotency key of one operation and cannot be reused for {operation}"
+            )
+        if fingerprint and owned_fingerprint and owned_fingerprint != fingerprint:
+            raise RequestMismatch(
+                f"request id {request_id!r} already owns a {owned_operation or operation} run made "
+                "with different inputs; a repeat is a retry of the same request, not a new one"
+            )
+        run_id = _text(payload.get("run_id"))
         return self.get(run_id) if run_id else None
 
     def for_ref(self, ref: str) -> list[ProductRun]:
@@ -267,7 +350,14 @@ class RunStore:
 
     # -- writes ----------------------------------------------------------------------------
 
-    def claim(self, request_id: str, build: Any) -> tuple[ProductRun, bool]:
+    def claim(
+        self,
+        request_id: str,
+        build: Any,
+        *,
+        operation: str = "",
+        fingerprint: str = "",
+    ) -> tuple[ProductRun, bool]:
         """The run this request id owns, creating it under the lock when it owns none yet.
 
         `build` is called with a fresh run id only when this request id is new, and it returns the
@@ -281,7 +371,7 @@ class RunStore:
         """
         self._prepare()
         with file_lock(self.lock_path):
-            existing = self.by_request(request_id)
+            existing = self.by_request(request_id, operation=operation, fingerprint=fingerprint)
             if existing is not None:
                 return existing, False
             run = build(new_run_id())
@@ -290,7 +380,15 @@ class RunStore:
             self._write(run)
             write_text_atomic(
                 self._request_path(request_id),
-                json.dumps({"request_id": request_id, "run_id": run.run_id}, sort_keys=True),
+                json.dumps(
+                    {
+                        "request_id": request_id,
+                        "run_id": run.run_id,
+                        "operation": operation,
+                        "fingerprint": fingerprint,
+                    },
+                    sort_keys=True,
+                ),
             )
             return run, True
 
@@ -301,7 +399,16 @@ class RunStore:
             self._write(run)
         return run
 
-    def settle(self, run_id: str, state: str, reason: str, *, now: float) -> tuple[ProductRun, bool]:
+    def settle(
+        self,
+        run_id: str,
+        state: str,
+        reason: str,
+        *,
+        now: float,
+        exit_status: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> tuple[ProductRun, bool]:
         """Record the terminal state of a run, exactly once, and say whether this call did it.
 
         The one place a run stops being open, and the reason the terminal event can be published
@@ -315,7 +422,9 @@ class RunStore:
                 raise RunStoreError(f"there is no product run {run_id!r} to settle")
             if current.settled:
                 return current, False
-            settled = current.settled_as(state, reason, now=now)
+            settled = current.settled_as(
+                state, reason, now=now, exit_status=exit_status, result=result
+            )
             self._write(settled)
             return settled, True
 
@@ -338,6 +447,10 @@ def _text(value: Any) -> str:
 
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _float(value: Any) -> float:

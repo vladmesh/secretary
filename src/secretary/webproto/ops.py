@@ -35,6 +35,15 @@ effort.
 
 **One owner of a card.** Both start paths go through :func:`secretary.webproto.admission.admit`
 before they build or spawn anything, and neither has a branch around it.
+
+**A request id owns an operation, and the events of a run are never assumed published.** Two
+properties that read as bookkeeping and are not. A request id is the idempotency key of one
+operation made with one set of inputs, checked against the record it owns, so a review made under a
+worker's id is a typed refusal rather than a review document about the worker's own run. And
+raising a head and publishing its start are two durable writes, as are settling an ending and
+publishing it: every path that hands back an existing or already-settled run republishes what that
+run owes first (:meth:`OperationLayer._republish`), because criterion 6 is that a launch and an
+outcome are visible through `task_events` and `task_snapshot`, not that they were once written.
 """
 
 from __future__ import annotations
@@ -63,11 +72,15 @@ from secretary.webproto.runs import (
     DEFAULT_DEADLINE_SECONDS,
     HEADS_RELATIVE,
     RESULT_NAME,
+    REVIEW_OPERATION,
     REVIEWER,
+    START_OPERATION,
     WORKER,
     ProductRun,
+    RequestMismatch,
     RunStore,
     RunStoreError,
+    request_fingerprint,
 )
 from secretary.webproto.workspaces import provision, workspace_path
 from triggered_agents.agents.pipeline.heads import HeadRegistryError, load_registry
@@ -274,14 +287,25 @@ class OperationLayer:
         anything is built; and only then is a workspace cut and a head raised. A repeat of the same
         request id — a retried command, a client that reconnected — finds the record at the first
         step and returns it, so no second process and no second workspace can exist for it.
+
+        "The same request id" means the same request: the id is claimed under this operation and a
+        fingerprint of these inputs, so a repeat naming a different card, profile or instruction —
+        or a different operation entirely — is refused rather than answered with somebody else's
+        run. And the repeat republishes the run's `product_run.started` before returning it, so a
+        launch whose publication failed once is not invisible forever.
         """
         now = self._clock()
         report = self.report()
         data_dir = self.data_dir(report)
         store = self.store(data_dir)
-        existing = self._existing(store, request_id)
+        fingerprint = request_fingerprint(
+            START_OPERATION, {"ref": ref, "profile": profile, "instruction": instruction}
+        )
+        existing = self._existing(
+            store, request_id, operation=START_OPERATION, fingerprint=fingerprint
+        )
         if existing is not None:
-            return self._document(existing, now=now)
+            return self._document(existing, now=now, state=self._republish(data_dir, existing, now=now))
 
         admission = admit(
             ref,
@@ -301,9 +325,11 @@ class OperationLayer:
             spec=spec,
             data_dir=data_dir,
             now=now,
+            operation=START_OPERATION,
+            fingerprint=fingerprint,
         )
         if not created:
-            return self._document(run, now=now)
+            return self._document(run, now=now, state=self._republish(data_dir, run, now=now))
         with self._closing_a_failed_bring_up(run, store, now=now):
             workspace = provision(admission.repo, Path(run.workspace), base=admission.default_branch)
             document = self._worker_document(run, admission, instruction=instruction, base=workspace)
@@ -334,13 +360,24 @@ class OperationLayer:
         — a published result, a non-zero exit, a process that died — is what the reviewer is handed,
         in the same workspace the worker worked in, so the review is of the work rather than of a
         report about it.
+
+        The request id is claimed under *this* operation and this review's own inputs, which is what
+        keeps that promise against a caller that repeats the worker's start id here: the repeat is a
+        typed validation conflict rather than a `product_review` document carrying the worker's run,
+        with no reviewer raised and nobody told.
         """
         now = self._clock()
         report = self.report()
         data_dir = self.data_dir(report)
         store = self.store(data_dir)
-        existing = self._existing(store, request_id)
+        fingerprint = request_fingerprint(
+            REVIEW_OPERATION, {"ref": ref, "worker_run_id": worker_run_id, "profile": profile}
+        )
+        existing = self._existing(
+            store, request_id, operation=REVIEW_OPERATION, fingerprint=fingerprint
+        )
         if existing is not None:
+            self._republish(data_dir, existing, now=now)
             return self._review_document(existing, store, now=now)
 
         worker = self._worker_run(store, ref=ref, worker_run_id=worker_run_id)
@@ -372,8 +409,11 @@ class OperationLayer:
             now=now,
             parent_run_id=worker.run_id,
             workspace=worker.workspace,
+            operation=REVIEW_OPERATION,
+            fingerprint=fingerprint,
         )
         if not created:
+            self._republish(data_dir, run, now=now)
             return self._review_document(run, store, now=now)
         with self._closing_a_failed_bring_up(run, store, now=now):
             document = self._review_prompt(run, worker, worker_state)
@@ -393,10 +433,14 @@ class OperationLayer:
         """One run's state — and the one place a run's ending becomes durable.
 
         Reading is most of it, and the write is exactly one thing: the first observation of a
-        terminal state settles the run and publishes its single `product_run.finished` event. That
-        is not a second history — the event goes onto the card's own journal — and it is not a
-        second answer either, because :meth:`secretary.webproto.runs.RunStore.settle` records an
-        ending once and every later observer of the same ending publishes nothing.
+        terminal state settles the run, recording the state, the reason, the exit status and the
+        result together, and its single `product_run.finished` event goes onto the card's own
+        journal. That is not a second history, and not a second answer either:
+        :meth:`secretary.webproto.runs.RunStore.settle` records an ending once, and the event is a
+        pure function of that record, so every later observer that republishes it rebuilds the
+        record the journal already holds. Republishing rather than publishing once is deliberate —
+        the settle is durable before its publication is, and an ending lost to one journal failure
+        would otherwise never become visible again.
 
         Two things this operation does besides observing, and both are what "the product owns the
         process" means. A run whose head has published its result is a run whose work is done, so
@@ -417,10 +461,22 @@ class OperationLayer:
                 self._stop(run, data_dir, reason)
                 state = run_state_reads.observe(run, now=now)
         if state["terminal"] and not run.settled:
-            run, first = store.settle(run.run_id, state["value"], state["reason"], now=now)
+            exit_status, result = run_state_reads.terminal_evidence(run)
+            run, _first = store.settle(
+                run.run_id,
+                state["value"],
+                state["reason"],
+                now=now,
+                exit_status=exit_status,
+                result=result,
+            )
             state = run_state_reads.observe(run, now=now)
-            if first:
-                run_events.publish_finished(self._audit(data_dir), run, state)
+        if run.settled:
+            # Not `if first`: an ending is settled once, and *publishing* it is a separate durable
+            # write that may have failed after the settle. So every terminal read republishes,
+            # which is free when the event is already on the journal and is the only way an ending
+            # lost to one journal failure ever becomes visible again. See :meth:`_republish`.
+            state = self._republish(data_dir, run, now=now, state=state) or state
         return self._document(run, now=now, state=state)
 
     # -- the pieces the operations are made of ----------------------------------------------
@@ -448,13 +504,59 @@ class OperationLayer:
                 )
             raise
 
-    def _existing(self, store: RunStore, request_id: str) -> ProductRun | None:
+    def _existing(
+        self, store: RunStore, request_id: str, *, operation: str, fingerprint: str
+    ) -> ProductRun | None:
+        """The run this exact request already owns, or nothing, or a typed refusal.
+
+        The refusal is the point. A request id is the idempotency key of *one* operation made with
+        *one* set of inputs, so the store is asked for the run under both, and a repeat that names
+        a different operation or different inputs is a validation conflict rather than a document
+        about a run that answers a different question. Without that, a review command that reused
+        the worker's request id would be handed the worker's own run back, reported as a review,
+        with no reviewer ever raised.
+        """
         if not request_id:
             raise ValidationRefused("a product run operation names the request it is made under")
         try:
-            return store.by_request(request_id)
+            return store.by_request(request_id, operation=operation, fingerprint=fingerprint)
+        except RequestMismatch as exc:
+            raise ValidationRefused(str(exc)) from None
         except RunStoreError as exc:
             raise RuntimeUnavailable(str(exc)) from None
+
+    def _republish(
+        self,
+        data_dir: Path,
+        run: ProductRun,
+        *,
+        now: float,
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Make sure this run's events are on the card's history, however often that is asked.
+
+        Criterion 6 says the launch and the outcome are visible through the existing `task_events`
+        and `task_snapshot`. Publishing them once, on the path that created them, only holds that
+        while the journal never fails: a `TaskAudit` that is briefly unavailable *after* the head
+        is up loses `product_run.started` forever, because the retry the idempotency contract
+        invites finds the record and returns it without ever trying again. The same hole sits under
+        `run_state`, whose settle is durable before its publication is.
+
+        So publication is not a step of the creating path but a property every path restores: a
+        recovered run republishes what it owes before it is returned. It costs nothing when the
+        events are already there, because both are derived entirely from the run -- `occurred_at`
+        included -- so a replay builds the byte-identical record `TaskAudit` already holds and
+        recognises, and neither a second event nor a second history can come of it.
+        """
+        if not run.raised and not run.settled:
+            return state
+        observed = state if state is not None else run_state_reads.observe(run, now=now)
+        audit = self._audit(data_dir)
+        if run.raised:
+            run_events.publish_started(audit, run)
+        if run.settled:
+            run_events.publish_finished(audit, run, observed)
+        return observed
 
     def _claim(
         self,
@@ -467,6 +569,8 @@ class OperationLayer:
         spec: HeadSpec,
         data_dir: Path,
         now: float,
+        operation: str,
+        fingerprint: str,
         parent_run_id: str = "",
         workspace: str = "",
     ) -> tuple[ProductRun, bool]:
@@ -493,7 +597,9 @@ class OperationLayer:
             )
 
         try:
-            return store.claim(request_id, build)
+            return store.claim(request_id, build, operation=operation, fingerprint=fingerprint)
+        except RequestMismatch as exc:
+            raise ValidationRefused(str(exc)) from None
         except RunStoreError as exc:
             raise RuntimeUnavailable(str(exc)) from None
 

@@ -458,6 +458,42 @@ class IdempotencyTests(ProductRuntimeFixture):
         self.assertEqual(first["review"]["run"]["run_id"], again["review"]["run"]["run_id"])
         self.assertEqual(len(self.runtime.starts), 2)
 
+    def test_a_request_id_belongs_to_the_operation_it_was_made_under(self) -> None:
+        """A worker's request id repeated on `review` is refused, not aliased to the worker run.
+
+        The failure this pins down returned a `product_review` document whose run was the worker's
+        own -- `role == "worker"`, no parent run -- while no reviewer process was ever raised: a
+        caller was told a review had happened when none had.
+        """
+        worker = self._settled_worker()
+        with self.assertRaises(ValidationRefused) as refused:
+            self.layer().run_review(
+                request_id="req-worker",
+                profile=REVIEWER_PROFILE,
+                worker_run_id=worker["run"]["run_id"],
+            )
+        self.assertIn("run_start", str(refused.exception))
+        self.assertEqual(len(self.runtime.starts), 1)
+
+    def test_a_repeat_with_different_inputs_is_refused_rather_than_answered(self) -> None:
+        self._backlog_card("secretary-run-2")
+        self.start(request_id="req-same")
+        with self.assertRaises(ValidationRefused) as refused:
+            self.start(request_id="req-same", ref="secretary-run-2")
+        self.assertIn("different inputs", str(refused.exception))
+        self.assertEqual(len(self.runtime.starts), 1)
+
+    def test_a_review_repeated_with_a_different_worker_is_refused(self) -> None:
+        worker = self._settled_worker()
+        self.layer().run_review(
+            request_id="rev-1", profile=REVIEWER_PROFILE, worker_run_id=worker["run"]["run_id"]
+        )
+        with self.assertRaises(ValidationRefused):
+            self.layer().run_review(
+                request_id="rev-1", profile=REVIEWER_PROFILE, worker_run_id="pr-someone-else"
+            )
+        self.assertEqual(len(self.runtime.starts), 2)
+
     def _settled_worker(self) -> dict[str, Any]:
         document = self.start(request_id="req-worker")
         run_id = document["run"]["run_id"]
@@ -812,6 +848,67 @@ class EventVisibilityTests(ProductRuntimeFixture):
         page = self.reads().task_events("secretary-run-1", None, limit=50)
         finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
         self.assertEqual(len(finished), 1)
+
+    def test_a_start_event_lost_to_one_journal_failure_is_recovered_by_the_retry(self) -> None:
+        """Criterion 6 has to survive a journal that is briefly unavailable.
+
+        The head is up and its run record is durable; publishing its `product_run.started` fails
+        once. The retry the idempotency contract invites finds the record -- and must publish the
+        event it owes rather than only hand the document back, or the launch is invisible forever.
+        """
+        with mock.patch.object(
+            ops_module.run_events, "publish_started", side_effect=RuntimeUnavailable("journal down")
+        ):
+            with self.assertRaises(RuntimeUnavailable):
+                self.start(request_id="lost-start-event")
+        self.assertEqual(
+            self.reads().task_events("secretary-run-1", None, limit=10)["items"], []
+        )
+
+        again = self.start(request_id="lost-start-event")
+        self.assertEqual(len(self.runtime.starts), 1)
+        page = self.reads().task_events("secretary-run-1", None, limit=10)
+        started = [item for item in page["items"] if item["kind"] == run_events.STARTED]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["data"]["run_id"], again["run"]["run_id"])
+
+    def test_an_ending_lost_to_one_journal_failure_is_recovered_by_the_next_read(self) -> None:
+        """The same hole under `run_state`: the settle is durable before its publication is."""
+        run_id = self.start()["run"]["run_id"]
+        self.runtime.publish_result(run_id, {"status": "done"})
+        with mock.patch.object(
+            ops_module.run_events, "publish_finished", side_effect=RuntimeUnavailable("journal down")
+        ):
+            with self.assertRaises(RuntimeUnavailable):
+                self.layer().run_state(run_id)
+        kinds = [item["kind"] for item in self.reads().task_events("secretary-run-1", None, limit=10)["items"]]
+        self.assertEqual(kinds, [run_events.STARTED])
+
+        state = self.layer().run_state(run_id)
+        self.assertEqual(state["state"]["value"], "finished")
+        page = self.reads().task_events("secretary-run-1", None, limit=10)
+        finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["data"]["result"], {"status": "done"})
+
+    def test_a_recovered_ending_republishes_the_same_record_after_a_sweep(self) -> None:
+        """The republished event is the record the journal already holds, byte for byte.
+
+        A terminal event whose payload were re-derived from the run directory would differ once
+        that directory had been swept, and `TaskAudit` would refuse it as a different payload under
+        a taken request id -- so the recovery above would fail exactly when it is needed.
+        """
+        run_id = self.start()["run"]["run_id"]
+        self.runtime.publish_result(run_id, {"status": "done"})
+        self.layer().run_state(run_id)
+        for path in (self.data_dir / "webproto" / "heads" / run_id).iterdir():
+            path.unlink()
+        for _ in range(2):
+            self.layer().run_state(run_id)
+        page = self.reads().task_events("secretary-run-1", None, limit=50)
+        finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["data"]["result"], {"status": "done"})
 
     def test_no_second_history_is_written_anywhere(self) -> None:
         run_id = self.start()["run"]["run_id"]
