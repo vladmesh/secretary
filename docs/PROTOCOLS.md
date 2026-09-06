@@ -2687,6 +2687,19 @@ record once took a whole card page down through `run_list`. A defect of the laye
 `tests/test_web_run_protocol.py:ErrorContractTests` breaks the run store and the journal under every
 operation of both layers, and fails if an operation is added without being covered.
 
+**And a file this layer writes is written in one place, for the same reason.** That promise holds
+only while every failure a durable source can raise is in the boundary's vocabulary, and one was
+not: `secretary._fsutil.write_text_atomic` turns its `OSError` into a `RuntimeError`, which is
+deliberately *outside* that vocabulary because it is what a defect of the layer travels as. A full
+disk under any store therefore escaped raw, past every `except RunStoreError` and past a transport
+that catches `ReadError`. Widening the vocabulary would hide real defects and repairing it at one
+store would leave the next one to rediscover it, so every write in the package goes through
+`secretary.webproto.store_io.write_document`, which is where the writer's `RuntimeError` becomes
+`RunStoreError` and therefore `backend_unavailable`. `write_text_atomic` itself is unchanged: a
+dozen callers outside this layer already catch its `RuntimeError` on purpose.
+`tests/test_web_run_protocol.py:FileWriteSeamTests` scans the package and fails if any module of it
+writes a file another way.
+
 ## Running the pipeline
 
 The other half of `secretary.webproto`, and the half that produces what the read layer shows: three
@@ -2891,6 +2904,171 @@ The same typed exceptions the reads use, plus the two only a mutation can make. 
 | `ValidationRefused` | `validation` | no request id, a request id already owning another operation or another request's inputs, no profile, an unlaunchable profile, one on another backend, or an unregistered project |
 | `OwnerConflict` | `owner_conflict` | somebody else owns this card — an open sprint, the dispatcher's lane, its durable record, an unsettled run of this layer's, or a worker run that has not ended yet |
 | `RuntimeUnavailable` | `backend_unavailable` | the workspace, the head or the run's own record could not be made |
+
+## Opening and watching a sprint
+
+The third part of `secretary.webproto`, and the one that decides what the other two have to work
+on: a run is one head on one card, and the cards come from a sprint. One operation opens a sprint,
+two reads answer what a sprint can be built from and what one is doing. They hold the same
+properties as the halves above — no HTTP, no sockets, no framework, no rendering, typed codes
+instead of status numbers, and every section of every document carrying its own availability — and
+they are the contract the web transport, the CLI and a future Telegram head all call.
+
+Every document validates against the packaged `web-sprint` schema and carries `schema_version`, a
+`kind` of `sprint_options`, `sprint` or `sprint_created`, and `observed_at`. The identities are the
+ones this pipeline already has: a sprint is its `sprint:N` reference, a product its id, an issue its
+`issue:*` reference, a project its registered id, a head profile its registry id.
+
+**Every rule stays with the writer that owns it.** `SprintWriter.create` decides what a sprint may
+be — an existing product, at least one *open* issue of that product, registered projects, no
+project another open sprint reserves, an observer that is a profile of this installation's head
+registry or the word `none`, and executor pins held to that same registry — and the operation calls
+it. There is no second admission gate here, no second audit, no second reservation index and no
+second copy of any of those rules; the audit event, the guard index write and the staged-intent
+transaction are the ones [Sprints](#sprints) already describes.
+
+**There is no "start", because there is no start action.** A sprint observer is raised by the
+production tick, which reconciles open sprints against the observer records it holds and brings up
+one head per sprint that has none. So opening a sprint *with* an observer is the whole of starting
+it, and a scheduler of this layer's own would be a second thing racing the tick for the same head.
+What the operation returns instead is where the sprint actually is — see the launch states below.
+
+### What a sprint can be built from
+
+**`sprint_options()`** answers four sections, each from the source that owns the rule it feeds:
+
+| section | source | what is in it |
+| --- | --- | --- |
+| `products` | `ProductIssueStore.list_products` | id, label, ref, and the projects the product names |
+| `issues` | `ProductIssueStore.list_issues` | the **open** issues only, each with the product that owns it |
+| `projects` | `registered_projects` plus `sprints/active-repositories.json` | id, label, and `reserved_by`: the open sprints holding it |
+| `heads` | the installation's `heads/heads.yaml` | every profile with its model, effort, adapter and resource |
+
+The issues are the admissible ones and not the whole board: a closed issue is refused by
+`_check_ownership`, so it is never offered, and a client that filters by the product it picked
+cannot assemble a request that will be refused for that reason. `reserved_by` is `null` — never an
+empty list — when the reservation index itself could not be established, because "held by nobody"
+and "nobody could say" are opposite answers.
+
+The head profiles are read from the installed registry and never from a constant in the product:
+what an installation runs off is its own, and a list written into this product would offer heads the
+host does not have and hide the ones it does. Each entry carries `id`, a `label` composed from what
+the registry actually holds (`codex · gpt-5.6-sol · medium effort`), `model`, `effort`, `adapter`,
+`resource`, the roles it is the registry's default for, and `observer`: whether a sprint may declare
+it as its observer. That flag is not a restatement of the rule — `check_observer_profile` is asked
+about each profile, the same call a create makes — so a profile the registry does not have is
+absent from the list *and* refused by the create, and the two cannot disagree. Beside the list,
+`heads.observer` carries the one answer that is not a profile id (`none`, for a sprint that runs
+without an observer) and the registry's own observer default.
+
+### Opening one
+
+**`sprint_create(request_id, actor, product, goal, issues, projects, observer, …)`** opens a sprint
+and answers with `kind: sprint_created`: the request id, whether *this* call claimed it, and the
+whole `sprint` document the read below returns.
+
+`observer` is the one word an operator must say — a profile id, or `none` — exactly as
+`--observer` is required on the CLI, and for the same reason: neither answer is more of a default
+than the other.
+
+`worker` and `reviewer` are optional in the full sense. `None` is the caller saying nothing about
+that role; it travels as `None` into `SprintWriter._executor_intent`, and the row is written with
+**no field at all** for it, which is what keeps an unpinned role readable as unpinned rather than as
+pinned to the empty string or to a `role_defaults` value nobody chose. There is deliberately no
+spelling that means "unpin": `""` and `none` are refused rather than folded into absence. See
+[The optional executor pins](#the-optional-executor-pins).
+
+### Idempotency
+
+`sprint_create` is idempotent on `request_id`, by the mechanism `run_start` already uses and not by
+a second one. The id is claimed in this layer's own request index
+(`<data>/webproto/sprint-requests/<digest>.json`, the id digested so nothing a caller supplies
+becomes a path) **before** the writer is called; the same id is handed down to
+`SprintWriter.create`; and the reference of the sprint it produced is recorded under the id
+afterwards. A repeat that finds a recorded reference answers from it and calls no writer at all, so
+it can raise no second entity and no second observer. A request id is the key of *one* request:
+the record carries the operation and a digest of the inputs, so a repeat naming a different
+product, goal or pin is refused with `validation` rather than answered with somebody else's sprint.
+There is no distributed lock; what this defends against is one operator's retry.
+
+**A partial failure is repeated, not restarted.** Between the claim and the recorded reference
+there is a window in which a sprint may exist while nothing here names it — and the same window
+exists one level down, between the writer's board row and the reference that publishes it. Both
+close the same way: the repeat carries the same request id, so `SprintWriter.create` resumes its
+own staged transaction and returns the sprint it already began instead of opening a second one.
+Such a create is refused with `backend_unavailable` and an `OperationPending`, whose `data` says so
+in a shape a client acts on rather than parses:
+
+```json
+{"code": "backend_unavailable",
+ "message": "...",
+ "data": {"reason": "sprint_create_pending_repair",
+          "action": {"operation": "sprint_create", "repeat_request": true,
+                     "request_id": "…", "reference": null}}}
+```
+
+`repeat_request` is the safe available action, and it is the *only* one: a new request id would
+open a second sprint beside the half-written one. `reference` is filled in when this layer knows
+which sprint the unfinished request already holds.
+
+**That answer does not depend on what failed.** Once `SprintWriter.create` has returned, a sprint
+row exists, and every remaining step of the operation — recording the reference under the request
+id, and reading the sprint back for the document — runs inside one region that answers this way
+whatever raises: the atomic writer, the lock file's `mkdir`/`open`/`flock`, the board read, or a
+defect of the layer itself. The region catches broadly on purpose rather than listing the
+vocabularies it knows, because a list is what has to be kept in step and a step added tomorrow
+would otherwise be the next hole; the cause is chained rather than swallowed, so a traceback still
+names the primitive that failed.
+
+The order inside the message is part of the contract too: the durable fact comes before the cause.
+A caller is told which sprint exists and that repeating the same request is safe, and only then
+what went wrong — because a caller that reads the cause first and acts on it opens a second sprint.
+
+### Watching one
+
+**`sprint_state(ref)`** is the page somebody watches a sprint on: the goal and definition of done it
+was opened with, its product, issues and reserved projects, its repositories, its status, its
+current card, the state of each executor pin, its last observer resume entry — and, separately,
+whether its observer is up.
+
+The sprint's own fields and the observer's liveness are two sources and fail apart: a dispatcher
+state nobody can read leaves the goal, the reservations and the pins on the page and says that the
+liveness is what could not be established. The sprint is read through `SprintReader.list`, never
+`show`, because `show` would create the sprint board it reads from and a read of this layer creates
+nothing.
+
+Liveness comes from the dispatcher's durable production state, classified by the same
+`observer_snapshot` rows `secretary sprint status` shows. A terminal, pane or window is never
+consulted and is never evidence. `observer.launch.state` is one of:
+
+| state | what it means |
+| --- | --- |
+| `not_started` | the entity is saved and the production tick holds no observer record for it yet |
+| `running` | the dispatcher holds a record and its head is alive |
+| `unavailable` | the production state could not be read; nothing is established either way |
+| `stopped` | a record exists and its head is not alive — which is neither of the two above |
+| `not_declared` | the sprint declared `--observer none`, so the tick raises none for it |
+
+The first three are the three a watching page has to tell apart, and the last two are distinctions
+the same source already makes: folding a head that was raised and is now gone into "not started",
+or a sprint that chose to run without an observer into "waiting for one", would be a lie in the one
+field an operator opens the page for. Beside the state, `observer.declared` carries what the row
+itself declares, in its own three states (`declared`, `absent`, `malformed`), because an absent
+observer field and a corrupt one are repaired differently.
+
+### Errors
+
+The same typed exceptions the rest of the layer uses, with no code of its own added. The writer's
+`TaskError` codes are mapped once, in `secretary.webproto.sprint_ops`, and the mapping never
+re-decides a refusal:
+
+| writer code | exception | code | when |
+| --- | --- | --- | --- |
+| `validation`, `role_forbidden` | `ValidationRefused` | `validation` | a closed or foreign issue, an unregistered project, an unknown observer or executor profile, a missing request id, a repeat over different inputs |
+| `not_found` | `TaskNotFound` | `not_found` | the board holds no such product, issue or sprint |
+| `sprint_conflict`, `resource_conflict` | `OwnerConflict` | `owner_conflict` | an open sprint already reserves one of these projects, or this installation is at its open-sprint limit |
+| `audit_pending` | `OperationPending` | `backend_unavailable` | the create is part-done and repairable with the same request id (above) |
+| `backend_error`, anything else | `RuntimeUnavailable` | `backend_unavailable` | a durable source of this installation refused |
 
 ## Serving the pipeline locally
 

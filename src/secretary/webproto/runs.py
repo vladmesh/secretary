@@ -40,7 +40,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from secretary._fsutil import file_lock, write_text_atomic
+from secretary._fsutil import file_lock
+from secretary.webproto.store_io import RunStoreError, write_document
 
 #: Which side of the demonstration scenario a run is. Two, and there is no third: this card covers
 #: exactly the scenario it executes.
@@ -92,8 +93,10 @@ START_OPERATION = "run_start"
 REVIEW_OPERATION = "run_review"
 
 
-class RunStoreError(RuntimeError):
-    """The store could not be read or written. Never a statement about a run."""
+# `RunStoreError` is imported above rather than defined here: it now lives at the seam every store
+# of this layer writes through (:mod:`secretary.webproto.store_io`), because it is that seam's
+# vocabulary and not this store's alone. It stays importable from here, as everything that already
+# imports it from here expects -- `IMPLEMENTATION_FAILURES` included -- and it is still one class.
 
 
 class RequestMismatch(RunStoreError):
@@ -468,7 +471,7 @@ class RunStore:
             if not isinstance(run, ProductRun):
                 raise RunStoreError("a product run record is built as a ProductRun")
             self._write(run)
-            write_text_atomic(
+            write_document(
                 self._request_path(request_id),
                 json.dumps(
                     {
@@ -519,7 +522,7 @@ class RunStore:
             return settled, True
 
     def _write(self, run: ProductRun) -> None:
-        write_text_atomic(self._run_path(run.run_id), json.dumps(run.to_json(), sort_keys=True, indent=2))
+        write_document(self._run_path(run.run_id), json.dumps(run.to_json(), sort_keys=True, indent=2))
 
 
 def new_run_id() -> str:
