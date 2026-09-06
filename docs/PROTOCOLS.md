@@ -2523,6 +2523,102 @@ Writer operations require an actor and go through the journal protocol; direct e
 trail. `reindex` changes only the derived index and must not overlap another index writer. Model and
 dimension come from instance configuration.
 
+## Reading the pipeline
+
+One read layer answers "what is running", "what is this card doing" and "what happened next",
+and every transport reads it: the CLI below today, an operator dashboard and a Telegram head
+later. It is `secretary.webproto`, it knows nothing about HTTP, sockets, rendering or any
+framework, and it writes nothing — no board mutation, no dispatcher state, no repair, no cache.
+Why it is separate from whatever serves it is in [Architecture](ARCHITECTURE.md#the-read-layer).
+
+```bash
+python3 -P -m secretary web-read system --instance INSTANCE [--offline] [--json]
+python3 -P -m secretary web-read task --instance INSTANCE --ref REF [--events N] [--json]
+python3 -P -m secretary web-read events --instance INSTANCE --ref REF [--cursor C] [--limit N] [--json]
+```
+
+Every document validates against the packaged `web-read` schema and carries `schema_version`, a
+`kind` of `system`, `task` or `task_events`, and `observed_at`. Identities are the ones the
+pipeline already has: a card is its reference, a project is its registered id. Nothing here
+introduces an identifier of its own.
+
+**`system_snapshot()`** — the dashboard. Installation health (`collect_status`, the same collector
+`secretary status --json` prints), the registered projects from the instance's validated bindings,
+the cards in `ready`, `in_progress`, `validate`, `assessment` and `blocked`, and every head the
+dispatcher holds, each with the card and project it belongs to.
+
+**`task_snapshot(ref)`** — the card page. The card as `secretary task show` reads it, its project
+and whether that project is registered here, what the dispatcher durably holds for it (attempt,
+round, gate state, workspace, heads, pause), the heads working it, the tail of its history with a
+cursor to continue from, and its result: the worker's `report:done` / `report:blocked` (with its
+classification), the reviewer's `review:green` / `review:red`, the observer's `decision:*`, and
+whichever of them is the latest, marked `terminal` when the card is Done.
+
+**`task_events(ref, cursor, limit)`** — the history, one page at a time, with `next_cursor`.
+
+### Sources fail apart
+
+Each section of each document carries a source record, always, with four fields: `state`
+(`available` or `unavailable`), `reason`, `observed_at` and `data_age_seconds`. A source that
+answered is stamped with the moment of the read and an age of 0; one that refused carries why, and
+dates the newest evidence still on disk behind it, so an unavailable section says how old what it
+is showing instead is. An empty list therefore never has to be read as "and I could not tell":
+"the dispatcher is running nothing" and "nobody could say what the dispatcher is running" are
+different answers, and a dead Kanboard blanks the card list rather than the page.
+
+### The four states of an agent
+
+Liveness is process state and nothing else. A head's own shell publishes a launch-identity
+heartbeat — pid, boot id, process start ticks, run id, role, task — before it `exec`s, and the
+layer classifies that record against the durable `HeadRun` the dispatcher recorded. A terminal,
+pane or window is never consulted: panes are aliased, detached and drawn empty over working heads
+(`secretary head-status`), so a pane is evidence about a window and about nothing else.
+
+| state | what it means |
+| --- | --- |
+| `running` | a live process whose recorded identity matches this head's run |
+| `finished` | the run's stop was confirmed, or its process ended after a stop was asked for |
+| `process_failed` | the run still expects a process and the heartbeat names none that is alive |
+| `source_unavailable` | the heartbeat itself could not be read; nothing is proven either way |
+| `unknown` | no evidence yet: no durable run, no heartbeat published, or a foreign pid |
+
+Every agent row carries the `evidence` it was decided from (heartbeat state, pid, pid file) and
+the invariant above in words, so a row can be read correctly without knowing this document.
+
+### Continuing a read
+
+The cursor is a position in the board's append-only audit journal
+(`<data>/board/events.ndjson`), which is where the order of what happened to a card actually
+lives. It is opaque to the client — a base64 document carrying the card and a byte offset — and
+three properties follow from it being a place in an append-only file rather than a timestamp or a
+recomputed index:
+
+* reading with a page's `next_cursor` returns what was appended after that page, exactly once;
+* reading the same cursor twice returns the same page;
+* a cursor issued before new events, read after them, returns exactly those new events.
+
+A page ends with `next_cursor` (always present, even when the page is empty) and `has_more`, which
+is true only when the page was cut short by `limit`. Both record shapes on the journal are
+returned — the typed board protocol events and the released generic audit records beside them,
+told apart by `typed` — because a history with the transitions in it and the creations missing is
+not a history. Staged records that have not committed are not events and no cursor lands inside
+them. Omitting `--cursor` starts at the beginning of the journal; the `next_cursor` a task
+snapshot returns is the end of it, so a client that polls a card is never handed an event it was
+just shown.
+
+### Errors
+
+Failures that are not a source outage are typed exceptions with the codes the task protocol
+already uses; the transport is what turns a code into whatever its protocol says. The CLI prints
+`{"error": {"code", "message"}}` on stderr and exits 2 on `not_found` and `validation`, 1 on
+`backend_unavailable`.
+
+| exception | code | when |
+| --- | --- | --- |
+| `TaskNotFound` | `not_found` | the board answered and holds no card under that reference |
+| `InvalidCursor` | `validation` | a cursor this layer did not issue, one belonging to another card, or one past the end of the journal — never silently reset to the beginning |
+| `InstallationUnavailable` | `backend_unavailable` | the instance config does not validate, so there is no data plane to read |
+
 ## Knowledge
 
 Long recoverable documents (brainstorms, decision logs, incident write-ups) live in

@@ -87,6 +87,7 @@ from secretary.state_repo import StateRepoError
 from secretary.status import collect_status
 from secretary.task_commands import add_task_subcommands
 from secretary.upgrade import add_upgrade_command
+from secretary.webproto.commands import add_web_read_subcommands
 
 PUSH_INTERVAL_MINUTES = int(PUSH_INTERVAL_SECONDS // 60)
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
@@ -140,6 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_pause_commands(subparsers)
     add_head_status_command(subparsers)
     add_check_subcommands(subparsers)
+    add_web_read_subcommands(subparsers)
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
     doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)

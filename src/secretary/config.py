@@ -31,6 +31,7 @@ SCHEMAS = {
     "onboarding-contract": "onboarding-contract.schema.json",
     "status": "status.schema.json",
     "secret-catalog": "secret-catalog.schema.json",
+    "web-read": "web-read.schema.json",
 }
 
 

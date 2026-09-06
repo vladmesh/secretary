@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "web-read.schema.json",
+  "title": "Transport-independent read layer snapshots",
+  "description": "The three documents secretary.webproto returns. Every transport renders these and none of them may invent a field: a client that reads one of these reads all of them the same way.",
+  "oneOf": [
+    {"$ref": "#/$defs/system"},
+    {"$ref": "#/$defs/task"},
+    {"$ref": "#/$defs/events"}
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "description": "Whether one source answered, why not, and how old what is shown instead is.",
+      "required": ["state", "reason", "observed_at", "data_age_seconds"],
+      "properties": {
+        "state": {"enum": ["available", "unavailable"]},
+        "reason": {"type": ["string", "null"]},
+        "observed_at": {"type": ["string", "null"]},
+        "data_age_seconds": {"type": ["number", "null"]}
+      }
+    },
+    "agent": {
+      "type": "object",
+      "required": ["ref", "role", "state", "reason", "evidence", "invariant"],
+      "properties": {
+        "ref": {"type": "string"},
+        "role": {"enum": ["worker", "reviewer"]},
+        "state": {"enum": ["running", "finished", "process_failed", "source_unavailable", "unknown"]},
+        "reason": {"type": "string"},
+        "project": {"type": ["string", "null"]},
+        "head": {"type": ["string", "null"]},
+        "run_id": {"type": ["string", "null"]},
+        "run_lifecycle": {"type": ["string", "null"]},
+        "attempt_id": {"type": ["string", "null"]},
+        "workspace": {"type": ["string", "null"]},
+        "card_state": {"type": ["string", "null"]},
+        "evidence": {
+          "type": "object",
+          "required": ["kind", "heartbeat_state", "pid", "pid_file", "detail"],
+          "properties": {
+            "kind": {"const": "process_heartbeat"},
+            "heartbeat_state": {"type": "string"},
+            "pid": {"type": ["integer", "null"]},
+            "pid_file": {"type": "string"},
+            "detail": {"type": ["string", "null"]}
+          }
+        },
+        "invariant": {"type": "string"}
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["cursor", "typed", "kind", "ref", "occurred_at", "actor", "reason", "outcome", "transition", "related_refs", "data"],
+      "properties": {
+        "cursor": {"type": "string"},
+        "typed": {"type": "boolean"},
+        "kind": {"type": "string"},
+        "event_id": {"type": ["string", "null"]},
+        "request_id": {"type": ["string", "null"]},
+        "ref": {"type": "string"},
+        "occurred_at": {"type": ["string", "null"]},
+        "actor": {"type": ["object", "null"]},
+        "reason": {"type": ["string", "null"]},
+        "outcome": {"type": ["string", "null"]},
+        "transition": {"type": ["object", "null"]},
+        "related_refs": {"type": "array", "items": {"type": "string"}},
+        "data": {"type": "object"}
+      }
+    },
+    "system": {
+      "type": "object",
+      "required": ["schema_version", "kind", "observed_at", "installation", "projects", "tasks", "agents"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "kind": {"const": "system"},
+        "observed_at": {"type": "string"},
+        "installation": {
+          "type": "object",
+          "required": ["instance", "name", "data_dir", "health"],
+          "properties": {
+            "instance": {"type": "string"},
+            "name": {"type": ["string", "null"]},
+            "data_dir": {"type": "string"},
+            "health": {
+              "type": "object",
+              "required": ["source", "status"],
+              "properties": {
+                "source": {"$ref": "#/$defs/source"},
+                "status": {"type": ["object", "null"]}
+              }
+            }
+          }
+        },
+        "projects": {
+          "type": "object",
+          "required": ["source", "items"],
+          "properties": {
+            "source": {"$ref": "#/$defs/source"},
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "repo", "remote", "adapter", "default_branch", "plane", "enabled"],
+                "properties": {"id": {"type": "string"}, "enabled": {"type": "boolean"}}
+              }
+            }
+          }
+        },
+        "tasks": {
+          "type": "object",
+          "required": ["source", "items"],
+          "properties": {
+            "source": {"$ref": "#/$defs/source"},
+            "items": {"type": "array", "items": {"$ref": "#/$defs/task_row"}}
+          }
+        },
+        "agents": {
+          "type": "object",
+          "required": ["source", "items"],
+          "properties": {
+            "source": {"$ref": "#/$defs/source"},
+            "items": {"type": "array", "items": {"$ref": "#/$defs/agent"}}
+          }
+        }
+      }
+    },
+    "task_row": {
+      "type": "object",
+      "required": ["ref", "title", "state", "project", "sprint", "type", "blocked_by", "claimed_by", "created_at", "updated_at"],
+      "properties": {
+        "ref": {"type": "string"},
+        "title": {"type": "string"},
+        "state": {"type": "string"},
+        "project": {"type": ["string", "null"]},
+        "sprint": {"type": ["string", "null"]},
+        "type": {"type": ["string", "null"]},
+        "blocked_by": {"type": ["string", "null"]},
+        "claimed_by": {"type": ["string", "null"]},
+        "created_at": {"type": ["string", "null"]},
+        "updated_at": {"type": ["string", "null"]}
+      }
+    },
+    "marker": {
+      "type": ["object", "null"],
+      "required": ["marker", "value", "at", "body", "classification"],
+      "properties": {
+        "marker": {"type": "string"},
+        "value": {"type": "string"},
+        "at": {"type": ["string", "null"]},
+        "body": {"type": "string"},
+        "classification": {"type": ["string", "null"]}
+      }
+    },
+    "task": {
+      "type": "object",
+      "required": ["schema_version", "kind", "observed_at", "ref", "card", "project", "attempt", "agents", "work", "events"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "kind": {"const": "task"},
+        "observed_at": {"type": "string"},
+        "ref": {"type": "string"},
+        "card": {
+          "type": "object",
+          "required": ["source", "value"],
+          "properties": {"source": {"$ref": "#/$defs/source"}, "value": {"type": ["object", "null"]}}
+        },
+        "project": {
+          "type": "object",
+          "required": ["id", "registered", "binding"],
+          "properties": {
+            "id": {"type": ["string", "null"]},
+            "registered": {"type": "boolean"},
+            "binding": {"type": ["object", "null"]}
+          }
+        },
+        "attempt": {
+          "type": "object",
+          "required": ["source", "value"],
+          "properties": {"source": {"$ref": "#/$defs/source"}, "value": {"type": ["object", "null"]}}
+        },
+        "agents": {
+          "type": "object",
+          "required": ["source", "items"],
+          "properties": {
+            "source": {"$ref": "#/$defs/source"},
+            "items": {"type": "array", "items": {"$ref": "#/$defs/agent"}}
+          }
+        },
+        "work": {
+          "type": "object",
+          "required": ["worker_report", "review_verdict", "decision", "outcome"],
+          "properties": {
+            "worker_report": {"$ref": "#/$defs/marker"},
+            "review_verdict": {"$ref": "#/$defs/marker"},
+            "decision": {"$ref": "#/$defs/marker"},
+            "outcome": {
+              "type": ["object", "null"],
+              "required": ["kind", "value", "at", "terminal"],
+              "properties": {
+                "kind": {"enum": ["report", "review", "decision"]},
+                "value": {"type": "string"},
+                "at": {"type": ["string", "null"]},
+                "terminal": {"type": "boolean"}
+              }
+            }
+          }
+        },
+        "events": {
+          "type": "object",
+          "required": ["source", "items", "next_cursor"],
+          "properties": {
+            "source": {"$ref": "#/$defs/source"},
+            "items": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+            "next_cursor": {"type": "string"}
+          }
+        }
+      }
+    },
+    "events": {
+      "type": "object",
+      "required": ["schema_version", "kind", "observed_at", "ref", "source", "cursor", "next_cursor", "has_more", "items"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "kind": {"const": "task_events"},
+        "observed_at": {"type": "string"},
+        "ref": {"type": "string"},
+        "source": {"$ref": "#/$defs/source"},
+        "cursor": {"type": ["string", "null"]},
+        "next_cursor": {"type": "string"},
+        "has_more": {"type": "boolean"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/event"}}
+      }
+    }
+  }
+}
