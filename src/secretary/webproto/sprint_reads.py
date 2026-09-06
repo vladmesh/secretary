@@ -216,12 +216,19 @@ class SprintReadLayer(ProtocolBoundary):
         One store, one failure: the products and the issues come off the same board through the
         same reader, so a board that will not answer marks both sections unavailable with the same
         reason rather than leaving a client to wonder which of two reads failed.
+
+        `catalogue` reads that board once for both halves, so the form does not pay a second full
+        pass to answer the same question twice.
         """
         evidence = data_dir / "board" / "cards.ndjson"
         try:
             store = ProductIssueStore(
                 self._client(), data_dir=data_dir, instance=report.instance_path.parent
             )
+            # `include_closed=False` is the admissible half of `_check_ownership` and not a
+            # convenience: a closed issue is refused there, so offering one would be offering a
+            # request this installation will not accept.
+            raw_products, raw_issues = store.catalogue(include_closed=False)
             products = [
                 {
                     "id": str(product.get("id") or ""),
@@ -229,12 +236,9 @@ class SprintReadLayer(ProtocolBoundary):
                     "ref": str(product.get("ref") or ""),
                     "projects": [str(project) for project in product.get("projects") or []],
                 }
-                for product in store.list_products()
+                for product in raw_products
                 if str(product.get("id") or "")
             ]
-            # `include_closed=False` is the admissible half of `_check_ownership` and not a
-            # convenience: a closed issue is refused there, so offering one would be offering a
-            # request this installation will not accept.
             issues = [
                 {
                     "ref": str(issue.get("ref") or ""),
@@ -243,7 +247,7 @@ class SprintReadLayer(ProtocolBoundary):
                     "kind": str(issue.get("kind") or "") or None,
                     "priority": str(issue.get("priority") or "") or None,
                 }
-                for issue in store.list_issues(include_closed=False)
+                for issue in raw_issues
                 if str(issue.get("ref") or "")
             ]
         except _SOURCE_FAILURES as exc:
