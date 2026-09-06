@@ -2384,10 +2384,18 @@ adds no rule, no second flag, no second lock and no store of its own.
 
 | operation | inputs | answers with | errors |
 | --- | --- | --- | --- |
-| `pause_drain` | `actor`, `reason` | a `pause_command` document | `validation` (empty actor or reason), `owner_conflict` (already paused in the other mode), `backend_unavailable` |
-| `pause_resume` | `actor` | a `pause_command` document, with `restored` | `backend_unavailable` |
-| `pause_state` | — | a `pause_state` document | `backend_unavailable` (no data directory could be located) |
-| `pause_scope` | — | a `pause_scope` document | `backend_unavailable` (the same) |
+| `pause_drain` | `actor`, `reason` | a `pause_command` document | `validation` (empty actor or reason, or an installation whose config does not validate), `owner_conflict` (already paused in the other mode), `backend_unavailable` (a durable source or the host refused) |
+| `pause_resume` | `actor` | a `pause_command` document, with `restored` | `validation` (an installation whose config does not validate), `backend_unavailable` (a durable source or the host refused) |
+| `pause_state` | — | a `pause_state` document | `validation` (an installation whose config does not validate, with no data directory to fall back on) |
+| `pause_scope` | — | a `pause_scope` document | `validation` (the same) |
+
+That table is not prose: it is checked against
+`secretary.webproto.pause_ops.PAUSE_ERRORS`, and every code in it is driven out of the real
+operation by `tests/test_web_pause_protocol.py::ErrorContractTests`. A behaviour change that moves a
+code fails here rather than being found in review. Beside those codes, every operation of this
+package can answer `backend_unavailable` for an implementation failure caught by
+`secretary.webproto.boundary`; that is the layer-wide contract and not a decision of a pause
+operation, so it is stated once here rather than in each row.
 
 **Four properties of the pause, preserved and stated on every document.** They are what the read is
 for, and each is a field rather than an assumption a reader has to bring:
@@ -2474,9 +2482,18 @@ unestablished pause state as paused, because a backup must own the freeze it tak
 whose `stopped_worker` is the number `1`, or a production record whose `attempt_round` is the string
 `"not-an-integer"`, is readable JSON that cannot be converted into the state these documents report.
 Every such conversion happens *inside the source read*, so it becomes an unavailable source rather
-than an exception past the seam, and the set of failures that means "this source could not answer"
-is one tuple both this layer and the sprint layer import
-(`secretary.webproto.sources.SOURCE_FAILURES`) rather than two hand-kept lists. The semantically
+than an exception past the seam.
+
+**And what counts as "could not answer" is the span, not a list.** A source read is the one place
+whose entire job is to answer that question, so it catches *everything* raised while reading and
+converting its one durable document and returns a refused `Reading` carrying the cause's type and
+message. It enumerates nothing: a tuple of exception types is what has to be kept in step, and this
+one had already drifted — `DispatcherError`, which `DispatcherRecord.from_json` raises for a record
+shape a release no longer stores, was in no list and escaped the seam as itself. The broad catch is
+kept to exactly that span, which is why the conversions live inside the read: assembling a section or
+a document is this layer's own work, and a failure there is a defect that travels as itself to the
+reader best placed to fix it, never as "a source refused". `PauseSections` and the assembly around it
+are outside every span. The semantically
 corrupt flag gets its own reason and never borrows the unreadable-flag sentence above: that file
 parses, so the tick still reads it and behaves by it, and what could not be established is what the
 flag says here.

@@ -61,6 +61,25 @@ from secretary.webproto.pause_reads import (
 PAUSE_DRAIN_OPERATION = "pause_drain"
 PAUSE_RESUME_OPERATION = "pause_resume"
 
+#: The error contract of the pause half, in one place, for the four operations of both its modules.
+#:
+#: It is here because a published contract that only a document states goes stale on the next change
+#: -- twice on this card a behaviour change left a public sentence behind. So the codes each
+#: operation can refuse with are a value: `tests/test_web_pause_protocol.py` drives every code listed
+#: here out of the real operation, *and* checks the operations table in `docs/PROTOCOLS.md` against
+#: it, so the prose fails with the code rather than after it.
+#:
+#: What is deliberately not listed: `backend_unavailable` reaching a caller from
+#: :mod:`secretary.webproto.boundary` for an implementation failure anywhere in this layer. That is
+#: the layer-wide contract every operation of this package carries and not something a pause
+#: operation decides, and listing it per operation would be listing it everywhere.
+PAUSE_ERRORS: dict[str, tuple[str, ...]] = {
+    PAUSE_DRAIN_OPERATION: ("validation", "owner_conflict", "backend_unavailable"),
+    PAUSE_RESUME_OPERATION: ("validation", "backend_unavailable"),
+    "pause_state": ("validation",),
+    "pause_scope": ("validation",),
+}
+
 #: How a `DispatcherError` from the pause becomes a code of this layer. Every entry is a mapping and
 #: never a re-decision: what was refused and why is `dispatcher_pause_ops`' answer, and this only
 #: says which of this layer's codes carries it.
@@ -273,6 +292,7 @@ def _restored(result: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "PAUSE_DRAIN_OPERATION",
+    "PAUSE_ERRORS",
     "PAUSE_RESUME_OPERATION",
     "PauseOperationLayer",
 ]

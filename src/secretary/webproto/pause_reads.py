@@ -44,6 +44,14 @@ it. The pause flag being unreadable therefore leaves the heads, the sprints and 
 and vice versa -- and the flag's refusal says in words that the production tick reads an unreadable
 flag as a freeze, which is the rule `ProductionPause.load` already holds and this read does not
 restate as a claim of its own.
+
+**And "could not answer" is a span here, never a list.** Each source read (:func:`_source`) catches
+everything raised while reading and converting its one durable document and answers with a refused
+`Reading` carrying the cause. It enumerates no exception types: the list this module used to share
+had already drifted -- `DispatcherError`, which `DispatcherRecord.from_json` raises for a record
+shape this release does not store, was in none of them -- and a span cannot be forgotten the way an
+entry can. Everything outside that span, this module's sections and the assembly of its documents
+included, is this layer's own work: a failure there is a defect and travels as itself.
 """
 
 from __future__ import annotations
@@ -95,9 +103,9 @@ SOURCE_CARDS = "cards"
 #: prevent.
 PIPELINE_WIDE = (
     "The pause is one pipeline-wide flag on the production dispatcher. There is no per-sprint "
-    "pause and no way to pause one sprint: a pause reached from a sprint stops claiming for every "
-    "open sprint of this installation, and for every card on its Pipeline board -- including the "
-    "cards no open sprint holds, which the scope below does not list."
+    "pause and no way to pause one sprint: a pause reached from a sprint stops the dispatcher "
+    "claiming every card on this installation's Pipeline board -- whichever sprint holds it, and "
+    "whether or not one does -- and stops claiming for every open sprint at once."
 )
 
 #: Property 2. Named `stops`/`does_not_stop` rather than left to a reader of the head list.
@@ -147,10 +155,47 @@ FREEZE_CONTRACT = {
 #: or a task transition, whatever column it currently sits in.
 NOT_A_CARD = frozenset(_TYPED_RECORD_TYPES)
 
-#: Failures a source read may answer with instead of a value. The same tuple the sprint reads catch,
-#: from the one place both layers read it -- see :data:`secretary.webproto.sources.SOURCE_FAILURES`
-#: for why it is wider than "the file was not there" and why it is not kept twice.
-_SOURCE_FAILURES = sources.SOURCE_FAILURES
+
+class _Unreadable(Exception):
+    """Inside one source read: the document could not be read or parsed at all.
+
+    Not a second kind of refusal -- both answers are the same unavailable source -- but the one
+    distinction that changes what the refusal may say. A pause flag whose bytes are unreadable is a
+    file the production tick has already decided its own behaviour for; a flag that parses and holds
+    the wrong shapes is not, and must not borrow that sentence.
+    """
+
+
+def _source(
+    key: str,
+    produce: Callable[[], Any],
+    *,
+    refusal: Callable[[Exception], str],
+    now: float,
+    evidence: Path | None,
+) -> Reading:
+    """Read and convert one source's durable document, or say that it could not answer.
+
+    **This is the whole span of the broad catch, and the span is the contract.** A source read is
+    the one place whose entire job is to answer "did this source answer", so *anything* raised while
+    reading and converting that one document becomes an unavailable `Reading` -- not a list of
+    exception types, because a list is what has to be kept in step and the next durable document
+    read through here would be the next hole. `DispatcherError` out of `DispatcherRecord.from_json`
+    is exactly that hole arriving: it was the step nobody added to the tuple.
+
+    **What is deliberately outside it.** Section building, the assembly of a document, and every
+    other line of this layer are not in any span: a failure there is a defect of this layer and
+    travels as itself, to the reader best placed to fix it. That boundary is why the conversions
+    live inside `produce` rather than inside a section -- the conversion of a durable document is
+    part of reading it, and everything after it is this layer's own work.
+
+    The cause is not swallowed: `refusal` composes the reason from it, so the type and message of
+    whatever failed are on the document, in the section's own `source.reason`.
+    """
+    try:
+        return Reading(key, sources.available(now), produce())
+    except Exception as exc:  # noqa: BLE001 -- the span above is the reason this is broad
+        return Reading(key, sources.unavailable(refusal(exc), now=now, evidence=evidence), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,21 +555,38 @@ class PauseReadLayer(ProtocolBoundary):
         a client of this layer. A config that does not validate is the caller naming an installation
         that is not one; nothing of this installation refused.
         """
-        report = validate_instance(self.instance)
-        if report.ok and report.data_dir is not None:
-            return report, Reading(SOURCE_INSTALLATION, sources.available(now), self._paths(report.data_dir))
-        reason = (
-            "this instance config does not validate: " + "; ".join(str(error) for error in report.errors[:5])
-            if report.errors
-            else "this instance config names no data directory"
-        )
-        if self._data_dir is None:
-            raise ValidationRefused(reason)
-        return None, Reading(
+
+        def produce() -> tuple[InstanceReport, dict[str, Path]]:
+            report = validate_instance(self.instance)
+            if not report.ok or report.data_dir is None:
+                raise _Unreadable(
+                    "this instance config does not validate: "
+                    + "; ".join(str(error) for error in report.errors[:5])
+                    if report.errors
+                    else "this instance config names no data directory"
+                )
+            return report, self._paths(report.data_dir)
+
+        reading = _source(
             SOURCE_INSTALLATION,
-            sources.unavailable(reason, now=now, evidence=report.instance_path),
-            None,
+            produce,
+            refusal=lambda exc: (
+                str(exc)
+                if isinstance(exc, _Unreadable)
+                else f"this instance config could not be read: {_reason(exc)}"
+            ),
+            now=now,
+            evidence=self._instance_file(),
         )
+        if reading.answered:
+            report, paths = reading.value
+            return report, Reading(SOURCE_INSTALLATION, reading.source, paths)
+        # The refusal is raised outside the span on purpose: it is this layer answering the caller,
+        # not a source failing, and a broad catch that swallowed it would answer a document about an
+        # installation nobody could locate.
+        if self._data_dir is None:
+            raise ValidationRefused(str(reading.source.reason))
+        return None, reading
 
     @staticmethod
     def _paths(data_dir: Path) -> dict[str, Path]:
@@ -548,43 +610,30 @@ class PauseReadLayer(ProtocolBoundary):
         read: an unreadable flag is treated as a freeze by every tick until it is repaired.
         """
         flag = ProductionPause(data_dir)
-        try:
+
+        def produce() -> dict[str, Any]:
             state = flag.load()
-            unreadable = bool(state.get("corrupt"))
-            value = None if unreadable else _flag_state(state)
-        except _SOURCE_FAILURES as exc:
-            unreadable, value, cause = False, None, exc
-        else:
-            cause = None
-        if unreadable:
-            # The file itself could not be read or parsed, which is the case `ProductionPause.load`
-            # already decided the pipeline's behaviour for.
-            return Reading(
-                SOURCE_PAUSE,
-                sources.unavailable(
+            if state.get("corrupt"):
+                raise _Unreadable("the flag could not be read or parsed")
+            return _flag_state(state)
+
+        def refusal(exc: Exception) -> str:
+            if isinstance(exc, _Unreadable):
+                # The case `ProductionPause.load` has already decided the pipeline's behaviour for.
+                return (
                     f"the pause flag could not be read: {flag.path}. Until it is repaired every "
-                    "production tick reads an unreadable flag as a freeze and advances nothing",
-                    now=now,
-                    evidence=flag.path,
-                ),
-                None,
-            )
-        if cause is not None:
-            # A different fault, and it must not borrow the sentence above: the file parses, so the
+                    "production tick reads an unreadable flag as a freeze and advances nothing"
+                )
+            # Any other fault, and it must not borrow the sentence above: the file parses, so the
             # tick keeps reading the same flag and behaving by it. What is unestablished is what the
             # flag says here, not what the pipeline does.
-            return Reading(
-                SOURCE_PAUSE,
-                sources.unavailable(
-                    f"the pause flag parses but does not hold a pause state: {flag.path} "
-                    f"({_reason(cause)}). The production tick reads the same file, so what could "
-                    "not be established here is what the flag says, not the pipeline's behaviour",
-                    now=now,
-                    evidence=flag.path,
-                ),
-                None,
+            return (
+                f"the pause flag parses but does not hold a pause state: {flag.path} "
+                f"({_reason(exc)}). The production tick reads the same file, so what could not be "
+                "established here is what the flag says, not the pipeline's behaviour"
             )
-        return Reading(SOURCE_PAUSE, sources.available(now), value)
+
+        return _source(SOURCE_PAUSE, produce, refusal=refusal, now=now, evidence=flag.path)
 
     def _production(self, data_dir: Path, *, now: float) -> Reading:
         """The dispatcher's durable production state, read once for the document.
@@ -594,27 +643,32 @@ class PauseReadLayer(ProtocolBoundary):
         is "nobody could say which heads are up", never "no head is up".
         """
         state = ProductionState(data_dir)
-        try:
+
+        def produce() -> _Dispatcher:
             payload = state.load()
             if str(payload.get("phase") or "") == "unavailable":
-                raise ValueError("the state is not readable JSON")
-            value = _Dispatcher(
+                raise _Unreadable("the state could not be read or parsed")
+            return _Dispatcher(
                 phase=str(payload.get("phase") or "new"),
                 owner=str(payload.get("owner") or ""),
+                # Every conversion of the durable document is inside this span, records included:
+                # `DispatcherRecord.from_json` refuses record shapes this release does not store,
+                # and that refusal is this source failing to answer, not an exception for a caller.
                 heads=head_lines(state.records(payload)),
                 observers=observer_snapshot(payload),
             )
-        except _SOURCE_FAILURES as exc:
-            return Reading(
-                SOURCE_LIVENESS,
-                sources.unavailable(
-                    f"the dispatcher production state could not be read: {state.path} ({_reason(exc)})",
-                    now=now,
-                    evidence=state.path,
-                ),
-                None,
-            )
-        return Reading(SOURCE_LIVENESS, sources.available(now), value)
+
+        return _source(
+            SOURCE_LIVENESS,
+            produce,
+            refusal=lambda exc: (
+                f"the dispatcher production state could not be read: {state.path}"
+                if isinstance(exc, _Unreadable)
+                else f"the dispatcher production state could not be read: {state.path} ({_reason(exc)})"
+            ),
+            now=now,
+            evidence=state.path,
+        )
 
     def _boards(
         self, data_dir: Path, report: InstanceReport | None, *, now: float
@@ -625,35 +679,21 @@ class PauseReadLayer(ProtocolBoundary):
         a read of this layer creates no board, and the two calls are two board passes that can fail
         independently -- an installation without a Pipeline must not lose its open sprints.
         """
-        reader: SprintReader | None = None
-        try:
-            reader = SprintReader(self._client(), data_dir=data_dir)
-            rows = reader.list(create=False)
-            sprints = Reading(SOURCE_SPRINTS, sources.available(now), rows)
-        except _SOURCE_FAILURES as exc:
-            sprints = Reading(
-                SOURCE_SPRINTS,
-                sources.unavailable(
-                    f"the sprint board could not be read: {_reason(exc)}",
-                    now=now,
-                    evidence=data_dir / "board" / "cards.ndjson",
-                ),
-                None,
-            )
-        try:
-            if reader is None:
-                reader = SprintReader(self._client(), data_dir=data_dir)
-            cards = Reading(SOURCE_CARDS, sources.available(now), reader.linked_cards())
-        except _SOURCE_FAILURES as exc:
-            cards = Reading(
-                SOURCE_CARDS,
-                sources.unavailable(
-                    f"the Pipeline board could not be read: {_reason(exc)}",
-                    now=now,
-                    evidence=data_dir / "board" / "cards.ndjson",
-                ),
-                None,
-            )
+        evidence = data_dir / "board" / "cards.ndjson"
+        sprints = _source(
+            SOURCE_SPRINTS,
+            lambda: SprintReader(self._client(), data_dir=data_dir).list(create=False),
+            refusal=lambda exc: f"the sprint board could not be read: {_reason(exc)}",
+            now=now,
+            evidence=evidence,
+        )
+        cards = _source(
+            SOURCE_CARDS,
+            lambda: SprintReader(self._client(), data_dir=data_dir).linked_cards(),
+            refusal=lambda exc: f"the Pipeline board could not be read: {_reason(exc)}",
+            now=now,
+            evidence=evidence,
+        )
         return sprints, cards
 
     @staticmethod
@@ -671,6 +711,10 @@ class PauseReadLayer(ProtocolBoundary):
 
     def _instance_dir(self) -> Path:
         return self.instance.parent if self.instance.is_file() else self.instance
+
+    def _instance_file(self) -> Path:
+        """The config file itself, so a refusal can be dated by it even when reading it failed."""
+        return self.instance if self.instance.is_file() else self.instance / "instance.yaml"
 
 
 def extent() -> dict[str, Any]:

@@ -50,10 +50,13 @@ state and report `installation` as an unavailable source, where the old path ref
 supplied the missing information gains an answer, and no refusal changed its status.
 
 **A durable file that parses but cannot be converted is an unavailable source, not an exception.** A
-pause flag whose `stopped_worker` is a number, or a production record whose `attempt_round` is not an
-integer, marks its source unavailable and leaves every other section standing. The set of failures
-that means "this source could not answer" now lives in one place both the pause and the sprint reads
-import, `secretary.webproto.sources.SOURCE_FAILURES`.
+pause flag whose `stopped_worker` is a number, a production record whose `attempt_round` is not an
+integer, or one whose shape this release no longer stores (a `DispatcherError` from
+`DispatcherRecord.from_json`) marks its source unavailable and leaves every other section standing.
+What counts as "this source could not answer" is the span of the source read rather than a list of
+exception types: the pause layer's source reads catch everything raised while reading and converting
+one durable document, and enumerate nothing. Assembly outside that span is unchanged — a defect there
+still travels as itself.
 
 **Nothing says a soft pause stops a head, or that a pause is per sprint.** Every document carries an
 `extent` object stating that the pause is one pipeline-wide flag with no per-sprint form — including a

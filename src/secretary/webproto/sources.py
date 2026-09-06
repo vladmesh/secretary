@@ -44,8 +44,14 @@ UNAVAILABLE = "unavailable"
 #:
 #: It lives here rather than in each layer because it is one rule about sources, and two hand-kept
 #: lists of "what a refused source can raise" drift the first time a new durable document is read
-#: through one of them. `secretary.webproto.sprint_reads` and `secretary.webproto.pause_reads` both
-#: catch exactly this tuple.
+#: through one of them. `secretary.webproto.sprint_reads` catches exactly this tuple.
+#:
+#: A list is still a list, and this one drifted: `DispatcherError`, which
+#: `DispatcherRecord.from_json` raises for a record shape a release does not store, was never in it.
+#: So `secretary.webproto.pause_reads` no longer enumerates at all -- its source reads catch
+#: everything raised while reading and converting one durable document, because the *span* is what
+#: says "this source could not answer" and a span cannot be forgotten the way an entry can. This
+#: tuple is kept for the layer that still reads by it rather than being widened again.
 SOURCE_FAILURES: tuple[type[BaseException], ...] = (
     TaskError,
     HeadRegistryConfigError,

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -22,8 +23,8 @@ from unittest import mock
 from secretary.config import validate
 from secretary.dispatcher_pause_ops import pause as dispatcher_pause
 from secretary.webproto.errors import OwnerConflict, ReadError, ValidationRefused
-from secretary.webproto.pause_ops import PauseOperationLayer
-from secretary.webproto.pause_reads import DRAIN, PIPELINE_WIDE
+from secretary.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
+from secretary.webproto.pause_reads import DRAIN, PIPELINE_WIDE, PauseReadLayer
 from secretary.webproto.section import Section, SectionSet, sections
 from tests.webproto_pause_fixtures import EXISTING_CARD, PauseProtocolFixture
 
@@ -102,6 +103,36 @@ class ScopeReadTests(PauseProtocolFixture):
             if method == "getAllTasks" and params.get("project_id") == 7
         ]
         self.assertEqual(len(listings), 1)
+
+    def test_the_extent_statement_claims_no_omission_the_document_does_not_make(self) -> None:
+        """The prose fails with the code, rather than after it.
+
+        Twice on this card a behaviour change left a public sentence behind, and this is the sentence
+        that was left: while the scope listed only the sprints' cards, `extent.statement` said so,
+        and when the scope grew to the whole board the sentence still said the cards no sprint holds
+        were not listed. So the claim is checked against the document rather than read: every
+        claimable card on the board is in `cards.items`, and the statement makes no omission claim.
+        """
+        sprint = self.add_sprint_row("sprint:900", goal="an open sprint")
+        self.link_card(EXISTING_CARD, sprint, state="in_progress")
+        self.add_card("secretary-77", state="ready")
+        document = self.pause_reads().pause_scope()
+
+        claimable = {
+            str(task["reference"])
+            for task in self.board.tasks
+            if task["project_id"] == 7
+            and int(task.get("is_active", 1) or 0) != 0
+            and self.board.metadata.get(int(task["id"]), {}).get("record_type") not in {"product", "issue"}
+        }
+        self.assertEqual({item["ref"] for item in document["cards"]["items"]}, claimable)
+        statement = document["extent"]["statement"].lower()
+        for claim in ("does not list", "not listed", "omit", "there are others", "only the cards"):
+            with self.subTest(claim=claim):
+                self.assertNotIn(claim, statement)
+        # And it still says the thing it exists to say.
+        self.assertIn("no per-sprint pause", statement)
+        self.assertIn("every card", statement)
 
     def test_the_scope_says_a_drain_stops_no_running_head_and_lists_the_heads_it_leaves(self) -> None:
         self.tracked_head()
@@ -319,15 +350,92 @@ class SourceIsolationTests(PauseProtocolFixture):
                 self.assertEqual(document["sources"]["pause"]["source"]["state"], "unavailable")
                 self.assertEqual(document["sources"]["liveness"]["source"]["state"], "unavailable")
 
-    def test_the_layers_catch_the_same_source_failures_from_one_place(self) -> None:
-        """One rule about what a refused source may raise, not two hand-kept lists."""
-        from secretary.webproto import pause_reads, sprint_reads
-        from secretary.webproto import sources as source_module
+    def test_a_record_shape_the_dispatcher_refuses_marks_the_source_unavailable(self) -> None:
+        """The failure a list of exception types could not have anticipated, and did not.
 
-        self.assertIs(pause_reads._SOURCE_FAILURES, source_module.SOURCE_FAILURES)
+        `DispatcherRecord.from_json` refuses record shapes this release does not store -- a flat
+        `worker_retained_at` is one, an unknown outcome terminal path another -- with a
+        `DispatcherError`, which was in no tuple. It is the production state failing to answer, so
+        it marks that source unavailable and leaves the pause state readable beside it.
+        """
+        self.pause_ops().pause_drain(actor="operator", reason="host maintenance")
+        self.tracked_head(worker_retained_at=1)
+        document = self.pause_reads().pause_scope()
+
+        source = self.assert_unavailable(document, "heads")
+        self.assertEqual(source["name"], "liveness")
+        self.assertIn("DispatcherError", source["reason"])
+        self.assertIsNone(document["heads"]["cards"])
+        self.assert_available(document, "state")
+        self.assertEqual(document["state"]["mode"], DRAIN)
+
+    def test_a_source_read_enumerates_no_failure_and_is_the_only_broad_catch(self) -> None:
+        """The rule is the span, not a list: nothing here says which failures count.
+
+        A tuple of exception types is the thing that drifts -- `DispatcherError` was the step added
+        tomorrow arriving on schedule -- so a source read catches everything raised while reading
+        and converting its one durable document, and the module holds no enumeration to keep in
+        step. This replaces the previous round's test that the two layers shared one tuple: the
+        pause layer no longer has a tuple to share, which is strictly stronger than agreeing on one.
+        """
+        from secretary.webproto import pause_reads
+
+        source = Path(pause_reads.__file__).read_text(encoding="utf-8")
+        module = ast.parse(source)
+        handlers = [node for node in ast.walk(module) if isinstance(node, ast.ExceptHandler)]
+        # Exactly one, and it names `Exception` rather than any set of vocabularies.
+        self.assertEqual([getattr(handler.type, "id", None) for handler in handlers], ["Exception"])
+        span = next(
+            node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_source"
+        )
+        self.assertEqual(
+            [handler for handler in ast.walk(span) if isinstance(handler, ast.ExceptHandler)],
+            handlers,
+            "the one broad catch is the read-and-convert of one source, and nothing wider",
+        )
+        self.assertNotIn("_SOURCE_FAILURES", source)
+        # Every source of both documents goes through that span, so none of them is the exception.
+        readers = {
+            node.name
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"_installation", "_flag", "_production", "_boards"}
+        }
+        self.assertEqual(readers, {"_installation", "_flag", "_production", "_boards"})
+        for name in sorted(readers):
+            with self.subTest(reader=name):
+                reader = next(
+                    node
+                    for node in ast.walk(module)
+                    if isinstance(node, ast.FunctionDef) and node.name == name
+                )
+                calls = [
+                    node
+                    for node in ast.walk(reader)
+                    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_source"
+                ]
+                self.assertTrue(calls, f"{name} reads its source outside the one guarded span")
+
+    def test_a_defect_outside_a_source_read_still_travels_as_itself(self) -> None:
+        """The other half of the span: assembling a document is this layer's work, not a source.
+
+        A broad catch that covered the whole read would turn a defect of this layer into "a source
+        could not answer", which is the reader losing the one thing that would let them fix it.
+        """
+        with (
+            mock.patch(
+                "secretary.webproto.pause_reads.extent", side_effect=ValueError("a defect of this layer")
+            ),
+            self.assertRaises(ValueError),
+        ):
+            self.pause_reads().pause_scope()
+
+    def test_the_sprint_layer_still_reads_its_failures_from_the_one_shared_place(self) -> None:
+        """The sprint reads are not this card's to invert, and they keep one shared list."""
+        from secretary.webproto import sources as source_module
+        from secretary.webproto import sprint_reads
+
         self.assertIs(sprint_reads._SOURCE_FAILURES, source_module.SOURCE_FAILURES)
-        for failure in (ValueError, TypeError, KeyError, OSError):
-            self.assertIn(failure, source_module.SOURCE_FAILURES)
 
     def test_every_section_names_the_source_that_answered_it(self) -> None:
         self.create()
@@ -561,6 +669,79 @@ class LayerPropertyTests(PauseProtocolFixture):
         ):
             layer.pause_drain(actor="operator", reason="host maintenance")
         self.assertEqual(refused.exception.code, "backend_unavailable")
+
+
+class ErrorContractTests(PauseProtocolFixture):
+    """The published error contract, checked against the operations and against the document.
+
+    `PAUSE_ERRORS` is the contract as a value. One test drives every code in it out of the real
+    operation; the other reads the operations table out of `docs/PROTOCOLS.md` and holds it to the
+    same value. Between them, a code that moves fails here instead of leaving a public sentence
+    behind, which is what happened twice on this card.
+    """
+
+    def _broken_instance(self) -> Path:
+        broken = self.tmp / "not-an-installation"
+        broken.mkdir(exist_ok=True)
+        (broken / "instance.yaml").write_text("version: 1\nname: broken\n", encoding="utf-8")
+        return broken
+
+    def _code(self, call) -> str:
+        with self.assertRaises(ReadError) as refused:
+            call()
+        return refused.exception.code
+
+    def test_every_documented_code_is_one_the_operation_actually_raises(self) -> None:
+        raised: dict[str, set[str]] = {name: set() for name in PAUSE_ERRORS}
+        broken = str(self._broken_instance())
+
+        # validation, on all four: an installation whose config does not validate, and for the
+        # drain also the operation's own missing input.
+        raised["pause_drain"].add(
+            self._code(lambda: self.pause_ops().pause_drain(actor="operator", reason=""))
+        )
+        raised["pause_drain"].add(
+            self._code(lambda: PauseOperationLayer(broken).pause_drain(actor="operator", reason="why"))
+        )
+        raised["pause_resume"].add(
+            self._code(lambda: PauseOperationLayer(broken).pause_resume(actor="operator"))
+        )
+        raised["pause_state"].add(self._code(PauseReadLayer(broken).pause_state))
+        raised["pause_scope"].add(self._code(PauseReadLayer(broken).pause_scope))
+
+        # owner_conflict: a well-formed drain refused on the state of the world.
+        dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
+        raised["pause_drain"].add(
+            self._code(lambda: self.pause_ops().pause_drain(actor="operator", reason="host maintenance"))
+        )
+
+        # backend_unavailable: the durable write the operation makes could not be made.
+        with mock.patch("secretary.webproto.pause_ops._pause", side_effect=OSError("no disk")):
+            raised["pause_drain"].add(
+                self._code(lambda: self.pause_ops().pause_drain(actor="operator", reason="why"))
+            )
+        with mock.patch("secretary.webproto.pause_ops._resume", side_effect=OSError("no disk")):
+            raised["pause_resume"].add(self._code(lambda: self.pause_ops().pause_resume(actor="operator")))
+
+        for operation, documented in PAUSE_ERRORS.items():
+            with self.subTest(operation=operation):
+                self.assertEqual(raised[operation], set(documented))
+
+    def test_the_published_table_records_exactly_those_codes(self) -> None:
+        """`docs/PROTOCOLS.md` is held to the contract, not trusted to have kept up with it."""
+        protocols = (Path(__file__).resolve().parents[1] / "docs" / "PROTOCOLS.md").read_text(
+            encoding="utf-8"
+        )
+        documented: dict[str, tuple[str, ...]] = {}
+        for line in protocols.splitlines():
+            cells = [cell.strip() for cell in line.split("|")]
+            if len(cells) != 6:
+                continue
+            operation = re.fullmatch(r"`(pause_[a-z]+)`", cells[1])
+            if operation is None or operation.group(1) not in PAUSE_ERRORS:
+                continue
+            documented[operation.group(1)] = tuple(re.findall(r"`([a-z_]+)`", cells[4]))
+        self.assertEqual(documented, PAUSE_ERRORS)
 
 
 class CommandClientTests(PauseProtocolFixture):
