@@ -346,10 +346,16 @@ class MigrationScriptTests(unittest.TestCase):
     """Alembic's script directory as this product ships it — no server needed."""
 
     def test_the_tree_ships_exactly_the_revisions_this_build_expects(self) -> None:
-        """Newest first, as `walk_revisions` returns them: `0002` sits on top of `0001`."""
+        """Newest first, as `walk_revisions` returns them: each revision sits on the one before.
+
+        The list grows by one whenever a revision ships, which is the point: a revision file
+        added to the tree and not chained onto the head is exactly the mistake this catches.
+        """
         revisions = [script.revision for script in migrate.script_directory().walk_revisions()]
 
-        self.assertEqual(revisions, ["0002_board_gaps", "0001_initial"])
+        self.assertEqual(
+            revisions, ["0003_task_type_optional", "0002_board_gaps", "0001_initial"]
+        )
         self.assertEqual(migrate.head_revision(), migrate.EXPECTED_SCHEMA_REVISION)
 
     def test_the_script_directory_ships_inside_the_installed_package(self) -> None:

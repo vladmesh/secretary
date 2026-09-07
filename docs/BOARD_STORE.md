@@ -751,7 +751,10 @@ CREATE TABLE tasks (
     task_number    integer NOT NULL,
     title          text NOT NULL CHECK (title <> ''),
     description    text NOT NULL DEFAULT '',
-    task_type      text NOT NULL CHECK (task_type IN ('code','research')),
+    -- Nullable since 2026-09-07: `secretary-583` carries no `task_type` metadata either (§8.6).
+    -- The vocabulary is still closed; only the absence of a value was added to it.
+    task_type      text CONSTRAINT task_type_is_a_known_type_or_nothing
+                     CHECK (task_type IS NULL OR task_type IN ('code','research')),
     state          text NOT NULL CHECK (state IN
                      ('issues','ready','in_progress','validate','assessment','blocked','done')),
     archived       boolean NOT NULL DEFAULT false,
@@ -1241,7 +1244,7 @@ Every column with a closed vocabulary, and its source of truth:
 | `issues.close_reason` | `resolved`, `invalid`, `duplicate`, `wont_do` | `product_issues.ISSUE_CLOSE_REASONS` |
 | `sprints.status` | `open`, `closed`, `stopped` | `SprintState` |
 | `tasks.state` | the seven card states | `CardState` |
-| `tasks.task_type` | `code`, `research` | `tasks._TASK_TYPES` |
+| `tasks.task_type` | `code`, `research`, or none | `tasks._TASK_TYPES` |
 | `tasks.complexity` | `cheap`, `standard`, `hard`, `frontier` | `tasks._COMPLEXITIES` |
 | `tasks.family_preference` | `auto`, `claude`, `codex` | `tasks._FAMILY_PREFERENCES` |
 | `tasks.codex_launch_mode` | `tui` | `tasks._CODEX_LAUNCH_MODES` ← `head/command.py:CODEX_LAUNCH_MODES` |
@@ -1252,8 +1255,18 @@ Every column with a closed vocabulary, and its source of truth:
 | `board_events.entity_kind`, `requests.entity_kind` | `product`, `issue`, `sprint`, `card` | `EntityKind` |
 | `repositories.role` | `primary`, `curator_root` | this schema (§8.3) |
 
-Two of these need a word about the import, because a `CHECK` that historical data cannot satisfy
+Three of these need a word about the import, because a `CHECK` that historical data cannot satisfy
 would block the migration rather than protect it:
+
+- **`tasks.task_type` admits NULL as well as its two values** since 2026-09-07. That is not a
+  widening of the vocabulary and deliberately not the degenerate "any text": the two values are
+  still the only values, and what was added is the *absence* of one. `secretary-583` carries no
+  `task_type` metadata at all, `tasks._card` reads it as `''`, and a `NOT NULL` column made that
+  card the one record of 944 the store could not hold (§8.6). `task_type IS NULL OR task_type IN
+  ('code','research')` spells both halves out rather than relying on `NULL IN (…)` evaluating to
+  unknown, so a reader of the constraint sees the decision instead of inferring it from
+  three-valued logic. The importer stores NULL only where the board says nothing; a value outside
+  the vocabulary is still refused and named, exactly as before.
 
 - **`tasks.codex_launch_mode` is a one-value vocabulary today**, and `tasks.py` normalizes a
   *retired* launch mode away on read (`_enum_or_none(meta.get("codex_launch_mode"),
@@ -1311,6 +1324,7 @@ reading:
 |---|---|---|---|---|---|---|
 | `0001_initial` (the numbers §10's run produced) | 22 | 34 | 36 | 22 | 12 | 4 |
 | `0002_board_gaps` (2026-09-07, the gaps the first import of real data found) | 23 | 37 | 38 | 23 | 13 | 4 |
+| `0003_task_type_optional` (2026-09-07, the last card that import could not write) | 23 | 37 | 38 | 23 | 13 | 4 |
 
 The last table and the last primary key are Alembic's `alembic_version` in both rows. The deltas
 are the whole of `0002`: one table (`issue_comments`) with its primary key, its `UNIQUE
@@ -1320,6 +1334,12 @@ one on `depends_on_task`; the sprint's identity moving from `sprint_number` to `
 `sprints`' `UNIQUE (ref)` for a `UNIQUE (sprint_number)` and adds the two `CHECK`s that keep a
 numbered reference and its number spelling the same thing; and
 `dependency_resolution_is_the_same_reference`, the third new `CHECK`.
+
+`0003`'s row repeats `0002`'s six numbers because every one of them is unchanged, and it is
+recounted from the same container rather than assumed: the revision drops one `CHECK` on
+`tasks.task_type` and creates one in its place, and makes a column nullable, which no count here
+measures. The number that *is* different is the one this table does not carry — the column's
+`NOT NULL`, which is what the revision is for.
 
 The split exists because four of the schema's relations are forward or mutual, and a scoped
 foreign key (§3.3) makes that unavoidable rather than incidental: `sprints` must exist before
@@ -2201,9 +2221,12 @@ Losing nothing means not deleting the closeouts and not pretending a reconstruct
   product and keeps the observed lane in `extensions` where the two disagree, so
   `product_lanes.py`'s finding survives the migration instead of being silently normalized away.
 
-**Two fields the board leaves empty where the schema demanded one (2026-09-07).** These are not
+**Three fields the board leaves empty where the schema demanded one (2026-09-07).** These are not
 absent *fields*; they are records the first import of real data could not write, and the choice
-each one forced is stated here rather than only in the models.
+each one forced is stated here rather than only in the models. The first two were found by the
+run of `secretary-1583` and closed by revision `0002`; the third was found by the parity run of
+`secretary-1585` on 2026-09-07, which was honestly red over exactly one record of 944, and is
+closed by revision `0003`.
 
 - **A card with no `project`.** `secretary-583` carries no `project` metadata at all, and
   `tasks.project_id` was `NOT NULL`, so the card was named in the import report as unwritable.
@@ -2213,6 +2236,19 @@ each one forced is stated here rather than only in the models.
   satisfied by something. A NULL says exactly what is true — the board does not say which project
   this card belongs to — and `UNIQUE (project_id, task_number)` simply does not constrain a row
   with no project, which is correct: there is no project whose numbering it could collide with.
+- **A card with no `task_type`.** `secretary-583` again, and the same shape of finding: it
+  carries no `task_type` metadata at all, and `tasks.task_type` was `NOT NULL` with a `CHECK` over
+  `('code','research')`, so the parity run of `secretary-1585` reported
+  `MISSING card secretary-583: task_type '' is outside the CHECK vocabulary` and refused the row.
+  The column is nullable now and its `CHECK` admits NULL or a value of the vocabulary (§3.12).
+  Defaulting to `code` was the alternative and was rejected for the reason the project was: the
+  board does not say it, and the product's own reader does not say it either — `tasks._card`
+  returns `_text(meta.get("task_type"))`, which is `''` for this card and not `'code'`. A NULL
+  says what is true. So that a NULL is not mistaken for a value the import lost, the importer
+  records the silence in the row itself: `tasks.extensions` carries
+  `{"board_never_named": ["task_type"]}` beside §8.2's `kanboard` bag, and the report names every
+  such card on its own line with the count. The question was put to the owner; if the answer is
+  a different one, it is applied to exactly the rows that line names.
 - **A dependency on a card the board does not hold.** Nine `blocked_by` values name cards that are
   not on this board (`triggered-agents-*`, `memory-mcp-*`), and `task_dependencies.depends_on` was
   a foreign key into `tasks`, so all nine were dropped. The table now carries the reference and
@@ -2377,7 +2413,21 @@ and no extraction could have caught it, because §10 executes the statements a d
 not the claims it makes around them. That is the honest boundary of this procedure, and it is worth
 stating where the procedure is described: running the document proves the SQL, and nothing else.
 
-The five probes added in that re-run are the five things `0002` made true and `0001` did not: a
+**What the 2026-09-07 parity run found (`secretary-1586`).** That run changed exactly one fence
+of this document, §3.5's, and one line of it: `tasks.task_type` is nullable and its `CHECK` is
+named and restated. Re-running the whole extraction would have re-proved 21 unchanged fences, so
+what ran instead was §3.5's fence alone, extracted from this file and executed verbatim against a
+throwaway `postgres:16` with stub `projects`, `sprints` and `issues` — plus one positive probe (a
+card with neither a project nor a type is a row) and one negative probe (`task_type = 'chore'` is
+still refused, by the named constraint). PostgreSQL reports the constraint back as
+`CHECK (task_type IS NULL OR task_type = ANY (ARRAY['code','research']))`, which is what
+`0003_task_type_optional` builds and what `tests/test_board_store_schema.py` counts, so the
+document, the models and the migration agree. Naming what did **not** run is the point of saying
+this: the other 20 executed fences were not re-executed in that round, and the whole-document run
+this section describes remains the thing a card that changes §3 broadly has to do.
+
+The five probes added in the `secretary-1585` re-run are the five things `0002` made true and
+`0001` did not: a
 comment on an Issue has a table and a generated `issue_ref`, a card with no project is a row, a
 dependency naming a card the board does not hold is a row, and a reference and its number may not
 disagree. Each is a positive probe except the last, which is negative, because that is which
