@@ -162,8 +162,10 @@ def synthetic_board() -> BoardSource:
                 "codex_launch_mode": "exec",
             },
         ),
-        # A row since 0002: no project metadata at all, so `tasks.project_id` is NULL (§8.6).
-        _row(13, "secretary-13", is_active=0, meta={"record_type": "task", "task_type": "code"}),
+        # `secretary-583` on the live board, in miniature: the two columns the card carries no
+        # metadata for at all.  `project_id` is NULL since 0002 and `task_type` since 0003, and
+        # the row records the second silence in `extensions` (§8.6).
+        _row(13, "secretary-13", is_active=0, meta={"record_type": "task"}),
     )
     sprints = (
         _row(
@@ -431,6 +433,20 @@ class BoardImportIntegrationTests(unittest.TestCase):
         by_ref = {row["task_ref"]: row for row in stored["tasks"]}
         self.assertIsNone(by_ref["secretary-13"]["project_id"])
         self.assertIsNotNone(by_ref["secretary-13"]["task_number"])
+
+    def test_a_card_the_board_never_gave_a_type_is_a_row_that_says_so(self) -> None:
+        """0003 made the column nullable (§8.6); before it, this card was the import's one loss."""
+        _, stored = self.imported()
+        by_ref = {row["task_ref"]: row for row in stored["tasks"]}
+        self.assertIsNone(by_ref["secretary-13"]["task_type"])
+        self.assertEqual(
+            by_ref["secretary-13"]["extensions"],
+            # The two halves are namespaced: the card's lane disagrees with its (absent) product's,
+            # so §8.2's provenance bag is there too and neither hides the other.
+            {"kanboard": {"swimlane": "secretary"}, "board_never_named": ["task_type"]},
+        )
+        (named,) = self.plan.report.fields_the_board_never_named
+        self.assertEqual((named["field"], named["ref"]), ("tasks.task_type", "secretary-13"))
 
     def test_a_dependency_on_a_card_the_board_does_not_hold_is_a_row(self) -> None:
         _, stored = self.imported()
@@ -714,7 +730,7 @@ class BoardImportIntegrationTests(unittest.TestCase):
 
     def test_the_schema_revision_is_asserted_before_anything_is_written(self) -> None:
         with self.engine("app").connect() as connection:
-            self.assertEqual(migrate.assert_schema_revision(connection), "0002_board_gaps")
+            self.assertEqual(migrate.assert_schema_revision(connection), "0003_task_type_optional")
 
     def test_the_read_role_can_query_the_imported_board_and_cannot_write_it(self) -> None:
         import sqlalchemy as sa

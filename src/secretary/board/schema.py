@@ -27,6 +27,12 @@ number, because two live sprints are `sprint:canary-terra-20260813` and
 records that had no representable field — a card with no `project` metadata and nine `blocked_by`
 values naming cards that are not on the board.
 
+Revision `0003_task_type_optional` is the last of that same list: the import run of
+`secretary-1585` (2026-09-07) named one card the store still could not hold, `secretary-583`
+again, this time for carrying no `task_type` metadata against a `NOT NULL` column.  The column is
+nullable now and its `CHECK` admits NULL or a value of the closed vocabulary — the board's silence,
+stored as silence.
+
 The version table is Alembic's ``alembic_version`` and is not declared here: it is the migration
 tool's own bookkeeping, it is created by the tool, and inventing a second one beside it is what
 §7.4 no longer does.
@@ -314,7 +320,9 @@ class Task(Base):
     task_number = sa.Column(sa.Integer, nullable=False)
     title = sa.Column(sa.Text, nullable=False)
     description = sa.Column(sa.Text, nullable=False, server_default=sa.text("''"))
-    task_type = sa.Column(sa.Text, nullable=False)
+    # Nullable since 0003: `secretary-583` carries no `task_type` metadata either, and the
+    # board's silence is stored as NULL rather than as an invented type (§8.6).
+    task_type = sa.Column(sa.Text)
     state = sa.Column(sa.Text, nullable=False)
     archived = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false"))
     position = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
@@ -345,7 +353,10 @@ class Task(Base):
 
     __table_args__ = (
         sa.CheckConstraint("title <> ''"),
-        sa.CheckConstraint("task_type IN ('code','research')"),
+        sa.CheckConstraint(
+            "task_type IS NULL OR task_type IN ('code','research')",
+            name="task_type_is_a_known_type_or_nothing",
+        ),
         sa.CheckConstraint(
             "state IN ('issues','ready','in_progress','validate','assessment','blocked','done')"
         ),

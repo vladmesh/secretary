@@ -201,6 +201,33 @@ class CardMappingTests(unittest.TestCase):
         ]
         self.assertIn("carries no project metadata", approximate["reason"])
 
+    def test_a_card_the_board_never_gave_a_type_is_a_row_that_says_so(self) -> None:
+        """0003 made `tasks.task_type` nullable, so `secretary-583` is a row (§8.6).
+
+        The assertion this joins — a `task_type` *outside* the vocabulary is still refused — is
+        the one that used to cover this case too, and it was right for a `NOT NULL` column.  An
+        empty value and a wrong value are two different findings: the board saying nothing is a
+        NULL the row records as silence, and the board saying `chore` is still a refusal.
+        """
+        result = self.plan_of(pipeline=(PRODUCT, row(2, "secretary-10", meta=card_meta(task_type=""))))
+        (task,) = result.rows["tasks"]
+        self.assertIsNone(task["task_type"])
+        self.assertEqual(result.report.records_not_imported, [])
+        self.assertEqual(task["extensions"]["board_never_named"], ["task_type"])
+        (named,) = result.report.fields_the_board_never_named
+        self.assertEqual((named["field"], named["ref"]), ("tasks.task_type", "secretary-10"))
+        self.assertIn("cards the board never gave a value for", import_board.render(result.report))
+
+    def test_a_card_with_no_type_keeps_its_own_metadata_bag_beside_the_silence(self) -> None:
+        """The two halves of `extensions` are namespaced, so neither hides the other (§8.2, J3)."""
+        result = self.plan_of(
+            pipeline=(PRODUCT, row(2, "secretary-10", meta=card_meta(task_type="", surprise="x"))),
+        )
+        (task,) = result.rows["tasks"]
+        self.assertEqual(
+            task["extensions"], {"kanboard": {"surprise": "x"}, "board_never_named": ["task_type"]}
+        )
+
     def test_a_task_type_outside_the_vocabulary_is_refused_rather_than_defaulted(self) -> None:
         result = self.plan_of(pipeline=(PRODUCT, row(2, "secretary-10", meta=card_meta(task_type="chore"))))
         self.assertEqual(result.rows["tasks"], [])

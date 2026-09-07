@@ -453,6 +453,12 @@ class ImportReport:
     budget: dict[str, Any] = field(default_factory=dict)
     unrecognized_comment_markers: list[dict[str, Any]] = field(default_factory=list)
     approximate_values: list[dict[str, Any]] = field(default_factory=list)
+    #: A card the board carries with no value at all for a column the schema has.  The column is
+    #: NULL and `tasks.extensions` says which field the board never named, so a reader of the row
+    #: can tell "the board did not say" from "the import lost it".  One line per record, because
+    #: the whole point is that these are named rather than counted: a NULL nobody named is
+    #: indistinguishable from a value that went missing.
+    fields_the_board_never_named: list[dict[str, Any]] = field(default_factory=list)
     parity: dict[str, Any] = field(default_factory=dict)
 
     def record_not_imported(self, *, kind: str, ref: str, reason: str) -> None:
@@ -469,6 +475,17 @@ class ImportReport:
     def board_rows_merged(self, *, kind: str, ref: str, kept: int, dropped: int) -> None:
         self.duplicate_board_rows.append(
             {"kind": kind, "ref": ref, "kept_kanboard_task": kept, "merged_kanboard_task": dropped}
+        )
+
+    def board_never_named(self, *, field_name: str, ref: str, reason: str) -> None:
+        """One record whose column is NULL because the board carries no value for it.
+
+        Not a loss and not an approximation: the record lands whole, and the NULL is the board's
+        own silence written down.  It is reported by name because a NULL in a column that usually
+        carries a value is exactly what a reader would otherwise have to guess about.
+        """
+        self.fields_the_board_never_named.append(
+            {"field": field_name, "ref": ref, "reason": reason}
         )
 
     def link_not_imported(self, *, kind: str, subject: str, target: str, reason: str) -> None:
@@ -497,6 +514,7 @@ class ImportReport:
                 "budget": self.budget,
                 "unrecognized_comment_markers": self.unrecognized_comment_markers,
                 "approximate_values": self.approximate_values,
+                "fields_the_board_never_named": self.fields_the_board_never_named,
             },
             "parity": self.parity,
         }
@@ -615,6 +633,18 @@ def render(report: ImportReport) -> str:
         lines += [
             f"  {item['field']}: {item['rows']} row(s); {item['reason']}"
             for item in report.approximate_values
+        ]
+    if report.fields_the_board_never_named:
+        lines += [
+            "",
+            (
+                "cards the board never gave a value for (column NULL, said so in extensions): "
+                f"{len(report.fields_the_board_never_named)}"
+            ),
+        ]
+        lines += [
+            f"  {item['field']} {item['ref']}: {item['reason']}"
+            for item in report.fields_the_board_never_named
         ]
     if report.parity:
         missing = report.parity.get("records_missing", [])
@@ -977,7 +1007,7 @@ def _plan_issues(
             "priority": priority,
             "state": "closed" if closed else "open",
             "close_reason": reason,
-            "extensions": {"kanboard": extensions} if extensions else {},
+            "extensions": _extensions_of(extensions),
             "created_at": created,
             "updated_at": _required_when(row.raw.get("date_modification"), created),
         }
@@ -1257,6 +1287,23 @@ def _timestamp(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _extensions_of(
+    kanboard: dict[str, Any], *, silent: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """`tasks.extensions` (J3), in its two namespaced halves.
+
+    ``kanboard`` is §8.2's provenance bag — the metadata keys the model does not name.  ``silent``
+    is the other half and is not provenance at all: it names the columns the board carries no
+    value for, so a NULL in the row can be read as the board's silence rather than as a loss.
+    """
+    bag: dict[str, Any] = {}
+    if kanboard:
+        bag["kanboard"] = kanboard
+    if silent:
+        bag["board_never_named"] = list(silent)
+    return bag
+
+
 def _plan_tasks(
     source: BoardSource,
     card_rows: list[SourceRow],
@@ -1277,7 +1324,9 @@ def _plan_tasks(
         ref = row.ref
         project_id = _null_if_empty(row.meta.get("project"))
         task_number = _task_number_of(ref)
-        task_type = _text(row.meta.get("task_type"))
+        # Nullable since 0003 (§8.6): a card the board never gave a type is stored with NULL,
+        # not with a type this importer chose for it.
+        task_type = _null_if_empty(row.meta.get("task_type"))
         column = source.pipeline_columns.get(_positive_int(row.raw.get("column_id")) or -1, "")
         refusal = None
         if not ref:
@@ -1286,7 +1335,7 @@ def _plan_tasks(
             refusal = "the reference does not end in -<number>, so UNIQUE (project_id, task_number) has no value"
         elif project_id is not None and project_id not in known_projects:  # pragma: no cover
             refusal = f"project {project_id!r} has no projects row"
-        elif task_type not in _TASK_TYPES:
+        elif task_type is not None and task_type not in _TASK_TYPES:
             refusal = f"task_type {task_type!r} is outside the CHECK vocabulary {sorted(_TASK_TYPES)}"
         elif column not in _STATE_BY_COLUMN:
             refusal = f"the row sits in column {column!r}, which _STATE_BY_COLUMN does not map to a state"
@@ -1308,6 +1357,14 @@ def _plan_tasks(
                     "reason": f"{ref} carries no project metadata; the column is NULL rather than "
                     "derived from the reference prefix, which would invent a fact",
                 }
+            )
+        if task_type is None:
+            report.board_never_named(
+                field_name="tasks.task_type",
+                ref=ref,
+                reason="the card carries no task_type metadata; the column is NULL and "
+                "extensions.board_never_named records that the board did not name a type, so "
+                "the NULL reads as 'not said' rather than as a value that went missing",
             )
 
         sprint_ref = _null_if_empty(row.meta.get("sprint_ref"))
@@ -1374,7 +1431,9 @@ def _plan_tasks(
             "codex_launch_mode": _enum_or_none(row.meta.get("codex_launch_mode"), CODEX_LAUNCH_MODES),
             "retry_same": _nonnegative_int(row.meta.get("retry_same")),
             "retry_switch": _nonnegative_int(row.meta.get("retry_switch")),
-            "extensions": {"kanboard": extensions} if extensions else {},
+            "extensions": _extensions_of(
+                extensions, silent=() if task_type else ("task_type",)
+            ),
             "created_at": created,
             "updated_at": _required_when(row.raw.get("date_modification"), created),
         }

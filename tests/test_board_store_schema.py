@@ -4,12 +4,13 @@
 document each shipped a statement PostgreSQL refuses, and both were found by executing them, not
 by reading them. The same applies to the schema's transcription into SQLAlchemy models, so the
 Alembic revision is executed here and the result is counted against the numbers the document's own
-run produced. Two revisions ship now, so there are two sets of numbers and §3.13 records both:
-`0001_initial` built 22 tables, 34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique
-constraints and 4 partial unique indexes; `0002_board_gaps`, which closes the gaps the first import
-of real data found, makes that 23, 37, 38, 23, 13 and 4. The last table and the last primary key
-are Alembic's `alembic_version`, which since the owner's decision of 2026-09-07 stands where
-§7.4's `schema_migrations` stood.
+run produced. Three revisions ship now, and §3.13 records the numbers of each: `0001_initial` built 22 tables,
+34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique constraints and 4 partial unique indexes;
+`0002_board_gaps`, which closes the gaps the first import of real data found, makes that 23, 37,
+38, 23, 13 and 4; and `0003_task_type_optional` leaves every one of those six numbers alone,
+because it drops one `CHECK` on `tasks.task_type` and creates one in its place. The last table and
+the last primary key are Alembic's `alembic_version`, which since the owner's decision of
+2026-09-07 stands where §7.4's `schema_migrations` stood.
 
 The counting is not the strongest thing here. `test_the_migrated_database_still_matches_the_models`
 asks Alembic to autogenerate a diff between the database this revision built and the models, and
@@ -67,11 +68,11 @@ SELECT
 
 #: What the same schema makes of a `postgres:16` at the head revision, and what §3.13 records
 #: beside `0001`'s own numbers. A disagreement here is a defect of the transcription into models,
-#: not of the document.
+#: not of the document. Unchanged by `0003`, which trades one `CHECK` for one `CHECK`.
 DOCUMENTED_COUNTS = (23, 37, 38, 23, 13, 4)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
-REVISIONS = ("0001_initial", "0002_board_gaps")
+REVISIONS = ("0001_initial", "0002_board_gaps", "0003_task_type_optional")
 
 
 def docker(*arguments: str) -> str:
@@ -258,7 +259,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.run_migrations(connection)
 
         with self.assertRaisesRegex(BoardStoreError, "refusing to write"):
-            migrate.assert_schema_revision(connection, expected="0003_something_later")
+            migrate.assert_schema_revision(connection, expected="0004_something_later")
 
     def test_a_second_run_applies_nothing_and_leaves_the_schema_alone(self) -> None:
         connection = self.owner_connection()
@@ -358,12 +359,21 @@ class BoardStoreSchemaTests(unittest.TestCase):
             (ref, number),
         )
 
-    def card(self, connection, ref: str, *, project: str | None = "secretary", sprint=None) -> None:
+    def card(
+        self,
+        connection,
+        ref: str,
+        *,
+        project: str | None = "secretary",
+        sprint=None,
+        task_type: str | None = "code",
+        extensions: str = "{}",
+    ) -> None:
         connection.exec_driver_sql(
             "INSERT INTO tasks (task_ref, project_id, task_number, title, task_type, state, "
-            "sprint_ref, created_at, updated_at) VALUES (%s, %s, %s, 'A card', 'code', 'ready', "
-            "%s, now(), now())",
-            (ref, project, int(ref.rsplit("-", 1)[1]), sprint),
+            "sprint_ref, extensions, created_at, updated_at) VALUES (%s, %s, %s, 'A card', %s, "
+            "'ready', %s, %s, now(), now())",
+            (ref, project, int(ref.rsplit("-", 1)[1]), task_type, sprint, extensions),
         )
 
     def test_a_comment_on_an_issue_has_a_table_and_a_product_comment_has_none(self) -> None:
@@ -511,6 +521,32 @@ class BoardStoreSchemaTests(unittest.TestCase):
             ).fetchone()[0],
             None,
         )
+
+    def test_a_card_the_board_never_gave_a_type_is_still_a_row(self) -> None:
+        """AC 1: `secretary-583` carries no `task_type` either, and 0003 keeps it (§8.6)."""
+        import sqlalchemy as sa
+
+        connection = self.prepared()
+
+        self.card(
+            connection,
+            "secretary-583",
+            project=None,
+            task_type=None,
+            extensions='{"board_never_named": ["task_type"]}',
+        )
+        connection.commit()
+
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT task_type, extensions FROM tasks WHERE task_ref = 'secretary-583'"
+            ).fetchone(),
+            (None, {"board_never_named": ["task_type"]}),
+        )
+        # The vocabulary is still closed: NULL was added to what the column admits, not "any text".
+        with self.assertRaises(sa.exc.IntegrityError):
+            self.card(connection, "secretary-584", task_type="chore")
+        connection.rollback()
 
     def test_a_dependency_on_a_card_the_board_does_not_hold_is_kept(self) -> None:
         """AC 5: nine `blocked_by` values name cards that are not on this board."""
