@@ -431,6 +431,16 @@ that is only meaningful *within* one sprint is a **composite** foreign key carry
 never a bare existence check (§3.3, §3.4, §3.8). Closed vocabularies are `CHECK` constraints, by
 the uniform rule of §3.12. `jsonb` appears in exactly five places, each justified inline (§3.10).
 
+**What the first import of real data changed here (2026-09-07).** `secretary-1583` ran the
+importer against the whole live board — 1513 Pipeline rows with 15 571 comments, 102 sprint rows —
+and named every record this schema could not carry. Five of its findings are answered below and
+each is marked where it lands: `issue_comments` (§3.7, 479 comments on Issue rows had no table),
+`issues.extensions` (§3.2, nine metadata keys on 158 Issue rows had no home), the sprint's identity
+(§3.3 and §9, two live sprints have no number in their reference), a nullable `tasks.project_id`
+(§3.5, one card carries no `project` metadata) and `task_dependencies.depends_on_task` (§3.5, nine
+`blocked_by` values name cards that are not on the board). Revision `0002_board_gaps` is exactly
+that list; §3.13 carries both revisions' catalogue numbers.
+
 The DDL below is written entity by entity for reading, not in executable order. Several references
 are forward or mutual — `sprints.current_task_ref` → `tasks`, `sprints.resume_id` ↔
 `sprint_resumes`, `sprint_budget_events` and `sprint_decisions` → `tasks`, and every
@@ -550,6 +560,7 @@ CREATE TABLE issues (
     priority     text NOT NULL CHECK (priority IN ('P0','P1','P2','P3')),
     state        text NOT NULL DEFAULT 'open' CHECK (state IN ('open','closed')),
     close_reason text CHECK (close_reason IN ('resolved','invalid','duplicate','wont_do')),
+    extensions   jsonb NOT NULL DEFAULT '{}'::jsonb, -- (J6), added 2026-09-07; see §8.2
     created_at   timestamptz NOT NULL,
     updated_at   timestamptz NOT NULL,
     CONSTRAINT issue_close_reason_matches_state
@@ -560,12 +571,21 @@ CREATE TABLE issues (
 The last constraint is `product_issues.py:_validate_issue_record` made relational: today an open
 issue with a close reason, or a closed one without, is caught by a Python validator at export time.
 
+`extensions` is here because the 2026-09-07 import found nine leftover task-metadata keys riding on
+158 Issue rows, and 72 Issue rows in a lane that is not their product's. A card keeps that kind of
+provenance in `tasks.extensions`; an Issue had nowhere to keep it, so the keys would have been
+dropped on import. §8.2's rule — and its per-key count in the importer's report — applies to this
+column exactly as it applies to a card's.
+
 ### 3.3 Sprints
 
 ```sql
 CREATE TABLE sprints (
-    sprint_number      integer PRIMARY KEY,           -- N in sprint:N
-    ref                text GENERATED ALWAYS AS ('sprint:' || sprint_number) STORED UNIQUE,
+    -- The identity is §9's stable reference, since 2026-09-07: two live sprints on this board are
+    -- `sprint:canary-terra-20260813` and `sprint:canary-terra-final-20260813`, which an integer
+    -- key cannot hold.  `sprint_number` stays for §9's numbering rule, as a nullable unique column.
+    ref                text PRIMARY KEY,              -- "sprint:1037", "sprint:canary-terra-20260813"
+    sprint_number      integer UNIQUE,                -- N in sprint:N, NULL when the ref has none
     goal               text NOT NULL,
     definition_of_done text NOT NULL,
     product_id         text REFERENCES products(product_id),
@@ -584,25 +604,30 @@ CREATE TABLE sprints (
     created_at         timestamptz NOT NULL,
     updated_at         timestamptz NOT NULL,
     closed_at          timestamptz,
-    CONSTRAINT sprint_closed_has_time CHECK ((status = 'open') = (closed_at IS NULL))
+    CONSTRAINT sprint_closed_has_time CHECK ((status = 'open') = (closed_at IS NULL)),
+    CONSTRAINT sprint_ref_is_a_sprint_reference CHECK (ref ~ '^sprint:'),
+    -- A numbered reference keeps exactly its number, and only a numbered reference has one.
+    CONSTRAINT sprint_number_agrees_with_ref CHECK (
+        (ref ~ '^sprint:[0-9]+$') = (sprint_number IS NOT NULL) AND
+        (sprint_number IS NULL OR ref = 'sprint:' || sprint_number))
 );
 CREATE SEQUENCE sprint_number_seq;                    -- see §9
 
 CREATE TABLE sprint_repositories (
-    sprint_number integer NOT NULL REFERENCES sprints(sprint_number) ON DELETE CASCADE,
-    repository_id bigint  NOT NULL REFERENCES repositories(repository_id),
-    PRIMARY KEY (sprint_number, repository_id)
+    sprint_ref    text   NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
+    repository_id bigint NOT NULL REFERENCES repositories(repository_id),
+    PRIMARY KEY (sprint_ref, repository_id)
 );
 
 CREATE TABLE sprint_issues (
-    sprint_number integer NOT NULL REFERENCES sprints(sprint_number) ON DELETE CASCADE,
-    issue_id      text    NOT NULL REFERENCES issues(issue_id),
-    PRIMARY KEY (sprint_number, issue_id)
+    sprint_ref text NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
+    issue_id   text NOT NULL REFERENCES issues(issue_id),
+    PRIMARY KEY (sprint_ref, issue_id)
 );
 
 CREATE TABLE sprint_resumes (                         -- append-only; sprints.resume_id names the live one
     resume_id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    sprint_number        integer NOT NULL REFERENCES sprints(sprint_number) ON DELETE CASCADE,
+    sprint_ref           text NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
     selected_step        text NOT NULL,
     selected_why         text NOT NULL,
     rejected_alternatives text NOT NULL,
@@ -611,9 +636,22 @@ CREATE TABLE sprint_resumes (                         -- append-only; sprints.re
     next_safe_step       text NOT NULL,
     recorded_at          timestamptz NOT NULL,
     -- The target a scoped foreign key needs; redundant with the primary key by design.
-    UNIQUE (resume_id, sprint_number)
+    UNIQUE (resume_id, sprint_ref)
 );
 ```
+
+**Why the reference is the identity (2026-09-07).** The 2026-09-07 import found two live sprint
+rows whose reference carries no number at all — `sprint:canary-terra-20260813` and
+`sprint:canary-terra-final-20260813` — so `sprint_number integer PRIMARY KEY` could hold neither,
+and `secretary-1438` and `secretary-1439` lost their link to a sprint with them. §9 already
+promised that every reference survives cutover with the same spelling; making the reference the key
+is what makes that true. Nothing else about §9 moves: `sprint_number_seq` still allocates the
+number of a new numbered sprint, `sprint:N` is still spelled `sprint:N`, and the `UNIQUE` on
+`sprint_number` is still what makes reuse of a number impossible. Every relation that was scoped by
+`sprint_number` is now scoped by `sprint_ref` — the same composite construction, over an identity
+that can hold every reference the board has. The reference that is still **not** representable is a
+*duplicate* one: `sprint:1037` names two rows on today's board, a live one and an archived one, and
+a primary key holds one of them. §9 records that.
 
 `RESUME_FIELDS` in `sprints.py` is a fixed six-field tuple, so the resume is columns, not a blob.
 Resume *freshness* is derived (`_resume_freshness`) and is not stored, exactly as
@@ -635,31 +673,31 @@ Deferred constraints (they reference `tasks` and `sprint_resumes`; §3.13 places
 ```sql
 ALTER TABLE sprints
   ADD CONSTRAINT sprint_current_task_is_in_this_sprint
-      FOREIGN KEY (current_task_ref, sprint_number)
-      REFERENCES tasks (task_ref, sprint_number) MATCH SIMPLE
+      FOREIGN KEY (current_task_ref, ref)
+      REFERENCES tasks (task_ref, sprint_ref) MATCH SIMPLE
       DEFERRABLE INITIALLY DEFERRED,
   ADD CONSTRAINT sprint_resume_is_of_this_sprint
-      FOREIGN KEY (resume_id, sprint_number)
-      REFERENCES sprint_resumes (resume_id, sprint_number) MATCH SIMPLE
+      FOREIGN KEY (resume_id, ref)
+      REFERENCES sprint_resumes (resume_id, sprint_ref) MATCH SIMPLE
       DEFERRABLE INITIALLY DEFERRED;
 ```
 
 Three properties make this work, and each is load-bearing:
 
-- `tasks` carries `UNIQUE (task_ref, sprint_number)` (§3.5) and `sprint_resumes` carries
-  `UNIQUE (resume_id, sprint_number)` purely so these composite keys have a target. Both are
+- `tasks` carries `UNIQUE (task_ref, sprint_ref)` (§3.5) and `sprint_resumes` carries
+  `UNIQUE (resume_id, sprint_ref)` purely so these composite keys have a target. Both are
   redundant with their table's primary key; that redundancy is the price of a scoped key and is
   cheaper than a trigger.
 - `MATCH SIMPLE` is PostgreSQL's default and is **stated explicitly because it is the mechanism**,
   not an incidental default: a composite foreign key with any NULL column is not checked at all.
   That is exactly right here — a sprint with no current task (`current_task_ref IS NULL`) and a
-  sprint before its first resume are both legal, and `sprint_number` is the primary key and never
-  NULL, so the check fires precisely when a cursor is set.
+  sprint before its first resume are both legal, and `ref` is the primary key and never NULL, so
+  the check fires precisely when a cursor is set.
 - `DEFERRABLE INITIALLY DEFERRED` because a sprint row and the card or resume it points at are
   inserted in one transaction (§7.1), in an order the writer should not have to think about.
 
 Moving a card between sprints now has a defined consequence rather than a silent one: the
-`UPDATE tasks SET sprint_number = …` fails while a sprint still names that card as its current
+`UPDATE tasks SET sprint_ref = …` fails while a sprint still names that card as its current
 task, so the writer must clear the cursor first. That is the same refusal
 `set_current_task` gives today, arriving from the other direction.
 
@@ -668,7 +706,7 @@ task, so the writer must clear the cursor first. That is the same refusal
 ```sql
 CREATE TABLE sprint_budget_events (
     budget_event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    sprint_number   integer NOT NULL REFERENCES sprints(sprint_number) ON DELETE CASCADE,
+    sprint_ref      text NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
     event_type      text NOT NULL CHECK (event_type IN
         ('red_review','blocked','red_ci','preempt','recreated_task','hotfix',
          'infrastructure_blocked')),
@@ -687,8 +725,8 @@ Deferred constraint (it references `tasks`; §3.13 places it):
 ```sql
 ALTER TABLE sprint_budget_events
   ADD CONSTRAINT budget_card_is_in_this_sprint
-      FOREIGN KEY (task_ref, sprint_number)
-      REFERENCES tasks (task_ref, sprint_number) MATCH SIMPLE;
+      FOREIGN KEY (task_ref, sprint_ref)
+      REFERENCES tasks (task_ref, sprint_ref) MATCH SIMPLE;
 ```
 
 Today `sprint_budget` is a counter object in one metadata value, incremented read-modify-write. As
@@ -708,7 +746,8 @@ name a card — and `MATCH SIMPLE` skips the check exactly then.
 ```sql
 CREATE TABLE tasks (
     task_ref       text PRIMARY KEY,                  -- "secretary-1580"
-    project_id     text NOT NULL REFERENCES projects(project_id),
+    -- Nullable since 2026-09-07: `secretary-583` carries no `project` metadata (§8.6).
+    project_id     text REFERENCES projects(project_id),
     task_number    integer NOT NULL,
     title          text NOT NULL CHECK (title <> ''),
     description    text NOT NULL DEFAULT '',
@@ -717,7 +756,7 @@ CREATE TABLE tasks (
                      ('issues','ready','in_progress','validate','assessment','blocked','done')),
     archived       boolean NOT NULL DEFAULT false,
     position       integer NOT NULL DEFAULT 0,
-    sprint_number  integer REFERENCES sprints(sprint_number),
+    sprint_ref     text REFERENCES sprints(ref),      -- the sprint's identity since 2026-09-07
     claim_worker   text,
     claimed_at     timestamptz,
     -- workspace
@@ -746,7 +785,7 @@ CREATE TABLE tasks (
     UNIQUE (project_id, task_number),
     -- The target the sprint's scoped cursor and decision keys need (§3.3, §3.8).
     -- Redundant with the primary key by design.
-    UNIQUE (task_ref, sprint_number)
+    UNIQUE (task_ref, sprint_ref)
 );
 
 CREATE TABLE task_retry_heads (                       -- retry_heads, today a delimited string
@@ -763,10 +802,15 @@ CREATE TABLE task_issues (
 );
 
 CREATE TABLE task_dependencies (                      -- blocked_by
-    task_ref    text NOT NULL REFERENCES tasks(task_ref) ON DELETE CASCADE,
-    depends_on  text NOT NULL REFERENCES tasks(task_ref),
+    task_ref        text NOT NULL REFERENCES tasks(task_ref) ON DELETE CASCADE,
+    -- The reference as the card writes it, always kept; and the same reference as a foreign key,
+    -- set exactly when the board holds that card.  Split on 2026-09-07: see §8.6.
+    depends_on      text NOT NULL,
+    depends_on_task text REFERENCES tasks(task_ref),
     PRIMARY KEY (task_ref, depends_on),
-    CONSTRAINT no_self_dependency CHECK (task_ref <> depends_on)
+    CONSTRAINT no_self_dependency CHECK (task_ref <> depends_on),
+    CONSTRAINT dependency_resolution_is_the_same_reference
+        CHECK (depends_on_task IS NULL OR depends_on_task = depends_on)
 );
 
 CREATE TABLE task_supersessions (                     -- supersedes
@@ -783,16 +827,25 @@ without also forbidding a card that references one not yet imported, and `task_d
 where a later card adds a second dependency without a schema change. `task_supersessions` keeps its
 one-row-per-card primary key so the current cardinality stays enforced.
 
+The dependency's two columns are the 2026-09-07 import's second finding of a record with no
+representable field: nine `blocked_by` values on this board name cards the board does not hold
+(`triggered-agents-*`, `memory-mcp-*`), and a single foreign-keyed column would have dropped all
+nine. `depends_on` keeps the reference verbatim and is half of the primary key, so the relation
+survives; `depends_on_task` is the foreign key and carries the same reference whenever the card is
+there, so a dependency that *can* be checked still is. "Unresolved" is then a query
+(`depends_on_task IS NULL`) rather than an absence, and the check constraint forbids the two
+columns from naming different cards. §8.6 states the choice and its reason.
+
 ### 3.6 Reservations
 
 ```sql
 CREATE TABLE sprint_projects (
-    sprint_number integer NOT NULL REFERENCES sprints(sprint_number) ON DELETE CASCADE,
-    project_id    text    NOT NULL REFERENCES projects(project_id),
-    reserved      boolean NOT NULL DEFAULT true,
-    reserved_at   timestamptz NOT NULL,
-    released_at   timestamptz,
-    PRIMARY KEY (sprint_number, project_id),
+    sprint_ref  text    NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
+    project_id  text    NOT NULL REFERENCES projects(project_id),
+    reserved    boolean NOT NULL DEFAULT true,
+    reserved_at timestamptz NOT NULL,
+    released_at timestamptz,
+    PRIMARY KEY (sprint_ref, project_id),
     CONSTRAINT reserved_matches_release CHECK (reserved = (released_at IS NULL))
 );
 
@@ -807,7 +860,7 @@ See §4.
 ```sql
 CREATE TABLE sprint_comments (
     comment_id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    sprint_number integer NOT NULL REFERENCES sprints(sprint_number) ON DELETE CASCADE,
+    sprint_ref    text NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
     marker        text,                               -- "po", "sprint:resume", NULL for unmarked
     body          text NOT NULL,
     actor_role    text,
@@ -829,7 +882,28 @@ CREATE TABLE task_comments (
     created_at  timestamptz NOT NULL
 );
 CREATE INDEX task_comments_by_task ON task_comments (task_ref, created_at);
+
+CREATE TABLE issue_comments (                         -- added 2026-09-07; see below
+    comment_id  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    issue_id    text NOT NULL REFERENCES issues(issue_id) ON DELETE CASCADE,
+    marker      text,                                 -- a role, or issue:* (§8.1)
+    body        text NOT NULL,
+    actor_role  text,
+    actor_id    text,
+    request_id  text UNIQUE,                          -- FK added in §3.13 step 2
+    created_at  timestamptz NOT NULL
+);
+CREATE INDEX issue_comments_by_issue ON issue_comments (issue_id, created_at);
 ```
+
+**Three tables, and the third one's count.** `issue_comments` exists because the 2026-09-07 import
+found **479** comments on Issue rows and this section declared only two comment tables, both
+foreign-keyed to their own entity — the largest single record loss the run reported. It is §3.7's
+own shape with `issues` as the entity: the same columns, the same `UNIQUE (request_id)`, the same
+claim key in §3.13 step 2, the same place in the order. The Product side was recounted by reading
+the live board on 2026-09-07 and the answer is **0**: not one of the 8 Product rows carries a
+comment. So there is no `product_comments` table, and the counted zero is recorded here instead of
+a table nothing would fill — if a Product ever takes a comment, this is the shape it gets.
 
 The marker becomes a column because today it is recovered by string-parsing the first line of the
 comment body (`tasks._normalize_comment`), and a body whose first line happens to look like
@@ -841,7 +915,7 @@ without the `[marker]` prefix line; §8.1 says how the prefix is stripped once, 
 ```sql
 CREATE TABLE sprint_decisions (
     decision_id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    sprint_number integer NOT NULL REFERENCES sprints(sprint_number) ON DELETE CASCADE,
+    sprint_ref    text NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
     subject_kind  text NOT NULL CHECK (subject_kind IN ('issue','card')),
     -- Both subjects are scoped to this sprint below; neither is a bare existence check.
     issue_id      text,
@@ -864,9 +938,9 @@ CREATE TABLE sprint_decisions (
         (verdict IN ('already_closed','already_moved')) = (actual IS NOT NULL))
 );
 CREATE UNIQUE INDEX sprint_decisions_one_per_issue
-    ON sprint_decisions (sprint_number, issue_id) WHERE issue_id IS NOT NULL;
+    ON sprint_decisions (sprint_ref, issue_id) WHERE issue_id IS NOT NULL;
 CREATE UNIQUE INDEX sprint_decisions_one_per_card
-    ON sprint_decisions (sprint_number, task_ref) WHERE task_ref IS NOT NULL;
+    ON sprint_decisions (sprint_ref, task_ref) WHERE task_ref IS NOT NULL;
 ```
 
 Deferred constraints (they reference `tasks`, so they are applied in the last step of §3.13):
@@ -874,11 +948,11 @@ Deferred constraints (they reference `tasks`, so they are applied in the last st
 ```sql
 ALTER TABLE sprint_decisions
   ADD CONSTRAINT decided_issue_is_declared_by_this_sprint
-      FOREIGN KEY (sprint_number, issue_id)
-      REFERENCES sprint_issues (sprint_number, issue_id) MATCH SIMPLE,
+      FOREIGN KEY (sprint_ref, issue_id)
+      REFERENCES sprint_issues (sprint_ref, issue_id) MATCH SIMPLE,
   ADD CONSTRAINT decided_card_is_in_this_sprint
-      FOREIGN KEY (task_ref, sprint_number)
-      REFERENCES tasks (task_ref, sprint_number) MATCH SIMPLE;
+      FOREIGN KEY (task_ref, sprint_ref)
+      REFERENCES tasks (task_ref, sprint_ref) MATCH SIMPLE;
 ```
 
 Every check here is a rule `sprint_close.py` enforces in Python before a close writes anything: one
@@ -887,8 +961,8 @@ confirmation. Moving them into constraints is what stops a decision existing onl
 transaction file (§2.6 gap 2).
 
 The two scoped foreign keys carry the sprint into the key for the same reason §3.3 does. They
-target `sprint_issues (sprint_number, issue_id)` — whose primary key that already is — and
-`tasks (task_ref, sprint_number)`, so an issue decision is only representable for an issue the
+target `sprint_issues (sprint_ref, issue_id)` — whose primary key that already is — and
+`tasks (task_ref, sprint_ref)`, so an issue decision is only representable for an issue the
 sprint *declared* and a card decision only for a card the sprint *holds*. This is exactly what
 `plan_close_decisions` refuses in Python today: `"sprint close was given a decision for issue(s)
 the sprint did not declare"`. `MATCH SIMPLE` is again the mechanism, and here it does the work of
@@ -963,16 +1037,15 @@ CREATE INDEX board_events_by_ref ON board_events (ref, occurred_at);
 
 Every other table that carries a `request_id` now references this one instead of owning its own
 uniqueness. These are deferred constraints too — `task_comments` and the rest are created before
-`requests` in reading order — and §3.13 places them. The three sprint-owned children first gain the
-generated column their key needs, and this fence runs **before** the keys below it:
+`requests` in reading order — and §3.13 places them. A child reaches `requests.ref` through the
+column that already spells its entity's reference: since 2026-09-07 the three sprint-owned children
+carry `sprint_ref` as their *scoping* column (§3.3), so none of them needs a generated column any
+more. `issue_comments` is the one that does, because its scoping column is the Issue's bare id and
+`requests.ref` spells an Issue `issue:<id>`; this fence runs **before** the keys below it:
 
 ```sql
-ALTER TABLE sprint_comments
-  ADD COLUMN sprint_ref text GENERATED ALWAYS AS ('sprint:' || sprint_number) STORED;
-ALTER TABLE sprint_budget_events
-  ADD COLUMN sprint_ref text GENERATED ALWAYS AS ('sprint:' || sprint_number) STORED;
-ALTER TABLE sprint_decisions
-  ADD COLUMN sprint_ref text GENERATED ALWAYS AS ('sprint:' || sprint_number) STORED;
+ALTER TABLE issue_comments
+  ADD COLUMN issue_ref text GENERATED ALWAYS AS ('issue:' || issue_id) STORED;
 ```
 
 ```sql
@@ -982,6 +1055,9 @@ ALTER TABLE board_events
 ALTER TABLE task_comments
   ADD CONSTRAINT task_comment_claims_its_request
       FOREIGN KEY (request_id, task_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
+ALTER TABLE issue_comments
+  ADD CONSTRAINT issue_comment_claims_its_request
+      FOREIGN KEY (request_id, issue_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
 ALTER TABLE sprint_comments
   ADD CONSTRAINT sprint_comment_claims_its_request
       FOREIGN KEY (request_id, sprint_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
@@ -1004,9 +1080,9 @@ id. It does not prove the child belongs to *that* claim, and running it proved t
 plain key, `INSERT INTO task_comments (task_ref, …, request_id) VALUES ('secretary-1580', …,
 'req-sprint-1432-create')` was accepted — a card comment hanging off a `sprint.create` claim whose
 `ref` is `sprint:1432`. Carrying the entity's own reference into the key refuses it, with the same
-construction §3.3 uses for the sprint's cursors and §3.8 for its decision subjects. The three
-sprint-owned children reach their reference through one generated column each, added by the fence
-above this one.
+construction §3.3 uses for the sprint's cursors and §3.8 for its decision subjects. A sprint-owned
+child reaches its reference through the scoping column it already carries; `issue_comments` reaches
+its own through the one generated column added by the fence above this one.
 
 What stays the writer's job, and is named here so nobody mistakes the key for it: comparing the
 stored `operation` and `intent` on a conflicting claim. The database now enforces *one id, one
@@ -1118,7 +1194,7 @@ the previous draft gave to a separate `command_requests` table. There is no `com
 second table for staged intents would have re-created the split namespace this section exists to
 prevent.
 
-### 3.10 The five `jsonb` columns, and why each is one
+### 3.10 The six `jsonb` columns, and why each is one
 
 | Column | Why it is not relational |
 |---|---|
@@ -1127,6 +1203,7 @@ prevent.
 | (J3) `tasks.extensions` | The open extension point that `tasks._normalize` already produces as `extensions.kanboard`. It is where an unrecognized metadata key survives import instead of being dropped (§8.2). It is deliberately not a place for any field this schema names. |
 | (J4) `board_events.data` | Per-`EventKind` payloads: marker bodies, attempt usage in five token dimensions across three accounts, outcome dispositions. Twenty-plus kinds with disjoint payloads; one table per kind is a larger change than this sprint carries, and the payloads are already validated by `board/models.py` on the way in. |
 | (J5) `requests.intent` | The frozen argument set of an arbitrary command, compared for equality on retry. Its shape is the command's, not the schema's. |
+| (J6) `issues.extensions` | (J3) for an Issue, added 2026-09-07: the import found nine leftover metadata keys on 158 Issue rows and a lane that is not the product's, and an Issue had nowhere to keep them. Same rule, same §8.2 counting, same prohibition on holding a field this schema names. |
 
 Nothing else is JSON. In particular `product_projects`, `sprint_repositories`, `sprint_issues`,
 `task_retry_heads`, `task_issues`, budget counters, resume fields and close decisions — all of
@@ -1209,15 +1286,40 @@ is the order migration `0001` applies:
    `product_projects`), §3.2 (`issues`), §3.3 (`sprints`, `sprint_repositories`, `sprint_issues`,
    `sprint_resumes`, `sprint_number_seq`), §3.4 (`sprint_budget_events`), §3.5 (`tasks`,
    `task_retry_heads`, `task_issues`, `task_dependencies`, `task_supersessions`), §3.6
-   (`sprint_projects` and its partial unique index), §3.7 (`sprint_comments`, `task_comments`),
-   §3.8 (`sprint_decisions` and its two partial unique indexes), §3.9 (`requests`, `board_events`),
+   (`sprint_projects` and its partial unique index), §3.7 (`sprint_comments`, `task_comments`,
+   `issue_comments` and their indexes), §3.8 (`sprint_decisions` and its two partial unique
+   indexes), §3.9 (`requests`, `board_events`),
    §7.4 (Alembic's `alembic_version`, which the migration tool creates).
 2. **Add the deferred constraints**, in the same reading order: §3.3's two scoped sprint cursors,
-   §3.4's `budget_card_is_in_this_sprint`, §3.8's two scoped decision subjects, §3.9's five
-   `request_id` foreign keys.
+   §3.4's `budget_card_is_in_this_sprint`, §3.8's two scoped decision subjects, §3.9's generated
+   `issue_ref` column and its six `request_id` foreign keys.
+
+`issue_comments` takes §3.7's place in both steps, because it is §3.7's table: it is created with
+the other two, and its `issue_comment_claims_its_request` is added with the other claim keys. That
+is the whole of its placement, and it is why the order above did not otherwise change on
+2026-09-07.
 
 Every fence in §3 that begins `ALTER TABLE` is a step-2 fence and is labelled as one. Every fence
 that begins `CREATE` is a step-1 fence. Nothing else needs to be decided at execution time.
+
+**The catalogue, per revision.** The schema of §3 is built by two Alembic revisions, and a card
+that checks its work against a migrated database needs the numbers of the one it ran. Both are
+counted from a real `postgres:16` by `tests/test_board_store_schema.py`, never asserted from
+reading:
+
+| After | Tables | `CHECK` | Foreign keys | Primary keys | `UNIQUE` | Partial unique indexes |
+|---|---|---|---|---|---|---|
+| `0001_initial` (the numbers §10's run produced) | 22 | 34 | 36 | 22 | 12 | 4 |
+| `0002_board_gaps` (2026-09-07, the gaps the first import of real data found) | 23 | 37 | 38 | 23 | 13 | 4 |
+
+The last table and the last primary key are Alembic's `alembic_version` in both rows. The deltas
+are the whole of `0002`: one table (`issue_comments`) with its primary key, its `UNIQUE
+(request_id)` and its foreign key to `issues`; the claim key
+`issue_comment_claims_its_request`; `task_dependencies` trading its foreign key on `depends_on` for
+one on `depends_on_task`; the sprint's identity moving from `sprint_number` to `ref`, which trades
+`sprints`' `UNIQUE (ref)` for a `UNIQUE (sprint_number)` and adds the two `CHECK`s that keep a
+numbered reference and its number spelling the same thing; and
+`dependency_resolution_is_the_same_reference`, the third new `CHECK`.
 
 The split exists because four of the schema's relations are forward or mutual, and a scoped
 foreign key (§3.3) makes that unavoidable rather than incidental: `sprints` must exist before
@@ -1909,13 +2011,13 @@ dependencies beside `psycopg[binary]` (§5.8).
 | `head`, `review_head`, `resolved_head`, `resolved_review_head` | task metadata | `head_override`, `review_head_override`, `resolved_worker_head`, `resolved_review_head` |
 | `retry_same`, `retry_switch` | numeric strings | integer columns with `>= 0` |
 | `retry_heads` | delimited string, split by `_split_heads` | `task_retry_heads` rows, order preserved in `ordinal` |
-| `blocked_by` | task metadata (single ref) | `task_dependencies` row |
+| `blocked_by` | task metadata (single ref) | `task_dependencies` row: `depends_on` always, `depends_on_task` when the board holds that card (§3.5, §8.6) |
 | `supersedes` | task metadata (single ref) | `task_supersessions` row |
-| `sprint_ref` | task metadata | `tasks.sprint_number` FK |
+| `sprint_ref` | task metadata | `tasks.sprint_ref` FK — the same spelling as the metadata key, since 2026-09-07 made the sprint's reference its identity (§3.3, §9) |
 | `record_type` (`task`/`issue`/`product`) | task metadata | table identity: the three record types become three tables |
 | column name (`Ready`, `In progress`, …) | Kanboard column | `tasks.state`, via `_STATE_BY_COLUMN` |
 | `is_active = 0` | Kanboard row status | `tasks.archived` |
-| `swimlane` | Kanboard swimlane, per product | derived from the product; kept in `extensions` for provenance (§8.2) |
+| `swimlane` | Kanboard swimlane, per product | derived from the product; kept in `extensions` for provenance (§8.2) — `tasks.extensions` for a card, `issues.extensions` for an Issue since 2026-09-07 |
 | `sprint_goal`, `sprint_definition_of_done` | sprint metadata | `sprints.goal`, `.definition_of_done` |
 | `sprint_repositories` | JSON array of paths | `sprint_repositories` rows (§8.3) |
 | `sprint_product`, `sprint_issues` | metadata / JSON array | `sprints.product_id`, `sprint_issues` rows |
@@ -1929,27 +2031,66 @@ dependencies beside `psycopg[binary]` (§5.8).
 | `product_id`, `product_projects` | metadata / JSON array | `products.product_id`, `product_projects` rows |
 | `issue_product`, `issue_kind`, `issue_priority`, `issue_closed_reason` | metadata | `issues` columns with CHECKs |
 | `reference_repair` | metadata provenance | `tasks.extensions` (it describes a Kanboard-era repair) |
-| `[role]\nbody` comments | Kanboard comments | `task_comments` / `sprint_comments`: first line parsed once at import into `marker`, remainder into `body` |
+| `[role]\nbody` comments | Kanboard comments | `task_comments` / `sprint_comments` / `issue_comments`: first line parsed once at import into `marker`, remainder into `body`. The third table is there because the 2026-09-07 import found 479 comments on Issue rows (§3.7) |
 | `[report:done]`, `[report:blocked]` with a `classification:` line, `[review:green]`, `[review:red]`, `[decision:release]`, `[decision:rework]`, `[decision:reslice]` | Kanboard comments rendered from typed events | `board_events` rows (`data` carries `marker`, `body`, `status`, `classification`, `decision`) **and** a `task_comments` row; the event is the fact, the comment is its rendering, exactly as `EventKind`'s comment already says |
 | `[secretary-product-issue-transaction:<digest>]`, `[secretary-sprint-transaction:<digest>]` | Kanboard comments used as transaction witnesses | **not** carried forward as comments: they exist because Kanboard has no transaction. They import into `requests` as settled rows, with their digest retained for traceability |
 
 **Import rule for the comment prefix.** The `[marker]` line is stripped exactly once, at import,
 and only when the first line is a complete `[…]` on its own line and the token matches a known
 marker vocabulary (a role in `_ROLES`, or `report:*` / `review:*` / `decision:*` / `issue:*` /
-`sprint:resume` / `archive` / `rejected`). A first line that merely looks like a marker but is not
-in the vocabulary keeps the whole body verbatim and gets `marker = NULL`. This is stricter than
+`sprint:resume` / `archive` / `rejected` / `validate:*` / `claim:*` / `watchdog:*` /
+`steward:blocked-done` / `provision:request`). A first line that merely looks like a marker but is
+not in the vocabulary keeps the whole body verbatim and gets `marker = NULL`. This is stricter than
 today's `_normalize_comment`, which treats *any* bracketed first line as a marker, and it is
 stricter in the safe direction: it can only fail to recognize a marker, never eat a line of prose.
+
+**The five families this list did not have (2026-09-07).** The import found **778** comments whose
+bracketed first line was outside the vocabulary above, so all 778 kept their whole body and got
+`marker = NULL` — nothing was lost, but the vocabulary was incomplete against the board it
+describes. The five families are named above and counted here, from a re-read of both live boards
+on 2026-09-07:
+
+| Family | Tokens on the board today | Comments |
+|---|---|---|
+| `validate:*` | `ci-green` 297, `review-return` 143, `automerge` 131, `ci-red` 17, `review-skipped` 4, `stand-green` 4 | 596 |
+| `claim:*` | `started` 132 | 132 |
+| `steward:blocked-done` | — | 34 |
+| `watchdog:*` | `retry` 15 | 15 |
+| `provision:request` | — | 1 |
+
+The families are open (`validate:*`, `claim:*`, `watchdog:*`) where the board already carries more
+than one token and closed (`steward:blocked-done`, `provision:request`) where it carries exactly
+one, because a family that has grown once will grow again and a single-token marker is a name.
+`steward:blocked-done` is deliberately not read as the role `steward`: the role marker is bare.
+
+**And the number that closes it: zero.** The same read enumerated every bracketed first line on the
+1514 Pipeline rows and the 102 sprint rows — 15 596 and 2 207 comments — and grouped them by token.
+With these five families added, **no token on either board is outside the vocabulary**: 0 comments
+remain uncovered. The 27 tokens the two boards carry are the roles `dispatcher`, `po`, `observer`,
+`steward`, `worker`, `reviewer`; `report:done`, `report:blocked`; `review:red`, `review:green`;
+`decision:rework`, `decision:release`, `decision:reslice`; `issue:closed`, `issue:priority`;
+`sprint:resume`; `archive`; and the ten tokens of the five families above. `rejected` is in the
+vocabulary and is currently unused on the board, which is not a defect: the rule can only fail to
+recognize, and a vocabulary entry with no rows costs nothing.
 
 ### 8.2 Metadata keys the model does not name
 
 `tasks._normalize` already collects every key outside `_KNOWN_METADATA` into
-`extensions["kanboard"]`. The importer does the same into `tasks.extensions` (J3). This is what
+`extensions["kanboard"]`. The importer does the same into `tasks.extensions` (J3) — and, since
+2026-09-07, into `issues.extensions` (J6) for an Issue row. This is what
 keeps "simplify the schema and lose records" from happening by accident: a key nobody remembers
 writing survives the import and is visible in a query, rather than being dropped because it was not
 in a hand-written column list. The dry-run report of the importer card must list, per key, how many
 rows carry it and where it landed — a key that lands in `extensions` for thousands of rows is a
 missing column, and the report is how that gets noticed before cutover, not after.
+
+**Why the Issue got one (2026-09-07).** The first import of real data reported per key for a card
+(`swimlane` 399, `steward_report` 51, `model` 3, `reference_repair` 2, none of them near thousands,
+so the alarm above correctly did not fire) and then had nothing to report for an Issue, because
+there was no column: nine leftover task-metadata keys on 158 Issue rows and a lane that is not the
+product's on 72 more had no home at all and would have been dropped. `issues.extensions` closes
+that, and the per-key count this section requires now covers both tables — an Issue key that
+appears on hundreds of rows is the same missing-column signal a card key is.
 
 ### 8.3 The project/repository mismatch (DoD 2)
 
@@ -2041,6 +2182,30 @@ Losing nothing means not deleting the closeouts and not pretending a reconstruct
   product and keeps the observed lane in `extensions` where the two disagree, so
   `product_lanes.py`'s finding survives the migration instead of being silently normalized away.
 
+**Two fields the board leaves empty where the schema demanded one (2026-09-07).** These are not
+absent *fields*; they are records the first import of real data could not write, and the choice
+each one forced is stated here rather than only in the models.
+
+- **A card with no `project`.** `secretary-583` carries no `project` metadata at all, and
+  `tasks.project_id` was `NOT NULL`, so the card was named in the import report as unwritable.
+  The column is nullable now. The two alternatives were both worse: deriving the project from the
+  reference's prefix invents a fact the board does not state, and keeping the value in
+  `extensions` would leave the row unwritable anyway, since the `NOT NULL` still has to be
+  satisfied by something. A NULL says exactly what is true — the board does not say which project
+  this card belongs to — and `UNIQUE (project_id, task_number)` simply does not constrain a row
+  with no project, which is correct: there is no project whose numbering it could collide with.
+- **A dependency on a card the board does not hold.** Nine `blocked_by` values name cards that are
+  not on this board (`triggered-agents-*`, `memory-mcp-*`), and `task_dependencies.depends_on` was
+  a foreign key into `tasks`, so all nine were dropped. The table now carries the reference and
+  the resolution separately (§3.5): `depends_on` is the reference as written and half of the
+  primary key, `depends_on_task` is the foreign key and is set exactly when the card is on the
+  board. Dropping the foreign key altogether was the alternative, and it would have cost every
+  dependency its relational check to keep nine; putting the unresolved ones in `extensions` was
+  the other, and it would have hidden a *relation* inside a provenance bag where no join can
+  reach it. `depends_on_task IS NULL` is the query for "not on this board", and
+  `dependency_resolution_is_the_same_reference` forbids the two columns from naming different
+  cards.
+
 ### 8.7 Counters become aggregates
 
 `sprint_budget` is a JSON object incremented read-modify-write, and `sprint_budget_uncharged` is a
@@ -2058,15 +2223,15 @@ approximate for historical rows, and the report says so rather than presenting t
 
 | Identifier | Today | In the schema |
 |---|---|---|
-| `sprint:N` | `reference` on the sprint row; N allocated by `next_reference` over open **and** archived rows under `reference_allocation_lock` | `sprints.sprint_number` PK; `sprints.ref` a generated `UNIQUE` column. New numbers come from `sprint_number_seq`, set past the imported maximum at import. The unique index — not a file lock — is what makes reuse impossible, which is the defect `references.py` documents for 2026-08-06. |
+| `sprint:N`, and any other `sprint:` reference | `reference` on the sprint row; N allocated by `next_reference` over open **and** archived rows under `reference_allocation_lock` | `sprints.ref` PK — the reference itself, stored verbatim; `sprints.sprint_number` a nullable `UNIQUE` integer. New numbers still come from `sprint_number_seq`, set past the imported maximum at import, and the unique index on the number — not a file lock — is still what makes reuse of a number impossible, which is the defect `references.py` documents for 2026-08-06. Changed 2026-09-07: see below. |
 | `<project>-<n>` task refs | `reference` on the card row; same allocator, same lock, same archived-rows rule | `tasks.task_ref` PK plus `UNIQUE (project_id, task_number)`; one sequence per project, or `max(task_number)+1` under the row lock the insert takes anyway. The 2026-08-18 defect (a reference derived from a fresh row id colliding with an archived card) cannot recur: archived rows are ordinary rows in `tasks`. |
 | `product:<id>` | `product_id` metadata + `reference` | `products.product_id` PK, `products.ref` generated `UNIQUE` |
 | `issue:<hash>` | `reference`, hash-allocated (not numbered) | `issues.issue_id` PK, `issues.ref` generated `UNIQUE` |
 | sprint↔issue links | `sprint_issues` JSON array | `sprint_issues` table, FK both ways |
 | sprint↔project links | `sprint_reservations` JSON array + derived guard index | `sprint_projects` (§4) |
 | sprint↔repository links | `sprint_repositories` JSON array of paths | `sprint_repositories` → `repositories` (§8.3) |
-| card→sprint | `sprint_ref` metadata | `tasks.sprint_number` FK |
-| card→card dependency | `blocked_by` metadata | `task_dependencies` |
+| card→sprint | `sprint_ref` metadata | `tasks.sprint_ref` FK, into `sprints.ref` |
+| card→card dependency | `blocked_by` metadata | `task_dependencies.depends_on` (always) and `.depends_on_task` (the FK, when the board holds that card — §8.6) |
 | supersession | `supersedes` metadata | `task_supersessions` |
 | archive | Kanboard `is_active = 0`, `closeTask` | `tasks.archived`; the row is never deleted |
 | issue close reason | `issue_closed_reason` metadata | `issues.close_reason` + the state CHECK |
@@ -2080,6 +2245,38 @@ approximate for historical rows, and the report says so rather than presenting t
 
 Every reference in the left column survives cutover with the same spelling. Nothing in this schema
 renumbers, rewrites or re-derives an existing `sprint:N` or task ref.
+
+**Why the sprint's identity moved, and the one reference that still does not fit (2026-09-07).**
+The claim in the paragraph above was not true of this board until now. The first import of real
+data found two live sprint rows whose reference carries no number — `sprint:canary-terra-20260813`
+and `sprint:canary-terra-final-20260813` — which `sprint_number integer PRIMARY KEY` could not
+hold; `secretary-1438` and `secretary-1439` lost their link to a sprint as a consequence. Making
+the reference the primary key (§3.3) makes the claim true for both, keeps `sprint:N` spelled
+`sprint:N`, keeps the allocator, and moves every scoped composite key onto the reference without
+narrowing what any of them checks.
+
+One record is still not representable, and it is named rather than quietly dropped:
+**`sprint:1037` is on the board twice** — a live row (Kanboard task 748) and an archived row
+(task 1037, whose title is the one `sprint:canary-terra-20260813` now carries). A primary key on
+`ref` holds one of them, exactly as the integer key did. Three ways out exist and the choice is the
+owner's, not this card's:
+
+1. **Disambiguate the archived row at import** — the archived row is stored with a distinguishing
+   reference and its original spelling is kept in `sprints.source_audit` as provenance. Both
+   *records* survive with every field, comment and card link intact; one archived row loses its
+   spelling, and §9's promise above holds for every live row. This is the cheapest option and the
+   one this card would recommend, and it needs no schema change at all: two sprint rows are
+   representable today as long as their references differ.
+2. **Surrogate key** — `sprints` grows a `bigint` identity primary key, `ref` becomes unique only
+   among non-archived rows, and every scoped composite key targets the surrogate. Both rows keep
+   their spelling; the cost is that the reference stops being the identity again, every foreign key
+   in §3.3, §3.4, §3.5, §3.6, §3.7 and §3.8 carries a number the board does not know, and
+   "a reference names one sprint" stops being a database fact.
+3. **Drop the uniqueness of `ref`** — not viable: every scoped key in this schema targets it, and
+   a duplicate reference would make `tasks.sprint_ref` ambiguous.
+
+Until that is decided, the schema does what the integer key did — accepts one row per reference —
+and the importer's report names the archived `sprint:1037` as the one record it cannot carry.
 
 ---
 

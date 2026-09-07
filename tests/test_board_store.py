@@ -197,11 +197,16 @@ class SchemaModelTests(unittest.TestCase):
     """
 
     def test_it_declares_every_table_of_section_3_and_no_version_table(self) -> None:
-        """21 tables; the 22nd §10 counts is Alembic's own `alembic_version`."""
+        """22 tables; the 23rd §3.13 counts is Alembic's own `alembic_version`.
+
+        `issue_comments` is the 22nd, added by `0002_board_gaps` because the first import of real
+        data found 479 comments on Issue rows with no table to go to.
+        """
         self.assertEqual(
             sorted(schema.metadata.tables),
             [
                 "board_events",
+                "issue_comments",
                 "issues",
                 "product_projects",
                 "products",
@@ -227,7 +232,8 @@ class SchemaModelTests(unittest.TestCase):
         self.assertNotIn("schema_migrations", schema.metadata.tables)
         self.assertNotIn("alembic_version", schema.metadata.tables)
 
-    def test_jsonb_is_exactly_the_five_columns_section_3_10_names(self) -> None:
+    def test_jsonb_is_exactly_the_six_columns_section_3_10_names(self) -> None:
+        """Six since `0002_board_gaps`: `issues.extensions` is (J6), for §8.2's reason."""
         from sqlalchemy.dialects.postgresql import JSONB
 
         found = {
@@ -250,7 +256,9 @@ class SchemaModelTests(unittest.TestCase):
             if isinstance(constraint, sa.CheckConstraint)
         ]
 
-        self.assertEqual(len(checks), 34, "§10 counted 34 CHECK constraints in this schema")
+        self.assertEqual(
+            len(checks), 37, "§3.13 counts 37 CHECK constraints at the head revision"
+        )
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
@@ -280,17 +288,28 @@ class SchemaModelTests(unittest.TestCase):
         )
 
     def test_the_generated_ref_columns_are_postgresql_generated_columns(self) -> None:
+        """Three since `0002_board_gaps` moved the sprint's identity onto its reference.
+
+        `sprints.ref` and the three generated `sprint_ref` columns stopped being computed from
+        `sprint_number`: the reference is now the stored identity, and it is the scoping column of
+        every sprint child. `issue_comments.issue_ref` is the one new generated column, and it
+        exists for the reason the sprint ones did — §3.9's claim key joins `requests.ref`, which
+        spells an Issue `issue:<id>`.
+        """
         for table, column, expression in (
             ("products", "ref", "'product:' || product_id"),
             ("issues", "ref", "'issue:' || issue_id"),
-            ("sprints", "ref", "'sprint:' || sprint_number"),
-            ("sprint_comments", "sprint_ref", "'sprint:' || sprint_number"),
+            ("issue_comments", "issue_ref", "'issue:' || issue_id"),
         ):
             with self.subTest(table=table):
                 computed = schema.metadata.tables[table].columns[column].computed
                 self.assertIsNotNone(computed)
                 self.assertTrue(computed.persisted)
                 self.assertEqual(str(computed.sqltext), expression)
+        self.assertIsNone(
+            schema.metadata.tables["sprints"].columns["ref"].computed,
+            "the sprint's reference is stored, not derived: a reference with no number is a row",
+        )
 
     def test_section_3_13_step_two_constraints_are_emitted_as_alter_table(self) -> None:
         """`use_alter` is what makes a forward or mutual reference expressible at all."""
@@ -326,10 +345,11 @@ class SchemaModelTests(unittest.TestCase):
 class MigrationScriptTests(unittest.TestCase):
     """Alembic's script directory as this product ships it — no server needed."""
 
-    def test_the_tree_ships_exactly_the_initial_revision_this_build_expects(self) -> None:
+    def test_the_tree_ships_exactly_the_revisions_this_build_expects(self) -> None:
+        """Newest first, as `walk_revisions` returns them: `0002` sits on top of `0001`."""
         revisions = [script.revision for script in migrate.script_directory().walk_revisions()]
 
-        self.assertEqual(revisions, ["0001_initial"])
+        self.assertEqual(revisions, ["0002_board_gaps", "0001_initial"])
         self.assertEqual(migrate.head_revision(), migrate.EXPECTED_SCHEMA_REVISION)
 
     def test_the_script_directory_ships_inside_the_installed_package(self) -> None:
@@ -357,11 +377,25 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(config.attributes["passwords"], {"app_password": "a"})
 
     def test_no_password_is_a_literal_in_any_revision(self) -> None:
-        for path in sorted((migrate.SCRIPT_LOCATION / "versions").glob("*.py")):
+        """A revision that creates a role takes its passwords as parameters of the run (§5.5).
+
+        Both halves are kept: no revision may carry a password literal at all, and a revision that
+        issues `CREATE ROLE` has to reach its passwords through `PASSWORD_PARAMETERS`. Only
+        `0001_initial` creates roles — `0002_board_gaps` adds tables to a store whose roles already
+        exist, and `0001`'s `ALTER DEFAULT PRIVILEGES` is what makes them reachable — so the second
+        assertion is asked of the revisions it is actually about.
+        """
+        revisions = sorted((migrate.SCRIPT_LOCATION / "versions").glob("*.py"))
+        self.assertTrue(revisions)
+        creating_roles = 0
+        for path in revisions:
             with self.subTest(revision=path.name):
                 text = path.read_text(encoding="utf-8")
-                self.assertIn("PASSWORD_PARAMETERS", text)
                 self.assertNotIn("PASSWORD '", text)
+                if "CREATE ROLE" in text:
+                    creating_roles += 1
+                    self.assertIn("PASSWORD_PARAMETERS", text)
+        self.assertEqual(creating_roles, 1, "§5.5's fence is built once, by the initial revision")
 
     def test_the_url_survives_a_password_a_url_would_otherwise_break(self) -> None:
         with TemporaryDirectory() as tmp:
