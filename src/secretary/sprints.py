@@ -2206,7 +2206,18 @@ class SprintWriter:
             decisions=plan,
         )
         self._check_closeout_is_writable(document, text, actor=actor)
-        return {"document": document, "text": text, "written": False, "commit": ""}
+        return {
+            "document": document,
+            "text": text,
+            # The digest of the body the caller supplied, and what a retry is compared against. The
+            # composed text is not that comparison: the body sits inside it, so a *substring* of the
+            # staged prose -- an edited, shortened closeout -- would pass a containment test and the
+            # caller would be told the close succeeded with prose no document ever carried. The
+            # digest is the shape `SprintWriter.comment` already uses for the same question.
+            "body_sha256": _digest(str(closeout)),
+            "written": False,
+            "commit": "",
+        }
 
     def _check_closeout_is_writable(self, document: str, text: str, *, actor: str) -> None:
         """Refuse a closeout this installation cannot write, before anything is written.
@@ -2253,7 +2264,10 @@ class SprintWriter:
             self._refuse_restated_closeout()
         if not body:
             return
-        if not isinstance(staged, dict) or str(staged.get("text") or "").find(body) < 0:
+        # Exactly, and never by containment: the supplied body against the digest of the body this
+        # close was staged with. A staged plan carrying no digest cannot answer the question, and
+        # the safe answer to "is this the same closeout" that nothing can establish is no.
+        if not isinstance(staged, dict) or staged.get("body_sha256") != _digest(str(closeout)):
             self._refuse_restated_closeout()
 
     def _refuse_restated_closeout(self) -> None:

@@ -2511,10 +2511,46 @@ class CloseOperationTests(CloseFixture):
         self.assertEqual([event["event_id"] for event in self.audit_events()], events)
 
     def test_a_repeat_that_states_another_closeout_is_refused(self) -> None:
+        """Compared exactly, and never by containment.
+
+        The shortened body is the case that matters: it is a *substring* of the prose this close was
+        staged with, so a containment test accepted it and answered the caller with the completed
+        close -- telling them a close succeeded with an account no document ever carried. Ordinary
+        editing during a retry is enough to produce it, which is why all three shapes are pinned.
+        """
         self.close()
+        first_sentence = CLOSEOUT_BODY.split(".")[0] + "."
+        self.assertIn(first_sentence, CLOSEOUT_BODY)
+        for label, body in (
+            ("another account entirely", "actually the sprint achieved everything"),
+            ("a shortened body", first_sentence),
+            ("an extended body", CLOSEOUT_BODY + "\nAnd one more paragraph nobody staged.\n"),
+        ):
+            with self.subTest(closeout=label):
+                with self.assertRaises(ValidationRefused) as refused:
+                    self.close(closeout=body)
+                self.assertIn("staged with another closeout", refused.exception.message)
+        # The body it was staged with still answers from the record and writes nothing new.
+        self.assertTrue(self.close()["result"]["close"]["closeout"]["written"])
+        self.assertEqual(len(self.knowledge()), 1)
+        self.assertEqual(len(self.knowledge_commits()), 1)
+
+    def test_a_retry_of_a_half_finished_close_is_held_to_the_same_comparison(self) -> None:
+        """The staged half of the same rule: a close that stopped mid-transaction refuses it too."""
+        with mock.patch(
+            "secretary.knowledge_write.write_knowledge_document",
+            side_effect=KnowledgeError("the instance repo would not commit"),
+        ), self.assertRaises(OperationPending):
+            self.close()
+
         with self.assertRaises(ValidationRefused) as refused:
-            self.close(closeout="actually the sprint achieved everything")
+            self.close(closeout=CLOSEOUT_BODY.split(".")[0] + ".")
         self.assertIn("staged with another closeout", refused.exception.message)
+
+        # And the retry that carries the body it was staged with finishes the same close.
+        answered = self.close()
+        self.assertTrue(answered["result"]["close"]["closeout"]["written"])
+        self.assertEqual(len(self.knowledge()), 1)
 
     def audit_events(self) -> list[dict[str, Any]]:
         from secretary.tasks import TaskAudit
