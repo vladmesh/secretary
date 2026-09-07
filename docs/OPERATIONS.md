@@ -734,6 +734,70 @@ exit `2` with `not_found` / `validation` on stderr, a source that refused exits 
 `backend_unavailable`. `secretary sprint show --ref` is unchanged and remains the way to read the
 entity's own record, comments included.
 
+## What was commanded, and what became of a request
+
+The previous section is what the pipeline *is* doing. This one is what has already been done to it,
+and it answers the two questions an operator has after something went wrong at three in the morning.
+Both are reads: neither writes a byte, and neither re-sends, retries or repairs anything.
+
+### The last commands, across everything
+
+```bash
+python3 -P -m secretary web-read commands --instance ~/secretary-instance
+python3 -P -m secretary web-read commands --instance ~/secretary-instance --limit 20
+python3 -P -m secretary web-read commands --instance ~/secretary-instance --json
+```
+
+One line per command, newest first, across every entity of the installation — cards, sprints,
+products and issues in the same page:
+
+```
+commands: 5 shown
+  2026-09-07T03:02:45Z secretary-production commented secretary-1579 success
+  2026-09-07T03:02:38Z secretary-production routing codegen-orchestrator-1270 success
+next cursor: eyJvZmZzZXQiOjI1MDYwLCJyZWYiOiIiLCJ2IjoxfQ (more)
+```
+
+Each row is who initiated it, the action, the entity it was aimed at, and how it ended. `--json`
+gives the same rows with the request id, the event id, the entity kind where the record carries one,
+and both result fields (`reason` for a typed protocol event, `outcome` for a released generic audit
+record) told apart.
+
+**Paging.** Pass the `next_cursor` of a page back as `--cursor` to continue into older commands.
+`(more)` — `has_more` in the JSON — is printed **only** when the limit cut the page short, so a page
+that reached the beginning of the history is not the same as one that stopped because it was full.
+The order is the journal's append order reversed, not a sort by timestamp: the writer stamps
+`occurred_at`, and two commands can share a second.
+
+**When it cannot answer.** `commands: unavailable (...)` with `items: null` means the audit journal
+could not be read. It never means "nothing has been commanded" — an empty history is `items: []`
+under an `available` source, and the two are opposite answers.
+
+### What happened to a request id
+
+```bash
+python3 -P -m secretary web-read request --instance ~/secretary-instance --request-id ID
+```
+
+Use it whenever a command failed, timed out, or was interrupted and you do not know whether it
+landed — instead of running it again to find out. Four answers, and they are not interchangeable:
+
+| answer | what to do |
+| --- | --- |
+| `committed` | nothing. It finished; the line shows the action, the entity and when. If `staged` is true beside it, an audit repair is owed (`secretary task reconcile-audit`), but the operation itself is done |
+| `pending` | repeat the operation **with the same request id**. It is staged and may be part-done; the read prints the id to repeat. A new request id would start a second operation beside it — a second sprint, a second close |
+| `not_found` | the installation never saw that request. It is safe to send it |
+| `unknown` | the audit could not be read, so nothing is established. Repair the journal and ask again; do not read this as `not_found` |
+
+The `--json` form carries the operation-identity contract on the answer (`identity`): which
+operations take a request id and what repeating each one means, which take none and why, and what
+the part-done failures promise. The same table is in
+[Protocols](PROTOCOLS.md#operation-identity-in-one-place).
+
+Both commands exit `2` with `validation` on stderr for an instance config that does not validate, a
+cursor this reader did not issue, or a missing request id; `1` with `backend_unavailable` if the
+layer itself could not be run.
+
 ## A PO comment on a running sprint
 
 This is how a PO intervenes in a sprint that is already running: a comment on the **entity**. Not by

@@ -4,6 +4,36 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-07 — the command history, and what became of a request id (secretary-1579, sprint:1431)
+
+**Two new protocol reads, and no new machinery.** `command_history(cursor, limit)` answers a page of
+the last commands across every entity of the installation — the initiator, the action, the target
+entity and the result of each, newest first — and `command_request(request_id)` answers what became
+of one request id: `committed` with its result and the entity it produced, `pending` with what is
+already staged and the id to repeat, `not_found`, or `unknown` when the audit could not be read.
+Both are published as the new `web-command` schema. They are built on what already existed:
+`TaskAudit.events()` for the traversal, `TaskAudit.committed_event` / `pending_event` for the
+lookup, and this layer's own cursor for the paging. No second store, index, cache, scheduler or
+registry of operations was added, and neither read writes, retries or repairs anything.
+
+**New commands:** `secretary web-read commands --instance I [--cursor C] [--limit N] [--json]` and
+`secretary web-read request --instance I --request-id ID [--json]`. Both are clients of the reads and
+hold no rule of their own; they exit `2` on `validation` and `1` on `backend_unavailable`, the
+statuses `secretary web-read` already uses. Nothing existing changed shape.
+
+**Two answers that must not be confused.** An audit journal that could not be read is an unavailable
+source with `items: null`, never an empty history; a request id looked up over an unreadable audit is
+`unknown`, never `not_found`. And `has_more` is true only when the limit cut a page short, so a page
+that reached the beginning of the history is distinguishable from one that was truncated.
+
+**The operation-identity contract is now written down in one place** — which operations take a
+`request_id` and what a repeat means for each, which deliberately take none and why, and what
+`OperationPending`, `audit_pending`, `close_conflict` and `PauseCommandCompleted` promise about what
+is already done. It is a value (`webproto.command_reads.OPERATION_IDENTITY`) derived from the
+operation layers' own signatures by a test, it travels on every `command_request` answer, and
+`docs/PROTOCOLS.md` is held to it. `pause_drain` and `pause_resume` still take no request id, and
+that is recorded as a decision with its reason rather than left to be noticed.
+
 ## 2026-09-07 — a sprint closes through the protocol, and its close writes a closeout (secretary-1578, sprint:1431)
 
 **A new protocol operation and a new read.** `sprint_close(request_id, actor, reference, reason,

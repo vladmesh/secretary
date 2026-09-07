@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "web-command.schema.json",
+  "title": "Transport-independent command history and operation identity reads",
+  "description": "The two documents secretary.webproto's command reads return: a page of the last commands across every entity of one installation, and what became of one request id. Both are built on the committed board audit through the traversal and the request lookups that already exist, and neither opens a second store, index, scheduler or registry of operations. Every section carries the availability of the source that answered it and names that source, and no section is assembled anywhere but secretary.webproto.section. Neither read writes, retries or repairs anything. No failure is a status number.",
+  "oneOf": [
+    { "$ref": "#/$defs/command_history" },
+    { "$ref": "#/$defs/command_request" }
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "description": "Whether one source answered this section, and which source it was.",
+      "required": ["state", "reason", "observed_at", "data_age_seconds", "name"],
+      "properties": {
+        "state": { "enum": ["available", "unavailable"] },
+        "reason": { "type": ["string", "null"] },
+        "observed_at": { "type": ["string", "null"] },
+        "data_age_seconds": { "type": ["number", "null"] },
+        "name": {
+          "enum": ["installation", "audit"],
+          "description": "The source that answered: the installation config, or the committed board audit journal."
+        }
+      }
+    },
+    "mark": {
+      "type": "object",
+      "description": "One source's availability, said for the document as a whole and claiming nothing.",
+      "required": ["source"],
+      "properties": { "source": { "$ref": "#/$defs/source" } }
+    },
+    "sources": {
+      "type": "object",
+      "description": "The availability of every source of the document, said once for the document.",
+      "additionalProperties": { "$ref": "#/$defs/mark" }
+    },
+    "actor": {
+      "type": ["object", "null"],
+      "description": "Who initiated the command. Null when the record names nobody, never a guess.",
+      "required": ["id", "role"],
+      "properties": {
+        "id": { "type": "string" },
+        "role": { "type": "string" }
+      }
+    },
+    "entity": {
+      "type": ["object", "null"],
+      "description": "The entity the command was aimed at. `kind` is null when the record does not say which kind of entity it is -- the released generic audit records carry the reference only -- and is never inferred.",
+      "required": ["ref", "kind"],
+      "properties": {
+        "ref": { "type": "string" },
+        "kind": { "type": ["string", "null"] }
+      }
+    },
+    "result": {
+      "type": ["object", "null"],
+      "description": "How the command ended. A typed protocol event carries the `reason` its writer gave and a released generic audit record carries the `outcome` of its backend effect; neither is renamed into the other's field.",
+      "required": ["outcome", "reason"],
+      "properties": {
+        "outcome": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "command": {
+      "type": "object",
+      "description": "One committed command: the initiator, the action, the target entity and the result.",
+      "required": [
+        "occurred_at",
+        "request_id",
+        "event_id",
+        "actor",
+        "action",
+        "kind",
+        "entity",
+        "result",
+        "typed"
+      ],
+      "properties": {
+        "occurred_at": { "type": ["string", "null"] },
+        "request_id": { "type": ["string", "null"] },
+        "event_id": { "type": ["string", "null"] },
+        "actor": { "$ref": "#/$defs/actor" },
+        "action": {
+          "type": "string",
+          "description": "The released control-plane action spelling, which is what `TaskAudit.events(kind=...)` narrows on."
+        },
+        "kind": { "type": "string" },
+        "entity": { "$ref": "#/$defs/entity" },
+        "result": { "$ref": "#/$defs/result" },
+        "typed": {
+          "type": "boolean",
+          "description": "Whether this row came from a typed board protocol event or from a released generic audit record beside it. Both are returned: a history with the transitions in it and the creations missing is not a history."
+        }
+      }
+    },
+    "commands": {
+      "type": "object",
+      "description": "One page of the committed history, newest first. `items` is null and never an empty list when the audit did not answer: an empty list is the affirmative claim that this installation has commanded nothing.",
+      "required": ["source", "items", "next_cursor", "has_more"],
+      "properties": {
+        "source": { "$ref": "#/$defs/source" },
+        "items": {
+          "type": ["array", "null"],
+          "items": { "$ref": "#/$defs/command" }
+        },
+        "next_cursor": {
+          "type": ["string", "null"],
+          "description": "The opaque position older commands continue from. An ordinal in the committed traversal's append-ordered sequence, bound to no entity, so a card's byte cursor and this one can never be honoured by the other's reader."
+        },
+        "has_more": {
+          "type": ["boolean", "null"],
+          "description": "True only when the limit cut this page short, so a page that reached the beginning of the history is distinguishable from one that was truncated."
+        }
+      }
+    },
+    "extent": {
+      "type": "object",
+      "description": "What the history covers, read from no source at all: it is what this read is, so it is stated even on a document where every source refused.",
+      "required": ["entities", "records", "order", "statement"],
+      "properties": {
+        "entities": { "const": "all" },
+        "records": { "const": "committed" },
+        "order": { "const": "journal_append_reversed" },
+        "statement": { "type": "string" }
+      }
+    },
+    "continuation": {
+      "type": ["object", "null"],
+      "description": "How a staged, part-done operation is continued safely: by repeating exactly this request id. A description and never an act -- the read performs no part of it. The same shape `OperationPending` carries on the failure itself.",
+      "required": ["repeat_request", "request_id", "action", "statement"],
+      "properties": {
+        "repeat_request": { "const": true },
+        "request_id": { "type": "string" },
+        "action": { "type": ["string", "null"] },
+        "statement": { "type": "string" }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "description": "What became of one request id. `unknown` is a state of its own and is never folded into `not_found`: an audit nobody could read has not said that this installation never saw the request.",
+      "required": [
+        "source",
+        "state",
+        "action",
+        "kind",
+        "entity",
+        "actor",
+        "occurred_at",
+        "event_id",
+        "result",
+        "staged",
+        "continuation"
+      ],
+      "properties": {
+        "source": { "$ref": "#/$defs/source" },
+        "state": { "enum": ["committed", "pending", "not_found", "unknown"] },
+        "action": { "type": ["string", "null"] },
+        "kind": { "type": ["string", "null"] },
+        "entity": { "$ref": "#/$defs/entity" },
+        "actor": { "$ref": "#/$defs/actor" },
+        "occurred_at": { "type": ["string", "null"] },
+        "event_id": { "type": ["string", "null"] },
+        "result": { "$ref": "#/$defs/result" },
+        "staged": {
+          "type": ["boolean", "null"],
+          "description": "Whether a staged record for this request id still stands. True beside a committed answer is an owed audit repair, said as one rather than answered differently."
+        },
+        "continuation": { "$ref": "#/$defs/continuation" }
+      }
+    },
+    "identity_entry": {
+      "type": "object",
+      "description": "One operation of the identity contract: which layer it belongs to, and what a repeat of it means, or why it takes no request id at all.",
+      "properties": {
+        "layer": { "type": "string" },
+        "repeat": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "required": ["layer"]
+    },
+    "identity": {
+      "type": "object",
+      "description": "The operation-identity contract, in one place: the operations that take a request id and what a repeat means for each, the ones that take none and why, and what the part-done and repairable failures promise about what is already done. Read from no source, and stated on every answer.",
+      "required": ["with_request_id", "without_request_id", "errors"],
+      "properties": {
+        "with_request_id": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/identity_entry" }
+        },
+        "without_request_id": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/identity_entry" }
+        },
+        "errors": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["promises"],
+            "properties": {
+              "code": { "type": "string" },
+              "exit_status": { "type": "integer" },
+              "promises": { "type": "string" },
+              "action": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "command_history": {
+      "type": "object",
+      "description": "A page of the last commands across every entity of one installation, newest first.",
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "limit",
+        "extent",
+        "commands",
+        "sources"
+      ],
+      "properties": {
+        "schema_version": { "type": "integer" },
+        "kind": { "const": "command_history" },
+        "observed_at": { "type": "string" },
+        "limit": { "type": "integer" },
+        "extent": { "$ref": "#/$defs/extent" },
+        "commands": { "$ref": "#/$defs/commands" },
+        "sources": { "$ref": "#/$defs/sources" }
+      }
+    },
+    "command_request": {
+      "type": "object",
+      "description": "What became of one request id: not found, pending with how to continue safely, committed with its result -- or unknown.",
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "request_id",
+        "operation",
+        "identity",
+        "sources"
+      ],
+      "properties": {
+        "schema_version": { "type": "integer" },
+        "kind": { "const": "command_request" },
+        "observed_at": { "type": "string" },
+        "request_id": { "type": "string" },
+        "operation": { "$ref": "#/$defs/operation" },
+        "identity": { "$ref": "#/$defs/identity" },
+        "sources": { "$ref": "#/$defs/sources" }
+      }
+    }
+  }
+}

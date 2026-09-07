@@ -35,6 +35,7 @@ SCHEMAS = {
     "web-run": "web-run.schema.json",
     "web-sprint": "web-sprint.schema.json",
     "web-pause": "web-pause.schema.json",
+    "web-command": "web-command.schema.json",
 }
 
 

@@ -29,6 +29,7 @@ import os
 import sys
 from typing import Any
 
+from secretary.webproto.command_reads import CommandReadLayer
 from secretary.webproto.errors import ReadError
 from secretary.webproto.journal import DEFAULT_LIMIT
 from secretary.webproto.ops import OperationLayer
@@ -76,20 +77,49 @@ def add_web_read_subcommands(subparsers) -> None:
     events.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="page size")
     events.set_defaults(handler=run_web_read_events)
 
+    history = commands.add_parser(
+        "commands",
+        help="the last commands across every entity: who ran what, on what, and how it ended",
+    )
+    _installation(history)
+    history.add_argument(
+        "--cursor",
+        help="the `next_cursor` of an earlier page; omit to start at the newest command",
+    )
+    history.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="page size")
+    history.set_defaults(handler=run_web_read_commands)
+
+    request = commands.add_parser(
+        "request", help="what became of one request id: not found, pending, committed or unknown"
+    )
+    _installation(request)
+    request.add_argument("--request-id", required=True, help="the id the operation was sent with")
+    request.set_defaults(handler=run_web_read_request)
+
     group.set_defaults(handler=_usage)
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
+    _installation(parser)
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="collect installation health without inspecting the live host",
+    )
+
+
+def _installation(parser: argparse.ArgumentParser) -> None:
+    """The arguments every read of this group takes: which installation, and how to print it.
+
+    `--offline` is deliberately not among them. It is the host-inspection switch of the
+    installation health collector, and the two command-history reads consult no host: offering it
+    there would offer a mode that changes nothing.
+    """
     parser.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
     parser.add_argument(
         "--data-dir",
         default=os.environ.get("SECRETARY_DATA_DIR"),
         help="override the instance's configured data directory",
-    )
-    parser.add_argument(
-        "--offline",
-        action="store_true",
-        help="collect installation health without inspecting the live host",
     )
     parser.add_argument("--json", action="store_true", help="print the snapshot as JSON")
 
@@ -101,6 +131,10 @@ def _usage(_args: argparse.Namespace) -> int:
 
 def _layer(args: argparse.Namespace) -> ReadLayer:
     return ReadLayer(args.instance, data_dir=args.data_dir, offline=bool(args.offline))
+
+
+def _command_layer(args: argparse.Namespace) -> CommandReadLayer:
+    return CommandReadLayer(args.instance, data_dir=args.data_dir)
 
 
 def run_web_read_system(args: argparse.Namespace) -> int:
@@ -116,6 +150,22 @@ def run_web_read_events(args: argparse.Namespace) -> int:
         args,
         lambda: _layer(args).task_events(args.ref, args.cursor, limit=args.limit),
         _event_lines,
+    )
+
+
+def run_web_read_commands(args: argparse.Namespace) -> int:
+    return _emit(
+        args,
+        lambda: _command_layer(args).command_history(args.cursor, limit=args.limit),
+        _command_lines,
+    )
+
+
+def run_web_read_request(args: argparse.Namespace) -> int:
+    return _emit(
+        args,
+        lambda: _command_layer(args).command_request(args.request_id),
+        _request_lines,
     )
 
 
@@ -165,6 +215,27 @@ def _task_lines(snapshot: dict[str, Any]):
     outcome = snapshot["work"]["outcome"]
     yield f"outcome: {outcome['kind']}:{outcome['value']} at {outcome['at']}" if outcome else "outcome: none"
     yield f"events: {len(snapshot['events']['items'])} shown, next cursor {snapshot['events']['next_cursor']}"
+
+
+def _command_lines(snapshot: dict[str, Any]):
+    commands = snapshot["commands"]
+    items = commands["items"]
+    yield f"commands: {_source(commands)}" if items is None else f"commands: {len(items)} shown"
+    for item in items or []:
+        actor = item["actor"] or {}
+        result = item["result"]["reason"] or item["result"]["outcome"] or ""
+        entity = item["entity"]["ref"]
+        yield f"  {item['occurred_at']} {actor.get('id') or '?'} {item['action']} {entity} {result}".rstrip()
+    yield f"next cursor: {commands['next_cursor']}" + (" (more)" if commands["has_more"] else "")
+
+
+def _request_lines(snapshot: dict[str, Any]):
+    operation = snapshot["operation"]
+    yield f"{snapshot['request_id']}: {operation['state']} ({_source(operation)})"
+    if operation["entity"]:
+        yield f"  {operation['action']} on {operation['entity']['ref']} at {operation['occurred_at']}"
+    if operation["continuation"]:
+        yield f"  continue by repeating this request id: {operation['continuation']['request_id']}"
 
 
 def _event_lines(snapshot: dict[str, Any]):
