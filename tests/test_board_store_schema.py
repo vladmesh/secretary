@@ -26,7 +26,9 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from secretary import upgrade
 from secretary.board import migrator
 from secretary.board.store import BoardStoreConfig, BoardStoreError
 
@@ -322,6 +324,91 @@ class BoardStoreSchemaTests(unittest.TestCase):
             app.execute(f"INSERT INTO {table} (a) VALUES (2)")
         with psycopg.connect(self.credentials("read").conninfo(), autocommit=True) as reader:
             self.assertEqual(reader.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 2)
+
+    # --- `step_board_store` end to end -------------------------------------------------
+    #
+    # The unit suite proves the step's three outcomes over a stubbed runner. These prove the wire
+    # between them is real: that a complete `board-store.env` in an instance directory is what the
+    # step resolves, connects with and migrates through, and that a second upgrade changes
+    # nothing. They live in this class so one container serves the whole module.
+
+    def write_store(self, directory: Path) -> Path:
+        credentials = self.credentials("owner")
+        path = directory / "board-store.env"
+        path.write_text(
+            "\n".join(
+                [
+                    f"SECRETARY_DB_HOST={credentials.host}",
+                    f"SECRETARY_DB_PORT={credentials.port}",
+                    f"SECRETARY_DB_NAME={DATABASE}",
+                    f"SECRETARY_DB_OWNER_USER={OWNER}",
+                    f"SECRETARY_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
+                    "SECRETARY_DB_APP_USER=secretary_app",
+                    f"SECRETARY_DB_APP_PASSWORD={APP_PASSWORD}",
+                    "SECRETARY_DB_READ_USER=secretary_read",
+                    f"SECRETARY_DB_READ_PASSWORD={READ_PASSWORD}",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+        return path
+
+    def context(self, instance: Path, *, dry_run: bool = False):
+        return upgrade.UpgradeContext(
+            instance_path=instance,
+            product_root=instance,
+            base_branch="main",
+            dry_run=dry_run,
+            units=None,
+            orca=None,
+            automations=None,
+        )
+
+    def test_an_upgrade_migrates_a_configured_store_and_then_leaves_it_alone(self) -> None:
+        with TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            self.write_store(instance)
+
+            preview = upgrade.step_board_store(self.context(instance, dry_run=True))
+            self.assertEqual(preview.status, "would-change")
+            self.assertIn("0001", preview.detail)
+
+            conn = self.owner_connection()
+            self.assertIsNone(
+                conn.execute("SELECT to_regclass('public.schema_migrations')").fetchone()[0],
+                "a dry run must read and write nothing",
+            )
+            conn.close()
+
+            applied = upgrade.step_board_store(self.context(instance))
+            self.assertEqual(applied.status, "changed")
+            self.assertIn("0001", applied.detail)
+
+            again = upgrade.step_board_store(self.context(instance))
+            self.assertEqual(again.status, "unchanged")
+
+        conn = self.owner_connection()
+        self.assertEqual(tuple(conn.execute(COUNTS).fetchone()), DOCUMENTED_COUNTS)
+
+    def test_a_store_that_will_not_answer_fails_the_step_with_its_reason(self) -> None:
+        with TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            path = self.write_store(instance)
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    f"SECRETARY_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
+                    "SECRETARY_DB_OWNER_PASSWORD=not-the-password",
+                ),
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+
+            result = upgrade.step_board_store(self.context(instance))
+
+        self.assertTrue(result.failed)
+        self.assertIn("board store", result.detail)
 
 
 if __name__ == "__main__":

@@ -189,6 +189,70 @@ def resolve_role(instance_dir: Path | str, role: str) -> BoardStoreCredentials:
     return resolve(instance_dir).for_role(role)
 
 
+@dataclass(frozen=True)
+class StoreOutcome:
+    """Independent lifecycle actions taken for one store-configuration reconciliation."""
+
+    ignore_added: bool = False
+    mode_repaired: bool = False
+
+    @property
+    def changed(self) -> bool:
+        return self.ignore_added or self.mode_repaired
+
+    def render(self, *, dry_run: bool = False) -> str:
+        actions: list[str] = []
+        if self.ignore_added:
+            actions.append("would add board store ignore" if dry_run else "added board store ignore")
+        if self.mode_repaired:
+            actions.append("would secure board store mode" if dry_run else "secured board store mode")
+        return "; ".join(actions) if actions else "unchanged"
+
+
+def ensure_ignored(instance_dir: Path | str, *, dry_run: bool = False) -> StoreOutcome:
+    """The durable exclusion `board_transport.ensure` gives the transport, for this file.
+
+    Two actions, each reported independently: the `/board-store.env` entry in the instance
+    repository's exclusions, and a mode repair when the file exists and is readable by anyone but
+    its owner. A file already in the index is not something an exclusion can fix, so it refuses
+    rather than pretending; a symlink refuses for the reason `parse` refuses one.
+
+    It **never creates the file**. The passwords are generated once, by the bootstrap or reconcile
+    path that materializes `board-store.env`, and that owner calls this before it writes — which
+    is the order that keeps a generated credential from ever being a tracked one. This card ships
+    the operation and does not run it against any live installation.
+    """
+    path = store_path(instance_dir)
+    if state_repo.is_tracked(path.parent, f"/{STORE_FILE}"):
+        raise BoardStoreError(
+            "board store configuration is tracked in the instance repository; "
+            "remove it from tracked history before it can be excluded"
+        )
+    try:
+        ignore_added = (
+            state_repo.ensure_ignored(path.parent, f"/{STORE_FILE}", dry_run=dry_run)
+            if (path.parent / ".git").exists()
+            else False
+        )
+    except state_repo.StateRepoError as exc:
+        raise BoardStoreError(f"board store ignore lifecycle failed: {exc}") from exc
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return StoreOutcome(ignore_added=ignore_added)
+    except OSError as exc:
+        raise BoardStoreError(f"board store configuration is unreadable: {path}") from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise BoardStoreError("board store configuration must be a regular file, not a symlink")
+    mode_repaired = bool(mode & 0o077)
+    if mode_repaired and not dry_run:
+        try:
+            path.chmod(0o600)
+        except OSError as exc:
+            raise BoardStoreError(f"could not secure board store configuration: {exc}") from None
+    return StoreOutcome(ignore_added=ignore_added, mode_repaired=mode_repaired)
+
+
 def findings(instance_dir: Path | str) -> list[str]:
     """Public, non-secret store health evidence, in `board_transport.findings`'s shape.
 
@@ -224,6 +288,8 @@ __all__ = [
     "BoardStoreConfig",
     "BoardStoreCredentials",
     "BoardStoreError",
+    "StoreOutcome",
+    "ensure_ignored",
     "findings",
     "parse",
     "resolve",

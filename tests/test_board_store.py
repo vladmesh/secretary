@@ -9,15 +9,20 @@ it produced — is `tests/test_board_store_schema.py`, which raises a throwaway 
 from __future__ import annotations
 
 import os
+import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
+from secretary import state_repo, upgrade
 from secretary.board import migrator
 from secretary.board.store import (
     ROLES,
     STORE_ENV,
+    STORE_FILE,
     BoardStoreError,
+    ensure_ignored,
     findings,
     resolve,
     resolve_role,
@@ -359,3 +364,192 @@ class MigrationApplicationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IgnoreLifecycleTests(unittest.TestCase):
+    """The durable exclusion `board_transport.ensure` gives the transport (criterion 2, §5.4).
+
+    A finding that the file is tracked is not a lifecycle; making `/board-store.env` excluded is.
+    This card ships the operation and calls it against no live installation: the bootstrap path
+    that generates the three passwords owns the call, and calls it before it writes the file.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.instance = Path(self.tmp.name)
+        self.git("init", "-b", "main")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("config", "user.name", "Test")
+        (self.instance / "README.md").write_text("instance\n", encoding="utf-8")
+        self.git("add", "README.md")
+        self.git("commit", "-m", "Initial")
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.instance), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def ignored(self) -> bool:
+        return state_repo.is_ignored(self.instance, f"/{STORE_FILE}")
+
+    def test_it_adds_the_exclusion_and_says_so_once(self) -> None:
+        first = ensure_ignored(self.instance)
+
+        self.assertTrue(first.ignore_added)
+        self.assertTrue(first.changed)
+        self.assertEqual(first.render(), "added board store ignore")
+        self.assertTrue(self.ignored())
+
+        second = ensure_ignored(self.instance)
+
+        self.assertFalse(second.changed)
+        self.assertEqual(second.render(), "unchanged")
+
+    def test_a_dry_run_names_the_action_and_writes_nothing(self) -> None:
+        outcome = ensure_ignored(self.instance, dry_run=True)
+
+        self.assertTrue(outcome.ignore_added)
+        self.assertEqual(outcome.render(dry_run=True), "would add board store ignore")
+        self.assertFalse((self.instance / ".gitignore").exists())
+        self.assertFalse(self.ignored())
+
+    def test_it_secures_a_configuration_anyone_could_read(self) -> None:
+        write_store(self.instance, mode=0o644)
+
+        outcome = ensure_ignored(self.instance)
+
+        self.assertTrue(outcome.mode_repaired)
+        self.assertIn("secured board store mode", outcome.render())
+        self.assertEqual(store_path(self.instance).stat().st_mode & 0o777, 0o600)
+        resolve(self.instance)
+
+    def test_a_dry_run_reports_the_mode_repair_without_making_it(self) -> None:
+        write_store(self.instance, mode=0o644)
+
+        outcome = ensure_ignored(self.instance, dry_run=True)
+
+        self.assertTrue(outcome.mode_repaired)
+        self.assertEqual(store_path(self.instance).stat().st_mode & 0o777, 0o644)
+
+    def test_an_already_private_configuration_needs_no_repair(self) -> None:
+        write_store(self.instance)
+        ensure_ignored(self.instance)
+
+        outcome = ensure_ignored(self.instance)
+
+        self.assertFalse(outcome.changed)
+
+    def test_a_tracked_configuration_refuses_rather_than_pretending_to_hide_it(self) -> None:
+        write_store(self.instance)
+        self.git("add", "-f", STORE_FILE)
+        self.git("commit", "-m", "Track it by mistake")
+
+        with self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"):
+            ensure_ignored(self.instance)
+
+    def test_a_symlink_refuses_for_the_reason_the_parse_refuses_one(self) -> None:
+        store_path(self.instance).symlink_to(self.instance / "elsewhere.env")
+
+        with self.assertRaisesRegex(BoardStoreError, "regular file, not a symlink"):
+            ensure_ignored(self.instance)
+
+    def test_it_never_creates_the_configuration_itself(self) -> None:
+        ensure_ignored(self.instance)
+
+        self.assertFalse(store_path(self.instance).exists())
+
+    def test_a_directory_without_a_repository_is_left_alone(self) -> None:
+        with TemporaryDirectory() as plain:
+            outcome = ensure_ignored(Path(plain))
+
+        self.assertFalse(outcome.changed)
+
+
+class UpgradeStepTests(unittest.TestCase):
+    """`step_board_store`: the three outcomes the observer decision defines for it."""
+
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.instance = Path(self.tmp.name)
+
+    def context(self, *, dry_run: bool = False):
+        return upgrade.UpgradeContext(
+            instance_path=self.instance,
+            product_root=Path(self.tmp.name),
+            base_branch="main",
+            dry_run=dry_run,
+            units=None,
+            orca=None,
+            automations=None,
+        )
+
+    def test_it_runs_immediately_after_the_step_that_installs_the_driver(self) -> None:
+        """§7.4's placement: the driver has to exist before the step can connect."""
+        names = [step.__name__ for step in upgrade.STEPS]
+
+        self.assertEqual(
+            names[names.index("step_dependencies") + 1],
+            "step_board_store",
+        )
+
+    def test_an_installation_with_no_store_is_a_no_op_that_never_connects(self) -> None:
+        """Every installation until the store is provisioned, including the live one today."""
+        with mock.patch.object(upgrade, "migrate_instance") as migrate:
+            result = upgrade.step_board_store(self.context())
+
+        migrate.assert_not_called()
+        self.assertEqual((result.name, result.status), ("board-store", "skipped"))
+        self.assertIn("not configured", result.detail)
+        self.assertFalse(result.failed)
+
+    def test_a_configured_store_is_migrated_and_the_versions_are_named(self) -> None:
+        write_store(self.instance)
+
+        with mock.patch.object(upgrade, "migrate_instance", return_value=(1,)) as migrate:
+            result = upgrade.step_board_store(self.context())
+
+        migrate.assert_called_once_with(self.instance, dry_run=False)
+        self.assertEqual(result.status, "changed")
+        self.assertIn("0001", result.detail)
+
+    def test_a_current_store_reports_unchanged(self) -> None:
+        write_store(self.instance)
+
+        with mock.patch.object(upgrade, "migrate_instance", return_value=()):
+            result = upgrade.step_board_store(self.context())
+
+        self.assertEqual(result.status, "unchanged")
+
+    def test_a_dry_run_says_what_it_would_apply_and_applies_nothing(self) -> None:
+        write_store(self.instance)
+
+        with mock.patch.object(upgrade, "migrate_instance", return_value=(1,)) as migrate:
+            result = upgrade.step_board_store(self.context(dry_run=True))
+
+        migrate.assert_called_once_with(self.instance, dry_run=True)
+        self.assertEqual(result.status, "would-change")
+        self.assertIn("would apply", result.detail)
+
+    def test_a_store_that_is_configured_and_broken_fails_the_step(self) -> None:
+        """Never walk past it: the next thing the upgrade would do is restart services."""
+        with mock.patch.object(
+            upgrade, "migrate_instance", side_effect=BoardStoreError("connection refused")
+        ):
+            write_store(self.instance)
+            result = upgrade.step_board_store(self.context())
+
+        self.assertTrue(result.failed)
+        self.assertIn("connection refused", result.detail)
+
+    def test_a_partial_configuration_fails_before_any_driver_is_reached(self) -> None:
+        write_store(self.instance, {k: v for k, v in COMPLETE.items() if k != "SECRETARY_DB_NAME"})
+
+        result = upgrade.step_board_store(self.context())
+
+        self.assertTrue(result.failed)
+        self.assertIn("SECRETARY_DB_NAME", result.detail)

@@ -1213,7 +1213,7 @@ is the order migration `0001` applies:
    §3.8 (`sprint_decisions` and its two partial unique indexes), §3.9 (`requests`, `board_events`),
    §7.4 (`schema_migrations`).
 2. **Add the deferred constraints**, in the same reading order: §3.3's two scoped sprint cursors,
-   §3.4's `budget_card_is_in_this_sprint`, §3.8's two scoped decision subjects, §3.9's four
+   §3.4's `budget_card_is_in_this_sprint`, §3.8's two scoped decision subjects, §3.9's five
    `request_id` foreign keys.
 
 Every fence in §3 that begins `ALTER TABLE` is a step-2 fence and is labelled as one. Every fence

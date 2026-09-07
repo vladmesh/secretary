@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.board import store as board_store
 from secretary.board.store import BoardStoreError
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
@@ -230,6 +231,40 @@ def connect_owner(credentials: Any) -> Any:
     return psycopg.connect(credentials.conninfo(), autocommit=False)
 
 
+def migrate_instance(instance_dir: Path | str, *, dry_run: bool = False) -> tuple[int, ...]:
+    """Bring one installation's configured board store to the schema this build ships.
+
+    Returns the versions applied, or — under ``dry_run`` — the versions that *would* be applied,
+    having connected and read but written nothing.
+
+    Every failure leaves as one `BoardStoreError` carrying its reason: an unparsable connection
+    file, an absent driver, a server that will not answer, a refused login, and the checksum rule
+    all reach the caller in the same shape. That is what lets `upgrade.py`'s step report a reason
+    without importing the driver — which matters, because the same upgrade that installs the
+    driver has to be able to start on a venv that does not have it yet.
+    """
+    config = board_store.resolve(instance_dir)
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise BoardStoreError(
+            "the board store is configured but the psycopg driver is not installed; "
+            "reinstall the product dependencies before migrating"
+        ) from exc
+    try:
+        with connect_owner(config.for_role("owner")) as conn:
+            if dry_run:
+                return tuple(migration.version for migration in plan(discover(), applied(conn)))
+            return apply(conn, passwords=passwords_for(config))
+    except psycopg.Error as exc:
+        raise BoardStoreError(f"the board store did not accept the migration run: {exc}") from exc
+
+
+def passwords_for(config: Any) -> dict[str, str]:
+    """`0001`'s two runner parameters, taken from the connection file rather than the file."""
+    return {"app_password": config.app_password, "read_password": config.read_password}
+
+
 __all__ = [
     "ADVISORY_LOCK_KEY",
     "EXPECTED_SCHEMA_VERSION",
@@ -243,6 +278,8 @@ __all__ = [
     "connect_owner",
     "current_version",
     "discover",
+    "migrate_instance",
+    "passwords_for",
     "plan",
     "render",
 ]
