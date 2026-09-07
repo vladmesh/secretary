@@ -388,6 +388,25 @@ KANBOARD_ONLY = {
         "id.  Reading an archived card is covered here by "
         "SqlTaskReaderTests.test_restore_snapshot_returns_every_card_by_reference"
     ),
+    # --- Kanboard's wire behaviour, not the product's request.  These three assert what a
+    # *batch* is: one JSON-RPC round trip carrying several reads, in the order they were asked
+    # for.  `SqlCardClient.call_batch` is `[self.call(...) for ...]` — one batch because there is
+    # no round trip — so the same assertion passes here while proving nothing about the economy
+    # it exists to protect.  Vacuous is not the same as true, so they stay Kanboard-only.
+    "test_export_includes_archived_cards_in_one_metadata_comments_batch": (
+        "asserts the JSON-RPC batch the export posts and its order.  The store answers the same "
+        "reads in one connection and posts no batch, so there is no equivalent fact"
+    ),
+    "test_steward_signal_cards_are_bounded_normalized_and_filtered": (
+        "same: its bound is the number of JSON-RPC batches.  The projection it also asserts is "
+        "covered on this backend by SqlTaskReaderTests.test_steward_signal_cards_report_the_"
+        "bounded_view"
+    ),
+    "test_steward_report_read_is_bounded_and_exposes_no_backend_row": (
+        "same bound, and the case builds its own Kanboard board rather than taking "
+        "`board_client`'s: the read under test would never reach this backend's client, so "
+        "counting it as a PostgreSQL execution would be counting a Kanboard run twice"
+    ),
     # --- §9: one reference, one card.  `tasks.task_ref` is the primary key, so every fixture
     # that puts two cards under one reference builds a board this store cannot hold.
     "test_duplicate_reference_preview_and_apply_use_exact_producer_evidence": (

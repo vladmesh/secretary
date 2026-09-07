@@ -154,8 +154,16 @@ class BoardFixture:
         return len(self.board_calls(method))
 
     def board_batches(self) -> list[list[tuple[str, dict]]]:
-        """The batched reads the product posted.  Both clients serve `call_batch`, so how many
-        batches one read costs is a fact about the product on either backend."""
+        """The batched reads the product posted — a Kanboard-only observation.
+
+        Both clients serve `call_batch`, so an assertion over this log *passes* on either backend,
+        and that is exactly why it must not be read as parity.  A Kanboard batch is one JSON-RPC
+        round trip and the economy is the point; `SqlCardClient.call_batch` is
+        `[self.call(...) for ...]`, one batch because there is no round trip, so the same
+        assertion proves nothing there.  Every case that uses this is named in `KANBOARD_ONLY`
+        (tests/test_tasks_sql_backend.py).  What *is* portable is the other log, `self.rpc`:
+        which methods of the client interface the product invoked, and how many times.
+        """
         return self.rpc_batches
 
     def board_writes(self) -> list[str]:
@@ -448,18 +456,19 @@ class TaskReaderTests(BoardFixture, unittest.TestCase):
 
     def test_export_includes_archived_cards_in_one_metadata_comments_batch(self) -> None:
         self.archive_card("old-1")
-        live, archived = self.backend_id("secretary-468"), self.backend_id("old-1")
         exported = self.reader.export()
 
         self.assertEqual([card["reference"] for card in exported], ["secretary-468", "old-1"])
+        # A JSON-RPC round trip carrying four reads, in the order the export asked for them.
+        # Kanboard-only by name: see KANBOARD_ONLY in tests/test_tasks_sql_backend.py.
         self.assertEqual(len(self.board_batches()), 1)
         self.assertEqual(
             self.board_batches()[0],
             [
-                ("getTaskMetadata", {"task_id": live}),
-                ("getAllComments", {"task_id": live}),
-                ("getTaskMetadata", {"task_id": archived}),
-                ("getAllComments", {"task_id": archived}),
+                ("getTaskMetadata", {"task_id": 12}),
+                ("getAllComments", {"task_id": 12}),
+                ("getTaskMetadata", {"task_id": 13}),
+                ("getAllComments", {"task_id": 13}),
             ],
         )
         self.assertFalse(exported[0]["closed"])
@@ -562,14 +571,12 @@ class TaskReaderTests(BoardFixture, unittest.TestCase):
                 }
             ],
         )
-        # One batch, and it reads the metadata of exactly these two cards.  Which of them the
-        # board hands back first is the board's row order, not a fact about the read.
+        # One JSON-RPC round trip, and the two reads in it in board order.  Kanboard-only by
+        # name: see KANBOARD_ONLY in tests/test_tasks_sql_backend.py.
         self.assertEqual(len(self.board_batches()), 1)
-        batch = self.board_batches()[0]
-        self.assertEqual({method for method, _params in batch}, {"getTaskMetadata"})
         self.assertEqual(
-            sorted(params["task_id"] for _method, params in batch),
-            sorted([self.backend_id("secretary-468"), self.backend_id("old-1")]),
+            self.board_batches()[0],
+            [("getTaskMetadata", {"task_id": 12}), ("getTaskMetadata", {"task_id": 13})],
         )
         self.assertEqual(set(cards[0]), {"reference", "state", "column", "project", "date_moved", "steward_report"})
         self.assertIsInstance(StewardSignalBoard(self.reader).active_cards(states={"ready"}), list)
@@ -1108,7 +1115,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:
             self.writer.report(role="reviewer", actor="r", reference="secretary-468", kind="done", body="")
         self.assertEqual(raised.exception.code, "role_forbidden")
-        self.assertEqual(self.board_writes(), [])
+        self.assertEqual(self.rpc, [])
 
     def test_stale_transition_does_not_write(self) -> None:
         with self.assertRaisesRegex(TaskError, "may not move") as raised:
@@ -1146,15 +1153,60 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
 
         self.assertEqual(result["task"]["ref"], "secretary-701")
         self.assertEqual(result["task"]["state"], "in_progress")
+        # The whole card, compared exactly, and not a list of fields that happen to match: the
+        # released case compared the complete metadata map, so an extra key the create starts
+        # writing has to fail here.  Every metadata key reaches the reader — the model's own keys
+        # as named fields, everything else in `extensions.kanboard` — so the exhaustive claim
+        # survives the move intact.  Three keys are dropped by name because they are the board's
+        # identity and placement rather than anything the create stamped, and §9 spells two of
+        # them differently on the two backends.
         report = self.card("secretary-701")
-        self.assertEqual(report["record_type"], "task")
-        self.assertEqual(report["type"], "research")
-        self.assertEqual(report["project"], "secretary")
-        self.assertEqual(report["routing"]["complexity"], "standard")
-        self.assertEqual(report["routing"]["family_preference"], "auto")
-        self.assertEqual(report["workspace"]["slug"], "steward-sweep-20260830-120000")
-        self.assertEqual(report["claim"]["worker"], "steward-sweep-20260830-120000")
-        self.assertEqual(self.card_extension("secretary-701", "steward_report"), "1")
+        for backend_owned in ("id", "audit", "position"):
+            report.pop(backend_owned)
+        self.assertEqual(
+            report,
+            {
+                "ref": "secretary-701",
+                "title": "steward: hourly sweep",
+                "description": "",
+                "state": "in_progress",
+                "closed": False,
+                "project": "secretary",
+                "type": "research",
+                "blocked_by": None,
+                "claim": {"worker": "steward-sweep-20260830-120000", "claimed_at": None},
+                "routing": {
+                    "complexity": "standard",
+                    "family_preference": "auto",
+                    "head_override": None,
+                    "review_head_override": None,
+                    "resolved_worker_family": None,
+                    "resolved_worker_head": None,
+                    "resolved_review_family": None,
+                    "resolved_review_head": None,
+                    "routing_reason": None,
+                    "quota_snapshot_at": None,
+                    "codex_launch_mode": None,
+                },
+                "workspace": {
+                    "slug": "steward-sweep-20260830-120000",
+                    "base_branch": None,
+                    "seed_ref": None,
+                    "supersedes": None,
+                },
+                "retry": {"same": 0, "switched": 0, "heads": []},
+                "sprint": None,
+                "record_type": "task",
+                "extensions": {
+                    "kanboard": {
+                        "record_type": "task",
+                        "steward_report": "1",
+                        "swimlane": "Secretary",
+                    }
+                },
+                "comments": [],
+            },
+        )
         self.assertEqual(self.board_call_count("moveTaskPosition"), 0)
         event = self.writer.audit.committed_event("steward-report-create")
         assert event is not None
@@ -1671,12 +1723,12 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:
             self.writer.edit(role="worker", actor="w", reference="secretary-468", description="new spec")
         self.assertEqual(raised.exception.code, "role_forbidden")
-        self.assertEqual(self.board_writes(), [])
+        self.assertEqual(self.rpc, [])
 
         with self.assertRaisesRegex(TaskError, "requires a new") as raised:
             self.writer.edit(role="po", actor="operator", reference="secretary-468")
         self.assertEqual(raised.exception.code, "validation")
-        self.assertEqual(self.board_writes(), [])
+        self.assertEqual(self.rpc, [])
 
     def test_edit_refuses_active_states(self) -> None:
         self.place_card("secretary-468", "in_progress")
