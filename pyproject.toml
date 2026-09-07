@@ -71,6 +71,12 @@ dependencies = [
     # cannot open its own secrets is not recoverable. 41.0 is the first release
     # with the AEAD and KDF surface secretary/secret_store.py uses.
     "cryptography>=41.0",
+    # The board store's driver, core for the same reason: after cutover an installation that
+    # cannot reach its board is not degraded, it is non-functional (docs/BOARD_STORE.md §5.8).
+    # The `binary` extra ships manylinux wheels that bundle libpq, so no libpq-dev, no compiler
+    # and no apt step. A floor, not an equality pin, like the three above; ruff is equality-pinned
+    # because a linter's version is part of a gate's meaning and a driver's is not.
+    "psycopg[binary]>=3.2",
 ]
 
 [project.optional-dependencies]
@@ -100,6 +106,9 @@ include = ["secretary*", "triggered_agents*"]
 
 [tool.setuptools.package-data]
 "secretary.schemas" = ["*.json"]
+# The migration files are product data, not documentation: the runner reads them from the
+# installed tree, so they ship with the package rather than only existing in the checkout.
+"secretary.board" = ["migrations/*.sql"]
 "triggered_agents.agents.curator" = ["*.toml"]
 "triggered_agents.agents.pipeline" = ["*.toml"]
 "triggered_agents.agents.retro" = ["*.toml"]
