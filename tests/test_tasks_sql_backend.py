@@ -35,7 +35,8 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.board import backend
-from secretary.tasks import TaskReader, TaskWriter
+from secretary.board.sql_cards import _COLUMN_ID_BY_STATE
+from secretary.tasks import TaskError, TaskReader, TaskWriter
 
 # Imported as a module, not by name: a bare import would make unittest collect the Kanboard
 # cases a second time here, once more on the backend they already run on in test_tasks.py.
@@ -189,6 +190,311 @@ class SqlTaskWriterTests(SqlBoardCase):
         fake = WriteKanboard()
         self.client = self.client_for(fake)
         self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)  # type: ignore[arg-type]
+        self.reader = TaskReader(self.client)  # type: ignore[arg-type]
+
+    # --- the transition's transaction boundary ---------------------------------------
+
+    def _place(self, reference: str, state: str) -> None:
+        """Put a card in a column through the client's own protocol, not through its rows."""
+        card = self.reader.show(reference)
+        self.client.call(
+            "moveTaskPosition",
+            project_id=1,
+            task_id=int(card["id"].rsplit("_", 1)[1]),
+            column_id=_COLUMN_ID_BY_STATE[state],
+            position=1,
+            swimlane_id=0,
+        )
+
+    def _set_metadata(self, reference: str, **values: str) -> None:
+        card = self.reader.show(reference)
+        self.client.call(
+            "saveTaskMetadata", task_id=int(card["id"].rsplit("_", 1)[1]), values=dict(values)
+        )
+
+    @contextlib.contextmanager
+    def _drops_the_call_after(self, method: str):
+        """The round trip after `method` is lost; `method` itself already landed."""
+        served = self.client.call
+        armed = False
+
+        def call(name: str, /, **params):
+            nonlocal armed
+            if armed:
+                armed = False
+                raise TaskError("backend_unavailable", "the board is unavailable", 1)
+            result = served(name, **params)
+            if name == method:
+                armed = True
+            return result
+
+        with mock.patch.object(self.client, "call", side_effect=call):
+            yield
+
+    @contextlib.contextmanager
+    def _loses_the_reply_to(self, method: str):
+        """`method` is applied and then its reply is lost, once."""
+        served = self.client.call
+        lost = False
+
+        def call(name: str, /, **params):
+            nonlocal lost
+            result = served(name, **params)
+            if name == method and not lost:
+                lost = True
+                raise TaskError("backend_unavailable", "the board is unavailable", 1)
+            return result
+
+        with mock.patch.object(self.client, "call", side_effect=call):
+            yield
+
+    def assertNoRepairIsOwed(self, error: TaskError) -> None:
+        """The refusal says the mutation did not happen, and the audit agrees with it.
+
+        The point of the check is the *absence* of a repair obligation. `audit_pending` promises
+        the caller that a board write is committed and that `reconcile` owes it a repair; after a
+        rollback both halves are false, and a caller that believed the sentence would wait for a
+        repair `SqlTaskAudit.reconcile` can never perform.
+        """
+        self.assertNotEqual(error.code, "audit_pending")
+        self.assertEqual(error.code, "backend_error")
+        self.assertEqual(error.exit_code, 1)
+        self.assertIn("no repair is owed", str(error))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.writer.reconcile(), (0, 0))
+
+    def assertNothingSurvived(self, request_id: str) -> None:
+        """Neither half of the mutation is there: no request row, and no published event."""
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM requests WHERE request_id = %s", (request_id,)
+            ),
+            [(0,)],
+        )
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM board_events WHERE request_id = %s", (request_id,)
+            ),
+            [(0,)],
+        )
+
+    def test_a_failure_after_the_column_move_leaves_neither_the_move_nor_a_staged_request(
+        self,
+    ) -> None:
+        """§7.1 for the transition, at the first of its three post-effect points.
+
+        `moveTaskPosition` returned and the round trip after it was lost, which on Kanboard is
+        exactly the state `test_a_transport_failure_after_the_move_keeps_the_typed_pending_record`
+        recovers from: a card in Validate beside a staged request.  Here the move is a statement of
+        the same transaction as the claim, so the rollback takes both and there is nothing to
+        recover.
+        """
+        self._place("secretary-468", "in_progress")
+
+        with self._drops_the_call_after("moveTaskPosition"), self.assertRaises(TaskError) as raised:
+            self.writer.move(
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="validate",
+                reason="submit",
+                request_id="rq-move-lost-read-back",
+            )
+
+        self.assertNoRepairIsOwed(raised.exception)
+        self.assertEqual(self.reader.show("secretary-468")["state"], "in_progress")
+        self.assertNothingSurvived("rq-move-lost-read-back")
+
+    def test_a_failure_after_the_claim_metadata_write_leaves_neither_the_claim_nor_a_staged_request(
+        self,
+    ) -> None:
+        """The second point: the claim's own board work landed and then the reply was lost.
+
+        On Kanboard that is `test_a_claim_whose_metadata_write_fails_keeps_its_pending_event` — a
+        card in In progress, its claim metadata half-written, and the event held open.  The
+        metadata write here is issued inside the transition's transaction, so it rolls back with
+        the column effect: the card is still Ready and still unclaimed.
+        """
+        self._set_metadata("secretary-468", claim="")
+
+        with (
+            self._loses_the_reply_to("saveTaskMetadata"),
+            self.assertRaises(TaskError) as raised,
+        ):
+            self.writer.claim(
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="codex-terra",
+                request_id="rq-claim-lost-metadata-reply",
+            )
+
+        self.assertNoRepairIsOwed(raised.exception)
+        card = self.reader.show("secretary-468")
+        self.assertEqual(card["state"], "ready")
+        self.assertIsNone(card["claim"]["worker"])
+        self.assertNothingSurvived("rq-claim-lost-metadata-reply")
+
+    def test_a_failure_after_the_ready_cleanup_leaves_neither_the_reset_nor_a_staged_request(
+        self,
+    ) -> None:
+        """The third point: the Ready reset landed and then the reply was lost.
+
+        On Kanboard this is `test_pending_ready_replay_finishes_cleanup_before_success_audit` and
+        `test_reconcile_completes_stale_ready_cleanup_before_closing_pending`: a card in Ready
+        whose reset is owed, held by a pending record.  Under one transaction the reset, the
+        column effect and the claim are undone together, so the card keeps the routing the reset
+        would have cleared.
+        """
+        self._place("secretary-468", "in_progress")
+        self._set_metadata(
+            "secretary-468", resolved_head="codex-terra", resolved_review_head="codex-reviewer"
+        )
+
+        with (
+            self._loses_the_reply_to("saveTaskMetadata"),
+            self.assertRaises(TaskError) as raised,
+        ):
+            self.writer.move(
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="ready",
+                reason="",
+                request_id="rq-ready-lost-reset-reply",
+            )
+
+        self.assertNoRepairIsOwed(raised.exception)
+        card = self.reader.show("secretary-468")
+        self.assertEqual(card["state"], "in_progress")
+        self.assertEqual(card["routing"]["resolved_worker_head"], "codex-terra")
+        self.assertEqual(card["routing"]["resolved_review_head"], "codex-reviewer")
+        self.assertEqual(card["claim"]["worker"], "codex-terra")
+        self.assertNothingSurvived("rq-ready-lost-reset-reply")
+
+    # --- Done retention, the fourth path with a board effect -------------------------
+
+    @contextlib.contextmanager
+    def _card_moved_at(self, reference: str, moved_at: int):
+        """Answer `date_moved` for one card, which this store has no column for.
+
+        This is the one fact the fixture supplies rather than the product, and it is named here
+        rather than hidden: `tasks` has no column for when a card entered its column, so
+        `SqlCardClient._row` answers no `date_moved` and `TaskWriter._retention_matches` refuses
+        every candidate on this backend before a close is ever issued (see
+        `test_done_retention_is_unreachable_on_this_backend_without_a_date_moved`).  That absence
+        is a finding about the schema, not the subject of the case below: what is under test is
+        that when the close *is* reached, it and its record stand or fall together.  Everything
+        else — the freshness guard, `closeTask`, the proof and the append — is the product's.
+        """
+        served = self.client.call
+        number = int(self.reader.show(reference)["id"].rsplit("_", 1)[1])
+
+        def call(name: str, /, **params):
+            result = served(name, **params)
+            if name == "getAllTasks" and isinstance(result, list):
+                for row in result:
+                    if isinstance(row, dict) and int(row.get("id") or 0) == number:
+                        row["date_moved"] = moved_at
+            return result
+
+        with mock.patch.object(self.client, "call", side_effect=call):
+            yield
+
+    def test_done_retention_is_unreachable_on_this_backend_without_a_date_moved(self) -> None:
+        """Why the case below has to supply one field, stated as an assertion rather than a claim.
+
+        `tasks` holds no column for when a card entered its column, and §8.6 does not list the
+        field among the ones the store deliberately drops, so `SqlCardClient` answers no
+        `date_moved` at all.  `TaskWriter._retention_matches` compares that against the episode the
+        caller names, so every candidate is refused: retention on this backend closes nothing,
+        stages nothing, and reports itself skipped.  A finding for the schema, not a licence to add
+        a column here (AC6).
+        """
+        self._place("secretary-468", "done")
+
+        result = self.writer.retire_done(
+            reference="secretary-468",
+            expected_date_moved=100,
+            cutoff=101,
+            retention_days=14,
+            request_id="rq-retire-unreachable",
+        )
+
+        self.assertTrue(result["skipped"])
+        self.assertFalse(result["retired"])
+        self.assertTrue(self.reader.show("secretary-468")["state"] == "done")
+        self.assertNothingSurvived("rq-retire-unreachable")
+
+    def test_a_lost_close_reply_in_done_retention_leaves_neither_the_close_nor_a_staged_request(
+        self,
+    ) -> None:
+        """The counterpart `DoneRetentionTests.test_lost_close_reply_recovers_through_generic_reconcile` had none of.
+
+        That case is retention's half of the §7.3 class: `closeTask` landed, its reply was lost,
+        and an archived card survived beside a staged request for `reconcile` to settle.  Until
+        secretary-1591 `retire_done` staged its request and issued the close outside
+        `_mutation()`, so on this backend both committed at `_depth == 0` and the same
+        half-applied state was reachable the moment the store could name a Done episode.  The
+        whole of it — the freshness guard, the close, its proof and the record — is now one
+        transaction, so the lost reply takes the close with it.
+        """
+        self._place("secretary-468", "done")
+
+        with (
+            self._card_moved_at("secretary-468", 100),
+            self._loses_the_reply_to("closeTask"),
+            self.assertRaises(TaskError) as raised,
+        ):
+            self.writer.retire_done(
+                reference="secretary-468",
+                expected_date_moved=100,
+                cutoff=101,
+                retention_days=14,
+                request_id="rq-retire-lost-close-reply",
+            )
+
+        self.assertNoRepairIsOwed(raised.exception)
+        card = self.reader.show("secretary-468")
+        self.assertEqual(card["state"], "done")
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM tasks WHERE task_ref = %s AND archived", ("secretary-468",)
+            ),
+            [(0,)],
+        )
+        self.assertNothingSurvived("rq-retire-lost-close-reply")
+
+    def test_done_retention_that_completes_closes_the_card_and_commits_its_record(self) -> None:
+        """The positive control for the case above: with no failure the same path retires.
+
+        Without it the rollback proof would be satisfied by a fixture that never reached the
+        close at all, which is exactly the vacuity the parked-case block is about.
+        """
+        self._place("secretary-468", "done")
+
+        with self._card_moved_at("secretary-468", 100):
+            result = self.writer.retire_done(
+                reference="secretary-468",
+                expected_date_moved=100,
+                cutoff=101,
+                retention_days=14,
+                request_id="rq-retire-committed",
+            )
+
+        self.assertTrue(result["retired"])
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM tasks WHERE task_ref = %s AND archived", ("secretary-468",)
+            ),
+            [(1,)],
+        )
+        self.assertEqual(
+            self.client._query(
+                "SELECT status FROM requests WHERE request_id = %s", ("rq-retire-committed",)
+            ),
+            [("committed",)],
+        )
 
     def test_a_comment_lands_with_its_request_row_committed(self) -> None:
         result = self.writer.comment(
@@ -287,9 +593,15 @@ class SqlTaskWriterTests(SqlBoardCase):
         journal, a pending file to reconcile.  §7.3 says that class of half-applied write does not
         exist on this backend; it only actually did not once the whole create became one
         transaction.
-        """
-        from secretary.tasks import TaskError
 
+        What it still asserts about the *refusal* is the create's own contract and not this
+        card's: `audit_pending` here says "backend write committed; audit repair is required"
+        beside two `count(*) = 0` checks that prove the opposite, and secretary-1591 repaired that
+        sentence only for the two paths its observer decision named — the transition and Done
+        retention (`TaskWriter._post_effect_refusal`).  The create, `_write_effect` and
+        `_marker_write` still answer the old sentence, and the report of that round carries it as
+        a finding rather than changing it here.
+        """
         with (
             mock.patch.object(
                 type(self.client),
@@ -347,10 +659,10 @@ if __name__ == "__main__":  # pragma: no cover
 #:   number, §3.5's CHECKs);
 #: * a half-applied write of the kind §7.3 removes, where the whole mutation is one transaction
 #:   (§7.1) and the failure leaves nothing to recover.  `SqlTaskWriterTests` proves that
-#:   property directly for the paths that have it;
-#: * a half-applied write the transition path still *has* — the fourth kind, and the one that is
-#:   a defect rather than a difference.  See the block that names those cases below: they are
-#:   parked here until the product change lands, not excluded for being impossible.
+#:   property directly, at the create's boundary and at the transition's three post-effect
+#:   points.  Since secretary-1591 this covers the transition too: the eleven cases that were
+#:   parked here as a defect of this backend — a state edge whose effect could outlive its
+#:   record — are §7.3 omissions like the rest, and the block that names them says so.
 KANBOARD_ONLY = {
     "test_duplicate_reference_retry_reallocates_a_stolen_pending_target": (
         "two cards under one reference again; `tasks.task_ref` is the primary key (§9)"
@@ -392,19 +704,26 @@ KANBOARD_ONLY = {
         "id.  Reading an archived card is covered here by "
         "SqlTaskReaderTests.test_restore_snapshot_returns_every_card_by_reference"
     ),
-    # --- The transition is not yet one transaction on this backend, and these cases would be
-    # proving the wrong thing here.  `TaskWriter._transition_card` calls `board_host.transition`
-    # without entering `_mutation()`, so with `SqlCardClient._depth == 0` the staged `requests`
-    # row and the card RPC commit separately: a post-effect failure really does leave a moved
-    # card beside a staged request.  Every case below asserts exactly that state and would
-    # therefore pass here *because* §7.1's promise is broken, which is not parity.  They are not
-    # excluded as impossible states either — the state is possible today and should not be.
-    # They come back, and are the proof, when the card that makes the SQL transition one
-    # transaction lands.  Reported as a finding of secretary-1590; the repair is a product
-    # change and is out of this card's scope.
+    # --- §7.3, the transition's eleven: a half-applied state edge, which this backend no longer
+    # has.  Until secretary-1591 `TaskWriter._transition_card` called `board_host.transition`
+    # outside `_mutation()`, so the staged `requests` row and the card RPC committed separately
+    # and a post-effect failure really did leave a moved card beside a staged request.  These
+    # eleven were parked here as *"the invariant is not met yet"*: they would have passed
+    # precisely because §7.1's promise was broken.  The transition now runs inside
+    # `_mutation()`, the rollback takes the column effect, the caller's `finish` work and the
+    # claim together, and the state every one of them asserts — an applied board write beside a
+    # record that is not committed — does not exist here.  So they are the same kind of omission
+    # as the §7.3 block at the end of this table, not a debt: the class is impossible, and the
+    # eleven are listed one by one rather than by their class so that nothing hides in the
+    # summary.  What replaces them is not a recount of them: `SqlTaskWriterTests` proves the
+    # invariant positively at the three post-effect points they covered — after the column move,
+    # after the claim's metadata write, and after the Ready cleanup — by showing that neither the
+    # board effect nor a staged request survives the failure.  Each of the eleven keeps running,
+    # unchanged, on Kanboard, where the state and its `recover_*` path are exactly as before.
     "test_typed_pending_transition_recovers_only_after_proving_the_live_target": (
         "asserts an In progress card beside a pending protocol record after the journal append "
-        "failed; see the header above"
+        "failed, which is the §7.3 state the transition's transaction removes; see the header "
+        "above"
     ),
     "test_reconcile_publishes_a_typed_pending_transition_whose_board_work_is_done": (
         "recovers from that same half-applied move (`_pending_typed_move`)"
@@ -435,7 +754,8 @@ KANBOARD_ONLY = {
         "the same half-applied Ready reset, from the reconcile side"
     ),
     "test_partial_move_failure_keeps_pending_until_reconcile": (
-        "asserts a moved Validate card and a pending record after the follow-up comment failed"
+        "asserts a moved Validate card and a pending record after the follow-up comment failed; "
+        "the comment is issued inside the transition's transaction, so its failure takes the move"
     ),
     # --- Kanboard's wire behaviour, not the product's request.  These three assert what a
     # *batch* is: one JSON-RPC round trip carrying several reads, in the order they were asked
