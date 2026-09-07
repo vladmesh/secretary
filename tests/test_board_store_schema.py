@@ -1,17 +1,23 @@
-"""Migration `0001` against a real PostgreSQL, in a throwaway container.
+"""The initial revision against a real PostgreSQL, in a throwaway container.
 
 §10 of ``docs/BOARD_STORE.md`` is the reason this file exists: two earlier revisions of that
 document each shipped a statement PostgreSQL refuses, and both were found by executing them, not
-by reading them. The same applies to a transcription of that schema into the product, so the
-migration is executed here and the result is counted against the numbers the document's own run
-produced — 22 tables, 34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique constraints, and
-4 partial unique indexes.
+by reading them. The same applies to the schema's transcription into SQLAlchemy models, so the
+Alembic revision is executed here and the result is counted against the numbers the document's own
+run produced — 22 tables, 34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique constraints, and
+4 partial unique indexes. The 22nd table and the 22nd primary key are Alembic's `alembic_version`,
+which since the owner's decision of 2026-09-07 stands where §7.4's `schema_migrations` stood.
 
-**There is no skip in this module.** A missing Docker, a missing driver or a container that never
-becomes ready is an error, not an absence: a schema test that quietly passes because it never
+The counting is not the strongest thing here. `test_the_migrated_database_still_matches_the_models`
+asks Alembic to autogenerate a diff between the database this revision built and the models, and
+requires it to be empty: the models are the schema, and a revision that drifts from them is a red
+test rather than a surprise on the next installation.
+
+**There is no skip in this module.** A missing Docker, a missing dependency or a container that
+never becomes ready is an error, not an absence: a schema test that quietly passes because it never
 reached a database is worth less than no test at all. The suite is `integration-board`, so this
-runs in the `test / integration-board` job of the exact-SHA gate, where both the driver (a core
-dependency since this card) and Docker are present.
+runs in the `test / integration-board` job of the exact-SHA gate, where the dependencies (core
+since this card) and Docker are both present.
 
 The container is verification, never delivery. It publishes on loopback, holds no volume, is
 removed in `tearDownClass`, and nothing here reads or writes the live installation.
@@ -24,19 +30,21 @@ import subprocess
 import threading
 import time
 import unittest
-import uuid
+import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from secretary import upgrade
-from secretary.board import migrator
+from secretary.board import migrate, schema
 from secretary.board.store import BoardStoreConfig, BoardStoreError
 
 IMAGE = "postgres:16"
 DATABASE = "board_store_test"
 OWNER = "secretary_owner"
 OWNER_PASSWORD = "throwaway-owner-password"
-APP_PASSWORD = "throwaway-app-password"
+#: Deliberately awkward: it carries the three characters that break a URL, a `text()` construct
+#: and a naive SQL literal respectively.
+APP_PASSWORD = "throwaway@app/pass:word"
 READ_PASSWORD = "throwaway-read-password"
 READY_TIMEOUT_SECONDS = 90
 
@@ -54,8 +62,8 @@ SELECT
     WHERE n.nspname = 'public' AND i.indisunique AND i.indpred IS NOT NULL)
 """
 
-#: What §10 counted after running the same statements against `postgres:16`. A disagreement here
-#: is a defect of the transcription, not of the document.
+#: What §10 counted after running the same schema against `postgres:16`. A disagreement here is a
+#: defect of the transcription into models, not of the document.
 DOCUMENTED_COUNTS = (22, 34, 36, 22, 12, 4)
 
 
@@ -74,13 +82,18 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        try:
-            import psycopg  # noqa: F401
-        except ImportError as exc:  # pragma: no cover - a venv without the core dependency
-            raise RuntimeError(
-                "psycopg is a core dependency since docs/BOARD_STORE.md §5.8; reinstall the "
-                "product (`pip install -e .`) rather than skipping the schema proof"
-            ) from exc
+        for module, why in (
+            ("psycopg", "the driver docs/BOARD_STORE.md §5.8 chose"),
+            ("sqlalchemy", "the schema's source of truth since 2026-09-07"),
+            ("alembic", "the migration tool since 2026-09-07"),
+        ):
+            try:
+                __import__(module)
+            except ImportError as exc:  # pragma: no cover - a venv without a core dependency
+                raise RuntimeError(
+                    f"{module} is a core dependency ({why}); reinstall the product "
+                    "(`pip install -e .`) rather than skipping the schema proof"
+                ) from exc
         cls.container = docker(
             "run",
             "--rm",
@@ -121,134 +134,205 @@ class BoardStoreSchemaTests(unittest.TestCase):
         raise RuntimeError(f"the throwaway {IMAGE} never accepted a connection: {last}")
 
     @classmethod
-    def credentials(cls, role: str, dbname: str = DATABASE):
-        config = BoardStoreConfig(
+    def config(cls, dbname: str = DATABASE) -> BoardStoreConfig:
+        return BoardStoreConfig(
             host="127.0.0.1",
             port=cls.port,
             dbname=dbname,
             owner_user=OWNER,
             owner_password=OWNER_PASSWORD,
-            app_user="secretary_app",
+            app_user=schema.APP_ROLE,
             app_password=APP_PASSWORD,
-            read_user="secretary_read",
+            read_user=schema.READ_ROLE,
             read_password=READ_PASSWORD,
         )
-        return config.for_role(role)
+
+    @classmethod
+    def credentials(cls, role: str, dbname: str = DATABASE):
+        return cls.config(dbname).for_role(role)
 
     def setUp(self) -> None:
-        """One empty database and no leftover roles per test: `0001` only ever runs on an empty
-        database, and its `CREATE ROLE` statements are cluster-wide."""
+        """One empty database and no leftover roles per test: the initial revision only ever runs
+        on an empty database, and its `CREATE ROLE` statements are cluster-wide."""
         import psycopg
 
         with psycopg.connect(
             self.credentials("owner", "postgres").conninfo(), autocommit=True
         ) as maintenance:
             maintenance.execute(f"DROP DATABASE IF EXISTS {DATABASE} WITH (FORCE)")
-            maintenance.execute("DROP ROLE IF EXISTS secretary_app")
-            maintenance.execute("DROP ROLE IF EXISTS secretary_read")
+            maintenance.execute(f"DROP ROLE IF EXISTS {schema.APP_ROLE}")
+            maintenance.execute(f"DROP ROLE IF EXISTS {schema.READ_ROLE}")
             maintenance.execute(f"CREATE DATABASE {DATABASE} OWNER {OWNER}")
 
-    def owner_connection(self):
-        import psycopg
+    def engine(self, role: str = "owner"):
+        import sqlalchemy as sa
 
-        conn = psycopg.connect(self.credentials("owner").conninfo())
-        self.addCleanup(conn.close)
-        return conn
+        engine = sa.create_engine(migrate.sqlalchemy_url(self.credentials(role)))
+        self.addCleanup(engine.dispose)
+        return engine
+
+    def owner_connection(self):
+        connection = self.engine().connect()
+        self.addCleanup(connection.close)
+        return connection
 
     @property
     def passwords(self) -> dict[str, str]:
-        return {"app_password": APP_PASSWORD, "read_password": READ_PASSWORD}
+        return migrate.passwords_for(self.config())
 
-    def migrate(self, conn) -> tuple[int, ...]:
-        return migrator.apply(conn, passwords=self.passwords)
+    def run_migrations(self, connection, **kwargs) -> tuple[str, ...]:
+        return migrate.apply(connection, passwords=self.passwords, **kwargs)
 
-    def test_the_initial_migration_reproduces_the_documents_own_numbers(self) -> None:
-        conn = self.owner_connection()
+    def counts(self, connection) -> tuple[int, ...]:
+        return tuple(connection.exec_driver_sql(COUNTS).fetchone())
 
-        self.assertEqual(self.migrate(conn), (1,))
+    # --- the schema itself -------------------------------------------------------------
 
-        counts = conn.execute(COUNTS).fetchone()
+    def test_the_initial_revision_reproduces_the_documents_own_numbers(self) -> None:
+        connection = self.owner_connection()
+
+        self.assertEqual(self.run_migrations(connection), ("0001_initial",))
+
         self.assertEqual(
-            tuple(counts),
+            self.counts(connection),
             DOCUMENTED_COUNTS,
             "tables, CHECK, FK, PK, UNIQUE and partial unique indexes must match §10's run",
         )
 
-    def test_it_records_the_version_it_applied_with_the_checksum_of_the_shipped_file(self) -> None:
-        conn = self.owner_connection()
-        self.migrate(conn)
+    def test_the_migrated_database_still_matches_the_models(self) -> None:
+        """The models are the schema, so a revision that drifts from them is a defect here.
 
-        rows = conn.execute("SELECT version, name, checksum FROM schema_migrations").fetchall()
+        This is Alembic's own autogenerate comparison, run backwards: anything it would emit to
+        make the database match `board.schema` is a difference the revision failed to build.
+        """
+        from alembic.autogenerate import compare_metadata
+        from alembic.migration import MigrationContext
 
-        shipped = migrator.discover()[0]
-        self.assertEqual(rows, [(1, "initial", shipped.checksum)])
-        self.assertEqual(migrator.assert_schema_version(conn), migrator.EXPECTED_SCHEMA_VERSION)
+        connection = self.owner_connection()
+        self.run_migrations(connection)
 
-    def test_a_second_run_applies_nothing_and_leaves_the_schema_alone(self) -> None:
-        conn = self.owner_connection()
-        self.migrate(conn)
-        before = tuple(conn.execute(COUNTS).fetchone())
+        with warnings.catch_warnings():
+            # A persisted generated column cannot be altered, which autogenerate says out loud
+            # every time it compares one; it is not a difference.
+            warnings.filterwarnings("ignore", message="Computed default on")
+            context = MigrationContext.configure(
+                connection, opts={"compare_type": True, "compare_server_default": True}
+            )
+            difference = compare_metadata(context, schema.metadata)
 
-        self.assertEqual(self.migrate(conn), ())
+        self.assertEqual(difference, [], "the built schema and the models disagree")
 
-        self.assertEqual(tuple(conn.execute(COUNTS).fetchone()), before)
-        self.assertEqual(conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 1)
+    def test_section_9s_sprint_number_sequence_exists(self) -> None:
+        connection = self.owner_connection()
+        self.run_migrations(connection)
 
-    def test_an_edited_applied_migration_is_refused_rather_than_reapplied(self) -> None:
-        conn = self.owner_connection()
-        self.migrate(conn)
-        shipped = migrator.discover()[0]
-        edited = migrator.Migration(
-            shipped.version,
-            shipped.name,
-            shipped.path,
-            shipped.sql + "\n-- an edit after the fact\n",
-            migrator.checksum(shipped.sql + "\n-- an edit after the fact\n"),
+        found = connection.exec_driver_sql(
+            "SELECT count(*) FROM pg_sequences WHERE schemaname='public' AND sequencename=%s",
+            ("sprint_number_seq",),
+        ).fetchone()[0]
+
+        self.assertEqual(found, 1)
+
+    def test_the_version_lives_in_alembics_table_and_nowhere_else(self) -> None:
+        connection = self.owner_connection()
+        self.run_migrations(connection)
+
+        stamped = connection.exec_driver_sql("SELECT version_num FROM alembic_version").fetchall()
+
+        self.assertEqual(stamped, [("0001_initial",)])
+        self.assertIsNone(
+            connection.exec_driver_sql("SELECT to_regclass('public.schema_migrations')").fetchone()[0],
+            "the hand-rolled version table is gone; Alembic's is the version",
         )
-
-        with self.assertRaisesRegex(BoardStoreError, "was edited after it was applied"):
-            migrator.apply(conn, passwords=self.passwords, migrations=(edited,))
-
-        self.assertEqual(conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 1)
-        self.assertEqual(tuple(conn.execute(COUNTS).fetchone()), DOCUMENTED_COUNTS)
+        self.assertEqual(migrate.assert_schema_revision(connection), migrate.head_revision())
 
     def test_the_version_assertion_refuses_a_schema_this_build_does_not_speak(self) -> None:
-        conn = self.owner_connection()
-        self.migrate(conn)
+        connection = self.owner_connection()
+        self.run_migrations(connection)
 
         with self.assertRaisesRegex(BoardStoreError, "refusing to write"):
-            migrator.assert_schema_version(conn, expected=migrator.EXPECTED_SCHEMA_VERSION + 1)
+            migrate.assert_schema_revision(connection, expected="0002_something_later")
 
-    def test_a_failing_migration_leaves_no_half_applied_schema(self) -> None:
-        """PostgreSQL's transactional DDL, which is why the runner needs no down migration."""
-        import psycopg
+    def test_a_second_run_applies_nothing_and_leaves_the_schema_alone(self) -> None:
+        connection = self.owner_connection()
+        self.run_migrations(connection)
+        before = self.counts(connection)
 
-        conn = self.owner_connection()
-        broken = migrator.Migration(
-            1,
-            "broken",
-            Path("0001_broken.sql"),
-            "CREATE TABLE early (a int);\nCREATE TABLE syntax error;\n",
-            "checksum",
+        self.assertEqual(self.run_migrations(connection), ())
+
+        self.assertEqual(self.counts(connection), before)
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT count(*) FROM alembic_version").fetchone()[0], 1
         )
 
-        with self.assertRaises(psycopg.Error):
-            migrator.apply(conn, passwords=self.passwords, migrations=(broken,))
+    def test_a_dry_run_reads_the_version_and_writes_nothing(self) -> None:
+        connection = self.owner_connection()
 
-        self.assertIsNone(conn.execute("SELECT to_regclass('public.early')").fetchone()[0])
-        self.assertIsNone(conn.execute("SELECT to_regclass('public.schema_migrations')").fetchone()[0])
+        owed = self.run_migrations(connection, dry_run=True)
+
+        self.assertEqual(owed, ("0001_initial",))
+        self.assertIsNone(
+            connection.exec_driver_sql("SELECT to_regclass('public.products')").fetchone()[0]
+        )
+        self.assertIsNone(
+            connection.exec_driver_sql("SELECT to_regclass('public.alembic_version')").fetchone()[0]
+        )
+
+    def test_a_failing_revision_leaves_no_half_applied_schema(self) -> None:
+        """PostgreSQL's transactional DDL, which is why §7.4 needs no down migration.
+
+        The failure is a real one rather than a fabricated statement: §5.5's `CREATE ROLE` is the
+        last thing the revision does, so a cluster that already has `secretary_app` fails it after
+        all 21 tables have been created. Nothing may survive that.
+        """
+        import psycopg
+
+        with psycopg.connect(
+            self.credentials("owner", "postgres").conninfo(), autocommit=True
+        ) as maintenance:
+            maintenance.execute(f"CREATE ROLE {schema.APP_ROLE}")
+        self.addCleanup(self._drop_roles)
+        connection = self.owner_connection()
+
+        with self.assertRaises(Exception):  # noqa: B017 - whatever the server raises, nothing survives
+            self.run_migrations(connection)
+
+        connection.rollback()
+        self.assertIsNone(
+            connection.exec_driver_sql("SELECT to_regclass('public.products')").fetchone()[0],
+            "a failed revision must leave the schema it was moving from",
+        )
+
+    def _drop_roles(self) -> None:
+        import psycopg
+
+        with psycopg.connect(
+            self.credentials("owner", "postgres").conninfo(), autocommit=True
+        ) as maintenance:
+            maintenance.execute(f"DROP ROLE IF EXISTS {schema.APP_ROLE}")
+
+    def test_the_revision_refuses_to_run_without_the_generated_passwords(self) -> None:
+        """§5.5's two passwords are parameters of the run, and an absent one is not a default."""
+        connection = self.owner_connection()
+
+        with self.assertRaisesRegex(Exception, "app_password"):
+            migrate.apply(connection, passwords={})
+
+        connection.rollback()
+
+    # --- §7.4's lock -------------------------------------------------------------------
 
     def test_the_advisory_lock_makes_a_second_runner_wait_for_the_first(self) -> None:
         import psycopg
 
         holder = psycopg.connect(self.credentials("owner").conninfo(), autocommit=True)
         self.addCleanup(holder.close)
-        holder.execute("SELECT pg_advisory_lock(%s)", (migrator.ADVISORY_LOCK_KEY,))
-        conn = self.owner_connection()
+        holder.execute("SELECT pg_advisory_lock(%s)", (migrate.ADVISORY_LOCK_KEY,))
+        connection = self.owner_connection()
         finished = threading.Event()
 
         def run() -> None:
-            self.migrate(conn)
+            self.run_migrations(connection)
             finished.set()
 
         worker = threading.Thread(target=run, daemon=True)
@@ -256,100 +340,86 @@ class BoardStoreSchemaTests(unittest.TestCase):
         try:
             self.assertFalse(
                 finished.wait(1.5),
-                "the runner must contend on the fixed advisory key, not migrate concurrently",
+                "the run must contend on the fixed advisory key, not migrate concurrently",
             )
         finally:
-            holder.execute("SELECT pg_advisory_unlock(%s)", (migrator.ADVISORY_LOCK_KEY,))
-        self.assertTrue(finished.wait(30), "the runner never acquired the released lock")
+            holder.execute("SELECT pg_advisory_unlock(%s)", (migrate.ADVISORY_LOCK_KEY,))
+        self.assertTrue(finished.wait(60), "the runner never acquired the released lock")
         worker.join(timeout=5)
-        self.assertEqual(conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 1)
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT count(*) FROM alembic_version").fetchone()[0], 1
+        )
 
-    def test_the_lock_is_released_once_the_runner_is_done(self) -> None:
-        conn = self.owner_connection()
-        self.migrate(conn)
+    def test_the_lock_is_released_once_the_run_is_done(self) -> None:
+        connection = self.owner_connection()
+        self.run_migrations(connection)
 
-        held = conn.execute(
+        held = connection.exec_driver_sql(
             "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted"
         ).fetchone()[0]
 
         self.assertEqual(held, 0)
 
-    def test_the_migration_creates_the_two_roles_and_the_boundary_between_them(self) -> None:
-        """§5.5: the writer writes, the reader cannot, and neither of them owns any DDL."""
-        import psycopg
+    # --- §5.5's roles ------------------------------------------------------------------
 
-        conn = self.owner_connection()
-        self.migrate(conn)
-        conn.execute(
+    def test_the_revision_creates_the_two_roles_and_the_boundary_between_them(self) -> None:
+        """§5.5: the writer writes, the reader cannot, and neither of them owns any DDL."""
+        import sqlalchemy as sa
+
+        connection = self.owner_connection()
+        self.run_migrations(connection)
+        connection.exec_driver_sql(
             "INSERT INTO products (product_id, title, created_at, updated_at) "
             "VALUES ('secretary', 'Secretary', now(), now())"
         )
-        conn.commit()
+        connection.commit()
 
-        with psycopg.connect(self.credentials("app").conninfo(), autocommit=True) as app:
-            app.execute(
+        with self.engine("app").connect() as app:
+            app.exec_driver_sql(
                 "INSERT INTO products (product_id, title, created_at, updated_at) "
                 "VALUES ('written-by-app', 'App', now(), now())"
             )
-            with self.assertRaises(psycopg.errors.InsufficientPrivilege):
-                app.execute("CREATE TABLE forbidden (a int)")
+            app.commit()
+            with self.assertRaises(sa.exc.ProgrammingError):
+                app.exec_driver_sql("CREATE TABLE forbidden (a int)")
 
-        with psycopg.connect(self.credentials("read").conninfo(), autocommit=True) as reader:
-            self.assertEqual(reader.execute("SELECT count(*) FROM products").fetchone()[0], 2)
-            with self.assertRaises(psycopg.errors.InsufficientPrivilege):
-                reader.execute(
+        with self.engine("read").connect() as reader:
+            self.assertEqual(
+                reader.exec_driver_sql("SELECT count(*) FROM products").fetchone()[0], 2
+            )
+            with self.assertRaises(sa.exc.ProgrammingError):
+                reader.exec_driver_sql(
                     "INSERT INTO products (product_id, title, created_at, updated_at) "
                     "VALUES ('written-by-read', 'Read', now(), now())"
                 )
 
-    def test_a_table_a_later_migration_adds_is_reachable_without_a_further_grant(self) -> None:
+    def test_a_table_a_later_revision_adds_is_reachable_without_a_further_grant(self) -> None:
         """The `ALTER DEFAULT PRIVILEGES` half of §5.5, which is the half that fails late."""
-        import psycopg
+        connection = self.owner_connection()
+        self.run_migrations(connection)
 
-        conn = self.owner_connection()
-        self.migrate(conn)
-        later = migrator.Migration(
-            2,
-            "later",
-            Path("0002_later.sql"),
-            f"CREATE TABLE later_{uuid.uuid4().hex[:8]} AS SELECT 1 AS a;",
-            "checksum",
-        )
-        migrator.apply(conn, passwords=self.passwords, migrations=(migrator.discover()[0], later))
-        table = conn.execute(
-            "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'later_%'"
-        ).fetchone()[0]
+        connection.exec_driver_sql("CREATE TABLE later_table AS SELECT 1 AS a")
+        connection.commit()
 
-        with psycopg.connect(self.credentials("app").conninfo(), autocommit=True) as app:
-            app.execute(f"INSERT INTO {table} (a) VALUES (2)")
-        with psycopg.connect(self.credentials("read").conninfo(), autocommit=True) as reader:
-            self.assertEqual(reader.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 2)
+        with self.engine("app").connect() as app:
+            app.exec_driver_sql("INSERT INTO later_table (a) VALUES (2)")
+            app.commit()
+        with self.engine("read").connect() as reader:
+            self.assertEqual(
+                reader.exec_driver_sql("SELECT count(*) FROM later_table").fetchone()[0], 2
+            )
 
     # --- `step_board_store` end to end -------------------------------------------------
     #
-    # The unit suite proves the step's three outcomes over a stubbed runner. These prove the wire
+    # The unit suite proves the step's outcomes over a stubbed runner. These prove the wire
     # between them is real: that a complete `board-store.env` in an instance directory is what the
     # step resolves, connects with and migrates through, and that a second upgrade changes
     # nothing. They live in this class so one container serves the whole module.
 
     def write_store(self, directory: Path) -> Path:
-        credentials = self.credentials("owner")
         path = directory / "board-store.env"
         path.write_text(
-            "\n".join(
-                [
-                    f"SECRETARY_DB_HOST={credentials.host}",
-                    f"SECRETARY_DB_PORT={credentials.port}",
-                    f"SECRETARY_DB_NAME={DATABASE}",
-                    f"SECRETARY_DB_OWNER_USER={OWNER}",
-                    f"SECRETARY_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
-                    "SECRETARY_DB_APP_USER=secretary_app",
-                    f"SECRETARY_DB_APP_PASSWORD={APP_PASSWORD}",
-                    "SECRETARY_DB_READ_USER=secretary_read",
-                    f"SECRETARY_DB_READ_PASSWORD={READ_PASSWORD}",
-                ]
-            )
-            + "\n",
+            "".join(f"{key}={value}\n" for key, value in self.config().as_environ().items()),
             encoding="utf-8",
         )
         path.chmod(0o600)
@@ -375,12 +445,12 @@ class BoardStoreSchemaTests(unittest.TestCase):
             self.assertEqual(preview.status, "would-change")
             self.assertIn("0001", preview.detail)
 
-            conn = self.owner_connection()
+            connection = self.owner_connection()
             self.assertIsNone(
-                conn.execute("SELECT to_regclass('public.schema_migrations')").fetchone()[0],
+                connection.exec_driver_sql("SELECT to_regclass('public.alembic_version')").fetchone()[0],
                 "a dry run must read and write nothing",
             )
-            conn.close()
+            connection.close()
 
             applied = upgrade.step_board_store(self.context(instance))
             self.assertEqual(applied.status, "changed")
@@ -389,8 +459,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             again = upgrade.step_board_store(self.context(instance))
             self.assertEqual(again.status, "unchanged")
 
-        conn = self.owner_connection()
-        self.assertEqual(tuple(conn.execute(COUNTS).fetchone()), DOCUMENTED_COUNTS)
+        self.assertEqual(self.counts(self.owner_connection()), DOCUMENTED_COUNTS)
 
     def test_a_store_that_will_not_answer_fails_the_step_with_its_reason(self) -> None:
         with TemporaryDirectory() as tmp:

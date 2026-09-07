@@ -180,8 +180,24 @@ def parse(path: Path, *, require_private: bool = True) -> BoardStoreConfig:
 
 
 def resolve(instance_dir: Path | str) -> BoardStoreConfig:
-    """The whole configuration of one installation."""
-    return parse(store_path(instance_dir))
+    """The whole configuration of one installation, behind the git-exclusion enforcement.
+
+    Every path to a *configured* store goes through here — `resolve_role`, the migration runner,
+    `env.py`, and every consumer a later card adds — which is why the enforcement lives here and
+    not in the upgrade step alone.  A `board-store.env` that the instance repository **tracks**
+    refuses with that reason (`enforce_exclusion`), because these are database credentials and
+    migrating on top of a tracked credential file would make the tracking permanent.
+    """
+    return resolve_with_lifecycle(instance_dir)[0]
+
+
+def resolve_with_lifecycle(instance_dir: Path | str) -> tuple[BoardStoreConfig, StoreOutcome]:
+    """`resolve`, with the exclusion action it took, so a caller can report it.
+
+    `upgrade.py`'s step renders this outcome; nothing else has to, and nothing may skip it.
+    """
+    outcome = enforce_exclusion(instance_dir)
+    return parse(store_path(instance_dir)), outcome
 
 
 def resolve_role(instance_dir: Path | str, role: str) -> BoardStoreCredentials:
@@ -209,18 +225,15 @@ class StoreOutcome:
         return "; ".join(actions) if actions else "unchanged"
 
 
-def ensure_ignored(instance_dir: Path | str, *, dry_run: bool = False) -> StoreOutcome:
-    """The durable exclusion `board_transport.ensure` gives the transport, for this file.
+def enforce_exclusion(instance_dir: Path | str, *, dry_run: bool = False) -> StoreOutcome:
+    """The git half of `ensure_ignored`, and the gate every read of a configured store passes.
 
-    Two actions, each reported independently: the `/board-store.env` entry in the instance
-    repository's exclusions, and a mode repair when the file exists and is readable by anyone but
-    its owner. A file already in the index is not something an exclusion can fix, so it refuses
-    rather than pretending; a symlink refuses for the reason `parse` refuses one.
-
-    It **never creates the file**. The passwords are generated once, by the bootstrap or reconcile
-    path that materializes `board-store.env`, and that owner calls this before it writes — which
-    is the order that keeps a generated credential from ever being a tracked one. This card ships
-    the operation and does not run it against any live installation.
+    Two things happen and one of them is a refusal: a `board-store.env` that is **tracked** in the
+    instance repository raises, naming why, and an untracked one gets the durable
+    `/board-store.env` exclusion.  Nothing else — in particular no mode repair, which is
+    `ensure_ignored`'s and deliberately not on the read path: a credential file that was
+    world-readable has already been exposed, so `parse` refuses it rather than quietly chmodding
+    it mid-read.
     """
     path = store_path(instance_dir)
     if state_repo.is_tracked(path.parent, f"/{STORE_FILE}"):
@@ -236,6 +249,24 @@ def ensure_ignored(instance_dir: Path | str, *, dry_run: bool = False) -> StoreO
         )
     except state_repo.StateRepoError as exc:
         raise BoardStoreError(f"board store ignore lifecycle failed: {exc}") from exc
+    return StoreOutcome(ignore_added=ignore_added)
+
+
+def ensure_ignored(instance_dir: Path | str, *, dry_run: bool = False) -> StoreOutcome:
+    """The durable exclusion `board_transport.ensure` gives the transport, for this file.
+
+    Two actions, each reported independently: the `/board-store.env` entry in the instance
+    repository's exclusions, and a mode repair when the file exists and is readable by anyone but
+    its owner. A file already in the index is not something an exclusion can fix, so it refuses
+    rather than pretending; a symlink refuses for the reason `parse` refuses one.
+
+    It **never creates the file**. The passwords are generated once, by the bootstrap or reconcile
+    path that materializes `board-store.env`, and that owner calls this before it writes — which
+    is the order that keeps a generated credential from ever being a tracked one. This card ships
+    the operation and does not run it against any live installation.
+    """
+    ignore_added = enforce_exclusion(instance_dir, dry_run=dry_run).ignore_added
+    path = store_path(instance_dir)
     try:
         mode = path.lstat().st_mode
     except FileNotFoundError:
@@ -275,7 +306,7 @@ def findings(instance_dir: Path | str) -> list[str]:
     ):
         return []
     try:
-        resolve(instance_dir)
+        parse(path)
     except BoardStoreError as exc:
         return [f"board store configuration: {exc}"]
     return []
@@ -289,10 +320,12 @@ __all__ = [
     "BoardStoreCredentials",
     "BoardStoreError",
     "StoreOutcome",
+    "enforce_exclusion",
     "ensure_ignored",
     "findings",
     "parse",
     "resolve",
     "resolve_role",
+    "resolve_with_lifecycle",
     "store_path",
 ]

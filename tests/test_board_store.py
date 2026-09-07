@@ -1,9 +1,9 @@
-"""The board store's connection file and the parts of its migration runner that need no server.
+"""The board store's connection file, its models and its Alembic scripts: everything without a server.
 
-Everything here runs without PostgreSQL and without the driver: the resolver is a parse over a
-local file, and the runner's discovery, plan, checksum refusal and version assertion are ordinary
-Python over a connection object. What genuinely needs a server — applying `0001` and counting what
-it produced — is `tests/test_board_store_schema.py`, which raises a throwaway container.
+The resolver is a parse over a local file, the schema is a `MetaData` object and the script
+directory is a directory. What genuinely needs a server — running the revision, counting what
+PostgreSQL made of it, and asking Alembic whether the result still matches the models — is
+`tests/test_board_store_schema.py`, which raises a throwaway `postgres:16` container.
 """
 
 from __future__ import annotations
@@ -15,8 +15,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
+import secretary.board
 from secretary import state_repo, upgrade
-from secretary.board import migrator
+from secretary.board import migrate, schema, store
 from secretary.board.store import (
     ROLES,
     STORE_ENV,
@@ -26,6 +27,7 @@ from secretary.board.store import (
     findings,
     resolve,
     resolve_role,
+    resolve_with_lifecycle,
     store_path,
 )
 
@@ -187,192 +189,199 @@ class ConnectionFileTests(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(self.instance)), before)
 
 
-class FakeCursor:
-    def __init__(self, rows: list[tuple]) -> None:
-        self._rows = rows
+class SchemaModelTests(unittest.TestCase):
+    """The models are the schema (§3), so what §3 constrains has to be *in* them.
 
-    def fetchone(self):
-        return self._rows[0] if self._rows else None
-
-    def fetchall(self):
-        return list(self._rows)
-
-
-class FakeConnection:
-    """Only what the runner uses: `execute` returning something with `fetchone`/`fetchall`."""
-
-    def __init__(self, *, migrations_table: bool = True, rows: list[tuple] | None = None) -> None:
-        self.migrations_table = migrations_table
-        self.rows = rows or []
-        self.statements: list[str] = []
-        self.commits = 0
-        self.rollbacks = 0
-
-    def execute(self, statement, params=None):
-        self.statements.append(statement)
-        if "to_regclass" in statement:
-            return FakeCursor([("public.schema_migrations" if self.migrations_table else None,)])
-        if statement.startswith("SELECT version, checksum"):
-            return FakeCursor(self.rows)
-        return FakeCursor([])
-
-    def commit(self) -> None:
-        self.commits += 1
-
-    def rollback(self) -> None:
-        self.rollbacks += 1
-
-
-class MigrationDiscoveryTests(unittest.TestCase):
-    def test_the_tree_ships_exactly_the_initial_migration_this_build_expects(self) -> None:
-        shipped = migrator.discover()
-
-        self.assertEqual([m.version for m in shipped], [1])
-        self.assertEqual(shipped[0].name, "initial")
-        self.assertEqual(migrator.EXPECTED_SCHEMA_VERSION, shipped[-1].version)
-
-    def test_the_initial_migration_declares_only_the_two_generated_passwords(self) -> None:
-        self.assertEqual(migrator.discover()[0].parameters, migrator.PASSWORD_PARAMETERS)
-
-    def test_no_password_is_a_literal_in_the_file(self) -> None:
-        """§7.4: a migration whose bytes differ per installation cannot have a stable checksum."""
-        sql = migrator.discover()[0].sql
-
-        self.assertIn("CREATE ROLE secretary_app  LOGIN PASSWORD :'app_password';", sql)
-        self.assertIn("CREATE ROLE secretary_read LOGIN PASSWORD :'read_password';", sql)
-        self.assertNotIn("PASSWORD '", sql)
-
-    def test_a_misnamed_or_duplicated_file_refuses_before_anything_runs(self) -> None:
-        with TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            (directory / "initial.sql").write_text("SELECT 1;", encoding="utf-8")
-            with self.assertRaisesRegex(BoardStoreError, "not NNNN_name.sql"):
-                migrator.discover(directory)
-            (directory / "initial.sql").unlink()
-            (directory / "0002_second.sql").write_text("SELECT 1;", encoding="utf-8")
-            with self.assertRaisesRegex(BoardStoreError, "without a gap"):
-                migrator.discover(directory)
-
-    def test_render_substitutes_the_passwords_and_quotes_them(self) -> None:
-        migration = migrator.discover()[0]
-
-        rendered = migrator.render(migration, {"app_password": "it's", "read_password": "r"})
-
-        self.assertIn("CREATE ROLE secretary_app  LOGIN PASSWORD 'it''s';", rendered)
-        self.assertIn("CREATE ROLE secretary_read LOGIN PASSWORD 'r';", rendered)
-        self.assertNotRegex(rendered, r":'[a-z_]+'")
-
-    def test_render_refuses_rather_than_sending_an_empty_password(self) -> None:
-        migration = migrator.discover()[0]
-
-        with self.assertRaisesRegex(BoardStoreError, "read_password"):
-            migrator.render(migration, {"app_password": "a", "read_password": ""})
-
-    def test_render_refuses_a_parameter_the_runner_does_not_supply(self) -> None:
-        migration = migrator.Migration(1, "x", Path("0001_x.sql"), "SELECT :'other';", "c")
-
-        with self.assertRaisesRegex(BoardStoreError, "does not supply: other"):
-            migrator.render(migration, {"app_password": "a", "read_password": "b"})
-
-
-class MigrationPlanTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.shipped = migrator.discover()
-        self.first = self.shipped[0]
-
-    def test_an_empty_database_owes_every_migration(self) -> None:
-        self.assertEqual(migrator.plan(self.shipped, {}), self.shipped)
-
-    def test_an_up_to_date_database_owes_nothing(self) -> None:
-        self.assertEqual(migrator.plan(self.shipped, {1: self.first.checksum}), ())
-
-    def test_an_edited_applied_migration_is_refused_and_not_reapplied(self) -> None:
-        with self.assertRaisesRegex(BoardStoreError, "was edited after it was applied") as caught:
-            migrator.plan(self.shipped, {1: "0" * 64})
-
-        self.assertIn(self.first.checksum, str(caught.exception))
-
-    def test_a_database_ahead_of_the_tree_is_refused(self) -> None:
-        with self.assertRaisesRegex(BoardStoreError, "ahead of the code"):
-            migrator.plan(self.shipped, {1: self.first.checksum, 2: "x"})
-
-    def test_an_unmigrated_database_reports_no_version_rather_than_raising(self) -> None:
-        self.assertIsNone(migrator.current_version(FakeConnection(migrations_table=False)))
-
-
-class SchemaVersionAssertionTests(unittest.TestCase):
-    """§7.4's startup check. It exists and has both outcomes; this card wires it into nothing."""
-
-    def test_a_matching_version_is_accepted_and_returned(self) -> None:
-        conn = FakeConnection(rows=[(1, "checksum")])
-
-        self.assertEqual(migrator.assert_schema_version(conn, expected=1), 1)
-
-    def test_a_mismatching_version_refuses_and_names_both_numbers(self) -> None:
-        conn = FakeConnection(rows=[(1, "checksum")])
-
-        with self.assertRaises(BoardStoreError) as caught:
-            migrator.assert_schema_version(conn, expected=2)
-
-        self.assertIn("0001", str(caught.exception))
-        self.assertIn("0002", str(caught.exception))
-        self.assertIn("refusing to write", str(caught.exception))
-
-    def test_an_unmigrated_database_refuses_too(self) -> None:
-        conn = FakeConnection(migrations_table=False)
-
-        with self.assertRaisesRegex(BoardStoreError, "no schema at all"):
-            migrator.assert_schema_version(conn, expected=1)
-
-
-class MigrationApplicationTests(unittest.TestCase):
-    """The lock, the per-migration transaction and the refusal, against a recording connection."""
-
-    def test_it_locks_applies_records_and_unlocks_in_that_order(self) -> None:
-        conn = FakeConnection(migrations_table=False)
-        migration = migrator.Migration(1, "x", Path("0001_x.sql"), "CREATE TABLE t (a int);", "c")
-
-        applied = migrator.apply(
-            conn, passwords={}, migrations=(migration,), applied_at="2026-09-07T00:00:00Z"
-        )
-
-        self.assertEqual(applied, (1,))
-        self.assertIn("pg_advisory_lock", conn.statements[0])
-        self.assertIn("CREATE TABLE t (a int);", conn.statements)
-        self.assertTrue(
-            any(statement.startswith("INSERT INTO schema_migrations") for statement in conn.statements)
-        )
-        self.assertIn("pg_advisory_unlock", conn.statements[-1])
-        self.assertEqual(conn.rollbacks, 0)
-
-    def test_a_failing_migration_rolls_back_and_still_releases_the_lock(self) -> None:
-        class Failing(FakeConnection):
-            def execute(self, statement, params=None):
-                if statement.startswith("CREATE"):
-                    raise RuntimeError("syntax error at or near")
-                return super().execute(statement, params)
-
-        conn = Failing(migrations_table=False)
-        migration = migrator.Migration(1, "x", Path("0001_x.sql"), "CREATE TABLE t (a int);", "c")
-
-        with self.assertRaisesRegex(RuntimeError, "syntax error"):
-            migrator.apply(conn, passwords={}, migrations=(migration,))
-
-        self.assertEqual(conn.rollbacks, 1)
-        self.assertIn("pg_advisory_unlock", conn.statements[-1])
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class IgnoreLifecycleTests(unittest.TestCase):
-    """The durable exclusion `board_transport.ensure` gives the transport (criterion 2, §5.4).
-
-    A finding that the file is tracked is not a lifecycle; making `/board-store.env` excluded is.
-    This card ships the operation and calls it against no live installation: the bootstrap path
-    that generates the three passwords owns the call, and calls it before it writes the file.
+    None of this needs a server: it reads `MetaData`. What needs one — running the revision and
+    counting what PostgreSQL made of it — is `tests/test_board_store_schema.py`.
     """
+
+    def test_it_declares_every_table_of_section_3_and_no_version_table(self) -> None:
+        """21 tables; the 22nd §10 counts is Alembic's own `alembic_version`."""
+        self.assertEqual(
+            sorted(schema.metadata.tables),
+            [
+                "board_events",
+                "issues",
+                "product_projects",
+                "products",
+                "projects",
+                "repositories",
+                "requests",
+                "sprint_budget_events",
+                "sprint_comments",
+                "sprint_decisions",
+                "sprint_issues",
+                "sprint_projects",
+                "sprint_repositories",
+                "sprint_resumes",
+                "sprints",
+                "task_comments",
+                "task_dependencies",
+                "task_issues",
+                "task_retry_heads",
+                "task_supersessions",
+                "tasks",
+            ],
+        )
+        self.assertNotIn("schema_migrations", schema.metadata.tables)
+        self.assertNotIn("alembic_version", schema.metadata.tables)
+
+    def test_jsonb_is_exactly_the_five_columns_section_3_10_names(self) -> None:
+        from sqlalchemy.dialects.postgresql import JSONB
+
+        found = {
+            (name, column.name)
+            for name, table in schema.metadata.tables.items()
+            for column in table.columns
+            if isinstance(column.type, JSONB)
+        }
+
+        self.assertEqual(found, set(schema.JSONB_COLUMNS))
+
+    def test_every_closed_vocabulary_is_a_check_constraint(self) -> None:
+        """§3.12's rule: a closed vocabulary is a CHECK, never a reference table."""
+        import sqlalchemy as sa
+
+        checks = [
+            str(constraint.sqltext)
+            for table in schema.metadata.tables.values()
+            for constraint in table.constraints
+            if isinstance(constraint, sa.CheckConstraint)
+        ]
+
+        self.assertEqual(len(checks), 34, "§10 counted 34 CHECK constraints in this schema")
+        for vocabulary in (
+            "state IN ('active','archived')",
+            "priority IN ('P0','P1','P2','P3')",
+            "task_type IN ('code','research')",
+            "status IN ('staged','committed','discarded')",
+        ):
+            self.assertTrue(
+                any(vocabulary in text for text in checks), f"{vocabulary} is not a CHECK anywhere"
+            )
+
+    def test_the_four_partial_unique_indexes_carry_their_predicate(self) -> None:
+        partial = sorted(
+            index.name
+            for table in schema.metadata.tables.values()
+            for index in table.indexes
+            if index.unique and index.dialect_options["postgresql"]["where"] is not None
+        )
+
+        self.assertEqual(
+            partial,
+            [
+                "repositories_one_primary",
+                "sprint_decisions_one_per_card",
+                "sprint_decisions_one_per_issue",
+                "sprint_projects_one_live_reservation",
+            ],
+        )
+
+    def test_the_generated_ref_columns_are_postgresql_generated_columns(self) -> None:
+        for table, column, expression in (
+            ("products", "ref", "'product:' || product_id"),
+            ("issues", "ref", "'issue:' || issue_id"),
+            ("sprints", "ref", "'sprint:' || sprint_number"),
+            ("sprint_comments", "sprint_ref", "'sprint:' || sprint_number"),
+        ):
+            with self.subTest(table=table):
+                computed = schema.metadata.tables[table].columns[column].computed
+                self.assertIsNotNone(computed)
+                self.assertTrue(computed.persisted)
+                self.assertEqual(str(computed.sqltext), expression)
+
+    def test_section_3_13_step_two_constraints_are_emitted_as_alter_table(self) -> None:
+        """`use_alter` is what makes a forward or mutual reference expressible at all."""
+        import sqlalchemy as sa
+
+        altered = {
+            constraint.name
+            for table in schema.metadata.tables.values()
+            for constraint in table.constraints
+            if isinstance(constraint, sa.ForeignKeyConstraint) and constraint.use_alter
+        }
+
+        self.assertEqual(altered, set(schema.DEFERRED_CONSTRAINTS))
+
+    def test_the_two_sprint_cursors_are_deferrable(self) -> None:
+        import sqlalchemy as sa
+
+        deferred = {
+            constraint.name: constraint.initially
+            for constraint in schema.metadata.tables["sprints"].constraints
+            if isinstance(constraint, sa.ForeignKeyConstraint) and constraint.deferrable
+        }
+
+        self.assertEqual(
+            deferred,
+            {
+                "sprint_current_task_is_in_this_sprint": "DEFERRED",
+                "sprint_resume_is_of_this_sprint": "DEFERRED",
+            },
+        )
+
+
+class MigrationScriptTests(unittest.TestCase):
+    """Alembic's script directory as this product ships it — no server needed."""
+
+    def test_the_tree_ships_exactly_the_initial_revision_this_build_expects(self) -> None:
+        revisions = [script.revision for script in migrate.script_directory().walk_revisions()]
+
+        self.assertEqual(revisions, ["0001_initial"])
+        self.assertEqual(migrate.head_revision(), migrate.EXPECTED_SCHEMA_REVISION)
+
+    def test_the_script_directory_ships_inside_the_installed_package(self) -> None:
+        self.assertTrue((migrate.SCRIPT_LOCATION / "env.py").is_file())
+        self.assertTrue((migrate.SCRIPT_LOCATION / "script.py.mako").is_file())
+        self.assertEqual(
+            migrate.SCRIPT_LOCATION.parent, Path(secretary.board.__file__).resolve().parent
+        )
+
+    def test_the_configuration_carries_no_connection_string_of_its_own(self) -> None:
+        """§5.4 is the only place an installation's URL lives; an `alembic.ini` literal is not."""
+        config = migrate.alembic_config()
+
+        self.assertIsNone(config.get_main_option("sqlalchemy.url", None))
+        self.assertIsNone(config.config_file_name)
+        self.assertEqual(config.get_main_option("script_location"), str(migrate.SCRIPT_LOCATION))
+        self.assertNotIn("connection", config.attributes)
+
+    def test_the_connection_and_the_passwords_travel_in_attributes(self) -> None:
+        sentinel = object()
+
+        config = migrate.alembic_config(connection=sentinel, passwords={"app_password": "a"})
+
+        self.assertIs(config.attributes["connection"], sentinel)
+        self.assertEqual(config.attributes["passwords"], {"app_password": "a"})
+
+    def test_no_password_is_a_literal_in_any_revision(self) -> None:
+        for path in sorted((migrate.SCRIPT_LOCATION / "versions").glob("*.py")):
+            with self.subTest(revision=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("PASSWORD_PARAMETERS", text)
+                self.assertNotIn("PASSWORD '", text)
+
+    def test_the_url_survives_a_password_a_url_would_otherwise_break(self) -> None:
+        with TemporaryDirectory() as tmp:
+            write_store(Path(tmp), dict(COMPLETE, SECRETARY_DB_APP_PASSWORD="p@ss/w:rd"))
+            credentials = resolve_role(Path(tmp), "app")
+
+        url = migrate.sqlalchemy_url(credentials)
+
+        self.assertEqual(url.drivername, "postgresql+psycopg")
+        self.assertEqual(url.password, "p@ss/w:rd")
+        self.assertEqual(url.database, "secretary")
+        self.assertNotIn("p@ss/w:rd", str(url))  # never rendered, and never split into two fields
+
+    def test_the_advisory_key_is_a_fixed_literal(self) -> None:
+        """Two upgrades of one installation contend only if every checkout uses one key."""
+        self.assertEqual(migrate.ADVISORY_LOCK_KEY, 0x2C5B1F4A6E9D0713)
+
+
+class InstanceRepository(unittest.TestCase):
+    """A throwaway instance repository, for the tests that need one."""
 
     def setUp(self) -> None:
         self.tmp = TemporaryDirectory()
@@ -395,6 +404,15 @@ class IgnoreLifecycleTests(unittest.TestCase):
 
     def ignored(self) -> bool:
         return state_repo.is_ignored(self.instance, f"/{STORE_FILE}")
+
+
+class IgnoreLifecycleTests(InstanceRepository):
+    """The durable exclusion `board_transport.ensure` gives the transport (criterion 2, §5.4).
+
+    A finding that the file is tracked is not a lifecycle; making `/board-store.env` excluded is.
+    This card ships the operation and calls it against no live installation: the bootstrap path
+    that generates the three passwords owns the call, and calls it before it writes the file.
+    """
 
     def test_it_adds_the_exclusion_and_says_so_once(self) -> None:
         first = ensure_ignored(self.instance)
@@ -469,6 +487,107 @@ class IgnoreLifecycleTests(unittest.TestCase):
         self.assertFalse(outcome.changed)
 
 
+class ExclusionEnforcementTests(InstanceRepository):
+    """The lifecycle stands *in front of* every read of a configured store, not beside it.
+
+    Last round's gap was that a tracked `board-store.env` was only a passive finding: a store
+    could be read and migrated on top of database credentials the instance repository was
+    publishing. `resolve` is the one door — `resolve_role`, `migrate_instance` and `env.py` all
+    go through it — so the enforcement is there, and these tests are what says so.
+    """
+
+    def test_resolving_a_tracked_configuration_refuses_with_its_reason(self) -> None:
+        write_store(self.instance)
+        self.git("add", "-f", STORE_FILE)
+        self.git("commit", "-m", "credentials, by mistake")
+
+        with self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"):
+            resolve(self.instance)
+        with self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"):
+            resolve_role(self.instance, "owner")
+
+    def test_a_configured_store_is_excluded_before_it_is_read(self) -> None:
+        write_store(self.instance)
+        self.assertFalse(self.ignored())
+
+        config = resolve(self.instance)
+
+        self.assertTrue(self.ignored(), "resolve must make the exclusion durable, not report it")
+        self.assertEqual(config.owner_user, "secretary_owner")
+
+    def test_the_lifecycle_outcome_is_visible_to_a_caller(self) -> None:
+        write_store(self.instance)
+
+        _, first = resolve_with_lifecycle(self.instance)
+        _, second = resolve_with_lifecycle(self.instance)
+
+        self.assertTrue(first.ignore_added)
+        self.assertEqual(first.render(), "added board store ignore")
+        self.assertFalse(second.changed)
+
+    def test_the_read_path_refuses_a_broad_mode_rather_than_repairing_it(self) -> None:
+        """`enforce_exclusion` is the git half of `ensure_ignored` and deliberately not the mode
+        half: a credential file anyone could read has already been exposed, so `parse` refuses it
+        instead of quietly chmodding it in the middle of a read. `ensure_ignored`, which the
+        upgrade step calls, is what repairs it — visibly."""
+        path = write_store(self.instance, mode=0o644)
+
+        with self.assertRaisesRegex(BoardStoreError, "permissions are too broad"):
+            resolve(self.instance)
+
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        self.assertTrue(self.ignored())
+
+    def test_migrating_a_tracked_configuration_refuses_before_it_connects(self) -> None:
+        from secretary.board import migrate as board_migrate
+
+        write_store(self.instance)
+        self.git("add", "-f", STORE_FILE)
+        self.git("commit", "-m", "credentials, by mistake")
+
+        with (
+            mock.patch.object(board_migrate.board_store, "resolve", wraps=resolve) as door,
+            self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"),
+        ):
+            board_migrate.migrate_instance(self.instance)
+
+        door.assert_called_once_with(self.instance)
+
+    def test_the_upgrade_step_fails_rather_than_migrating_over_tracked_credentials(self) -> None:
+        write_store(self.instance)
+        self.git("add", "-f", STORE_FILE)
+        self.git("commit", "-m", "credentials, by mistake")
+        context = upgrade.UpgradeContext(
+            instance_path=self.instance,
+            product_root=self.instance,
+            base_branch="main",
+            dry_run=False,
+            units=None,
+            orca=None,
+            automations=None,
+        )
+
+        with mock.patch.object(upgrade, "migrate_instance") as migrated:
+            result = upgrade.step_board_store(context)
+
+        migrated.assert_not_called()
+        self.assertTrue(result.failed)
+        self.assertIn("tracked in the instance repository", result.detail)
+
+    def test_enforcement_is_the_only_door_to_a_configured_store(self) -> None:
+        """The claim `resolve` is a chokepoint, checked against the source rather than asserted.
+
+        Everything that opens a configured store reads it through `board_store.resolve`; the only
+        callers of the underlying `parse` are `resolve_with_lifecycle` itself and the read-only
+        `findings`, which does its own tracked check and never connects.
+        """
+        source = (Path(store.__file__)).read_text(encoding="utf-8")
+        callers = [line.strip() for line in source.splitlines() if "parse(" in line and "def " not in line]
+
+        self.assertEqual(callers, ["return parse(store_path(instance_dir)), outcome", "parse(path)"])
+        self.assertIn("outcome = enforce_exclusion(instance_dir)", source)
+
+
 class UpgradeStepTests(unittest.TestCase):
     """`step_board_store`: the three outcomes the observer decision defines for it."""
 
@@ -510,7 +629,7 @@ class UpgradeStepTests(unittest.TestCase):
     def test_a_configured_store_is_migrated_and_the_versions_are_named(self) -> None:
         write_store(self.instance)
 
-        with mock.patch.object(upgrade, "migrate_instance", return_value=(1,)) as migrate:
+        with mock.patch.object(upgrade, "migrate_instance", return_value=("0001_initial",)) as migrate:
             result = upgrade.step_board_store(self.context())
 
         migrate.assert_called_once_with(self.instance, dry_run=False)
@@ -528,7 +647,7 @@ class UpgradeStepTests(unittest.TestCase):
     def test_a_dry_run_says_what_it_would_apply_and_applies_nothing(self) -> None:
         write_store(self.instance)
 
-        with mock.patch.object(upgrade, "migrate_instance", return_value=(1,)) as migrate:
+        with mock.patch.object(upgrade, "migrate_instance", return_value=("0001_initial",)) as migrate:
             result = upgrade.step_board_store(self.context(dry_run=True))
 
         migrate.assert_called_once_with(self.instance, dry_run=True)
@@ -553,3 +672,7 @@ class UpgradeStepTests(unittest.TestCase):
 
         self.assertTrue(result.failed)
         self.assertIn("SECRETARY_DB_NAME", result.detail)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1590,7 +1590,11 @@ and both hold whichever way the question is decided.
 
 ### 5.8 The Python driver as a new core dependency
 
-**`psycopg[binary] >= 3.2`**, added to `[project].dependencies` in `pyproject.toml`.
+**`psycopg[binary] >= 3.2`**, added to `[project].dependencies` in `pyproject.toml` — and, since
+the owner's decision of 2026-09-07 (§7.4), **`SQLAlchemy >= 2.0`** and **`alembic >= 1.13`**
+beside it. The driver argument below is unchanged and applies to all three: the schema an
+installation cannot build or verify is a board it cannot serve. SQLAlchemy speaks to PostgreSQL
+*through* `psycopg`, so the driver choice is not superseded by them.
 
 - **Which package.** `psycopg` 3 is the current driver; `psycopg2` is maintenance-only. The
   `binary` extra ships manylinux wheels that bundle libpq, so the install needs **no** `libpq-dev`,
@@ -1605,21 +1609,23 @@ and both hold whichever way the question is decided.
   detects that a dependency manifest moved and runs
   `python -m pip install --quiet -e '<product_root>[dev]'` into `<product_root>/.venv`. Adding a
   dependency to `pyproject.toml` is exactly the trigger that step watches for, so a normal
-  `secretary upgrade` installs it. `bootstrap.py` gets it on a fresh install through the same venv
-  install.
+  `secretary upgrade` installs all three. `bootstrap.py` gets them on a fresh install through the
+  same venv install.
 - **Offline installation.** This is a real regression in the offline story and is named rather than
-  papered over. Today the three core dependencies (PyYAML, jsonschema, cryptography) are already
-  PyPI wheels, so `pip install -e .` on a host with no index already fails; a fourth wheel does not
-  change the *kind* of failure. What it does change is that the failure now happens on a host that
-  previously might have had the three cached. Two consequences the delivery card must handle:
+  papered over. Today the three original core dependencies (PyYAML, jsonschema, cryptography) are
+  already PyPI wheels, so `pip install -e .` on a host with no index already fails; three more
+  distributions do not change the *kind* of failure. What they do change is that the failure now
+  happens on a host that previously might have had the three cached, and that the staging list is
+  six names rather than four. Two consequences the delivery card must handle:
   (1) `psycopg[binary]` must be present in the venv **before** the first migration runs, so the
   upgrade step ordering is dependencies → migrations → services; (2) an air-gapped install needs
-  the wheel staged the same way the other three are, and `secretary upgrade` must report
+  the wheels staged the same way the other three are, and `secretary upgrade` must report
   `dependencies: failed` loudly rather than proceeding to a migration it cannot run. No new
   offline mechanism is introduced by this card.
-- **Version pin.** A floor (`>= 3.2`), not an equality pin, matching how PyYAML, jsonschema and
-  cryptography are declared. Ruff is the only equality-pinned dependency, because a linter's
-  version is part of a gate's meaning; a driver's is not.
+- **Version pin.** A floor (`>= 3.2`, `>= 2.0`, `>= 1.13`), not an equality pin, matching how
+  PyYAML, jsonschema and cryptography are declared. Ruff is the only equality-pinned dependency,
+  because a linter's version is part of a gate's meaning; a driver's and a migration tool's are
+  not.
 
 ---
 
@@ -1837,43 +1843,57 @@ The audit journal itself — `state/board/events.ndjson` — keeps being written
 
 ### 7.4 Schema versioning and migrations
 
-**A minimal in-product migration runner. No new dependency.**
+**SQLAlchemy models as the schema, Alembic as the migration tool.** The owner decided this on
+2026-09-07, replacing this section's earlier decision (a hand-written runner over numbered `.sql`
+files, its own `schema_migrations` table and a checksum rule, argued for on the grounds that it
+added no dependency). That runner is not in the product; SQLAlchemy and Alembic are core
+dependencies beside `psycopg[binary]` (§5.8).
 
-```sql
-CREATE TABLE schema_migrations (
-    version     integer PRIMARY KEY,
-    name        text NOT NULL,
-    applied_at  timestamptz NOT NULL,
-    checksum    text NOT NULL
-);
-```
-
-- Migrations are numbered `.sql` files shipped in the product tree
-  (`src/secretary/board/migrations/0001_initial.sql`, …), applied in order, each inside its own
-  transaction together with its `schema_migrations` insert. PostgreSQL has transactional DDL, so a
-  failed migration leaves the version it was moving from, not a half-applied schema.
-- A `checksum` mismatch on an already-applied version is a hard refusal, not a re-apply: an edited
-  historical migration means the running schema and the tree disagree, and guessing which is right
-  is how a store loses data.
-- The runner takes `pg_advisory_lock` on a fixed migration key, so two upgrades cannot race.
-- It runs as `secretary_owner`; the application role has no DDL (§5.5). Migration `0001` is where
-  `secretary_app` and `secretary_read` are created and granted, including the
-  `ALTER DEFAULT PRIVILEGES` statements that make every *later* migration's tables reachable by
-  them without a further grant (§5.5).
-- The two generated passwords `0001` needs are runner parameters read from `board-store.env`, never
-  literals in the file: a migration whose bytes differ per installation cannot have a stable
-  checksum, and the checksum rule above is the whole point of the runner.
-- Every process asserts the expected version at startup and refuses to write on a mismatch — the
-  same shape as `board_transport`'s refusal of a partial configuration and `TaskAudit`'s
-  `upgrade_required` refusal of the pre-v2 pending layout. A dispatcher writing through a schema it
-  does not know is worse than a dispatcher that stops.
-
-Why not Alembic or another framework: the product's dependency list is deliberately three packages,
-and §5.8 already adds a fourth for a reason that has no alternative. A framework here would add a
-migration DSL, a second configuration file and a second CLI to an installation whose whole
-migration need is "apply numbered SQL files in order, once, under a lock". `upgrade.py` already
-owns ordered idempotent steps with typed results (`StepResult`), and the runner is one more of
-them, placed after `step_dependencies` (§5.8) and before any service restart.
+- **The schema is `src/secretary/board/schema.py`** — declarative SQLAlchemy models, one per table
+  of §3. §3 above stays what it is: the description of the target schema, written as DDL because
+  DDL is what a reader can argue with. The models are that description made executable, and the
+  two are held together by execution rather than by good intentions: the integration suite runs
+  the migration against a real `postgres:16`, counts what §10 counted, and then asks Alembic to
+  autogenerate a diff between the built database and the models — an empty diff, or a red test.
+- **What an ORM does not express is expressed anyway, explicitly.** Every closed vocabulary of
+  §3.12 is a `CheckConstraint`; the four partial unique indexes of §3.6 and §3.8 are `Index(...,
+  postgresql_where=...)`; the generated `ref` columns are `Computed(..., persisted=True)`; §3.3's
+  two scoped sprint cursors are `DEFERRABLE INITIALLY DEFERRED` composite foreign keys. Nothing
+  §3 constrains is left to the application layer.
+- **The version table is Alembic's `alembic_version`**, and there is no second one. It is the
+  22nd table §10 counts and carries the 22nd primary key, exactly where `schema_migrations` used
+  to stand, so every number in §10 is unchanged. No checksum rule is layered on top of it: an
+  installation ahead of the tree is Alembic's own error to raise, and inventing bookkeeping beside
+  a migration tool's is what this section no longer does.
+- **The revisions live in `src/secretary/board/migrations/versions/`** and ship with the package.
+  `0001_initial` builds an empty database in §3.13's order — step 1 creates the tables in §3
+  reading order plus §9's `sprint_number_seq`, step 2 adds the constraints whose targets are
+  forward or mutual references — and ends with §5.5's roles, grants and `ALTER DEFAULT
+  PRIVILEGES`, which is why those reach every table above them and every table a later revision
+  adds. A revision runs inside its own transaction (`transaction_per_migration`); PostgreSQL has
+  transactional DDL, so a failed revision leaves the schema it was moving from, not half of one,
+  and there is no down migration for the initial revision at all.
+- **The connection is never an `alembic.ini` literal.** There is no `alembic.ini` in this
+  product. `secretary.board.migrate` builds Alembic's `Config` in code and hands `env.py` the
+  connection it opened from `board_store.resolve` (§5.4), as the `secretary_owner` role (§5.5);
+  an operator running `alembic` by hand names the installation instead (`-x instance=…`) and
+  `env.py` resolves the same way. `board_store.resolve` is also where the git-exclusion lifecycle
+  of `board-store.env` is enforced, so no route to a configured store can migrate on top of
+  credentials the instance repository is tracking.
+- **The two generated passwords §5.5 needs are parameters of the run**, read from
+  `board-store.env` and passed in Alembic's `config.attributes`; they are never bytes of a
+  revision file, and PostgreSQL takes no bound parameter in `CREATE ROLE`, so the revision renders
+  them through the dialect's own literal processor.
+- **The advisory lock stays.** Alembic has no opinion about two upgrades racing on one
+  installation, so `secretary.board.migrate` takes `pg_advisory_lock` on a fixed key on the same
+  session the revisions run on, and releases it once at the end whatever happened in between.
+- **Every process asserts the expected revision at startup** and refuses to write on a mismatch —
+  the same shape as `board_transport`'s refusal of a partial configuration and `TaskAudit`'s
+  `upgrade_required` refusal of the pre-v2 pending layout. A dispatcher writing through a schema
+  it does not know is worse than a dispatcher that stops.
+- **Where it runs.** `upgrade.py` owns ordered idempotent steps with typed results (`StepResult`),
+  and `step_board_store` is one more of them, placed after `step_dependencies` (§5.8) — the
+  dependencies have to exist before anything can connect — and before any service restart.
 
 ---
 

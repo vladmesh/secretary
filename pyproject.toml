@@ -77,6 +77,14 @@ dependencies = [
     # and no apt step. A floor, not an equality pin, like the three above; ruff is equality-pinned
     # because a linter's version is part of a gate's meaning and a driver's is not.
     "psycopg[binary]>=3.2",
+    # The board store's schema is SQLAlchemy models and its migrations are Alembic's, by the
+    # owner's decision of 2026-09-07 (docs/BOARD_STORE.md §7.4). Both are core for the same
+    # reason the driver is: after cutover an installation that cannot build or verify its own
+    # schema cannot serve the board at all. 2.0 is the first SQLAlchemy with the declarative
+    # and `Identity`/`Computed` surface board/schema.py uses; 1.13 is the Alembic that speaks
+    # it. Floors, not equality pins, like everything above except ruff.
+    "SQLAlchemy>=2.0",
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
@@ -106,9 +114,9 @@ include = ["secretary*", "triggered_agents*"]
 
 [tool.setuptools.package-data]
 "secretary.schemas" = ["*.json"]
-# The migration files are product data, not documentation: the runner reads them from the
-# installed tree, so they ship with the package rather than only existing in the checkout.
-"secretary.board" = ["migrations/*.sql"]
+# Alembic reads its environment, template and revisions from the installed tree by path, so
+# they ship with the package rather than only existing in the checkout.
+"secretary.board.migrations" = ["script.py.mako", "versions/*.py"]
 "triggered_agents.agents.curator" = ["*.toml"]
 "triggered_agents.agents.pipeline" = ["*.toml"]
 "triggered_agents.agents.retro" = ["*.toml"]
