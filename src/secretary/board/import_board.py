@@ -25,6 +25,27 @@ natural key to converge on.  Rather than duplicate rows or invent one, :func:`ap
 database that already holds board rows and names the table it found them in.  A repeat is a fresh
 ``migrate`` and a fresh import, which is reproducible because every row this module builds is a
 pure function of the board it read.
+
+**A green parity means the whole board is in the store, and nothing else** (2026-09-07).  The
+first revision of :func:`parity` subtracted the report's own refusals from what each axis expected
+to find, so a run that had just declined to write 479 comments still returned PASS: the check
+agreed with the report instead of with the board, which is a check that cannot fail.  Nothing is
+subtracted now.  A record the board holds and the store does not fails its axis, is named by its
+own identifier in ``records_missing`` — one line each, never an aggregate — and makes the result
+red.  A fifth axis, ``accounting``, then compares the refusals with the records actually missing in
+both directions, so "a record that is neither imported nor named is a defect" is a check rather
+than a promise.  The content axis compares all three comment tables, because comparing only the
+first of them let a reviewer change a stored sprint comment's body and still be told ``True``.
+
+**What revision ``0002_board_gaps`` moved here.**  The sprint's identity is its reference, so every
+sprint-scoped row this module builds carries ``sprint_ref``; ``issue_comments`` is the third table
+of §3.7 and the 479 comments land in it; ``issues.extensions`` takes an Issue's leftover metadata
+keys; ``tasks.project_id`` may be NULL; and ``task_dependencies`` keeps the reference and its
+resolution apart.  §9's ``sprint:1037`` is on the board twice and the owner's answer is
+outstanding, so this module runs §9's **option 1**: the live row keeps the spelling, the archived
+row is stored under a distinguishing reference, its original spelling goes to
+``sprints.source_audit``, and the report names the row on a line of its own so a different answer
+is cheap to apply (:func:`sprint_references`).
 """
 
 from __future__ import annotations
@@ -34,6 +55,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from hashlib import sha1
 from pathlib import Path
 from typing import Any
 
@@ -108,8 +130,15 @@ TASK_KNOWN_METADATA = frozenset(_KNOWN_METADATA) | {META_RECORD_TYPE}
 #: §8.1's marker vocabulary, exactly as the document spells it.  A first line that is a complete
 #: ``[token]`` whose token is *not* here keeps the whole body and gets ``marker = NULL``.
 MARKER_ROLES = frozenset(_ROLES)
-MARKER_PREFIXES = ("report:", "review:", "decision:", "issue:")
-MARKER_EXACT = frozenset({"sprint:resume", "archive", "rejected"})
+#: The open families: the board already carries more than one token under each, so the suffix is
+#: not enumerated.  `validate:*`, `claim:*` and `watchdog:*` joined the list on 2026-09-07, when a
+#: re-read of both boards counted 743 comments under them (§8.1).
+MARKER_PREFIXES = ("report:", "review:", "decision:", "issue:", "validate:", "claim:", "watchdog:")
+#: The closed ones: exactly one token each, so the token is a name rather than a family.
+#: `steward:blocked-done` is deliberately not read as the role `steward` — the role marker is bare.
+MARKER_EXACT = frozenset(
+    {"sprint:resume", "archive", "rejected", "steward:blocked-done", "provision:request"}
+)
 
 _MARKER_LINE = re.compile(r"^\[([^\]\n]+)\]$")
 
@@ -136,7 +165,23 @@ TABLE_ORDER = (
     "sprint_budget_events",
     "task_comments",
     "sprint_comments",
+    "issue_comments",
     "sprint_decisions",
+)
+
+#: The three comment tables of §3.7, each with the column that names its entity.  They are one
+#: list because every rule about a comment — §8.1's marker, §8.2's counting, both parity axes —
+#: applies to all three, and the reviewer's finding of 2026-09-07 was a rule that reached only
+#: the first of them.
+#: Parity's axes, in the order the report prints them.  ``accounting`` joined the other four on
+#: 2026-09-07: it is the axis that compares the *refusals* with the records actually missing, so
+#: "a record that is neither imported nor named is a defect" is a check and not a promise.
+PARITY_AXES = ("counts", "identifiers", "links", "content", "accounting")
+
+COMMENT_TABLES = (
+    ("task_comments", "task_ref"),
+    ("sprint_comments", "sprint_ref"),
+    ("issue_comments", "issue_id"),
 )
 
 
@@ -355,6 +400,21 @@ def parse_marker(body: str) -> tuple[str | None, str]:
     return token, rest if separator else ""
 
 
+def comment_identifier(owner_ref: str, comment: dict[str, Any]) -> str:
+    """One comment's own name: the record it sits on, and Kanboard's own comment id.
+
+    §3.7 gives a stored comment a generated identity and the board carries no column to match it
+    back on, so this identifier exists for the *report* and not for the schema.  That is enough
+    for what it is for: naming, one line each, the comments a run did not store.
+    """
+    identifier = _positive_int(comment.get("id"))
+    if identifier is None:
+        # No id: a digest of what the comment says, which is stable across runs of one board.
+        digest = sha1(_text(comment.get("comment")).encode("utf-8")).hexdigest()[:12]
+        return f"{owner_ref}#comment-body-{digest}"
+    return f"{owner_ref}#comment-{identifier}"
+
+
 def marker_token(body: str) -> str | None:
     """The bracketed first-line token, whether or not §8.1's vocabulary recognizes it."""
     match = _MARKER_LINE.match(body.partition("\n")[0].strip())
@@ -377,6 +437,15 @@ class ImportReport:
     expected_zero: list[dict[str, Any]] = field(default_factory=list)
     records_not_imported: list[dict[str, Any]] = field(default_factory=list)
     links_not_imported: list[dict[str, Any]] = field(default_factory=list)
+    #: Two Kanboard rows carrying one reference.  Not a loss and deliberately not a refusal: the
+    #: record is the reference, the surviving row keeps it and the other row's comments merge into
+    #: it, so parity has nothing missing to find.  It is listed because a reader who counts board
+    #: rows and store rows will otherwise see a gap and have to guess what closed it.
+    duplicate_board_rows: list[dict[str, Any]] = field(default_factory=list)
+    #: §9 option 1: an archived sprint row whose reference a live row already holds, stored under a
+    #: distinguishing reference with its original spelling in `sprints.source_audit`.  One line per
+    #: row, so the owner's other choice can be applied to exactly these rows and no others.
+    disambiguated_references: list[dict[str, Any]] = field(default_factory=list)
     fields_without_a_column: list[dict[str, Any]] = field(default_factory=list)
     extensions_keys: list[dict[str, Any]] = field(default_factory=list)
     project_repository_mismatch: dict[str, Any] = field(default_factory=dict)
@@ -387,7 +456,20 @@ class ImportReport:
     parity: dict[str, Any] = field(default_factory=dict)
 
     def record_not_imported(self, *, kind: str, ref: str, reason: str) -> None:
+        """Name one record, by an identifier that is its own and nobody else's.
+
+        ``ref`` is the identifier :func:`parity` compares against, so it has to survive being put
+        in a set: a decorated string like ``"479 comments on Issue rows"`` names a count and not a
+        record, and the reviewer's finding of 2026-09-07 is exactly what that costs.  Where a
+        board reference is not unique by itself — a second row claiming it, a comment, which has
+        no reference at all — the identifier carries the Kanboard row or comment id.
+        """
         self.records_not_imported.append({"kind": kind, "ref": ref, "reason": reason})
+
+    def board_rows_merged(self, *, kind: str, ref: str, kept: int, dropped: int) -> None:
+        self.duplicate_board_rows.append(
+            {"kind": kind, "ref": ref, "kept_kanboard_task": kept, "merged_kanboard_task": dropped}
+        )
 
     def link_not_imported(self, *, kind: str, subject: str, target: str, reason: str) -> None:
         self.links_not_imported.append(
@@ -406,6 +488,8 @@ class ImportReport:
                 "expected_zero": self.expected_zero,
                 "records_not_imported": self.records_not_imported,
                 "links_not_imported": self.links_not_imported,
+                "duplicate_board_rows": self.duplicate_board_rows,
+                "disambiguated_references": self.disambiguated_references,
                 "fields_without_a_column": self.fields_without_a_column,
                 "extensions_keys": self.extensions_keys,
                 "project_repository_mismatch": self.project_repository_mismatch,
@@ -451,6 +535,32 @@ def render(report: ImportReport) -> str:
         lines += [
             f"  {item['kind']} {item['ref']}: {item['reason']}" for item in report.records_not_imported
         ]
+    if report.disambiguated_references:
+        lines += [
+            "",
+            (
+                "references disambiguated at import (§9, option 1): "
+                f"{len(report.disambiguated_references)}"
+            ),
+        ]
+        lines += [
+            f"  {item['kind']} {item['original_ref']} (kanboard task {item['kanboard_task']}) "
+            f"stored as {item['stored_ref']}; original spelling kept in {item['provenance']}"
+            for item in report.disambiguated_references
+        ]
+    if report.duplicate_board_rows:
+        lines += [
+            "",
+            (
+                "two board rows, one reference, one record (comments merged, nothing lost): "
+                f"{len(report.duplicate_board_rows)}"
+            ),
+        ]
+        lines += [
+            f"  {item['kind']} {item['ref']}: kept kanboard task {item['kept_kanboard_task']}, "
+            f"merged kanboard task {item['merged_kanboard_task']}"
+            for item in report.duplicate_board_rows
+        ]
     if report.links_not_imported:
         lines += ["", f"links that did not land in the model ({len(report.links_not_imported)}):"]
         lines += [
@@ -464,8 +574,13 @@ def render(report: ImportReport) -> str:
             for item in report.fields_without_a_column
         ]
     if report.extensions_keys:
-        lines += ["", "metadata keys carried into tasks.extensions (§8.2), per key:"]
-        lines += [f"  {item['key']}: {item['rows']} row(s)" for item in report.extensions_keys]
+        # §8.2 asks for the key, the number of rows and *where it landed*: two tables have an
+        # extensions bag since 0002, and a key named without its table reads as a duplicate.
+        lines += ["", "metadata keys carried into an extensions bag (§8.2), per key and table:"]
+        lines += [
+            f"  {item['where']}.{item['key']}: {item['rows']} row(s)"
+            for item in report.extensions_keys
+        ]
     mismatch = report.project_repository_mismatch
     if mismatch:
         lines += ["", "project/repository mismatch (§8.3):"]
@@ -502,12 +617,17 @@ def render(report: ImportReport) -> str:
             for item in report.approximate_values
         ]
     if report.parity:
+        missing = report.parity.get("records_missing", [])
         lines += ["", f"parity: {'PASS' if report.parity.get('ok') else 'FAIL'}"]
-        for axis in ("counts", "identifiers", "links", "content"):
+        for axis in PARITY_AXES:
             checks = report.parity.get(axis, [])
             failed = [check for check in checks if not check.get("ok")]
             lines.append(f"  {axis}: {len(checks)} check(s), {len(failed)} failed")
             lines += [f"    FAIL {check['name']}: {check.get('detail')}" for check in failed]
+        lines.append(f"  records the board holds and the store does not: {len(missing)}")
+        # One line per record, with its own identifier.  An aggregate cannot answer "which ones",
+        # and "which ones" is the whole question a failing parity asks.
+        lines += [f"    MISSING {item['kind']} {item['id']}: {item['reason']}" for item in missing]
     return "\n".join(lines) + "\n"
 
 
@@ -582,7 +702,7 @@ def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> Im
     tasks = _plan_tasks(source, card_rows, sprints, products, rows, report)
     _link_sprint_cursors(source, sprints, tasks, report)
     _plan_budget(source, sprints, rows, report, thresholds=thresholds)
-    _plan_comments(source, tasks, sprints, issue_rows, product_rows, rows, report)
+    _plan_comments(source, tasks, sprints, issues, rows, report)
     _plan_decisions(source, sprints, tasks, rows, report)
 
     report.expected_zero = [
@@ -590,7 +710,8 @@ def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> Im
             "table": "task_issues",
             "reason": "no source field exists: no metadata key holds a card's issue refs and "
             "board/kanboard.py:_card builds every Card with an empty issue_refs (§8.4, gap 1). "
-            "A card's issue association is reachable through its sprint.",
+            "A card's issue association is reachable through its sprint "
+            "(tasks.sprint_ref -> sprint_issues).",
         },
         {
             "table": "board_events",
@@ -696,25 +817,65 @@ def _plan_registry(
     }
 
 
+def one_row_per_ref(
+    board_rows: list[SourceRow], *, kind: str, report: ImportReport
+) -> list[SourceRow]:
+    """The rows of one board, one per reference, and a report line for every row that merged.
+
+    Kanboard lets two rows carry one reference.  For a card, a Product and an Issue that is one
+    *record* seen twice, not two records: the live row wins, the other row's comments are still
+    imported against the same reference (:func:`_comments_for`), and nothing is lost.  It is
+    therefore not a refusal — a refusal is a record the store does not hold — and calling it one
+    is what made the old report claim 479 comments were missing when they were not the same kind
+    of thing at all.  It is still listed, so a reader who counts board rows finds the arithmetic.
+    """
+    chosen = chosen_by_identifier(board_rows, kind=kind)
+    for row in sorted(board_rows, key=lambda item: (item.ref, item.archived, item.task_id)):
+        key = board_identifier(row, kind)
+        if chosen[key] is not row:
+            report.board_rows_merged(
+                kind=kind, ref=row.ref, kept=chosen[key].task_id, dropped=row.task_id
+            )
+    return [chosen[key] for key in sorted(chosen)]
+
+
+def board_identifier(row: SourceRow, kind: str) -> str:
+    """The name a board row answers to in the report and in parity, whether or not it has a ref.
+
+    One scheme in one place, because the accounting axis of :func:`parity` compares the report's
+    refusals with the records actually missing, and two spellings of one record would make that
+    comparison lie in both directions.
+    """
+    return row.ref or f"{kind}@kanboard-{row.task_id}"
+
+
+def chosen_by_identifier(board_rows: list[SourceRow], *, kind: str) -> dict[str, SourceRow]:
+    """One row per identifier, the live one winning over an archived duplicate.  Pure."""
+    chosen: dict[str, SourceRow] = {}
+    for row in sorted(board_rows, key=lambda item: (item.ref, item.archived, item.task_id)):
+        chosen.setdefault(board_identifier(row, kind), row)
+    return chosen
+
+
 def _plan_products(
     product_rows: list[SourceRow], rows: dict[str, list[dict[str, Any]]], report: ImportReport
 ) -> dict[str, dict[str, Any]]:
     products: dict[str, dict[str, Any]] = {}
     known_projects = {row["project_id"] for row in rows["projects"]}
-    for row in sorted(product_rows, key=lambda item: item.ref):
+    for row in one_row_per_ref(product_rows, kind="product", report=report):
         product_id = _text(row.meta.get(META_PRODUCT_ID))
         if not product_id:
             report.record_not_imported(
                 kind="product",
-                ref=row.ref,
+                ref=row.ref or f"product@kanboard-{row.task_id}",
                 reason="the row carries no product_id, and products.product_id is the primary key",
             )
             continue
         if product_id in products:
             report.record_not_imported(
                 kind="product",
-                ref=f"{row.ref} (kanboard task {row.task_id})",
-                reason=f"a second board row claims product_id {product_id!r}, which is a "
+                ref=row.ref,
+                reason=f"a second board reference claims product_id {product_id!r}, which is a "
                 "primary key; the first row was kept",
             )
             continue
@@ -751,11 +912,13 @@ def _plan_issues(
     issues: dict[str, dict[str, Any]] = {}
     stray_keys: Counter[str] = Counter()
     misplaced_lanes = 0
-    for row in sorted(issue_rows, key=lambda item: item.ref):
+    for row in one_row_per_ref(issue_rows, kind="issue", report=report):
         issue_id = row.ref.removeprefix("issue:")
         if not issue_id or issue_id == row.ref:
             report.record_not_imported(
-                kind="issue", ref=row.ref, reason="the reference is not of the form issue:<id>"
+                kind="issue",
+                ref=row.ref or f"issue@kanboard-{row.task_id}",
+                reason="the reference is not of the form issue:<id>",
             )
             continue
         product_id = _text(row.meta.get(META_ISSUE_PRODUCT))
@@ -783,6 +946,28 @@ def _plan_issues(
             report.record_not_imported(kind="issue", ref=row.ref, reason=refusal)
             continue
         created = _required_when(row.raw.get("date_creation"), datetime.fromtimestamp(0, tz=UTC))
+        # §8.2 since 0002: an Issue has an `extensions` bag of its own, so a metadata key the
+        # schema does not name is provenance a query can reach rather than a record loss.
+        extensions = {
+            key: value
+            for key, value in row.meta.items()
+            if key
+            not in {
+                META_RECORD_TYPE,
+                META_ISSUE_PRODUCT,
+                META_ISSUE_KIND,
+                META_ISSUE_PRIORITY,
+                META_ISSUE_CLOSED_REASON,
+            }
+        }
+        lane = source.pipeline_swimlanes.get(_positive_int(row.raw.get("swimlane_id")) or -1, "")
+        if lane and lane != product_lane_name(product_id):
+            # The same rule §8.6 gives a card: where the observed lane disagrees with the
+            # product-derived one, the observed one is kept instead of being normalized away.
+            extensions["swimlane"] = lane
+            misplaced_lanes += 1
+        for key in extensions:
+            stray_keys[key] += 1
         issues[issue_id] = {
             "issue_id": issue_id,
             "product_id": product_id,
@@ -792,59 +977,66 @@ def _plan_issues(
             "priority": priority,
             "state": "closed" if closed else "open",
             "close_reason": reason,
+            "extensions": {"kanboard": extensions} if extensions else {},
             "created_at": created,
             "updated_at": _required_when(row.raw.get("date_modification"), created),
         }
-        for key in row.meta:
-            if key not in {
-                META_RECORD_TYPE,
-                META_ISSUE_PRODUCT,
-                META_ISSUE_KIND,
-                META_ISSUE_PRIORITY,
-                META_ISSUE_CLOSED_REASON,
-            }:
-                stray_keys[key] += 1
-        lane = source.pipeline_swimlanes.get(_positive_int(row.raw.get("swimlane_id")) or -1, "")
-        if lane and lane != product_lane_name(product_id):
-            misplaced_lanes += 1
     rows["issues"] = [issues[key] for key in sorted(issues)]
-    for key, count in sorted(stray_keys.items()):
-        report.fields_without_a_column.append(
-            {
-                "entity": "issue",
-                "key": key,
-                "rows": count,
-                    "reason": (
-                    "the issues table has no extensions column, so a metadata key the schema "
-                    "does not name has nowhere to land; §8.2's extensions bag is tasks-only"
-                ),
-            }
-        )
+    report.extensions_keys += [
+        {"key": key, "rows": count, "where": "issues.extensions.kanboard"}
+        for key, count in sorted(stray_keys.items(), key=lambda item: (-item[1], item[0]))
+    ]
     if misplaced_lanes:
-        report.fields_without_a_column.append(
+        report.approximate_values.append(
             {
-                "entity": "issue",
-                "key": "swimlane",
+                "field": "issues.extensions.kanboard.swimlane",
                 "rows": misplaced_lanes,
-                "reason": "the row sits in a lane that is not its product's, and unlike tasks "
-                "(§8.6) the issues table has no extensions column to keep the observed lane in",
+                "reason": "the row sits in a lane that is not its product's; the observed lane is "
+                "kept as provenance rather than replaced by the product-derived one (§8.2)",
             }
         )
     return issues
 
 
-def _one_row_per_reference(rows: tuple[SourceRow, ...]) -> list[SourceRow]:
-    """One row per reference, the live one winning over an archived duplicate.
+#: How a disambiguated sprint reference is spelled, and where the original one is kept.
+DISAMBIGUATION_SUFFIX = "-archived-{kanboard_task}"
+SOURCE_AUDIT_ORIGINAL_REF = "imported_original_ref"
 
-    Kanboard lets two rows carry one reference — `references.py` documents the allocator defect
-    that produced them — and §3 makes the reference a primary key.  Every pass over a board has
-    to pick the *same* survivor or the plan and the parity checks describe different sprints, so
-    the rule lives here and nowhere else.
+
+def sprint_references(rows: tuple[SourceRow, ...]) -> dict[int, str]:
+    """The reference each sprint row is stored under, keyed by Kanboard task id (§9, option 1).
+
+    A sprint reference is a primary key and this board carries one of them twice: `sprint:1037` is
+    a live row (Kanboard task 748) and an archived row (task 1037).  The owner has been asked and
+    has not answered, so the card runs §9's option 1: the live row keeps the spelling, the
+    archived row is stored under a distinguishing reference, and its original spelling is kept in
+    ``sprints.source_audit``.  Both *records* survive whole — every field, every comment, every
+    card link — and the only thing one archived row loses is its spelling.
+
+    The distinguishing reference deliberately does not match ``^sprint:[0-9]+$``, which is what
+    lets ``sprint_number_agrees_with_ref`` hold with a NULL number instead of colliding with the
+    live row on ``UNIQUE (sprint_number)``.  It needs no schema change, and reversing it — if the
+    owner picks option 2 or 3 — is a rewrite of exactly the rows the report names.
     """
-    chosen: dict[str, SourceRow] = {}
+    assigned: dict[int, str] = {}
+    taken: set[str] = set()
     for row in sorted(rows, key=lambda item: (item.ref, item.archived, item.task_id)):
-        chosen.setdefault(row.ref, row)
-    return [chosen[ref] for ref in sorted(chosen)]
+        reference = row.ref
+        if reference and reference in taken:
+            candidate = reference + DISAMBIGUATION_SUFFIX.format(kanboard_task=row.task_id)
+            ordinal = 2
+            while candidate in taken:
+                candidate = (
+                    reference
+                    + DISAMBIGUATION_SUFFIX.format(kanboard_task=row.task_id)
+                    + f"-{ordinal}"
+                )
+                ordinal += 1
+            reference = candidate
+        if reference:
+            taken.add(reference)
+        assigned[row.task_id] = reference
+    return assigned
 
 
 def _plan_sprints(
@@ -853,27 +1045,37 @@ def _plan_sprints(
     issues: dict[str, dict[str, Any]],
     rows: dict[str, list[dict[str, Any]]],
     report: ImportReport,
-) -> dict[int, dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     known_projects = {row["project_id"] for row in rows["projects"]}
     repository_paths = {row["path"] for row in rows["repositories"]}
-    sprints: dict[int, dict[str, Any]] = {}
+    sprints: dict[str, dict[str, Any]] = {}
     approximate_closed_at = 0
-    live_reservation: dict[str, int] = {}
+    live_reservation: dict[str, str] = {}
+    assigned = sprint_references(source.sprints)
     for row in sorted(source.sprints, key=lambda item: (item.ref, item.archived, item.task_id)):
-        number = _sprint_number_of(row.ref)
-        if number is None:
-            report.record_not_imported(
-                kind="sprint", ref=row.ref, reason="the reference is not of the form sprint:<N>"
-            )
-            continue
-        if number in sprints:
+        reference = assigned[row.task_id]
+        if not reference.startswith(SPRINT_REFERENCE_PREFIX):
             report.record_not_imported(
                 kind="sprint",
-                ref=f"{row.ref} (kanboard task {row.task_id})",
-                reason="a second board row claims this sprint number; §3.3 makes it a primary "
-                "key and the live row was kept",
+                ref=reference or f"sprint@kanboard-{row.task_id}",
+                reason="sprint_ref_is_a_sprint_reference requires a reference beginning "
+                f"{SPRINT_REFERENCE_PREFIX!r}, and this row carries {row.ref!r}",
             )
             continue
+        number = _sprint_number_of(reference)
+        if reference != row.ref:
+            report.disambiguated_references.append(
+                {
+                    "kind": "sprint",
+                    "original_ref": row.ref,
+                    "stored_ref": reference,
+                    "kanboard_task": row.task_id,
+                    "provenance": f"sprints.source_audit.{SOURCE_AUDIT_ORIGINAL_REF}",
+                    "reason": "a live row already holds this reference and §3.3 makes the "
+                    "reference the primary key; §9 option 1 stores the archived row under a "
+                    "distinguishing reference rather than dropping the record",
+                }
+            )
         status = row.meta.get("sprint_status")
         if status not in SPRINT_STATUSES:
             status = "open"
@@ -887,7 +1089,7 @@ def _plan_sprints(
         if product_id and product_id not in products:
             report.link_not_imported(
                 kind="sprint.product",
-                subject=row.ref,
+                subject=reference,
                 target=product_id,
                 reason="no products row exists for this id; sprints.product_id stays NULL",
             )
@@ -897,11 +1099,15 @@ def _plan_sprints(
         if OBSERVER_FIELD in row.meta and observer is None:
             report.link_not_imported(
                 kind="sprint.observer",
-                subject=row.ref,
+                subject=reference,
                 target=row.meta[OBSERVER_FIELD][:60],
                 reason="the value is not one of the four tagged observer forms; the column stays NULL",
             )
-        sprints[number] = {
+        source_audit = _source_audit(row.meta.get("sprint_source_audit"))
+        if reference != row.ref:
+            source_audit = {**(source_audit or {}), SOURCE_AUDIT_ORIGINAL_REF: row.ref}
+        sprints[reference] = {
+            "ref": reference,
             "sprint_number": number,
             "goal": row.meta.get("sprint_goal", ""),
             "definition_of_done": row.meta.get("sprint_definition_of_done", ""),
@@ -914,7 +1120,7 @@ def _plan_sprints(
             "resume_id": None,
             "close_reason": None,
             "closeout_document": None,
-            "source_audit": _source_audit(row.meta.get("sprint_source_audit")),
+            "source_audit": source_audit,
             "created_at": created,
             "updated_at": updated,
             "closed_at": closed_at,
@@ -923,29 +1129,29 @@ def _plan_sprints(
             if path not in repository_paths:  # pragma: no cover - _plan_registry created them all
                 report.link_not_imported(
                     kind="sprint_repositories",
-                    subject=row.ref,
+                    subject=reference,
                     target=path,
                     reason="no repositories row exists for this path",
                 )
                 continue
-            rows["sprint_repositories"].append({"sprint_number": number, "path": path})
+            rows["sprint_repositories"].append({"sprint_ref": reference, "path": path})
         for value in _json_list(row.meta.get("sprint_issues")):
             issue_id = value.removeprefix("issue:")
             if issue_id not in issues:
                 report.link_not_imported(
                     kind="sprint_issues",
-                    subject=row.ref,
+                    subject=reference,
                     target=value,
                     reason="the issue was not imported, and sprint_issues.issue_id is a foreign key",
                 )
                 continue
-            rows["sprint_issues"].append({"sprint_number": number, "issue_id": issue_id})
+            rows["sprint_issues"].append({"sprint_ref": reference, "issue_id": issue_id})
         reserved = status == "open"
         for project_id in _json_list(row.meta.get("sprint_reservations")):
             if project_id not in known_projects:  # pragma: no cover - _plan_registry created them
                 report.link_not_imported(
                     kind="sprint_projects",
-                    subject=row.ref,
+                    subject=reference,
                     target=project_id,
                     reason="no projects row exists for this id",
                 )
@@ -953,17 +1159,17 @@ def _plan_sprints(
             if reserved and project_id in live_reservation:
                 report.link_not_imported(
                     kind="sprint_projects",
-                    subject=row.ref,
+                    subject=reference,
                     target=project_id,
                     reason="sprint_projects_one_live_reservation already holds this project for "
-                    f"sprint:{live_reservation[project_id]}; §4 allows exactly one live reservation",
+                    f"{live_reservation[project_id]}; §4 allows exactly one live reservation",
                 )
                 continue
             if reserved:
-                live_reservation[project_id] = number
+                live_reservation[project_id] = reference
             rows["sprint_projects"].append(
                 {
-                    "sprint_number": number,
+                    "sprint_ref": reference,
                     "project_id": project_id,
                     "reserved": reserved,
                     "reserved_at": created,
@@ -975,7 +1181,7 @@ def _plan_sprints(
             recorded = _timestamp(resume.get("recorded_at")) or updated
             rows["sprint_resumes"].append(
                 {
-                    "sprint_number": number,
+                    "sprint_ref": reference,
                     **{field_name: resume[field_name] for field_name in RESUME_FIELDS},
                     "recorded_at": recorded,
                 }
@@ -983,7 +1189,7 @@ def _plan_sprints(
         elif row.meta.get("sprint_resume"):
             report.record_not_imported(
                 kind="sprint_resume",
-                ref=row.ref,
+                ref=reference,
                 reason="the stored resume is missing one of the six RESUME_FIELDS, all of which "
                 "are NOT NULL columns; the raw value stays on the Kanboard row",
             )
@@ -1015,14 +1221,14 @@ def _plan_sprints(
             "never stored by any writer (§8.6, gap 4)",
         ),
         (
-            "task_comments.actor_id / sprint_comments.actor_id",
+            "task_comments.actor_id / sprint_comments.actor_id / issue_comments.actor_id",
             (
                 "every Kanboard comment on this board carries user_id 0 and a null username, so "
                 "the actor's identity is not recoverable; actor_role comes from a role marker only"
             ),
         ),
         (
-            "task_comments.request_id / sprint_comments.request_id",
+            "task_comments.request_id / sprint_comments.request_id / issue_comments.request_id",
             (
                 "a comment on the board carries no request id; the namespace is the audit "
                 "journal's, which this import does not read for events"
@@ -1054,7 +1260,7 @@ def _timestamp(value: Any) -> datetime | None:
 def _plan_tasks(
     source: BoardSource,
     card_rows: list[SourceRow],
-    sprints: dict[int, dict[str, Any]],
+    sprints: dict[str, dict[str, Any]],
     products: dict[str, dict[str, Any]],
     rows: dict[str, list[dict[str, Any]]],
     report: ImportReport,
@@ -1067,26 +1273,18 @@ def _plan_tasks(
     extension_keys: Counter[str] = Counter()
     pending_links: list[tuple[str, str, str]] = []
     # Deterministic order, and the live row of a duplicated reference wins over an archived one.
-    ordered = sorted(card_rows, key=lambda row: (row.ref, row.archived, row.task_id))
-    for row in ordered:
+    for row in one_row_per_ref(card_rows, kind="card", report=report):
         ref = row.ref
-        project_id = _text(row.meta.get("project"))
+        project_id = _null_if_empty(row.meta.get("project"))
         task_number = _task_number_of(ref)
         task_type = _text(row.meta.get("task_type"))
         column = source.pipeline_columns.get(_positive_int(row.raw.get("column_id")) or -1, "")
         refusal = None
         if not ref:
             refusal = "the row carries no reference, and tasks.task_ref is the primary key"
-        elif ref in tasks:
-            refusal = (
-                f"a second board row claims reference {ref!r}; tasks.task_ref is the primary key "
-                "and the live row was kept"
-            )
         elif task_number is None:
             refusal = "the reference does not end in -<number>, so UNIQUE (project_id, task_number) has no value"
-        elif not project_id:
-            refusal = "the row carries no project metadata, and tasks.project_id is NOT NULL"
-        elif project_id not in known_projects:  # pragma: no cover - _plan_registry created them
+        elif project_id is not None and project_id not in known_projects:  # pragma: no cover
             refusal = f"project {project_id!r} has no projects row"
         elif task_type not in _TASK_TYPES:
             refusal = f"task_type {task_type!r} is outside the CHECK vocabulary {sorted(_TASK_TYPES)}"
@@ -1096,23 +1294,31 @@ def _plan_tasks(
             refusal = "tasks.title carries CHECK (title <> '')"
         if refusal is not None:
             report.record_not_imported(
-                kind="card",
-                ref=(f"{ref} (kanboard task {row.task_id})" if ref in tasks else ref)
-                or f"task_kanboard_{row.task_id}",
-                reason=refusal,
+                kind="card", ref=ref or f"card@kanboard-{row.task_id}", reason=refusal
             )
             continue
+        if project_id is None:
+            # Nullable since 0002 (§8.6): the board does not say which project this card belongs
+            # to, and a NULL says exactly that.  UNIQUE (project_id, task_number) does not
+            # constrain a row with no project, which is correct — there is no numbering to collide.
+            report.approximate_values.append(
+                {
+                    "field": "tasks.project_id",
+                    "rows": 1,
+                    "reason": f"{ref} carries no project metadata; the column is NULL rather than "
+                    "derived from the reference prefix, which would invent a fact",
+                }
+            )
 
         sprint_ref = _null_if_empty(row.meta.get("sprint_ref"))
-        sprint_number = _sprint_number_of(sprint_ref) if sprint_ref else None
-        if sprint_ref and (sprint_number is None or sprint_number not in sprints):
+        if sprint_ref is not None and sprint_ref not in sprints:
             report.link_not_imported(
                 kind="tasks.sprint",
                 subject=ref,
                 target=sprint_ref,
-                reason="the sprint was not imported; tasks.sprint_number stays NULL",
+                reason="the sprint was not imported; tasks.sprint_ref stays NULL",
             )
-            sprint_number = None
+            sprint_ref = None
 
         extensions = {
             key: value for key, value in row.meta.items() if key not in TASK_KNOWN_METADATA
@@ -1147,7 +1353,7 @@ def _plan_tasks(
             "state": _STATE_BY_COLUMN[column],
             "archived": row.archived,
             "position": _nonnegative_int(row.raw.get("position")),
-            "sprint_number": sprint_number,
+            "sprint_ref": sprint_ref,
             "claim_worker": _null_if_empty(row.meta.get("claim")),
             "claimed_at": None,
             "slug": _null_if_empty(row.meta.get("slug")),
@@ -1188,16 +1394,8 @@ def _plan_tasks(
                 )
 
     rows["tasks"] = [tasks[key] for key in sorted(tasks)]
+    unresolved_dependencies = 0
     for table, subject, target in pending_links:
-        if target not in tasks:
-            report.link_not_imported(
-                kind=table,
-                subject=subject,
-                target=target,
-                reason="the referenced card is not on the board, and the column is a foreign key "
-                "into tasks(task_ref)",
-            )
-            continue
         if subject == target:
             report.link_not_imported(
                 kind=table,
@@ -1207,16 +1405,48 @@ def _plan_tasks(
             )
             continue
         if table == "task_dependencies":
-            rows["task_dependencies"].append({"task_ref": subject, "depends_on": target})
-        else:
-            rows["task_supersessions"].append(
+            # Two columns since 0002 (§3.5, §8.6): the reference as the card writes it is always
+            # kept, and the foreign key is set exactly when the board holds that card.  A
+            # dependency on a card nobody has is a row with `depends_on_task IS NULL`, which is
+            # the query for "not on this board" — it is no longer a lost link.
+            resolved = target in tasks
+            if not resolved:
+                unresolved_dependencies += 1
+            rows["task_dependencies"].append(
                 {
                     "task_ref": subject,
-                    "supersedes": target,
-                    "recorded_at": tasks[subject]["updated_at"],
+                    "depends_on": target,
+                    "depends_on_task": target if resolved else None,
                 }
             )
-    report.extensions_keys = [
+            continue
+        if target not in tasks:
+            report.link_not_imported(
+                kind=table,
+                subject=subject,
+                target=target,
+                reason="the referenced card is not on the board, and task_supersessions.supersedes "
+                "is a foreign key into tasks(task_ref)",
+            )
+            continue
+        rows["task_supersessions"].append(
+            {
+                "task_ref": subject,
+                "supersedes": target,
+                "recorded_at": tasks[subject]["updated_at"],
+            }
+        )
+    if unresolved_dependencies:
+        report.approximate_values.append(
+            {
+                "field": "task_dependencies.depends_on_task",
+                "rows": unresolved_dependencies,
+                "reason": "the reference names a card that is not on this board; the reference is "
+                "stored and the foreign key stays NULL (§8.6), so the dependency is a row rather "
+                "than a loss",
+            }
+        )
+    report.extensions_keys += [
         {"key": key, "rows": count, "where": "tasks.extensions.kanboard"}
         for key, count in sorted(extension_keys.items(), key=lambda item: (-item[1], item[0]))
     ]
@@ -1225,23 +1455,24 @@ def _plan_tasks(
 
 def _link_sprint_cursors(
     source: BoardSource,
-    sprints: dict[int, dict[str, Any]],
+    sprints: dict[str, dict[str, Any]],
     tasks: dict[str, dict[str, Any]],
     report: ImportReport,
 ) -> None:
     """§3.3's scoped cursor: a sprint's current task must be a card of that sprint."""
-    for row in _one_row_per_reference(source.sprints):
-        number = _sprint_number_of(row.ref)
-        if number is None or number not in sprints:
+    assigned = sprint_references(source.sprints)
+    for row in source.sprints:
+        reference = assigned[row.task_id]
+        if reference not in sprints:
             continue
         current = _null_if_empty(row.meta.get("sprint_current_task"))
         if not current:
             continue
         card = tasks.get(current)
-        if card is None or card["sprint_number"] != number:
+        if card is None or card["sprint_ref"] != reference:
             report.link_not_imported(
                 kind="sprints.current_task_ref",
-                subject=row.ref,
+                subject=reference,
                 target=current,
                 reason="sprint_current_task_is_in_this_sprint scopes the cursor to a card this "
                 "sprint holds, and this card "
@@ -1249,12 +1480,12 @@ def _link_sprint_cursors(
                 + "; the cursor stays NULL",
             )
             continue
-        sprints[number]["current_task_ref"] = current
+        sprints[reference]["current_task_ref"] = current
 
 
 def _plan_budget(
     source: BoardSource,
-    sprints: dict[int, dict[str, Any]],
+    sprints: dict[str, dict[str, Any]],
     rows: dict[str, list[dict[str, Any]]],
     report: ImportReport,
     *,
@@ -1275,9 +1506,14 @@ def _plan_budget(
     mismatches: list[dict[str, Any]] = []
     per_type: Counter[str] = Counter()
     claimed: set[str] = set()
-    for row in _one_row_per_reference(source.sprints):
-        number = _sprint_number_of(row.ref)
-        if number is None or number not in sprints:
+    assigned = sprint_references(source.sprints)
+    # Two sprint rows can share the board spelling the journal keys on, so the journal records of
+    # one spelling are handed out once and never twice: the second row starts where the first
+    # stopped rather than importing the same charge again.
+    consumed: Counter[tuple[str, str]] = Counter()
+    for row in sorted(source.sprints, key=lambda item: (item.ref, item.archived, item.task_id)):
+        reference = assigned[row.task_id]
+        if reference not in sprints:
             continue
         budget = _budget(
             row.meta.get("sprint_budget"), thresholds, row.meta.get(BUDGET_UNCHARGED_FIELD)
@@ -1287,11 +1523,13 @@ def _plan_budget(
             wanted = int(counts.get(event_type, 0))
             counter_total += wanted
             per_type[event_type] += wanted
-            available = journal.get((row.ref, event_type), [])
+            already = consumed[(row.ref, event_type)]
+            available = journal.get((row.ref, event_type), [])[already:]
+            consumed[(row.ref, event_type)] += min(wanted, len(available))
             if len(available) > wanted:
                 mismatches.append(
                     {
-                        "sprint": row.ref,
+                        "sprint": reference,
                         "event_type": event_type,
                         "counter": wanted,
                         "audit_journal": len(available),
@@ -1304,13 +1542,15 @@ def _plan_budget(
                 record = available[index] if index < len(available) else None
                 if record is not None:
                     request_id = _text(record.get("request_id")) or (
-                        f"import:budget:{row.ref}:{event_type}:{index}"
+                        f"import:budget:{reference}:{event_type}:{index}"
                     )
-                    occurred = _timestamp(record.get("occurred_at")) or sprints[number]["updated_at"]
+                    occurred = (
+                        _timestamp(record.get("occurred_at")) or sprints[reference]["updated_at"]
+                    )
                     reason = f"imported from audit journal record {_text(record.get('event_id'))}"
                 else:
-                    request_id = f"import:budget:{row.ref}:{event_type}:{index}"
-                    occurred = sprints[number]["updated_at"]
+                    request_id = f"import:budget:{reference}:{event_type}:{index}"
+                    occurred = sprints[reference]["updated_at"]
                     reason = (
                         "imported from the sprint's counter; the audit journal holds no record "
                         "for this charge, so occurred_at is approximate"
@@ -1324,21 +1564,21 @@ def _plan_budget(
                         "request_id": request_id,
                         "operation": "sprint.budget",
                         "intent": {
-                            "sprint": row.ref,
+                            "sprint": reference,
                             "event_type": event_type,
                             "imported_by": f"board-import:{IMPORT_VERSION}",
                         },
                         "status": "committed",
                         "protocol": True,
                         "entity_kind": "sprint",
-                        "ref": row.ref,
+                        "ref": reference,
                         "created_at": occurred,
                         "settled_at": occurred,
                     }
                 )
                 rows["sprint_budget_events"].append(
                     {
-                        "sprint_number": number,
+                        "sprint_ref": reference,
                         "event_type": event_type,
                         "charged": event_type not in BUDGET_UNCHARGED_EVENT_TYPES,
                         "task_ref": None,
@@ -1381,99 +1621,121 @@ def _plan_budget(
 def _plan_comments(
     source: BoardSource,
     tasks: dict[str, dict[str, Any]],
-    sprints: dict[int, dict[str, Any]],
-    issue_rows: list[SourceRow],
-    product_rows: list[SourceRow],
+    sprints: dict[str, dict[str, Any]],
+    issues: dict[str, dict[str, Any]],
     rows: dict[str, list[dict[str, Any]]],
     report: ImportReport,
 ) -> None:
-    """§8.1's marker rule, applied once, to every comment on both boards."""
+    """§8.1's marker rule, applied once, to every comment on both boards and all three tables.
+
+    All three: ``task_comments``, ``sprint_comments`` and — since 0002 gave Issues a table —
+    ``issue_comments``.  A comment that belongs to a record the store does not hold is named one
+    line per comment, with the Kanboard comment id, because "479 comments on Issue rows" names a
+    number and the question a failing parity asks is *which ones*.
+    """
     unrecognized: Counter[str] = Counter()
-    homeless = Counter()
+
+    def stored(comment: dict[str, Any], fallback: datetime) -> dict[str, Any]:
+        body = _text(comment.get("comment"))
+        marker, text = parse_marker(body)
+        if marker is None and (token := marker_token(body)) is not None:
+            unrecognized[token] += 1
+        return {
+            "marker": marker,
+            "body": text,
+            "actor_role": marker if marker in MARKER_ROLES else None,
+            "actor_id": None,
+            "request_id": None,
+            "created_at": _required_when(comment.get("date_creation"), fallback),
+        }
+
+    def refuse(kind: str, owner_ref: str, comment: dict[str, Any], reason: str) -> None:
+        report.record_not_imported(
+            kind=kind, ref=comment_identifier(owner_ref, comment), reason=reason
+        )
+
     for row in source.pipeline:
-        if row.meta.get(META_RECORD_TYPE) in (PRODUCT_TYPE, ISSUE_TYPE):
-            if row.comments:
-                homeless[row.meta[META_RECORD_TYPE]] += len(row.comments)
+        record_type = row.meta.get(META_RECORD_TYPE)
+        if record_type == PRODUCT_TYPE:
+            for comment in row.comments:
+                # §3.7 has no `product_comments` table, because the 2026-09-07 read counted zero
+                # comments on Product rows.  If the board ever grows one, it is named here rather
+                # than dropped, one line per comment.
+                refuse(
+                    "product comment",
+                    row.ref,
+                    comment,
+                    "§3.7 declares three comment tables — task, sprint and issue — and a Product "
+                    "is none of them; the counted zero is what §3.7 records instead of a fourth "
+                    "table, so this comment has nowhere to land",
+                )
             continue
-        if row.ref not in tasks or tasks[row.ref] is None:
+        if record_type == ISSUE_TYPE:
+            issue_id = row.ref.removeprefix("issue:")
+            if issue_id not in issues:
+                for comment in row.comments:
+                    refuse(
+                        "issue comment",
+                        row.ref,
+                        comment,
+                        "the Issue itself was not imported, and issue_comments.issue_id is a "
+                        "foreign key into issues; the refusal of the Issue names the reason",
+                    )
+                continue
+            for comment in row.comments:
+                rows["issue_comments"].append(
+                    {
+                        "issue_id": issue_id,
+                        **stored(comment, issues[issue_id]["updated_at"]),
+                    }
+                )
+            continue
+        if row.ref not in tasks:
+            for comment in row.comments:
+                refuse(
+                    "card comment",
+                    row.ref or f"card@kanboard-{row.task_id}",
+                    comment,
+                    "the card itself was not imported, and task_comments.task_ref is a foreign "
+                    "key into tasks; the refusal of the card names the reason",
+                )
             continue
         # A duplicated reference keeps one card; a comment of the row that lost is still a comment
         # of that reference, so it is imported rather than dropped.
         for comment in row.comments:
-            body = _text(comment.get("comment"))
-            marker, text = parse_marker(body)
-            if marker is None and (token := marker_token(body)) is not None:
-                unrecognized[token] += 1
             rows["task_comments"].append(
-                {
-                    "task_ref": row.ref,
-                    "marker": marker,
-                    "body": text,
-                    "actor_role": marker if marker in MARKER_ROLES else None,
-                    "actor_id": None,
-                    "request_id": None,
-                    "created_at": _required_when(
-                        comment.get("date_creation"), tasks[row.ref]["updated_at"]
-                    ),
-                }
+                {"task_ref": row.ref, **stored(comment, tasks[row.ref]["updated_at"])}
             )
-    kept_sprint_rows = {row.task_id for row in _one_row_per_reference(source.sprints)}
+
+    assigned = sprint_references(source.sprints)
     for row in source.sprints:
-        number = _sprint_number_of(row.ref)
-        if number is None or number not in sprints:
+        reference = assigned[row.task_id]
+        if reference not in sprints:
+            for comment in row.comments:
+                refuse(
+                    "sprint comment",
+                    row.ref or f"sprint@kanboard-{row.task_id}",
+                    comment,
+                    "the sprint itself was not imported, and sprint_comments.sprint_ref is a "
+                    "foreign key into sprints; the refusal of the sprint names the reason",
+                )
             continue
-        if row.task_id not in kept_sprint_rows:
-            if not row.comments:
-                continue
-            # A duplicated *card* reference is one card seen twice, so its comments merge above.
-            # A duplicated *sprint* reference is two different sprints that were handed the same
-            # number, and merging their journals would invent a sprint that never ran.  The
-            # losing row's comments are named here instead.
-            report.record_not_imported(
-                kind="sprint comment",
-                ref=f"{len(row.comments)} comment(s) on the archived duplicate of {row.ref}",
-                reason="two board rows carry this sprint reference and §3.3 makes the number a "
-                "primary key; only the live row is imported, and merging the other row's journal "
-                "into it would attribute one sprint's record to another",
-            )
-            continue
+        # Since §9's option 1 gives the archived duplicate a reference of its own, its journal is
+        # its own too: nothing merges one sprint's record into another's, and nothing is refused.
         for comment in row.comments:
-            body = _text(comment.get("comment"))
-            marker, text = parse_marker(body)
-            if marker is None and (token := marker_token(body)) is not None:
-                unrecognized[token] += 1
             rows["sprint_comments"].append(
-                {
-                    "sprint_number": number,
-                    "marker": marker,
-                    "body": text,
-                    "actor_role": marker if marker in MARKER_ROLES else None,
-                    "actor_id": None,
-                    "request_id": None,
-                    "created_at": _required_when(
-                        comment.get("date_creation"), sprints[number]["updated_at"]
-                    ),
-                }
+                {"sprint_ref": reference, **stored(comment, sprints[reference]["updated_at"])}
             )
+
     report.unrecognized_comment_markers = [
         {"token": token, "comments": count}
         for token, count in sorted(unrecognized.items(), key=lambda item: (-item[1], item[0]))
     ]
-    for record_type, count in sorted(homeless.items()):
-        report.record_not_imported(
-            kind=f"{record_type} comment",
-            ref=f"{count} comment(s) across the board's {record_type} rows",
-            reason="§3.7 declares exactly two comment tables, task_comments and sprint_comments, "
-            "and both are foreign-keyed to their entity. A Product or an Issue is neither, so a "
-            "comment on one has no table. This is a gap §2.6 does not list and the schema has to "
-            "close before cutover; the comments stay on the Kanboard rows and are lost by any "
-            "reader that moves to SQL.",
-        )
 
 
 def _plan_decisions(
     source: BoardSource,
-    sprints: dict[int, dict[str, Any]],
+    sprints: dict[str, dict[str, Any]],
     tasks: dict[str, dict[str, Any]],
     rows: dict[str, list[dict[str, Any]]],
     report: ImportReport,
@@ -1487,33 +1749,31 @@ def _plan_decisions(
     Their lifecycle is the transaction store's, so coverage is partial by construction and a
     sprint with no surviving document is *named*, never reconstructed.
     """
-    declared_issues = {
-        (link["sprint_number"], link["issue_id"]) for link in rows["sprint_issues"]
-    }
-    recovered: set[int] = set()
+    declared_issues = {(link["sprint_ref"], link["issue_id"]) for link in rows["sprint_issues"]}
+    recovered: set[str] = set()
     claimed: set[str] = set()
     for document in source.transaction_documents:
         event = document.get("event")
         if not isinstance(event, dict):
             continue
-        number = _sprint_number_of(_text(event.get("ref")))
-        if number is None or number not in sprints:
+        reference = _text(event.get("ref"))
+        if reference not in sprints:
             continue
         payload = event.get("payload")
         plan_of = payload.get("decisions") if isinstance(payload, dict) else None
         if not isinstance(plan_of, dict):
             continue
         request_id = _text(document.get("request_id"))
-        decided_at = _timestamp(event.get("occurred_at")) or sprints[number]["updated_at"]
+        decided_at = _timestamp(event.get("occurred_at")) or sprints[reference]["updated_at"]
         entries: list[dict[str, Any]] = []
         for entry in plan_of.get("issues") or []:
             if not isinstance(entry, dict):
                 continue
             issue_id = _text(entry.get("ref")).removeprefix("issue:")
-            if (number, issue_id) not in declared_issues:
+            if (reference, issue_id) not in declared_issues:
                 report.link_not_imported(
                     kind="sprint_decisions.issue",
-                    subject=f"sprint:{number}",
+                    subject=reference,
                     target=_text(entry.get("ref")),
                     reason="decided_issue_is_declared_by_this_sprint requires the sprint to have "
                     "declared the issue, and this sprint_issues link was not imported",
@@ -1534,10 +1794,10 @@ def _plan_decisions(
                 continue
             task_ref = _text(entry.get("ref"))
             card = tasks.get(task_ref)
-            if card is None or card["sprint_number"] != number:
+            if card is None or card["sprint_ref"] != reference:
                 report.link_not_imported(
                     kind="sprint_decisions.card",
-                    subject=f"sprint:{number}",
+                    subject=reference,
                     target=task_ref,
                     reason="decided_card_is_in_this_sprint scopes the decision to a card this "
                     "sprint holds, and this card is not one",
@@ -1565,20 +1825,20 @@ def _plan_decisions(
                     "status": "committed",
                     "protocol": True,
                     "entity_kind": "sprint",
-                    "ref": f"sprint:{number}",
+                    "ref": reference,
                     "created_at": decided_at,
                     "settled_at": decided_at,
                 }
             )
-        recovered.add(number)
+        recovered.add(reference)
         for entry in entries:
             rows["sprint_decisions"].append(
-                {"sprint_number": number, "request_id": request_id, "decided_at": decided_at, **entry}
+                {"sprint_ref": reference, "request_id": request_id, "decided_at": decided_at, **entry}
             )
     report.sprints_without_recoverable_decisions = [
-        f"sprint:{number}"
-        for number, row in sorted(sprints.items())
-        if row["status"] != "open" and number not in recovered
+        reference
+        for reference, row in sorted(sprints.items())
+        if row["status"] != "open" and reference not in recovered
     ]
 
 
@@ -1608,7 +1868,15 @@ TRANSACTION_GROUPS = (
     ),
     (
         "claims, charges and comments",
-        ("requests", "board_events", "sprint_budget_events", "task_comments", "sprint_comments", "sprint_decisions"),
+        (
+            "requests",
+            "board_events",
+            "sprint_budget_events",
+            "task_comments",
+            "sprint_comments",
+            "issue_comments",
+            "sprint_decisions",
+        ),
     ),
 )
 
@@ -1692,7 +1960,7 @@ def apply(plan_result: ImportPlan, connection: Any) -> dict[str, int]:
             connection,
             "sprint_repositories",
             [
-                {"sprint_number": link["sprint_number"], "repository_id": repository_id[link["path"]]}
+                {"sprint_ref": link["sprint_ref"], "repository_id": repository_id[link["path"]]}
                 for link in rows["sprint_repositories"]
             ],
             written,
@@ -1711,20 +1979,20 @@ def apply(plan_result: ImportPlan, connection: Any) -> dict[str, int]:
         # §3.3's two cursors are DEFERRABLE INITIALLY DEFERRED precisely so they can be set in the
         # same transaction as the rows they point at, in an order nobody has to think about.
         resume_of = {
-            number: identifier
-            for identifier, number in connection.execute(
-                sa.select(_table("sprint_resumes").c.resume_id, _table("sprint_resumes").c.sprint_number)
+            reference: identifier
+            for identifier, reference in connection.execute(
+                sa.select(_table("sprint_resumes").c.resume_id, _table("sprint_resumes").c.sprint_ref)
             )
         }
         sprints = _table("sprints")
         for row in rows["sprints"]:
-            number = row["sprint_number"]
-            resume_id = resume_of.get(number)
+            reference = row["ref"]
+            resume_id = resume_of.get(reference)
             if row["current_task_ref"] is None and resume_id is None:
                 continue
             connection.execute(
                 sprints.update()
-                .where(sprints.c.sprint_number == number)
+                .where(sprints.c.ref == reference)
                 .values(current_task_ref=row["current_task_ref"], resume_id=resume_id)
             )
 
@@ -1736,6 +2004,7 @@ def apply(plan_result: ImportPlan, connection: Any) -> dict[str, int]:
             "sprint_budget_events",
             "task_comments",
             "sprint_comments",
+            "issue_comments",
             "sprint_decisions",
         ):
             _insert(connection, name, rows[name], written)
@@ -1763,7 +2032,7 @@ def fetch_rows(connection: Any) -> dict[str, list[dict[str, Any]]]:
         table = _table(name)
         if name == "sprint_repositories":
             repositories = _table("repositories")
-            statement = sa.select(table.c.sprint_number, repositories.c.path).join_from(
+            statement = sa.select(table.c.sprint_ref, repositories.c.path).join_from(
                 table, repositories, table.c.repository_id == repositories.c.repository_id
             )
         else:
@@ -1803,170 +2072,285 @@ def _difference(expected: Any, actual: Any) -> str:
     return f"expected {expected!r}, got {actual!r}"
 
 
-def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: ImportReport) -> dict[str, Any]:
-    """Compare the board against what was stored, on counts, identifiers, links and content."""
-    refused_records = {item["ref"] for item in report.records_not_imported}
-    refused_links = {(item["kind"], item["subject"], item["target"]) for item in report.links_not_imported}
+@dataclass(frozen=True)
+class BoardInventory:
+    """What the board holds, by the identifiers parity compares on.  One read, one interpretation.
 
-    board_products = {row.ref: row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == PRODUCT_TYPE}
-    board_issues = {row.ref: row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == ISSUE_TYPE}
-    board_cards: dict[str, SourceRow] = {}
-    for row in sorted(source.pipeline, key=lambda item: (item.ref, item.archived, item.task_id)):
-        if row.meta.get(META_RECORD_TYPE) in (PRODUCT_TYPE, ISSUE_TYPE):
+    Both halves of parity are built from this: the checks, which ask whether the store agrees with
+    it, and the per-record listing, which asks *which rows* it holds that the store does not.
+    Building it once is what keeps those two from disagreeing.
+    """
+
+    products: dict[str, SourceRow]
+    issues: dict[str, SourceRow]
+    cards: dict[str, SourceRow]
+    sprints: dict[str, SourceRow]
+    #: Every comment on either board, in board order, as (owner identifier, row, comment).
+    comments: tuple[tuple[str, SourceRow, dict[str, Any]], ...]
+
+
+def board_inventory(source: BoardSource) -> BoardInventory:
+    product_rows = [row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == PRODUCT_TYPE]
+    issue_rows = [row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == ISSUE_TYPE]
+    card_rows = [
+        row
+        for row in source.pipeline
+        if row.meta.get(META_RECORD_TYPE) not in (PRODUCT_TYPE, ISSUE_TYPE)
+    ]
+    assigned = sprint_references(source.sprints)
+    comments: list[tuple[str, SourceRow, dict[str, Any]]] = []
+    for row in source.pipeline:
+        kind = {PRODUCT_TYPE: "product", ISSUE_TYPE: "issue"}.get(
+            row.meta.get(META_RECORD_TYPE, ""), "card"
+        )
+        # A duplicated card reference is one card seen twice and its comments merge into the
+        # survivor, so a comment's owner is the reference, never the Kanboard row that carries it.
+        owner = board_identifier(row, kind)
+        for comment in row.comments:
+            comments.append((owner, row, comment))
+    for row in source.sprints:
+        owner = assigned[row.task_id] or board_identifier(row, "sprint")
+        for comment in row.comments:
+            comments.append((owner, row, comment))
+    return BoardInventory(
+        products=chosen_by_identifier(product_rows, kind="product"),
+        issues=chosen_by_identifier(issue_rows, kind="issue"),
+        cards=chosen_by_identifier(card_rows, kind="card"),
+        sprints={
+            assigned[row.task_id] or board_identifier(row, "sprint"): row for row in source.sprints
+        },
+        comments=tuple(comments),
+    )
+
+
+#: Where a stored comment's owner reference is read from, per §3.7 table, and how it is spelled so
+#: it matches the board identifier of the record it belongs to.
+_COMMENT_OWNER = {
+    "task_comments": lambda row: row["task_ref"],
+    "sprint_comments": lambda row: row["sprint_ref"],
+    "issue_comments": lambda row: "issue:" + row["issue_id"],
+}
+
+
+def _comment_key(owner: str, marker: Any, body: Any, created: Any) -> tuple[str, str, str, str]:
+    return (owner, _iso(created), _text(marker), _text(body))
+
+
+def _stored_comments(rows: dict[str, list[dict[str, Any]]], table: str) -> Counter:
+    owner_of = _COMMENT_OWNER[table]
+    return Counter(
+        _comment_key(owner_of(row), row["marker"], row["body"], row["created_at"])
+        for row in rows[table]
+    )
+
+
+def _expected_comments(
+    inventory: BoardInventory, owners: set[str], table: str, fallback: dict[str, Any]
+) -> Counter:
+    """The comments the board holds for the owners the store actually has, as a multiset."""
+    expected: Counter = Counter()
+    for owner, _row, comment in _comments_of(inventory, table):
+        if owner not in owners:
             continue
-        board_cards.setdefault(row.ref, row)
-    board_sprints = {row.ref: row for row in _one_row_per_reference(source.sprints)}
+        marker, body = parse_marker(_text(comment.get("comment")))
+        expected[
+            _comment_key(
+                owner, marker or "", body, _required_when(comment.get("date_creation"), fallback[owner])
+            )
+        ] += 1
+    return expected
 
-    refused = Counter(item["kind"] for item in report.records_not_imported)
+
+def _comments_of(inventory: BoardInventory, table: str):
+    """Every board comment that belongs in one §3.7 table."""
+    for owner, row, comment in inventory.comments:
+        kind = (
+            "sprint"
+            if owner in inventory.sprints
+            else {PRODUCT_TYPE: "product", ISSUE_TYPE: "issue"}.get(
+                row.meta.get(META_RECORD_TYPE, ""), "card"
+            )
+        )
+        if _COMMENT_TABLE_OF_KIND.get(kind) == table:
+            yield owner, row, comment
+
+
+#: Which §3.7 table a comment belongs in, by the kind of record it sits on.  A Product is in none
+#: of them, which is why a comment on one is a refusal and not a row (§3.7's counted zero).
+_COMMENT_TABLE_OF_KIND = {
+    "card": "task_comments",
+    "sprint": "sprint_comments",
+    "issue": "issue_comments",
+    "product": None,
+}
+
+
+def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: ImportReport) -> dict[str, Any]:
+    """Compare the board against what was stored, on counts, identifiers, links, content and
+    accounting — and refuse to call a run green while the store is missing a record.
+
+    **A refusal is not an excuse.**  The previous revision subtracted every record the report had
+    refused from what it expected to find, so a run that declined to write 479 comments still
+    returned PASS: the report explained the loss and parity agreed with the report instead of with
+    the board.  That is a check that cannot fail, and DoD 4 rests on it.  Nothing is subtracted
+    here.  A record the board holds and the store does not fails its axis, is listed by its own
+    identifier in ``records_missing``, and makes ``ok`` false — so a green parity means *"the whole
+    board is in the store"* and nothing else.
+
+    The accounting axis then closes the circle in both directions: every missing record must be
+    named in the report, and every record the report names must really be missing.  A refusal that
+    is not a loss and a loss that is not named are both defects, and both are now checks.
+    """
+    inventory = board_inventory(source)
+
+    stored_tasks = {row["task_ref"]: row for row in rows["tasks"]}
+    stored_sprints = {row["ref"]: row for row in rows["sprints"]}
+    stored_issues = {"issue:" + row["issue_id"]: row for row in rows["issues"]}
+    stored_products = {"product:" + row["product_id"]: row for row in rows["products"]}
+
+    board_comment_total = len(inventory.comments)
+    stored_comment_total = sum(len(rows[table]) for table, _ in COMMENT_TABLES)
     counts = [
         _check(
-            "every board card is a tasks row or a named refusal",
-            sum(1 for row in source.pipeline if row.meta.get(META_RECORD_TYPE) not in (PRODUCT_TYPE, ISSUE_TYPE)),
-            len(rows["tasks"]) + refused["card"],
-            note=f"{sum(1 for row in board_cards.values() if row.archived)} of them archived",
+            "every board card is a tasks row",
+            len(inventory.cards),
+            len(rows["tasks"]),
+            note=f"{sum(1 for row in inventory.cards.values() if row.archived)} of them archived",
         ),
-        _check("every Issue row is an issues row or a named refusal", len(board_issues),
-               len(rows["issues"]) + refused["issue"]),
-        _check("every Product row is a products row or a named refusal", len(board_products),
-               len(rows["products"]) + refused["product"]),
+        _check("every Issue row is an issues row", len(inventory.issues), len(rows["issues"])),
+        _check("every Product row is a products row", len(inventory.products), len(rows["products"])),
         _check(
-            "every sprint board row is a sprints row or a named refusal",
-            len(source.sprints),
-            len(rows["sprints"]) + refused["sprint"],
+            "every sprint board row is a sprints row",
+            len(inventory.sprints),
+            len(rows["sprints"]),
+            note="one row per Kanboard row, not per reference: §9's option 1 stores the archived "
+            "duplicate of a reference under a distinguishing one rather than dropping it",
         ),
         _check(
-            "every comment of an imported card or sprint is stored",
-            sum(len(row.comments) for row in source.pipeline if row.ref in {task["task_ref"] for task in rows["tasks"]})
-            + sum(len(row.comments) for row in _one_row_per_reference(source.sprints)
-                  if _sprint_number_of(row.ref) in {sprint["sprint_number"] for sprint in rows["sprints"]}),
-            len(rows["task_comments"]) + len(rows["sprint_comments"]),
+            "every comment on either board is stored, in one of §3.7's three tables",
+            board_comment_total,
+            stored_comment_total,
+            note=", ".join(f"{table}: {len(rows[table])}" for table, _ in COMMENT_TABLES),
         ),
     ]
 
     identifiers = [
-        _check(
-            "task refs, literally",
-            set(board_cards) - refused_records,
-            {row["task_ref"] for row in rows["tasks"]},
-        ),
-        _check(
-            "issue refs, literally",
-            {ref for ref in board_issues if ref not in refused_records},
-            {f"issue:{row['issue_id']}" for row in rows["issues"]},
-        ),
-        _check(
-            "product refs, literally",
-            {ref for ref in board_products if ref not in refused_records},
-            {f"product:{row['product_id']}" for row in rows["products"]},
-        ),
+        _check("task refs, literally", set(inventory.cards), set(stored_tasks)),
+        _check("issue refs, literally", set(inventory.issues), set(stored_issues)),
+        _check("product refs, literally", set(inventory.products), set(stored_products)),
         _check(
             "sprint refs, literally",
-            {ref for ref in board_sprints if ref not in refused_records},
-            {f"sprint:{row['sprint_number']}" for row in rows["sprints"]},
+            set(inventory.sprints),
+            set(stored_sprints),
+            note="the reference each row is stored under; a disambiguated one is listed in the "
+            "report and keeps its original spelling in sprints.source_audit",
         ),
         _check(
             "task numbers agree with the reference suffix",
             {(row["task_ref"], _task_number_of(row["task_ref"])) for row in rows["tasks"]},
             {(row["task_ref"], row["task_number"]) for row in rows["tasks"]},
         ),
+        _check(
+            "a numbered sprint reference keeps its number, and only a numbered one has one",
+            {(row["ref"], _sprint_number_of(row["ref"])) for row in rows["sprints"]},
+            {(row["ref"], row["sprint_number"]) for row in rows["sprints"]},
+        ),
     ]
 
-    stored_tasks = {row["task_ref"]: row for row in rows["tasks"]}
-    stored_sprints = {row["sprint_number"]: row for row in rows["sprints"]}
     expected_card_sprint = {
-        (ref, _sprint_number_of(_text(row.meta.get("sprint_ref"))))
-        for ref, row in board_cards.items()
-        if ref in stored_tasks and _text(row.meta.get("sprint_ref"))
-        and ("tasks.sprint", ref, _text(row.meta.get("sprint_ref"))) not in refused_links
+        (ref, _text(row.meta.get("sprint_ref")))
+        for ref, row in inventory.cards.items()
+        if ref in stored_tasks and _text(row.meta.get("sprint_ref")) in stored_sprints
     }
     expected_sprint_issues = {
-        (_sprint_number_of(ref), value.removeprefix("issue:"))
-        for ref, row in board_sprints.items()
+        (ref, value.removeprefix("issue:"))
+        for ref, row in inventory.sprints.items()
         for value in _json_list(row.meta.get("sprint_issues"))
-        if _sprint_number_of(ref) in stored_sprints
-        and ("sprint_issues", ref, value) not in refused_links
+        if ref in stored_sprints and value in stored_issues
     }
     expected_sprint_repositories = {
-        (_sprint_number_of(ref), path)
-        for ref, row in board_sprints.items()
+        (ref, path)
+        for ref, row in inventory.sprints.items()
         for path in _json_list(row.meta.get("sprint_repositories"))
-        if _sprint_number_of(ref) in stored_sprints
+        if ref in stored_sprints
     }
     expected_dependencies = {
         (ref, _text(row.meta.get("blocked_by")))
-        for ref, row in board_cards.items()
-        if ref in stored_tasks and _text(row.meta.get("blocked_by"))
-        and ("task_dependencies", ref, _text(row.meta.get("blocked_by"))) not in refused_links
+        for ref, row in inventory.cards.items()
+        if ref in stored_tasks
+        and _text(row.meta.get("blocked_by"))
+        and _text(row.meta.get("blocked_by")) != ref
     }
     links = [
         _check(
             "card -> sprint, from the card's side",
             expected_card_sprint,
-            {(row["task_ref"], row["sprint_number"]) for row in rows["tasks"] if row["sprint_number"]},
+            {(row["task_ref"], row["sprint_ref"]) for row in rows["tasks"] if row["sprint_ref"]},
         ),
         _check(
             "sprint -> card, from the sprint's side",
-            {number for _, number in expected_card_sprint},
-            {row["sprint_number"] for row in rows["tasks"] if row["sprint_number"]},
+            {reference for _, reference in expected_card_sprint},
+            {row["sprint_ref"] for row in rows["tasks"] if row["sprint_ref"]},
         ),
         _check(
             "sprint <-> issue",
             expected_sprint_issues,
-            {(row["sprint_number"], row["issue_id"]) for row in rows["sprint_issues"]},
+            {(row["sprint_ref"], row["issue_id"]) for row in rows["sprint_issues"]},
         ),
         _check(
             "sprint <-> repository, by path",
             expected_sprint_repositories,
-            {(row["sprint_number"], row["path"]) for row in rows["sprint_repositories"]},
+            {(row["sprint_ref"], row["path"]) for row in rows["sprint_repositories"]},
         ),
         _check(
-            "card -> card dependency",
+            "card -> card dependency, resolved or not",
             expected_dependencies,
             {(row["task_ref"], row["depends_on"]) for row in rows["task_dependencies"]},
+            note="a dependency naming a card the board does not hold is a row with "
+            "depends_on_task NULL (§8.6), so it is compared here like any other",
+        ),
+        _check(
+            "a resolved dependency names a card the store holds",
+            set(),
+            {
+                (row["task_ref"], row["depends_on_task"])
+                for row in rows["task_dependencies"]
+                if row["depends_on_task"] and row["depends_on_task"] not in stored_tasks
+            },
         ),
         _check(
             "the sprint cursor points inside its own sprint",
             set(),
             {
-                row["sprint_number"]
+                row["ref"]
                 for row in rows["sprints"]
                 if row["current_task_ref"]
-                and stored_tasks.get(row["current_task_ref"], {}).get("sprint_number")
-                != row["sprint_number"]
+                and stored_tasks.get(row["current_task_ref"], {}).get("sprint_ref") != row["ref"]
             },
         ),
         _check(
             "every product names its projects",
             {
                 (ref.removeprefix("product:"), project)
-                for ref, row in board_products.items()
+                for ref, row in inventory.products.items()
                 for project in _json_list(row.meta.get(META_PRODUCT_PROJECTS))
-                if ref not in refused_records
-                and ("product_projects", ref, project) not in refused_links
+                if ref in stored_products
+                and ("product_projects", ref, project)
+                not in {
+                    (item["kind"], item["subject"], item["target"])
+                    for item in report.links_not_imported
+                }
             },
             {(row["product_id"], row["project_id"]) for row in rows["product_projects"]},
         ),
     ]
 
-    stored_comments = Counter(
-        (row["task_ref"], _iso(row["created_at"]), _text(row["marker"]), row["body"])
-        for row in rows["task_comments"]
-    )
-    expected_comments: Counter[tuple[str, str, str, str]] = Counter()
-    for ref, row in board_cards.items():
-        if ref not in stored_tasks:
-            continue
-        for comment in _comments_for(source, ref):
-            body = _text(comment.get("comment"))
-            marker, text = parse_marker(body)
-            expected_comments[
-                (
-                    ref,
-                    _iso(_required_when(comment.get("date_creation"), stored_tasks[ref]["updated_at"])),
-                    marker or "",
-                    text,
-                )
-            ] += 1
+    fallback = {
+        **{ref: row["updated_at"] for ref, row in stored_tasks.items()},
+        **{ref: row["updated_at"] for ref, row in stored_sprints.items()},
+        **{ref: row["updated_at"] for ref, row in stored_issues.items()},
+    }
+    owners = set(stored_tasks) | set(stored_sprints) | set(stored_issues)
     content = [
         _check(
             "card title, description, state, archived flag and position",
@@ -1981,7 +2365,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
                     row.archived,
                     _nonnegative_int(row.raw.get("position")),
                 )
-                for ref, row in board_cards.items()
+                for ref, row in inventory.cards.items()
                 if ref in stored_tasks
             },
             {
@@ -2006,8 +2390,8 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
                     "closed" if row.archived else "open",
                     _text(row.meta.get(META_ISSUE_CLOSED_REASON)),
                 )
-                for ref, row in board_issues.items()
-                if ref not in refused_records
+                for ref, row in inventory.issues.items()
+                if ref in stored_issues
             },
             {
                 (
@@ -2024,62 +2408,157 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
             "sprint goal, definition of done and status",
             {
                 (
-                    _sprint_number_of(ref),
+                    ref,
                     row.meta.get("sprint_goal", ""),
                     row.meta.get("sprint_definition_of_done", ""),
                     row.meta.get("sprint_status")
                     if row.meta.get("sprint_status") in SPRINT_STATUSES
                     else "open",
                 )
-                for ref, row in board_sprints.items()
-                if _sprint_number_of(ref) in stored_sprints
+                for ref, row in inventory.sprints.items()
+                if ref in stored_sprints
             },
             {
-                (row["sprint_number"], row["goal"], row["definition_of_done"], row["status"])
+                (row["ref"], row["goal"], row["definition_of_done"], row["status"])
                 for row in rows["sprints"]
             },
         ),
         _check(
-            "card comment bodies and markers, as a multiset",
-            expected_comments,
-            stored_comments,
-            note="142 comments on this board share a card, a second and a body, so the check is a "
-            "multiset and not a set",
-        ),
-        _check(
             "the budget counters equal the rows, per sprint and per type",
             _counter_totals(source, stored_sprints),
-            Counter(
-                (row["sprint_number"], row["event_type"]) for row in rows["sprint_budget_events"]
-            ),
+            Counter((row["sprint_ref"], row["event_type"]) for row in rows["sprint_budget_events"]),
+        ),
+    ]
+    # One content check per comment table.  Three, not one: the axis used to compare card comments
+    # alone, so a reviewer could change the body of a stored *sprint* comment from `original` to
+    # `altered` and parity still returned True.  Each table is now its own multiset of
+    # (owner, second, marker, body), which is what makes an altered body a failure wherever it is.
+    for table, _column in COMMENT_TABLES:
+        content.append(
+            _check(
+                f"{table}: owner, second, marker and body, as a multiset",
+                _expected_comments(inventory, owners, table, fallback),
+                _stored_comments(rows, table),
+                note="a multiset and not a set, because comments sharing a record, a second and a "
+                "body are ordinary on this board",
+            )
+        )
+
+    missing = _records_missing(inventory, rows, stored_tasks, stored_sprints, stored_issues,
+                              stored_products, owners, fallback, report)
+    named = {item["ref"] for item in report.records_not_imported}
+    found = {item["id"] for item in missing}
+    accounting = [
+        _check(
+            "every record the store is missing is named in the report, by its own identifier",
+            set(),
+            found - named,
+            note="§8's rule: a record that is neither imported nor named is a defect. This is the "
+            "check that makes it one.",
+        ),
+        _check(
+            "every record the report refuses is really absent from the store",
+            set(),
+            named - found,
+            note="a refusal that names a record the store does hold is a false alarm, and it "
+            "would teach a reader to discount the list that matters",
         ),
     ]
 
-    axes = {"counts": counts, "identifiers": identifiers, "links": links, "content": content}
-    return {"ok": all(check["ok"] for checks in axes.values() for check in checks), **axes}
+    axes = {
+        "counts": counts,
+        "identifiers": identifiers,
+        "links": links,
+        "content": content,
+        "accounting": accounting,
+    }
+    return {
+        "ok": all(check["ok"] for checks in axes.values() for check in checks) and not missing,
+        "records_missing": missing,
+        **axes,
+    }
 
 
-def _comments_for(source: BoardSource, ref: str) -> list[dict[str, Any]]:
-    """Every comment of a reference, including those of an archived duplicate row of it."""
-    found: list[dict[str, Any]] = []
-    for row in source.pipeline:
-        if row.ref == ref and row.meta.get(META_RECORD_TYPE) not in (PRODUCT_TYPE, ISSUE_TYPE):
-            found.extend(row.comments)
-    return found
+def _records_missing(
+    inventory: BoardInventory,
+    rows: dict[str, list[dict[str, Any]]],
+    stored_tasks: dict[str, Any],
+    stored_sprints: dict[str, Any],
+    stored_issues: dict[str, Any],
+    stored_products: dict[str, Any],
+    owners: set[str],
+    fallback: dict[str, Any],
+    report: ImportReport,
+) -> list[dict[str, Any]]:
+    """Every board record the store does not hold, one entry each, with its own identifier.
+
+    This is the half of parity that answers "which ones".  An aggregate — "479 comments on Issue
+    rows" — states a number nobody can act on: it does not say which comments, so it cannot be
+    checked, repaired or even looked up.  Every entry here carries an identifier that names one
+    board record and no other, and the reason the report gave for refusing it where it gave one.
+    """
+    reasons = {item["ref"]: item["reason"] for item in report.records_not_imported}
+    missing: list[dict[str, Any]] = []
+
+    def note(kind: str, identifier: str) -> None:
+        missing.append(
+            {
+                "kind": kind,
+                "id": identifier,
+                "reason": reasons.get(identifier, "the store holds no row for it and the report "
+                "does not say why: this is the defect §8 calls a record neither imported nor named"),
+            }
+        )
+
+    for kind, board, stored in (
+        ("product", inventory.products, stored_products),
+        ("issue", inventory.issues, stored_issues),
+        ("card", inventory.cards, stored_tasks),
+        ("sprint", inventory.sprints, stored_sprints),
+    ):
+        for identifier in sorted(set(board) - set(stored)):
+            note(kind, identifier)
+
+    # Comments have no stored identity the board shares, so they are matched on what a reader can
+    # see — the record, the second, the marker and the body — and the ones the store has no slot
+    # for are named individually, in board order.
+    stored_counts: Counter = Counter()
+    for table, _column in COMMENT_TABLES:
+        stored_counts += _stored_comments(rows, table)
+    seen: Counter = Counter()
+    for owner, row, comment in inventory.comments:
+        kind = {PRODUCT_TYPE: "product", ISSUE_TYPE: "issue"}.get(
+            row.meta.get(META_RECORD_TYPE, ""), "card"
+        )
+        if owner in inventory.sprints:
+            kind = "sprint"
+        identifier = comment_identifier(owner, comment)
+        if owner not in owners:
+            note(f"{kind} comment", identifier)
+            continue
+        marker, body = parse_marker(_text(comment.get("comment")))
+        key = _comment_key(
+            owner, marker or "", body, _required_when(comment.get("date_creation"), fallback[owner])
+        )
+        seen[key] += 1
+        if seen[key] > stored_counts[key]:
+            note(f"{kind} comment", identifier)
+    return missing
 
 
-def _counter_totals(source: BoardSource, stored_sprints: dict[int, Any]) -> Counter:
+def _counter_totals(source: BoardSource, stored_sprints: dict[str, Any]) -> Counter:
     totals: Counter = Counter()
-    for row in _one_row_per_reference(source.sprints):
-        number = _sprint_number_of(row.ref)
-        if number not in stored_sprints:
+    assigned = sprint_references(source.sprints)
+    for row in source.sprints:
+        reference = assigned[row.task_id]
+        if reference not in stored_sprints:
             continue
         budget = _budget(row.meta.get("sprint_budget"), None, row.meta.get(BUDGET_UNCHARGED_FIELD))
         counts = {**budget["by_type"], **budget["uncharged"]}
         for event_type in BUDGET_RECORDED_EVENT_TYPES:
             wanted = int(counts.get(event_type, 0))
             if wanted:
-                totals[(number, event_type)] = wanted
+                totals[(reference, event_type)] = wanted
     return totals
 
 
@@ -2161,24 +2640,34 @@ def run(
 
 
 __all__ = [
+    "COMMENT_TABLES",
+    "DISAMBIGUATION_SUFFIX",
     "IMPORT_VERSION",
     "MARKER_EXACT",
     "MARKER_PREFIXES",
     "MARKER_ROLES",
+    "PARITY_AXES",
+    "SOURCE_AUDIT_ORIGINAL_REF",
     "TABLE_ORDER",
     "TASK_KNOWN_METADATA",
     "TRANSACTION_GROUPS",
     "BoardImportError",
+    "BoardInventory",
     "BoardSource",
     "ImportPlan",
     "ImportReport",
     "RegistryEntry",
     "SourceRow",
     "apply",
+    "board_identifier",
+    "board_inventory",
+    "chosen_by_identifier",
+    "comment_identifier",
     "engine_for",
     "fetch_rows",
     "marker_token",
     "occupied_tables",
+    "one_row_per_ref",
     "parity",
     "parse_marker",
     "plan",
@@ -2188,4 +2677,5 @@ __all__ = [
     "read_transaction_documents",
     "render",
     "run",
+    "sprint_references",
 ]

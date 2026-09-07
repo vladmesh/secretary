@@ -128,9 +128,30 @@ class MarkerRuleTests(unittest.TestCase):
                 self.assertEqual(import_board.parse_marker(f"[{token}]\ntext"), (token, "text"))
 
     def test_a_bracketed_first_line_outside_the_vocabulary_keeps_the_whole_body(self) -> None:
-        body = "[validate:ci-green]\nthe run was green"
+        body = "[not-a-marker:at-all]\nthe run was green"
         self.assertEqual(import_board.parse_marker(body), (None, body))
-        self.assertEqual(import_board.marker_token(body), "validate:ci-green")
+        self.assertEqual(import_board.marker_token(body), "not-a-marker:at-all")
+
+    def test_the_five_families_the_first_read_of_the_live_board_found_are_recognized(self) -> None:
+        """§8.1 gained `validate:*`, `claim:*`, `watchdog:*`, `steward:blocked-done` and
+        `provision:request` on 2026-09-07, behind 778 comments this vocabulary used to miss.
+
+        `[validate:ci-green]` was the example the old assertion used for a token *outside* the
+        vocabulary.  It is inside it now, on the board's own evidence, so the example moved to a
+        token nothing writes; the rule it demonstrates — an unknown token keeps its whole body —
+        is unchanged and still asserted above.
+        """
+        for token in ("validate:ci-green", "claim:started", "watchdog:retry"):
+            with self.subTest(token=token):
+                self.assertEqual(import_board.parse_marker(f"[{token}]\nbody"), (token, "body"))
+        for token in ("steward:blocked-done", "provision:request"):
+            with self.subTest(token=token):
+                self.assertEqual(import_board.parse_marker(f"[{token}]\nbody"), (token, "body"))
+        # A family is closed where the board carries exactly one token: `steward:` is not open.
+        self.assertEqual(
+            import_board.parse_marker("[steward:something-else]\nbody"),
+            (None, "[steward:something-else]\nbody"),
+        )
 
     def test_prose_that_merely_starts_with_a_bracket_is_never_eaten(self) -> None:
         body = "[see the note] and then the rest\nsecond line"
@@ -163,12 +184,22 @@ class CardMappingTests(unittest.TestCase):
         (task,) = result.rows["tasks"]
         self.assertTrue(task["archived"])
 
-    def test_a_card_without_project_metadata_is_refused_and_named(self) -> None:
+    def test_a_card_without_project_metadata_is_a_row_with_a_null_project(self) -> None:
+        """0002 made `tasks.project_id` nullable, so this card is a row and not a refusal (§8.6).
+
+        The assertion this replaces required the opposite — that `secretary-583` be named as
+        unwritable — and it was right for the schema it was written against.  It is the finding
+        that produced the column change, so keeping it would now assert the loss the change was
+        made to prevent.
+        """
         result = self.plan_of(pipeline=(PRODUCT, row(2, "secretary-10", meta=card_meta(project=""))))
-        self.assertEqual(result.rows["tasks"], [])
-        (refusal,) = result.report.records_not_imported
-        self.assertEqual(refusal["ref"], "secretary-10")
-        self.assertIn("tasks.project_id is NOT NULL", refusal["reason"])
+        (task,) = result.rows["tasks"]
+        self.assertIsNone(task["project_id"])
+        self.assertEqual(result.report.records_not_imported, [])
+        (approximate,) = [
+            item for item in result.report.approximate_values if item["field"] == "tasks.project_id"
+        ]
+        self.assertIn("carries no project metadata", approximate["reason"])
 
     def test_a_task_type_outside_the_vocabulary_is_refused_rather_than_defaulted(self) -> None:
         result = self.plan_of(pipeline=(PRODUCT, row(2, "secretary-10", meta=card_meta(task_type="chore"))))
@@ -185,8 +216,12 @@ class CardMappingTests(unittest.TestCase):
         )
         (task,) = result.rows["tasks"]
         self.assertEqual(task["title"], "live")
-        (refusal,) = result.report.records_not_imported
-        self.assertIn("kanboard task 3", refusal["ref"])
+        # Not a refusal: the record is the reference, the store holds it, and the archived row's
+        # comments merge into it.  Calling it a lost record is what let the old parity treat a
+        # real loss and this as the same thing.
+        self.assertEqual(result.report.records_not_imported, [])
+        (merged,) = result.report.duplicate_board_rows
+        self.assertEqual((merged["ref"], merged["merged_kanboard_task"]), ("secretary-10", 3))
 
     def test_retired_launch_modes_normalize_to_null_exactly_as_the_reader_reports_them(self) -> None:
         result = self.plan_of(
@@ -205,13 +240,28 @@ class CardMappingTests(unittest.TestCase):
             [(0, "a"), (1, "b"), (2, "c")],
         )
 
-    def test_a_dependency_on_a_card_nobody_has_is_named_not_dropped(self) -> None:
+    def test_a_dependency_on_a_card_nobody_has_is_a_row_with_an_unresolved_reference(self) -> None:
+        """0002 split `task_dependencies` in two (§3.5, §8.6), so this is a row, not a lost link.
+
+        The assertion this replaces required the row to be absent and the link to be reported.
+        That was the finding: nine `blocked_by` values on the live board name cards nobody has,
+        and all nine were dropped.  `depends_on` now always keeps the reference and
+        `depends_on_task` is the foreign key, so the dependency is queryable instead of gone.
+        """
         result = self.plan_of(
             pipeline=(PRODUCT, row(2, "secretary-10", meta=card_meta(blocked_by="ghost-1")))
         )
-        self.assertEqual(result.rows["task_dependencies"], [])
-        (link,) = result.report.links_not_imported
-        self.assertEqual((link["kind"], link["target"]), ("task_dependencies", "ghost-1"))
+        self.assertEqual(
+            result.rows["task_dependencies"],
+            [{"task_ref": "secretary-10", "depends_on": "ghost-1", "depends_on_task": None}],
+        )
+        self.assertEqual(result.report.links_not_imported, [])
+        (approximate,) = [
+            item
+            for item in result.report.approximate_values
+            if item["field"] == "task_dependencies.depends_on_task"
+        ]
+        self.assertEqual(approximate["rows"], 1)
 
     def test_a_dependency_on_a_card_that_exists_is_a_row_on_both_sides(self) -> None:
         result = self.plan_of(
@@ -222,7 +272,14 @@ class CardMappingTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            result.rows["task_dependencies"], [{"task_ref": "secretary-11", "depends_on": "secretary-10"}]
+            result.rows["task_dependencies"],
+            [
+                {
+                    "task_ref": "secretary-11",
+                    "depends_on": "secretary-10",
+                    "depends_on_task": "secretary-10",
+                }
+            ],
         )
 
 
@@ -290,20 +347,57 @@ class IssueAndProductTests(unittest.TestCase):
         self.assertEqual(result.rows["issues"], [])
         self.assertIn("issue_close_reason_matches_state", result.report.records_not_imported[0]["reason"])
 
-    def test_an_issues_metadata_key_the_table_cannot_hold_is_named(self) -> None:
+    def test_an_issues_metadata_key_the_table_does_not_name_lands_in_extensions(self) -> None:
+        """0002 gave `issues` an `extensions` bag (§8.2), so the key is kept, not merely named.
+
+        The assertion this replaces required the key to appear under "fields the schema gives no
+        home".  That report line *was* the finding — nine keys on 158 live Issue rows had nowhere
+        to go — and the column exists because of it, so the key now has a home and the per-key
+        count says where.
+        """
         result = import_board.plan(
             source(pipeline=(PRODUCT, self.issue("issue:" + "c" * 20, slug="left-over")))
         )
-        named = {item["key"] for item in result.report.fields_without_a_column}
-        self.assertIn("slug", named)
+        (stored,) = result.rows["issues"]
+        self.assertEqual(stored["extensions"], {"kanboard": {"slug": "left-over"}})
+        counted = {
+            item["key"]: item["where"]
+            for item in result.report.extensions_keys
+            if item["where"].startswith("issues.")
+        }
+        self.assertEqual(counted["slug"], "issues.extensions.kanboard")
+        self.assertNotIn("slug", {item["key"] for item in result.report.fields_without_a_column})
 
-    def test_a_comment_on_an_issue_has_no_table_and_the_report_says_so(self) -> None:
+    def test_a_comment_on_an_issue_is_a_row_in_the_third_comment_table(self) -> None:
+        """0002 added `issue_comments` (§3.7), so the 479 comments on live Issue rows land.
+
+        The assertion this replaces required a refusal naming "no table".  That refusal was the
+        largest single record loss the first import of real data found, and the table exists to
+        close it; asserting it again would assert the loss.
+        """
         card = self.issue("issue:" + "d" * 20)
         card = SourceRow(raw=card.raw, meta=card.meta, comments=(comment("[po]\nnote"),))
         result = import_board.plan(source(pipeline=(PRODUCT, card)))
         self.assertEqual(result.rows["task_comments"], [])
-        (refusal,) = [item for item in result.report.records_not_imported if "comment" in item["kind"]]
-        self.assertIn("no table", refusal["reason"])
+        (stored,) = result.rows["issue_comments"]
+        self.assertEqual((stored["issue_id"], stored["marker"], stored["body"]), ("d" * 20, "po", "note"))
+        self.assertEqual(result.report.records_not_imported, [])
+
+    def test_a_comment_on_a_product_still_has_no_table_and_is_named_one_line_each(self) -> None:
+        """§3.7 records a counted zero for Product comments rather than a fourth table, so a
+        comment on one is still a refusal — and it is named per comment, never as a count."""
+        card = SourceRow(
+            raw=PRODUCT.raw,
+            meta=PRODUCT.meta,
+            comments=(comment("[po]\nfirst", created=1), comment("[po]\nsecond", created=2)),
+        )
+        result = import_board.plan(source(pipeline=(card,)))
+        refusals = [item for item in result.report.records_not_imported if "comment" in item["kind"]]
+        self.assertEqual(len(refusals), 2)
+        self.assertEqual(
+            sorted(item["ref"] for item in refusals),
+            ["product:secretary#comment-1", "product:secretary#comment-2"],
+        )
 
     def test_a_product_carries_its_projects_as_rows(self) -> None:
         result = import_board.plan(
@@ -358,12 +452,71 @@ class SprintMappingTests(unittest.TestCase):
         ]
         self.assertEqual(approximate["rows"], 1)
 
-    def test_a_reference_that_is_not_a_number_is_refused_because_the_key_is_an_integer(self) -> None:
+    def test_a_reference_that_carries_no_number_is_a_row_with_a_null_number(self) -> None:
+        """0002 made `sprints.ref` the primary key (§3.3, §9), so an unnumbered reference is a row.
+
+        The assertion this replaces required `sprint:canary-20260813` to be refused because the
+        key was `sprint_number integer`.  Two live sprints spell their reference that way and
+        `secretary-1438`/`secretary-1439` lost their sprint link over it, which is why the key
+        moved; asserting the refusal again would assert that loss.
+        """
         result = import_board.plan(
             source(sprints=(row(9, "sprint:canary-20260813", meta={"sprint_goal": "g"}),))
         )
+        (stored,) = result.rows["sprints"]
+        self.assertEqual(stored["ref"], "sprint:canary-20260813")
+        self.assertIsNone(stored["sprint_number"])
+        self.assertEqual(result.report.records_not_imported, [])
+
+    def test_a_reference_that_is_not_a_sprint_reference_at_all_is_refused_and_named(self) -> None:
+        result = import_board.plan(source(sprints=(row(9, "not-a-sprint", meta={"sprint_goal": "g"}),)))
         self.assertEqual(result.rows["sprints"], [])
-        self.assertIn("sprint:<N>", result.report.records_not_imported[0]["reason"])
+        (refusal,) = result.report.records_not_imported
+        self.assertEqual(refusal["ref"], "not-a-sprint")
+        self.assertIn("sprint_ref_is_a_sprint_reference", refusal["reason"])
+
+    def test_an_archived_duplicate_reference_keeps_its_record_under_a_distinguishing_one(self) -> None:
+        """§9 option 1, which is what this card runs while the owner's answer is outstanding."""
+        result = import_board.plan(
+            source(
+                sprints=(
+                    sprint_row(748, 1037, comments=(comment("[po]\nthe live one"),)),
+                    sprint_row(
+                        1037,
+                        1037,
+                        active=0,
+                        comments=(comment("[po]\nthe archived one", created=1_700_000_060),),
+                    ),
+                )
+            )
+        )
+        stored = {item["ref"]: item for item in result.rows["sprints"]}
+        self.assertEqual(set(stored), {"sprint:1037", "sprint:1037-archived-1037"})
+        self.assertEqual(stored["sprint:1037"]["sprint_number"], 1037)
+        # The distinguishing reference is deliberately not `sprint:<N>`, so it holds no number and
+        # cannot collide with the live row on UNIQUE (sprint_number).
+        self.assertIsNone(stored["sprint:1037-archived-1037"]["sprint_number"])
+        self.assertEqual(
+            stored["sprint:1037-archived-1037"]["source_audit"][
+                import_board.SOURCE_AUDIT_ORIGINAL_REF
+            ],
+            "sprint:1037",
+        )
+        # One report line, so the owner's other choice can be applied to exactly these rows.
+        (named,) = result.report.disambiguated_references
+        self.assertEqual(
+            (named["original_ref"], named["stored_ref"], named["kanboard_task"]),
+            ("sprint:1037", "sprint:1037-archived-1037", 1037),
+        )
+        self.assertEqual(result.report.records_not_imported, [])
+        # Both journals survive, and neither is merged into the other.
+        self.assertEqual(
+            sorted((item["sprint_ref"], item["body"]) for item in result.rows["sprint_comments"]),
+            [
+                ("sprint:1037", "the live one"),
+                ("sprint:1037-archived-1037", "the archived one"),
+            ],
+        )
 
     def test_the_current_task_cursor_is_scoped_to_the_sprints_own_cards(self) -> None:
         result = import_board.plan(
@@ -381,8 +534,8 @@ class SprintMappingTests(unittest.TestCase):
                 sprints=(sprint_row(9, 100, sprint_current_task="secretary-10"), sprint_row(8, 101)),
             )
         )
-        stored = {item["sprint_number"]: item for item in result.rows["sprints"]}
-        self.assertIsNone(stored[100]["current_task_ref"])
+        stored = {item["ref"]: item for item in result.rows["sprints"]}
+        self.assertIsNone(stored["sprint:100"]["current_task_ref"])
         (link,) = [
             item for item in result.report.links_not_imported if item["kind"] == "sprints.current_task_ref"
         ]
@@ -398,10 +551,10 @@ class SprintMappingTests(unittest.TestCase):
                 registry=(registry_entry("secretary", "/home/dev/secretary"),),
             )
         )
-        held = {item["sprint_number"]: item for item in result.rows["sprint_projects"]}
-        self.assertFalse(held[100]["reserved"])
-        self.assertIsNotNone(held[100]["released_at"])
-        self.assertTrue(held[101]["reserved"])
+        held = {item["sprint_ref"]: item for item in result.rows["sprint_projects"]}
+        self.assertFalse(held["sprint:100"]["reserved"])
+        self.assertIsNotNone(held["sprint:100"]["released_at"])
+        self.assertTrue(held["sprint:101"]["reserved"])
 
     def test_a_second_live_reservation_of_one_project_is_refused_by_name(self) -> None:
         result = import_board.plan(
@@ -426,7 +579,7 @@ class SprintMappingTests(unittest.TestCase):
         result = import_board.plan(source(sprints=(sprint_row(9, 100, sprint_resume=resume),)))
         (stored,) = result.rows["sprint_resumes"]
         self.assertEqual(stored["selected_step"], "a")
-        self.assertEqual(stored["sprint_number"], 100)
+        self.assertEqual(stored["sprint_ref"], "sprint:100")
 
     def test_a_resume_missing_a_required_field_is_refused_not_padded(self) -> None:
         result = import_board.plan(source(sprints=(sprint_row(9, 100, sprint_resume='{"selected_step":"a"}'),)))
@@ -684,3 +837,165 @@ class ReportShapeTests(unittest.TestCase):
         checks = import_board.parity(board, result.rows, result.report)
         self.assertFalse(checks["ok"])
         self.assertTrue(any(not check["ok"] for check in checks["identifiers"]))
+
+
+class ParityTests(unittest.TestCase):
+    """DoD 4's check, and the two ways the previous revision of it could not fail.
+
+    A reviewer of `secretary-1583` found both on one run.  Parity returned **PASS** over an import
+    that had just declined to write 479 comments, because every axis subtracted the report's own
+    refusals from what it expected to find; and the reviewer then edited the body of a stored
+    *sprint* comment from `original` to `altered` and parity still returned `True`, because the
+    content axis compared card comments and nothing else.  Both are tests here.
+    """
+
+    def board(self) -> BoardSource:
+        issue = SourceRow(
+            raw=row(5, "issue:" + "a" * 20, column=1).raw,
+            meta={
+                "record_type": "issue",
+                "issue_product": "secretary",
+                "issue_kind": "bug",
+                "issue_priority": "P1",
+            },
+            comments=(comment("[po]\noriginal issue note"),),
+        )
+        card = row(
+            2,
+            "secretary-10",
+            meta=card_meta(sprint_ref="sprint:100"),
+            comments=(comment("[po]\noriginal card note"),),
+        )
+        sprint = sprint_row(9, 100, comments=(comment("[po]\noriginal"),))
+        return source(pipeline=(PRODUCT, issue, card), sprints=(sprint,))
+
+    def parity_of(self, board: BoardSource, rows=None, report=None):
+        result = import_board.plan(board)
+        return import_board.parity(board, rows if rows is not None else result.rows,
+                                   report if report is not None else result.report)
+
+    def test_a_whole_board_that_landed_is_the_only_thing_a_green_parity_means(self) -> None:
+        checks = self.parity_of(self.board())
+        self.assertTrue(checks["ok"], checks)
+        self.assertEqual(checks["records_missing"], [])
+
+    def test_a_refused_record_is_not_an_excuse_and_parity_fails(self) -> None:
+        """The reviewer's first finding: a named refusal used to make the axis pass."""
+        board = source(
+            pipeline=(PRODUCT, row(2, "secretary-10", meta=card_meta(task_type="chore"))),
+        )
+        result = import_board.plan(board)
+        # The card really is refused, by name and with a reason — and that is still not a pass.
+        self.assertEqual([item["ref"] for item in result.report.records_not_imported], ["secretary-10"])
+        checks = import_board.parity(board, result.rows, result.report)
+        self.assertFalse(checks["ok"])
+        self.assertTrue(any(not check["ok"] for check in checks["counts"]))
+        self.assertTrue(any(not check["ok"] for check in checks["identifiers"]))
+
+    def test_every_record_the_store_is_missing_is_named_one_line_each(self) -> None:
+        """DoD 2: an aggregate names a number; a report has to name the records."""
+        board = self.board()
+        result = import_board.plan(board)
+        result.rows["issue_comments"] = []
+        result.rows["sprint_comments"] = []
+        checks = import_board.parity(board, result.rows, result.report)
+        self.assertFalse(checks["ok"])
+        self.assertEqual(
+            sorted((item["kind"], item["id"]) for item in checks["records_missing"]),
+            [
+                ("issue comment", "issue:" + "a" * 20 + "#comment-1700000050"),
+                ("sprint comment", "sprint:100#comment-1700000050"),
+            ],
+        )
+        # And nothing named them, which is itself the defect the accounting axis reports.
+        self.assertTrue(any(not check["ok"] for check in checks["accounting"]))
+
+    def test_a_refusal_that_names_a_record_the_store_holds_is_a_false_alarm(self) -> None:
+        board = self.board()
+        result = import_board.plan(board)
+        result.report.record_not_imported(
+            kind="card", ref="secretary-10", reason="a refusal of a card that is in fact stored"
+        )
+        checks = import_board.parity(board, result.rows, result.report)
+        self.assertFalse(checks["ok"])
+        (failed,) = [check for check in checks["accounting"] if not check["ok"]]
+        self.assertIn("really absent", failed["name"])
+
+    def test_an_altered_sprint_comment_body_fails_the_content_axis(self) -> None:
+        """The reviewer's second finding, verbatim: `original` -> `altered` on a *sprint* comment."""
+        board = self.board()
+        result = import_board.plan(board)
+        (stored,) = result.rows["sprint_comments"]
+        self.assertEqual(stored["body"], "original")
+        stored["body"] = "altered"
+        checks = import_board.parity(board, result.rows, result.report)
+        self.assertFalse(checks["ok"])
+        (failed,) = [check for check in checks["content"] if not check["ok"]]
+        self.assertIn("sprint_comments", failed["name"])
+
+    def test_an_altered_issue_comment_body_fails_the_content_axis(self) -> None:
+        board = self.board()
+        result = import_board.plan(board)
+        (stored,) = result.rows["issue_comments"]
+        stored["body"] = "altered"
+        checks = import_board.parity(board, result.rows, result.report)
+        self.assertFalse(checks["ok"])
+        (failed,) = [check for check in checks["content"] if not check["ok"]]
+        self.assertIn("issue_comments", failed["name"])
+
+    def test_an_altered_card_comment_body_still_fails_the_content_axis(self) -> None:
+        board = self.board()
+        result = import_board.plan(board)
+        (stored,) = result.rows["task_comments"]
+        stored["body"] = "altered"
+        checks = import_board.parity(board, result.rows, result.report)
+        self.assertFalse(checks["ok"])
+        (failed,) = [check for check in checks["content"] if not check["ok"]]
+        self.assertIn("task_comments", failed["name"])
+
+    def test_an_altered_marker_fails_the_content_axis_too(self) -> None:
+        board = self.board()
+        result = import_board.plan(board)
+        result.rows["sprint_comments"][0]["marker"] = "observer"
+        checks = import_board.parity(board, result.rows, result.report)
+        self.assertFalse(checks["ok"])
+
+    def test_all_three_comment_tables_are_counted_and_compared(self) -> None:
+        checks = self.parity_of(self.board())
+        counted = [check for check in checks["counts"] if "three tables" in check["name"]]
+        self.assertEqual(len(counted), 1)
+        compared = {
+            check["name"] for check in checks["content"] if "as a multiset" in check["name"]
+        }
+        self.assertEqual(
+            compared,
+            {
+                f"{table}: owner, second, marker and body, as a multiset"
+                for table, _column in import_board.COMMENT_TABLES
+            },
+        )
+
+    def test_the_disambiguated_archived_sprint_is_parity_clean_and_named(self) -> None:
+        """§9 option 1: both records land, so parity is green *and* the report says what happened."""
+        board = source(
+            sprints=(
+                sprint_row(748, 1037, comments=(comment("[po]\nlive"),)),
+                sprint_row(1037, 1037, active=0, comments=(comment("[po]\narchived", created=1_700_000_060),)),
+            )
+        )
+        result = import_board.plan(board)
+        checks = import_board.parity(board, result.rows, result.report)
+        self.assertTrue(checks["ok"], checks)
+        self.assertEqual(len(result.report.disambiguated_references), 1)
+        rendered = import_board.render(result.report)
+        self.assertIn("references disambiguated at import", rendered)
+        self.assertIn("sprint:1037-archived-1037", rendered)
+
+    def test_the_rendered_report_lists_the_missing_records_by_name(self) -> None:
+        board = self.board()
+        result = import_board.plan(board)
+        result.rows["issue_comments"] = []
+        result.report.parity = import_board.parity(board, result.rows, result.report)
+        rendered = import_board.render(result.report)
+        self.assertIn("parity: FAIL", rendered)
+        self.assertIn("MISSING issue comment issue:" + "a" * 20 + "#comment-1700000050", rendered)

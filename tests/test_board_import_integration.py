@@ -162,7 +162,7 @@ def synthetic_board() -> BoardSource:
                 "codex_launch_mode": "exec",
             },
         ),
-        # Refused, named, and never silently dropped: no project metadata at all.
+        # A row since 0002: no project metadata at all, so `tasks.project_id` is NULL (§8.6).
         _row(13, "secretary-13", is_active=0, meta={"record_type": "task", "task_type": "code"}),
     )
     sprints = (
@@ -211,8 +211,17 @@ def synthetic_board() -> BoardSource:
                 "sprint_observer": '{"kind":"none"}',
             },
         ),
-        # Refused: §3.3 makes the number the primary key and this reference has none.
+        # A row since 0002: the reference is the primary key, so an unnumbered one is storable.
         _row(102, "sprint:canary-20260813", meta={"sprint_goal": "a canary"}),
+        # The shape of `sprint:1037` on the live board: one reference, a live row and an archived
+        # one.  §9 option 1 stores the archived row under a distinguishing reference.
+        _row(
+            103,
+            "sprint:101",
+            is_active=0,
+            meta={"sprint_goal": "the archived twin", "sprint_definition_of_done": "dod"},
+            comments=(_comment("[po]\nthe archived twin's own journal", created=1_700_000_600),),
+        ),
     )
     return BoardSource(
         pipeline=(product, *issues, *cards),
@@ -273,6 +282,30 @@ def synthetic_board() -> BoardSource:
                 },
             },
         ),
+    )
+
+
+def board_with_a_record_the_schema_cannot_carry() -> BoardSource:
+    """The same board plus one card no column can hold: `task_type` outside the vocabulary.
+
+    Refused, named, and never silently dropped — and, since 2026-09-07, never an excuse either:
+    the record is on the board and not in the store, so parity is red over it.
+    """
+    board = synthetic_board()
+    refused = _row(
+        14,
+        "secretary-14",
+        meta={"record_type": "task", "project": "secretary", "task_type": "chore"},
+        comments=(_comment("[po]\na comment of a card nobody stores", created=1_700_000_700),),
+    )
+    return BoardSource(
+        pipeline=(*board.pipeline, refused),
+        sprints=board.sprints,
+        pipeline_columns=board.pipeline_columns,
+        pipeline_swimlanes=board.pipeline_swimlanes,
+        registry=board.registry,
+        budget_records=board.budget_records,
+        transaction_documents=board.transaction_documents,
     )
 
 
@@ -377,11 +410,13 @@ class BoardImportIntegrationTests(unittest.TestCase):
 
     def test_the_whole_plan_commits_under_the_app_role_alone(self) -> None:
         written, stored = self.imported()
-        self.assertEqual(written["tasks"], 3)
-        self.assertEqual(len(stored["tasks"]), 3)
+        self.assertEqual(written["tasks"], 4)
+        self.assertEqual(len(stored["tasks"]), 4)
         # secretary_app has no CREATE (§5.5), so a committed run is the proof this needs no DDL.
-        self.assertEqual({row["task_ref"] for row in stored["tasks"]},
-                         {"secretary-10", "secretary-11", "secretary-12"})
+        self.assertEqual(
+            {row["task_ref"] for row in stored["tasks"]},
+            {"secretary-10", "secretary-11", "secretary-12", "secretary-13"},
+        )
 
     def test_the_archived_card_and_the_closed_issue_are_rows_like_any_other(self) -> None:
         _, stored = self.imported()
@@ -390,20 +425,61 @@ class BoardImportIntegrationTests(unittest.TestCase):
         closed = {row["issue_id"]: (row["state"], row["close_reason"]) for row in stored["issues"]}
         self.assertEqual(closed[ISSUE_B.removeprefix("issue:")], ("closed", "resolved"))
 
+    def test_a_card_with_no_project_metadata_is_a_row_with_a_null_project(self) -> None:
+        """0002 made the column nullable (§8.6); before it, this card was the import's one loss."""
+        _, stored = self.imported()
+        by_ref = {row["task_ref"]: row for row in stored["tasks"]}
+        self.assertIsNone(by_ref["secretary-13"]["project_id"])
+        self.assertIsNotNone(by_ref["secretary-13"]["task_number"])
+
+    def test_a_dependency_on_a_card_the_board_does_not_hold_is_a_row(self) -> None:
+        _, stored = self.imported()
+        by_ref = {row["task_ref"]: row for row in stored["task_dependencies"]}
+        self.assertEqual(by_ref["secretary-12"]["depends_on"], "ghost-1")
+        self.assertIsNone(by_ref["secretary-12"]["depends_on_task"])
+        self.assertEqual(by_ref["secretary-11"]["depends_on_task"], "secretary-10")
+
     def test_the_two_deferred_sprint_cursors_land_in_the_same_transaction_as_their_targets(self) -> None:
         _, stored = self.imported()
-        sprints = {row["sprint_number"]: row for row in stored["sprints"]}
-        self.assertEqual(sprints[100]["current_task_ref"], "secretary-10")
-        self.assertIsNotNone(sprints[100]["resume_id"])
+        sprints = {row["ref"]: row for row in stored["sprints"]}
+        self.assertEqual(sprints["sprint:100"]["current_task_ref"], "secretary-10")
+        self.assertIsNotNone(sprints["sprint:100"]["resume_id"])
         resumes = {row["resume_id"]: row for row in stored["sprint_resumes"]}
-        self.assertEqual(resumes[sprints[100]["resume_id"]]["sprint_number"], 100)
+        self.assertEqual(resumes[sprints["sprint:100"]["resume_id"]]["sprint_ref"], "sprint:100")
+
+    def test_an_unnumbered_sprint_reference_is_a_row_that_holds_no_number(self) -> None:
+        _, stored = self.imported()
+        sprints = {row["ref"]: row for row in stored["sprints"]}
+        self.assertIsNone(sprints["sprint:canary-20260813"]["sprint_number"])
+        self.assertEqual(sprints["sprint:100"]["sprint_number"], 100)
+
+    def test_the_archived_twin_of_a_reference_keeps_its_record_and_its_provenance(self) -> None:
+        """§9 option 1, executed: two rows, two references, one original spelling kept."""
+        _, stored = self.imported()
+        sprints = {row["ref"]: row for row in stored["sprints"]}
+        twin = sprints["sprint:101-archived-103"]
+        self.assertIsNone(twin["sprint_number"])
+        self.assertEqual(
+            twin["source_audit"][import_board.SOURCE_AUDIT_ORIGINAL_REF], "sprint:101"
+        )
+        self.assertEqual(
+            [row["body"] for row in stored["sprint_comments"] if row["sprint_ref"] == twin["ref"]],
+            ["the archived twin's own journal"],
+        )
+        (named,) = self.plan.report.disambiguated_references
+        self.assertEqual(named["stored_ref"], "sprint:101-archived-103")
 
     def test_the_generated_ref_columns_carry_the_boards_own_spellings(self) -> None:
         self.imported()
         with self.engine("read").connect() as connection:
             self.assertEqual(
                 sorted(value for (value,) in connection.exec_driver_sql("SELECT ref FROM sprints")),
-                ["sprint:100", "sprint:101"],
+                [
+                    "sprint:100",
+                    "sprint:101",
+                    "sprint:101-archived-103",
+                    "sprint:canary-20260813",
+                ],
             )
             self.assertEqual(
                 sorted(value for (value,) in connection.exec_driver_sql("SELECT ref FROM issues")),
@@ -412,6 +488,14 @@ class BoardImportIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 [value for (value,) in connection.exec_driver_sql("SELECT ref FROM products")],
                 ["product:secretary"],
+            )
+            # `issue_comments.issue_ref` is generated too, and is what its claim key joins on.
+            self.assertEqual(
+                sorted(
+                    value
+                    for (value,) in connection.exec_driver_sql("SELECT issue_ref FROM issue_comments")
+                ),
+                [ISSUE_A],
             )
 
     def test_the_budget_counters_became_rows_that_claim_their_requests(self) -> None:
@@ -434,13 +518,28 @@ class BoardImportIntegrationTests(unittest.TestCase):
         _, stored = self.imported()
         by_body = {row["body"]: row for row in stored["task_comments"]}
         self.assertEqual(by_body["it is done"]["marker"], "report:done")
-        # §8.1's vocabulary does not know `validate:*`, so the body is kept whole and unmarked.
-        unrecognized = by_body["[validate:ci-green]\nthe run was green"]
-        self.assertIsNone(unrecognized["marker"])
+        # §8.1 knows `validate:*` since 2026-09-07, on the live board's own evidence.
+        self.assertEqual(by_body["the run was green"]["marker"], "validate:ci-green")
         self.assertIsNone(by_body["plain prose with no marker at all"]["marker"])
         self.assertEqual(
-            [row["body"] for row in stored["sprint_comments"]], ["what happened"]
+            sorted(row["body"] for row in stored["sprint_comments"]),
+            ["the archived twin's own journal", "what happened"],
         )
+
+    def test_a_comment_on_an_issue_is_a_row_in_the_table_0002_added(self) -> None:
+        """479 comments on live Issue rows had no table; this is the one that holds them."""
+        _, stored = self.imported()
+        (issue_comment,) = stored["issue_comments"]
+        self.assertEqual(issue_comment["issue_id"], ISSUE_A.removeprefix("issue:"))
+        self.assertEqual(issue_comment["marker"], "po")
+        self.assertEqual(issue_comment["body"], "an issue comment with no table")
+
+    def test_an_issue_keeps_the_metadata_keys_the_schema_does_not_name(self) -> None:
+        _, stored = self.imported()
+        by_id = {row["issue_id"]: row for row in stored["issues"]}
+        self.assertEqual(by_id[ISSUE_B.removeprefix("issue:")]["extensions"], {})
+        counted = {item["where"] for item in self.plan.report.extensions_keys}
+        self.assertIn("tasks.extensions.kanboard", counted)
 
     def test_the_released_reservation_is_history_and_the_live_one_is_unique(self) -> None:
         _, stored = self.imported()
@@ -456,8 +555,8 @@ class BoardImportIntegrationTests(unittest.TestCase):
         self.assertEqual(by_path["/home/dev/secretary"]["role"], "primary")
         self.assertEqual(by_path["/home/dev/secretary-wt"]["role"], "curator_root")
         self.assertEqual(
-            {(row["sprint_number"], row["path"]) for row in stored["sprint_repositories"]},
-            {(100, "/home/dev/secretary"), (100, "secretary-instance")},
+            {(row["sprint_ref"], row["path"]) for row in stored["sprint_repositories"]},
+            {("sprint:100", "/home/dev/secretary"), ("sprint:100", "secretary-instance")},
         )
 
     def test_task_issues_is_empty_and_the_report_says_why(self) -> None:
@@ -468,17 +567,46 @@ class BoardImportIntegrationTests(unittest.TestCase):
 
     # --- parity -----------------------------------------------------------------------
 
-    def test_parity_passes_over_the_rows_postgresql_actually_holds(self) -> None:
+    def test_parity_is_green_only_when_the_whole_board_is_in_the_database(self) -> None:
         _, stored = self.imported()
         checks = import_board.parity(self.source, stored, self.plan.report)
         failures = [
             check
-            for axis in ("counts", "identifiers", "links", "content")
+            for axis in import_board.PARITY_AXES
             for check in checks[axis]
             if not check["ok"]
         ]
         self.assertEqual(failures, [], "parity must hold against the database, not against the plan")
+        self.assertEqual(checks["records_missing"], [])
         self.assertTrue(checks["ok"])
+
+    def test_a_refused_card_makes_parity_red_over_the_real_database(self) -> None:
+        """A record the schema cannot carry is named, with a reason — and is still not a pass.
+
+        This is the reviewer's first finding, executed: the run that refused 479 comments returned
+        PASS because each axis subtracted the report's own refusals from what it expected.  A
+        green parity is the claim "the whole board is in the store", and here it is not.
+        """
+        board = board_with_a_record_the_schema_cannot_carry()
+        plan = import_board.plan(board)
+        with self.engine("app").connect() as connection:
+            import_board.apply(plan, connection)
+            stored = import_board.fetch_rows(connection)
+        self.assertIn(
+            "secretary-14", {item["ref"] for item in plan.report.records_not_imported}
+        )
+        checks = import_board.parity(board, stored, plan.report)
+        self.assertFalse(checks["ok"])
+        # Named one line each, with the reason the plan gave — the card and its comment both.
+        self.assertEqual(
+            sorted((item["kind"], item["id"]) for item in checks["records_missing"]),
+            [
+                ("card", "secretary-14"),
+                ("card comment", "secretary-14#comment-1700000700"),
+            ],
+        )
+        # And the accounting axis is green, because both were named rather than lost silently.
+        self.assertTrue(all(check["ok"] for check in checks["accounting"]))
 
     def test_parity_notices_a_row_that_vanished_between_the_plan_and_the_database(self) -> None:
         with self.engine("app").connect() as connection:
@@ -490,6 +618,70 @@ class BoardImportIntegrationTests(unittest.TestCase):
         checks = import_board.parity(self.source, stored, self.plan.report)
         self.assertFalse(checks["ok"])
         self.assertTrue(any(not check["ok"] for check in checks["identifiers"]))
+        self.assertIn(
+            ("card", "secretary-12"),
+            {(item["kind"], item["id"]) for item in checks["records_missing"]},
+        )
+
+    def test_a_comment_deleted_from_the_database_is_named_by_its_own_identifier(self) -> None:
+        """DoD 2 against PostgreSQL: one line per comment, not a count of them."""
+        with self.engine("app").connect() as connection:
+            import_board.apply(self.plan, connection)
+            connection.rollback()
+            with connection.begin():
+                connection.exec_driver_sql("DELETE FROM issue_comments")
+                connection.exec_driver_sql(
+                    "DELETE FROM sprint_comments WHERE body = 'what happened'"
+                )
+            stored = import_board.fetch_rows(connection)
+        checks = import_board.parity(self.source, stored, self.plan.report)
+        self.assertFalse(checks["ok"])
+        named = {(item["kind"], item["id"]) for item in checks["records_missing"]}
+        self.assertEqual(
+            named,
+            {
+                ("issue comment", f"{ISSUE_A}#comment-1700000200"),
+                ("sprint comment", "sprint:100#comment-1700000200"),
+            },
+        )
+        self.assertTrue(any(not check["ok"] for check in checks["accounting"]))
+
+    def test_an_altered_sprint_comment_body_in_the_database_fails_the_content_axis(self) -> None:
+        """The reviewer's finding of 2026-09-07, executed against PostgreSQL rather than a dict."""
+        stored = self._altered("sprint_comments", "what happened")
+        checks = import_board.parity(self.source, stored, self.plan.report)
+        self.assertFalse(checks["ok"])
+        (failed,) = [check for check in checks["content"] if not check["ok"]]
+        self.assertIn("sprint_comments", failed["name"])
+
+    def test_an_altered_issue_comment_body_in_the_database_fails_the_content_axis(self) -> None:
+        stored = self._altered("issue_comments", "an issue comment with no table")
+        checks = import_board.parity(self.source, stored, self.plan.report)
+        self.assertFalse(checks["ok"])
+        (failed,) = [check for check in checks["content"] if not check["ok"]]
+        self.assertIn("issue_comments", failed["name"])
+
+    def test_an_altered_card_comment_body_in_the_database_fails_the_content_axis(self) -> None:
+        stored = self._altered("task_comments", "it is done")
+        checks = import_board.parity(self.source, stored, self.plan.report)
+        self.assertFalse(checks["ok"])
+        (failed,) = [check for check in checks["content"] if not check["ok"]]
+        self.assertIn("task_comments", failed["name"])
+
+    def _altered(self, table: str, body: str):
+        """Import, then rewrite one stored comment body from its original to `altered`."""
+        import sqlalchemy as sa
+
+        with self.engine("app").connect() as connection:
+            import_board.apply(self.plan, connection)
+            connection.rollback()
+            with connection.begin():
+                changed = connection.execute(
+                    sa.text(f"UPDATE {table} SET body = 'altered' WHERE body = :body"),
+                    {"body": body},
+                ).rowcount
+            self.assertEqual(changed, 1, f"{table} had no row spelling {body!r}")
+            return import_board.fetch_rows(connection)
 
     # --- running it twice --------------------------------------------------------------
 
@@ -502,8 +694,9 @@ class BoardImportIntegrationTests(unittest.TestCase):
             self.assertIn("tasks", str(refusal.exception))
             connection.rollback()
             stored = import_board.fetch_rows(connection)
-        self.assertEqual(len(stored["tasks"]), 3)
+        self.assertEqual(len(stored["tasks"]), 4)
         self.assertEqual(len(stored["task_comments"]), 3)
+        self.assertEqual(len(stored["issue_comments"]), 1)
 
     def test_a_fresh_database_after_migrate_reproduces_the_same_import(self) -> None:
         _, first = self.imported()
@@ -521,7 +714,7 @@ class BoardImportIntegrationTests(unittest.TestCase):
 
     def test_the_schema_revision_is_asserted_before_anything_is_written(self) -> None:
         with self.engine("app").connect() as connection:
-            self.assertEqual(migrate.assert_schema_revision(connection), "0001_initial")
+            self.assertEqual(migrate.assert_schema_revision(connection), "0002_board_gaps")
 
     def test_the_read_role_can_query_the_imported_board_and_cannot_write_it(self) -> None:
         import sqlalchemy as sa
@@ -529,6 +722,6 @@ class BoardImportIntegrationTests(unittest.TestCase):
         self.imported()
         with self.engine("read").connect() as connection:
             (cards,) = connection.exec_driver_sql("SELECT count(*) FROM tasks").fetchone()
-            self.assertEqual(cards, 3)
+            self.assertEqual(cards, 4)
             with self.assertRaises(sa.exc.ProgrammingError):
                 connection.exec_driver_sql("DELETE FROM tasks")
