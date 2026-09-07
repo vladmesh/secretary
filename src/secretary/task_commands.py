@@ -8,12 +8,12 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
+from secretary.board.backend import card_client
 from secretary.cli_output import print_json
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import (
     _BLOCK_CLASSIFICATIONS,
-    KanboardClient,
     TaskAudit,
     TaskError,
     TaskReader,
@@ -266,7 +266,7 @@ def run_task_repair_references_preview(args: argparse.Namespace) -> int:
 
     return run_task_command(
         lambda: preview_reference_repair(
-            TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args))
+            TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
         )
     )
 
@@ -276,7 +276,7 @@ def run_task_repair_references_apply(args: argparse.Namespace) -> int:
 
     return run_task_command(
         lambda: apply_reference_repair(
-            TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args)),
+            TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args)),
             plan_id=args.plan_id,
             task_ids=args.task_id,
             reason=_read_body(args.reason_file),
@@ -287,7 +287,7 @@ def run_task_repair_references_apply(args: argparse.Namespace) -> int:
 
 
 def _run_task_read(args: argparse.Namespace, operation: Callable[[TaskReader], object]) -> int:
-    return run_task_command(lambda: operation(TaskReader(KanboardClient.for_instance(_instance(args)))))
+    return run_task_command(lambda: operation(TaskReader(card_client(_instance(args)))))
 
 
 def run_task_command(
@@ -314,7 +314,7 @@ def _read_body(path: str | None) -> str:
 def _run_task_write(args: argparse.Namespace, operation: Callable[[TaskWriter, str, str], object]) -> int:
     def command() -> object:
         body = _read_body(getattr(args, "body_file", None) or getattr(args, "reason_file", None))
-        writer = TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args))
+        writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
         return operation(writer, body, args.actor or args.role)
 
     return run_task_command(command)
@@ -333,7 +333,7 @@ def run_task_create(args: argparse.Namespace) -> int:
     def command() -> object:
         _validate_codex_mode_for_create(args)
         description = _read_body(args.body_file) if args.body_file else args.description
-        writer = TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args))
+        writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
         return writer.create(
             role=args.role,
             actor=args.actor or args.role,
@@ -367,7 +367,7 @@ def run_task_create(args: argparse.Namespace) -> int:
 def run_task_edit(args: argparse.Namespace) -> int:
     def command() -> object:
         description = _read_body(args.body_file) if args.body_file else args.description
-        writer = TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args))
+        writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
         return writer.edit(
             role=args.role,
             actor=args.actor or args.role,
@@ -475,7 +475,7 @@ def run_task_claim(args: argparse.Namespace) -> int:
 def run_task_reconcile_audit(args: argparse.Namespace) -> int:
     def command() -> object:
         repaired, unresolved = TaskWriter(
-            KanboardClient.for_instance(_instance(args)),
+            card_client(_instance(args)),
             data_dir=resolve_data_dir(args),
         ).reconcile()
         return {"repaired": repaired, "unresolved": unresolved}

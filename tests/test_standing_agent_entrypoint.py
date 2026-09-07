@@ -89,7 +89,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
                 {"SECRETARY_INSTANCE": "/instance", "SECRETARY_DATA_DIR": "/audit"},
                 clear=False,
             ),
-            mock.patch.object(standing_agent.KanboardClient, "for_instance", return_value=client) as factory,
+            mock.patch.object(standing_agent, "card_client", return_value=client) as factory,
             mock.patch.object(standing_agent, "TaskWriter", Writer),
             mock.patch.object(standing_agent.dispatch, "run", return_value=0) as run,
         ):
@@ -107,8 +107,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
         )
 
     def test_report_board_is_lazy_until_runtime_needs_a_report(self) -> None:
-        with mock.patch.object(
-            standing_agent.KanboardClient, "for_instance", side_effect=AssertionError("client")
+        with mock.patch.object(standing_agent, "card_client", side_effect=AssertionError("client")
         ):
             board = standing_agent._report_board()
         self.assertIsInstance(board, StewardReportBoard)
@@ -148,8 +147,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
 
     def test_retro_cleanup_port_is_lazy_and_only_passed_to_cleanup_commands(self) -> None:
         with (
-            mock.patch.object(
-                standing_agent.KanboardClient, "for_instance", side_effect=AssertionError("client")
+            mock.patch.object(standing_agent, "card_client", side_effect=AssertionError("client")
             ),
             mock.patch.object(retro_cli, "main", return_value=8) as main,
         ):
@@ -166,9 +164,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
             state = AgentState("retro", state_dir=Path(tmp) / "state")
             with (
                 mock.patch.object(retro_cli, "STATE", state),
-                mock.patch.object(
-                    standing_agent.KanboardClient,
-                    "for_instance",
+                mock.patch.object(standing_agent, "card_client",
                     side_effect=TaskError("backend_unavailable", "transport unavailable", 1),
                 ),
             ):
@@ -185,7 +181,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": tmp}, clear=False),
-            mock.patch.object(standing_agent.KanboardClient, "for_instance", return_value=object()),
+            mock.patch.object(standing_agent, "card_client", return_value=object()),
             mock.patch.object(standing_agent, "TaskReader", return_value=Reader()),
             mock.patch.object(standing_agent, "TaskWriter", return_value=Writer()),
             self.assertRaises(KanboardUnreachable),
@@ -198,7 +194,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
             mock.patch.dict(
                 os.environ, {"SECRETARY_INSTANCE": "/instance", "SECRETARY_DATA_DIR": ""}, clear=False
             ),
-            mock.patch.object(standing_agent.KanboardClient, "for_instance", return_value=object()),
+            mock.patch.object(standing_agent, "card_client", return_value=object()),
             mock.patch.object(standing_agent, "instance_data_dir", side_effect=DataDirError("bad instance")),
             self.assertRaisesRegex(DataDirError, "bad instance"),
         ):
@@ -214,9 +210,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
                     "scan",
                     side_effect=lambda reader: reader.active_cards(),
                 ),
-                mock.patch.object(
-                    standing_agent.KanboardClient,
-                    "for_instance",
+                mock.patch.object(standing_agent, "card_client",
                     side_effect=TaskError("backend_unavailable", "transport unavailable", 1),
                 ) as factory,
             ):
@@ -232,8 +226,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
             state = AgentState("steward", state_dir=Path(tmp) / "state")
             with (
                 mock.patch.object(steward_cli, "STATE", state),
-                mock.patch.object(
-                    standing_agent.KanboardClient, "for_instance", side_effect=AssertionError("client")
+                mock.patch.object(standing_agent, "card_client", side_effect=AssertionError("client")
                 ),
             ):
                 self.assertEqual(standing_agent.main(["steward", "advance"]), 1)
@@ -248,9 +241,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
                     "scan",
                     side_effect=lambda reader: reader.active_cards(),
                 ),
-                mock.patch.object(
-                    standing_agent.KanboardClient,
-                    "for_instance",
+                mock.patch.object(standing_agent, "card_client",
                     side_effect=TaskError("backend_error", "bad board response", 1),
                 ),
             ):
@@ -270,7 +261,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
                     "scan",
                     side_effect=lambda reader: reader.active_cards(),
                 ),
-                mock.patch.object(standing_agent.KanboardClient, "for_instance", return_value=object()),
+                mock.patch.object(standing_agent, "card_client", return_value=object()),
                 mock.patch.object(standing_agent, "TaskReader", return_value=Reader()),
             ):
                 self.assertEqual(standing_agent.main(["steward", "precheck"]), PRECHECK_BOARD_UNREACHABLE)
@@ -289,7 +280,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
                     "scan",
                     side_effect=lambda reader: reader.active_cards(),
                 ),
-                mock.patch.object(standing_agent.KanboardClient, "for_instance", return_value=object()),
+                mock.patch.object(standing_agent, "card_client", return_value=object()),
                 mock.patch.object(standing_agent, "TaskReader", return_value=Reader()),
             ):
                 self.assertEqual(standing_agent.main(["steward", "precheck"]), 2)

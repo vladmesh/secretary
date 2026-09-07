@@ -8405,7 +8405,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         reason_file.write_text(raw_body, encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.board),
+            mock.patch("secretary.task_commands.card_client", return_value=self.board),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):

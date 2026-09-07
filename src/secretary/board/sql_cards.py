@@ -1,0 +1,591 @@
+"""The card reader's and writer's second implementation: the PostgreSQL board store.
+
+`docs/BOARD_STORE.md` §2.2 is the reason this module has the shape it has.  Almost every consumer
+of the board reaches cards through `TaskReader` and `TaskWriter`, not through the JSON-RPC client,
+so the cheapest honest place to put a second implementation is *underneath* those two classes and
+nowhere else.  `SqlCardClient` therefore answers the same eleven-method board vocabulary
+`tasks.py` and `board/kanboard.py` speak — `getAllTasks`, `getTaskMetadata`, `saveTaskMetadata`,
+`createTask`, `updateTask`, `moveTaskPosition`, `closeTask`, `createComment`, `getAllComments`,
+`getColumns`, `getActiveSwimlanes`, `getProjectByName`, `getTaskByReference`, `addSwimlane` — over
+`tasks`, `task_comments` and their satellites (§3.5, §3.7).  The public behaviour of the two
+classes above it does not change; where their data comes from and where it lands does.
+
+Three mappings do the whole job, and each is the inverse of one the importer already proved on
+live data (`board/import_board.py`):
+
+* **state ↔ column.**  The store keeps `tasks.state`; the board keeps a column id.  §3.5's seven
+  states and `_STATE_BY_COLUMN`'s seven column titles are the same seven, so the virtual board
+  below numbers them once and both directions read that one table.
+* **metadata bag ↔ columns.**  §8.1: the keys the model names are columns, and the keys it does
+  not are `tasks.extensions.kanboard` (§8.2).  `saveTaskMetadata` writes columns for the former
+  and the bag for the latter, so a key nobody modelled is still readable rather than dropped.
+* **swimlane ↔ nothing.**  The store has no lane: a lane is a Kanboard presentation of the
+  product a card belongs to.  It is kept exactly where the importer keeps it —
+  `extensions.kanboard.swimlane` — and the lane *table* is virtual, derived from the lanes the
+  rows themselves name plus the products the store holds.
+
+What is deliberately **not** here: a numeric Kanboard card id.  §9 makes the reference the card's
+stable identifier and the store has no column for Kanboard's integer, so the integer this client
+answers with is `tasks.task_number` — the store's own number for the card, parsed from its
+reference by the importer.  Two projects can spell the same number, and rather than pick one this
+client refuses (`SqlCardError`), because silently serving the wrong card is the one failure a
+board client must not have.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import re
+from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from secretary.board.store import BoardStoreCredentials
+
+#: The seven columns of the Pipeline board, in board order.  Their ids are this module's, not
+#: Kanboard's: nothing outside the client may depend on the number, only on the title.
+BOARD_COLUMNS = (
+    (1, "Issues"),
+    (2, "Ready"),
+    (3, "In progress"),
+    (4, "Validate"),
+    (5, "Assessment"),
+    (6, "Blocked"),
+    (7, "Done"),
+)
+
+#: `_STATE_BY_COLUMN` read the other way, so a store row can name its column.
+_COLUMN_ID_BY_STATE = {
+    "issues": 1,
+    "ready": 2,
+    "in_progress": 3,
+    "validate": 4,
+    "assessment": 5,
+    "blocked": 6,
+    "done": 7,
+}
+_STATE_BY_COLUMN_ID = {identifier: state for state, identifier in _COLUMN_ID_BY_STATE.items()}
+
+#: The one virtual board this client serves.  A second board is a Kanboard concept the store does
+#: not have; a name that is not this one is not found, exactly as Kanboard answers.
+BOARD_NAME = "Pipeline"
+BOARD_ID = 1
+
+#: §8.1's metadata keys that are `tasks` columns, and the column each one is.  Everything else a
+#: caller writes lands in `extensions.kanboard` (§8.2).
+_METADATA_COLUMNS = {
+    "project": "project_id",
+    "task_type": "task_type",
+    "claim": "claim_worker",
+    "slug": "slug",
+    "base_branch": "base_branch",
+    "seed_ref": "seed_ref",
+    "complexity": "complexity",
+    "family_preference": "family_preference",
+    "head": "head_override",
+    "review_head": "review_head_override",
+    "resolved_head": "resolved_worker_head",
+    "resolved_review_head": "resolved_review_head",
+    "routing_reason": "routing_reason",
+    "codex_launch_mode": "codex_launch_mode",
+    "sprint_ref": "sprint_ref",
+}
+
+#: The two counters, which are integers in the store and decimal strings on the board.
+_METADATA_COUNTERS = {"retry_same": "retry_same", "retry_switch": "retry_switch"}
+
+#: The columns whose closed vocabulary has a default the board spells as absence (§3.12).
+_ENUM_DEFAULTS = {"complexity": "standard", "family_preference": "auto"}
+
+#: `quota_snapshot_at` is a `timestamptz` column and an RFC3339 string on the board.
+_METADATA_TIMESTAMP = ("quota_snapshot_at", "quota_snapshot_at")
+
+#: The three metadata keys with satellite tables rather than columns (§3.5).
+_METADATA_LINKS = ("retry_heads", "blocked_by", "supersedes")
+
+
+class SqlCardError(RuntimeError):
+    """The store cannot answer this board question without guessing."""
+
+
+def _text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _epoch(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return str(int(value.timestamp()))
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _timestamp(value: Any) -> datetime | None:
+    text = _text(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _rfc3339(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _task_number_of(ref: str) -> int:
+    match = re.search(r"(\d+)$", ref)
+    if match is None:
+        raise SqlCardError(f"a card reference must end in a number: {ref!r}")
+    return int(match.group(1))
+
+
+class SqlCardClient:
+    """The board vocabulary of §2.2, answered from PostgreSQL instead of JSON-RPC.
+
+    One connection, opened lazily and kept: §5.6 sizes the store for ten of them, and a client
+    that reconnected per call would spend the whole budget on handshakes.  Autocommit is off, so
+    a mutation issued inside `transaction()` is one transaction (§7.1) and one issued outside it
+    still commits on its own — which is what keeps the reads of a read-only consumer cheap.
+    """
+
+    #: Which of the two card backends this client is (board/backend.py).  The reader spells the
+    #: card's identity and its `audit.backend` from this, so a normalized card always says which
+    #: store it came out of.
+    backend_kind = "postgres"
+
+    def __init__(self, credentials: BoardStoreCredentials, instance_dir: Path | str) -> None:
+        self.credentials = credentials
+        self.instance_dir = Path(instance_dir)
+        self._connection: Any = None
+        self._depth = 0
+        # The virtual lane table: names the rows themselves carry, plus what `addSwimlane` adds.
+        self._lanes: list[str] | None = None
+
+    # --- connection ------------------------------------------------------------------
+
+    @property
+    def connection(self) -> Any:
+        if self._connection is None:
+            import psycopg
+
+            self._connection = psycopg.connect(self.credentials.conninfo(), autocommit=False)
+        return self._connection
+
+    def close(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """One transaction per protocol mutation (§7.1), re-entrant for nested effects.
+
+        The writer opens this once around a whole protocol mutation — the request claim, the card
+        effect and the event — and every inner call joins it.  A failure anywhere inside rolls the
+        whole thing back, which is why the `BoardEventPending` class of half-applied write §7.3
+        describes does not exist on this backend.
+        """
+        if self._depth:
+            self._depth += 1
+            try:
+                yield
+            finally:
+                self._depth -= 1
+            return
+        self._depth = 1
+        try:
+            yield
+        except BaseException:
+            self.connection.rollback()
+            raise
+        else:
+            self.connection.commit()
+        finally:
+            self._depth = 0
+
+    def _commit_unless_nested(self) -> None:
+        if not self._depth:
+            self.connection.commit()
+
+    def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            return cursor.fetchall()
+
+    def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> int:
+        with self.connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            return cursor.rowcount
+
+    # --- the board vocabulary --------------------------------------------------------
+
+    def call(self, method: str, **params: Any) -> Any:
+        handler = getattr(self, f"_rpc_{method}", None)
+        if handler is None:
+            raise SqlCardError(f"the board store does not serve {method}")
+        return handler(**params)
+
+    def call_batch(self, calls: Iterable[tuple[str, dict[str, Any]]]) -> list[Any]:
+        """The batched read, which is one round trip here because there is no round trip."""
+        return [self.call(method, **arguments) for method, arguments in calls]
+
+    # --- board shape -----------------------------------------------------------------
+
+    def _rpc_getProjectByName(self, *, name: str) -> dict[str, Any] | None:
+        return {"id": BOARD_ID, "name": BOARD_NAME} if name == BOARD_NAME else None
+
+    def _rpc_getColumns(self, *, project_id: int) -> list[dict[str, Any]]:
+        return [{"id": identifier, "title": title} for identifier, title in BOARD_COLUMNS]
+
+    def _lane_names(self) -> list[str]:
+        if self._lanes is None:
+            named = {
+                row[0]
+                for row in self._query(
+                    "SELECT DISTINCT extensions->'kanboard'->>'swimlane' FROM tasks "
+                    "WHERE extensions->'kanboard'->>'swimlane' IS NOT NULL"
+                )
+            }
+            named |= {row[0] for row in self._query("SELECT product_id FROM products")}
+            self._lanes = sorted(named)
+        return self._lanes
+
+    def _rpc_getActiveSwimlanes(self, *, project_id: int) -> list[dict[str, Any]]:
+        return [
+            {"id": index, "name": name, "position": index}
+            for index, name in enumerate(self._lane_names(), start=1)
+        ]
+
+    def _rpc_addSwimlane(self, *, project_id: int, name: str) -> Any:
+        lanes = self._lane_names()
+        if name in lanes:
+            return False  # Kanboard answers a duplicate name with false, not with the existing id.
+        lanes.append(name)
+        lanes.sort()
+        return lanes.index(name) + 1
+
+    def _lane_id(self, name: str | None) -> int:
+        if not name:
+            return 0
+        lanes = self._lane_names()
+        return lanes.index(name) + 1 if name in lanes else 0
+
+    def _lane_name(self, identifier: Any) -> str | None:
+        lanes = self._lane_names()
+        try:
+            index = int(identifier)
+        except (TypeError, ValueError):
+            return None
+        return lanes[index - 1] if 1 <= index <= len(lanes) else None
+
+    # --- cards -----------------------------------------------------------------------
+
+    _CARD_COLUMNS = (
+        "task_ref, task_number, title, description, state, archived, position, "
+        "extensions, created_at, updated_at"
+    )
+
+    def _row(self, values: tuple[Any, ...]) -> dict[str, Any]:
+        (ref, number, title, description, state, archived, position, extensions, created, updated) = values
+        bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
+        lane = (bag.get("kanboard") or {}).get("swimlane")
+        return {
+            "id": number,
+            "reference": ref,
+            "title": _text(title),
+            "description": _text(description),
+            "column_id": _COLUMN_ID_BY_STATE[state],
+            "position": position,
+            "swimlane_id": self._lane_id(lane),
+            "date_creation": _epoch(created),
+            "date_modification": _epoch(updated),
+            "is_active": 0 if archived else 1,
+        }
+
+    def _rows(self, where: str = "", params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        clause = f" WHERE {where}" if where else ""
+        rows = [
+            self._row(values)
+            for values in self._query(
+                f"SELECT {self._CARD_COLUMNS} FROM tasks{clause} ORDER BY task_ref", params
+            )
+        ]
+        seen: dict[int, str] = {}
+        for row in rows:
+            previous = seen.get(row["id"])
+            if previous is not None:
+                raise SqlCardError(
+                    "two cards share one card number and the store keeps no separate card id: "
+                    f"{previous} and {row['reference']}"
+                )
+            seen[row["id"]] = row["reference"]
+        return rows
+
+    def _rpc_getAllTasks(self, *, project_id: int, status_id: int = 1) -> list[dict[str, Any]]:
+        if status_id not in {0, 1}:
+            return []
+        return self._rows("archived = %s", (status_id == 0,))
+
+    def _rpc_getTaskByReference(self, *, project_id: int, reference: str) -> dict[str, Any] | None:
+        rows = self._rows("task_ref = %s", (reference,))
+        return rows[0] if rows else None
+
+    def _ref_of(self, task_id: Any) -> str:
+        rows = self._query("SELECT task_ref FROM tasks WHERE task_number = %s", (int(task_id),))
+        if not rows:
+            raise SqlCardError(f"no card carries the number {task_id}")
+        if len(rows) > 1:
+            raise SqlCardError(f"two cards carry the number {task_id}")
+        return rows[0][0]
+
+    def _rpc_createTask(
+        self,
+        *,
+        project_id: int,
+        title: str,
+        description: str = "",
+        column_id: int = 1,
+        swimlane_id: int = 0,
+        reference: str = "",
+    ) -> Any:
+        if not reference:
+            raise SqlCardError("the board store identifies a card by its reference (§9)")
+        number = _task_number_of(reference)
+        lane = self._lane_name(swimlane_id)
+        extensions: dict[str, Any] = {"kanboard": {"swimlane": lane}} if lane else {}
+        now = _now()
+        self._execute(
+            "INSERT INTO tasks (task_ref, task_number, title, description, state, archived, "
+            "position, extensions, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, false, %s, %s::jsonb, %s, %s)",
+            (
+                reference,
+                number,
+                title,
+                description or "",
+                _STATE_BY_COLUMN_ID[int(column_id)],
+                self._next_position(_STATE_BY_COLUMN_ID[int(column_id)]),
+                json.dumps(extensions),
+                now,
+                now,
+            ),
+        )
+        self._commit_unless_nested()
+        return number
+
+    def _next_position(self, state: str) -> int:
+        rows = self._query("SELECT coalesce(max(position), 0) + 1 FROM tasks WHERE state = %s", (state,))
+        return int(rows[0][0])
+
+    def _rpc_updateTask(self, *, id: int, **fields: Any) -> bool:
+        ref = self._ref_of(id)
+        assignments = []
+        params: list[Any] = []
+        for name in ("reference", "title", "description"):
+            if name in fields:
+                assignments.append(f"{'task_ref' if name == 'reference' else name} = %s")
+                params.append(fields[name])
+        if not assignments:
+            return True
+        if "reference" in fields:
+            assignments.append("task_number = %s")
+            params.append(_task_number_of(str(fields["reference"])))
+        assignments.append("updated_at = %s")
+        params.append(_now())
+        params.append(ref)
+        self._execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE task_ref = %s", tuple(params))
+        self._commit_unless_nested()
+        return True
+
+    def _rpc_moveTaskPosition(
+        self, *, project_id: int, task_id: int, column_id: int, position: int, swimlane_id: int = 0
+    ) -> bool:
+        ref = self._ref_of(task_id)
+        state = _STATE_BY_COLUMN_ID[int(column_id)]
+        lane = self._lane_name(swimlane_id)
+        self._execute(
+            "UPDATE tasks SET state = %s, position = %s, updated_at = %s, "
+            "extensions = CASE WHEN %s::text IS NULL THEN extensions "
+            "ELSE jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard,swimlane}', "
+            "to_jsonb(%s::text), true) END "
+            "WHERE task_ref = %s",
+            (state, max(1, int(position)), _now(), lane, lane, ref),
+        )
+        self._commit_unless_nested()
+        return True
+
+    def _rpc_closeTask(self, *, task_id: int) -> bool:
+        ref = self._ref_of(task_id)
+        self._execute(
+            "UPDATE tasks SET archived = true, updated_at = %s WHERE task_ref = %s", (_now(), ref)
+        )
+        self._commit_unless_nested()
+        return True
+
+    # --- metadata --------------------------------------------------------------------
+
+    def _rpc_getTaskMetadata(self, *, task_id: int) -> dict[str, str]:
+        ref = self._ref_of(task_id)
+        rows = self._query(
+            "SELECT project_id, task_type, claim_worker, slug, base_branch, seed_ref, complexity, "
+            "family_preference, head_override, review_head_override, resolved_worker_head, "
+            "resolved_review_head, routing_reason, codex_launch_mode, sprint_ref, retry_same, "
+            "retry_switch, quota_snapshot_at, extensions FROM tasks WHERE task_ref = %s",
+            (ref,),
+        )
+        values = rows[0]
+        names = (
+            "project",
+            "task_type",
+            "claim",
+            "slug",
+            "base_branch",
+            "seed_ref",
+            "complexity",
+            "family_preference",
+            "head",
+            "review_head",
+            "resolved_head",
+            "resolved_review_head",
+            "routing_reason",
+            "codex_launch_mode",
+            "sprint_ref",
+        )
+        meta: dict[str, str] = {}
+        for name, value in zip(names, values[: len(names)], strict=True):
+            if value is not None and _text(value):
+                meta[name] = _text(value)
+        for name, value in (("retry_same", values[15]), ("retry_switch", values[16])):
+            if value:
+                meta[name] = str(value)
+        if values[17] is not None:
+            meta["quota_snapshot_at"] = _rfc3339(values[17])
+        heads = [row[0] for row in self._query(
+            "SELECT head FROM task_retry_heads WHERE task_ref = %s ORDER BY ordinal", (ref,)
+        )]
+        if heads:
+            meta["retry_heads"] = ",".join(heads)
+        blocked = [row[0] for row in self._query(
+            "SELECT depends_on FROM task_dependencies WHERE task_ref = %s ORDER BY depends_on", (ref,)
+        )]
+        if blocked:
+            meta["blocked_by"] = ",".join(blocked)
+        supersedes = self._query(
+            "SELECT supersedes FROM task_supersessions WHERE task_ref = %s", (ref,)
+        )
+        if supersedes:
+            meta["supersedes"] = supersedes[0][0]
+        bag = values[18] if isinstance(values[18], dict) else json.loads(values[18] or "{}")
+        for key, value in (bag.get("kanboard") or {}).items():
+            if key != "swimlane":
+                meta[key] = _text(value)
+        return meta
+
+    def _rpc_saveTaskMetadata(self, *, task_id: int, values: dict[str, Any]) -> bool:
+        ref = self._ref_of(task_id)
+        assignments: list[str] = []
+        params: list[Any] = []
+        bag_updates: dict[str, Any] = {}
+        bag_removals: list[str] = []
+        for key, raw in values.items():
+            text = _text(raw)
+            if key in _METADATA_COLUMNS:
+                column = _METADATA_COLUMNS[key]
+                assignments.append(f"{column} = %s")
+                params.append(text or _ENUM_DEFAULTS.get(key))
+            elif key in _METADATA_COUNTERS:
+                assignments.append(f"{_METADATA_COUNTERS[key]} = %s")
+                params.append(int(text) if text.isdigit() else 0)
+            elif key == _METADATA_TIMESTAMP[0]:
+                assignments.append(f"{_METADATA_TIMESTAMP[1]} = %s")
+                params.append(_timestamp(text))
+            elif key in _METADATA_LINKS:
+                self._write_link(ref, key, text)
+            elif text:
+                bag_updates[key] = text
+            else:
+                bag_removals.append(key)
+        if bag_updates:
+            assignments.append(
+                "extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard}', "
+                "coalesce(extensions->'kanboard', '{}'::jsonb) || %s::jsonb, true)"
+            )
+            params.append(json.dumps(bag_updates))
+        for key in bag_removals:
+            assignments.append("extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard}', "
+                               "coalesce(extensions->'kanboard', '{}'::jsonb) - %s, true)")
+            params.append(key)
+        if assignments:
+            assignments.append("updated_at = %s")
+            params.append(_now())
+            params.append(ref)
+            self._execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE task_ref = %s", tuple(params))
+        self._commit_unless_nested()
+        return True
+
+    def _write_link(self, ref: str, key: str, text: str) -> None:
+        """The three metadata keys that are satellite rows rather than a column (§3.5)."""
+        if key == "retry_heads":
+            self._execute("DELETE FROM task_retry_heads WHERE task_ref = %s", (ref,))
+            for ordinal, head in enumerate(part for part in text.split(",") if part.strip()):
+                self._execute(
+                    "INSERT INTO task_retry_heads (task_ref, ordinal, head) VALUES (%s, %s, %s)",
+                    (ref, ordinal, head.strip()),
+                )
+        elif key == "blocked_by":
+            self._execute("DELETE FROM task_dependencies WHERE task_ref = %s", (ref,))
+            for value in (part.strip() for part in text.split(",") if part.strip()):
+                if value == ref:
+                    continue
+                self._execute(
+                    "INSERT INTO task_dependencies (task_ref, depends_on, depends_on_task) "
+                    "SELECT %s, %s, (SELECT task_ref FROM tasks WHERE task_ref = %s)",
+                    (ref, value, value),
+                )
+        elif key == "supersedes":
+            self._execute("DELETE FROM task_supersessions WHERE task_ref = %s", (ref,))
+            if text and text != ref and self._query(
+                "SELECT 1 FROM tasks WHERE task_ref = %s", (text,)
+            ):
+                self._execute(
+                    "INSERT INTO task_supersessions (task_ref, supersedes, recorded_at) "
+                    "VALUES (%s, %s, %s)",
+                    (ref, text, _now()),
+                )
+
+    # --- comments --------------------------------------------------------------------
+
+    def _rpc_getAllComments(self, *, task_id: int) -> list[dict[str, Any]]:
+        ref = self._ref_of(task_id)
+        return [
+            {"id": identifier, "date_creation": _epoch(created), "comment": body}
+            for identifier, body, created in self._query(
+                "SELECT comment_id, body, created_at FROM task_comments WHERE task_ref = %s "
+                "ORDER BY created_at, comment_id",
+                (ref,),
+            )
+        ]
+
+    def _rpc_createComment(self, *, task_id: int, content: str, user_id: int = 0) -> Any:
+        ref = self._ref_of(task_id)
+        first = content.splitlines()[0] if content else ""
+        marker = first[1:-1] if first.startswith("[") and first.endswith("]") else None
+        rows = self._query(
+            "INSERT INTO task_comments (task_ref, marker, body, created_at) "
+            "VALUES (%s, %s, %s, %s) RETURNING comment_id",
+            (ref, marker, content, _now()),
+        )
+        self._commit_unless_nested()
+        return int(rows[0][0])
+
+
+__all__ = ["BOARD_COLUMNS", "BOARD_ID", "BOARD_NAME", "SqlCardClient", "SqlCardError"]

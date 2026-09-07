@@ -171,6 +171,23 @@ those as unmigrated.
 
 ### 2.2 Group (b): direct `KanboardClient` / JSON-RPC
 
+Since `secretary-1587` the first three rows of this table have **two** implementations, and which
+one a process uses is read from one named place — `SECRETARY_CARD_BACKEND`, `kanboard` (the
+default) or `postgres` — by `board/backend.py`.  The decision is taken once per process, is
+reported by `secretary status` under `card_backend`, and an unknown value refuses rather than
+falling back.  Nothing about it is inferred from whether `board-store.env` exists: an installation
+may hold a fully migrated store and still be served by Kanboard, which is the state the live
+installation is in.
+
+The seam is *underneath* `TaskReader` and `TaskWriter` rather than beside them, for the reason
+this section exists: almost every consumer below reaches cards through those two classes, so one
+replacement under them moves the CLI, the web process, the dispatcher and the observer together.
+`board/sql_cards.py` answers the same board vocabulary over `tasks`, `task_comments` and their
+satellites, and `board/sql_audit.py` is `TaskAudit`'s contract over `requests` and `board_events`
+(§7.3).  `SprintReader`/`SprintWriter` and `ProductIssueStore` are not switched by that name and
+remain Kanboard-only; their card is the next one.
+
+
 `KanboardClient` (`src/secretary/tasks.py:469`) is a generic JSON-RPC client with `call`,
 `call_batch` (chunked, `_BATCH_CHUNK = 200`) and byte-size preflight. It is constructed from
 `board-transport.env` (`KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN`) via
@@ -182,7 +199,7 @@ those as unmigrated.
 |---|---|---|---|
 | `tasks.py` — `TaskReader` | Cards: `reference`, `title`, `description`, column→`state`, `is_active`→`closed`, `position`, swimlane; metadata `project`, `task_type`, `blocked_by`, `claim`, `slug`, `base_branch`, `seed_ref`, `supersedes`, `head`, `resolved_head`, `review_head`, `resolved_review_head`, `retry_same`, `retry_switch`, `retry_heads`, `complexity`, `family_preference`, `routing_reason`, `quota_snapshot_at`, `codex_launch_mode`, `sprint_ref`, `record_type`; all comments | R | no — used by every process below |
 | `tasks.py` — `TaskWriter` | Same, plus `createTask`, `updateTask`, `moveTaskPosition`, `closeTask`, `saveTaskMetadata`, `createComment`; `_READY_RESET_METADATA` clears `claim`/`resolved_head`/`resolved_review_head`/`retry_*` on a Ready transition | R+W | no |
-| `tasks.py` — `TaskAudit` | Not Kanboard: the local append-only journal `<data>/board/events.ndjson`, pending records `<data>/board/pending-audit/v2-<sha256>.json`, lock `<data>/board/.audit.lock` | R+W (files) | no |
+| `tasks.py` — `TaskAudit` | Kanboard backend only: the local append-only journal `<data>/board/events.ndjson`, pending records `<data>/board/pending-audit/v2-<sha256>.json`, lock `<data>/board/.audit.lock` | R+W (files) | no |
 | `sprints.py` — `SprintReader`/`SprintWriter` | Sprint rows on the separate `Secretary sprints` board; metadata `sprint_goal`, `sprint_definition_of_done`, `sprint_repositories`, `sprint_product`, `sprint_issues`, `sprint_reservations`, `sprint_status`, `sprint_budget`, `sprint_budget_uncharged`, `sprint_current_task`, `sprint_resume`, `sprint_source_audit`, `sprint_observer`, executor pins; comments; `createProject` for the sprint board; `removeTask` to compensate a failed create | R+W | no |
 | `product_issues.py` — `ProductIssueStore` | Product and Issue rows on the Pipeline board, distinguished by `record_type`; per-product swimlanes (`getActiveSwimlanes`, `addSwimlane`); `catalogue()` batches metadata | R+W | no |
 | `board/reference_repair.py` | `updateTask` on `reference`, `saveTaskMetadata` `reference_repair` provenance | R+W | no |
@@ -1762,6 +1779,13 @@ After cutover, for each thing: what is canonical, and who writes it.
 
 ### 6.1 Canonical in PostgreSQL
 
+Which of the two implementations serves cards is not a property of the data and is therefore not
+in this table: it is `SECRETARY_CARD_BACKEND` (§2.2), one value per process, `kanboard` until an
+operator says otherwise.  The rows below describe the store once cards are served from it; the
+switch is what makes reaching that state reversible, since returning the value to `kanboard`
+restores today's behaviour with no data migration in either direction.
+
+
 | Data | Writer after cutover |
 |---|---|
 | products, issues, sprints, tasks | `secretary_app`, through the board protocol: dispatcher tick, CLI commands, `webproto/ops.py` and `webproto/sprint_ops.py` |
@@ -1772,8 +1796,8 @@ After cutover, for each thing: what is canonical, and who writes it.
 | `sprint_decisions`, sprint close reason and closeout document *path* | `SprintWriter.close` |
 | `sprint_budget_events` | `SprintWriter.record_budget`, dispatcher |
 | `sprint_resumes` | `SprintWriter.resume`, observer through the CLI |
-| `requests`, `board_events` | the protocol seam (`BoardEventCanon`, `MutationEventTransaction`); every writer claims a `requests` row before any other write |
-| card state, archive, claim, routing | dispatcher and CLI writers |
+| `requests`, `board_events` | the protocol seam (`BoardEventCanon`, `MutationEventTransaction`) and, for cards, `board/sql_audit.py`, which is `TaskAudit`'s contract over these two tables (§7.3); every writer claims a `requests` row before any other write |
+| card state, archive, claim, routing | dispatcher and CLI writers, through `TaskWriter` over `board/sql_cards.py` |
 
 ### 6.2 Canonical in files and git snapshots
 
