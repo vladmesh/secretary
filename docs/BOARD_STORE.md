@@ -26,8 +26,11 @@ Every claim in section 2 comes from a search over this checkout that a reader ca
 searches, and their results at the SHA this document was written against:
 
 ```bash
-# (a) the protocol seam
-grep -rln --include='*.py' -E '\bBoardHost\b|board_host' src
+# (a) the protocol seam, as the seam names itself
+grep -rln --include='*.py' -E '\bBoardHost\b|board_host' src   # 7 files
+
+# (a2) the seam's only production adapter, named by callers that never name the Protocol
+grep -rln --include='*.py' 'KanboardBoardHost' src             # 5 files
 
 # (b) direct JSON-RPC clients
 grep -rln --include='*.py' 'KanboardClient' src          # 23 files
@@ -48,18 +51,55 @@ grep -rn --include='*.py' -E '\b(TaskReader|TaskWriter|SprintReader|SprintWriter
 #      A superset of (b) and (b2); its extra hits are filtered by hand — see caution 4.
 grep -rln --include='*.py' -E '\b(TaskReader|TaskWriter|SprintReader|SprintWriter|ProductIssueStore|KanboardClient)\b' src
 
-# (c) consumers of the derived exports
-grep -rln --include='*.py' 'normalized_checkpoint\|validated_normalized_cards\|cards.ndjson\|export_board\|state/board' src
+# (c) consumers of the derived exports. The group is defined by the data flow below;
+#     these three searches corroborate it and are what a re-run repeats.
+# (c1) the export by its module and pathspec names
+grep -rln --include='*.py' 'normalized_checkpoint\|validated_normalized_cards\|cards.ndjson\|export_board\|state/board' src   # 17 files
+# (c2) the export by the artefact filenames themselves
+grep -rln --include='*.py' -E 'cards\.json|cards\.ndjson|sprints\.ndjson|export\.json|export\.ndjson|kanboard-raw' src        # 21 files
+# (c3) hop 3: the archive that carries a copy of the export
+grep -rln --include='*.py' -E 'backups|ARCHIVE_ROOT|requires_raw_board_data' src                                                 # 7 files
 ```
 
-`(b)` alone is not the inventory, and treating it as one is how the first draft of this document
-missed two modules. `(b)` finds modules that build or type a JSON-RPC client. A module that is
-*handed* a reader, or that builds one from a client somebody else made, reaches Kanboard just as
-much and matches nothing in `(b)`. `(b2)` is what finds those; `(b3)` is the deliberately loose net
-whose false positives caution 4 removes. The union of `(a)`, `(b)`, `(b2)` and the hand-filtered
-remainder of `(b3)` is the inventory, and §2.5 records what each search contributed.
+**No single search is a group.** Each group is a claim about a path; a search is only evidence for
+it, and every group here needed more than one search before its hits and its rows reconciled.
 
-Five cautions the inventory depends on, and which any later re-run must respect:
+- `(a)` alone is not group (a). It finds the modules that name the `Protocol` or hold a
+  `board_host` attribute; it does not find `sprints.py`, which imports `KanboardBoardHost` directly
+  and drives sprint transitions through it (`sprints.py:846-853` builds the host,
+  `_transition_host` at `:872` calls `.transition(...)` on it).
+  `(a2)` is what finds that one. Symmetrically, three of `(a)`'s seven hits are not paths at all
+  (caution 6).
+- `(b)` alone is not the inventory, and treating it as one is how the first draft of this document
+  missed two modules. `(b)` finds modules that build or type a JSON-RPC client. A module that is
+  *handed* a reader, or that builds one from a client somebody else made, reaches Kanboard just as
+  much and matches nothing in `(b)`. `(b2)` is what finds those; `(b3)` is the deliberately loose
+  net whose false positives caution 4 removes.
+- `(c)` is not a grep at all. It is enumerated by **data flow**, and the greps corroborate the
+  enumeration rather than define it — see immediately below, and caution 7 for the three rounds in
+  which grepping for it silently lost the same two modules.
+
+The union of `(a)`, `(a2)`, `(b)`, `(b2)` and the hand-filtered remainder of `(b3)` is groups (a)
+and (b); the data flow below is group (c). §2.5 records what each search contributed and shows the
+arithmetic closing.
+
+**Group (c), enumerated by data flow.** The derived export is not one file in one place. It is
+copied forward through three hops, and a module belongs to group (c) when it reads, validates,
+copies, publishes or deletes the export at *any* hop:
+
+| Hop | Artefact | Written by |
+|---|---|---|
+| 1 | `<data>/board/**` — `cards.json`, `cards.ndjson`, `sprints.json`, `sprints.ndjson`, `events.ndjson`, `export.json`, `analytics-manifest.json`, and the `kanboard-raw-*/` dump | `data.py` (`export_board`, `export_all`, `raw_kanboard_dump`) |
+| 2 | `<instance>/state/board/**` — the published, git-committed copy of hop 1 | `checkpoint.py` through `state_repo.py`, under `BOARD_RUNS_PATHSPEC` |
+| 3 | `<data>/backups/secretary-backup-{core,full}-<ts>.tar` — an archived copy of hop 1 under `archive/secretary-data/board/**` | `backup.py` |
+
+Hop 3 is why a grep-defined group (c) was wrong. A hop-3 consumer addresses the export through the
+tar, so it names `archive/secretary-data/board/cards.json`, or a component policy, or nothing but
+the archive's own filename — and matches none of the module and pathspec names search `(c1)`
+carries. Enumerating the flow instead puts `backup_verify.py` and `backup_retention.py` in the
+group where they always belonged, and `(c3)` is the search that repeats that result.
+
+Seven cautions the inventory depends on, and which any later re-run must respect:
 
 1. `grep -r` honours `.gitignore`. Run it over `src/` in a clean checkout; a "nowhere in the tree"
    conclusion from a recursive grep is not evidence about ignored paths.
@@ -80,8 +120,21 @@ Five cautions the inventory depends on, and which any later re-run must respect:
    does. They are named here so a later re-run recognizes them as filtered rather than forgotten,
    and does not re-add them.
 5. **Group membership is not exclusive.** A module can be both a direct Kanboard path and a
-   consumer of a derived export; `restore.py` and `installation.py` are exactly that. §2.3 marks
-   dual membership instead of pretending its members never write.
+   consumer of a derived export; `restore.py`, `installation.py`, `data.py`, `bootstrap.py`,
+   `status.py` and the three `webproto` readers are exactly that. §2.3 marks dual membership
+   instead of pretending its members never write.
+6. **Defining a type is not reaching the board.** Three of `(a)`'s seven hits define or re-export
+   the seam rather than travel it: `board/host.py` is the `Protocol` declaration,
+   `board/fake.py` is `FakeBoardHost`, a test double never constructed in production, and
+   `board/__init__.py` is the package surface — a docstring, an `__all__` and a lazy
+   `__getattr__` that imports `KanboardBoardHost` on demand (`:56-59`). They are named here for
+   the same reason as caution 4: so a re-run recognizes them as filtered rather than forgotten.
+7. **A search over artefact names both over- and under-shoots group (c).** It undershoots at hop 3
+   (above). It also overshoots, because two unrelated file sets share the export's filenames:
+   `<data>/runs/cards.json` (run state, read by `board/reference_repair.py:70` and discussed in
+   `triggered_agents/agents/steward/signals.py:425-453`) and the memory export's
+   `export.json` / `export.ndjson` (`memory_journal.py`, `memory_reindex.py`, `memory_service.py`,
+   `upgrade.py`). Neither set is the board export; §2.5 names all six as filtered.
 
 ---
 
@@ -99,9 +152,16 @@ sprint and Product/Issue command paths retain their current writers — which se
 |---|---|---|---|
 | `board/kanboard.py` | Product (`record_type`, `product_id`, `product_projects`), Issue (`issue_product`, `issue_kind`, `issue_priority`, `issue_closed_reason`), Sprint state + `SprintSupplement` (observer, `budget_by_type`), Card state, marker comments | R+W | no — a library inside its caller |
 | `tasks.py` (`TaskWriter.board_host`) | Card lifecycle transitions; the event canon (`BoardEventCanon`) for `request_id` ownership | R+W | no |
-| `sprints.py` (`SprintWriter._transition_host`) | Sprint lifecycle transitions only (`open`→`closed`/`stopped`/`open`) | W | no |
+| `sprints.py` (`SprintWriter._transition_host`) | Sprint lifecycle transitions only (`open`→`closed`/`stopped`/`open`) | W | no — found only by `(a2)` |
 | `product_issues.py` | Product/Issue create, priority replace, close, via the host | R+W | no |
 | `dispatcher.py` | reads `self.writer.board_host.canon` for events, attempt usage and outcome occurrences | R | yes (`secretary-dispatcher-production.service`) |
+
+Four of these five rows come from search `(a)`. `sprints.py` comes only from `(a2)`: it never
+writes `BoardHost` or `board_host`, it imports the concrete `KanboardBoardHost` in `_host`
+(`:846-853`, lazily, to keep reader imports acyclic) and `_transition_host` (`:872`) calls
+`.transition(...)` on what it returns. A group defined by the `Protocol`'s own name would have
+lost every sprint lifecycle transition, which is why `(a2)` is declared alongside `(a)` rather
+than left as a hand-added row.
 
 What the seam does **not** carry today: Sprint create and close bodies, Sprint metadata edits
 (goal, DoD, repositories, reservations, current task, resume, budget), Card create, Card edit, Card
@@ -168,26 +228,36 @@ found late by a better search is inventory, not a gap.
 
 ### 2.3 Group (c): consumers of derived exports
 
-A module is in this group when it reads `<data>/board/**` or `<instance>/state/board/**`.
-Membership is **not** exclusive: `restore.py` and `installation.py` are in group (b) as well, and
-the "also (b)" column says so rather than leaving the reader with a contradiction. What is true of
-every member is only this: *the export path itself* never speaks to Kanboard.
+A module is in this group when it reads, validates, copies, publishes or deletes the derived
+export at any of §1's three hops — `<data>/board/**`, `<instance>/state/board/**`, or the copy
+inside `<data>/backups/secretary-backup-*.tar`. The group is the data flow, not a grep; the greps
+`(c1)`, `(c2)` and `(c3)` corroborate it and §2.5 reconciles all three.
 
-| Module | Consumed fields | R/W | Own writer process? | Also (b)? |
-|---|---|---|---|---|
-| `checkpoint.py` | regenerates the exports, validates, publishes `state/board` + `state/runs` under `BOARD_RUNS_PATHSPEC`; seals `analytics-manifest.json`; reads `runs.ndjson` to refuse history loss | R+W (files, git) | yes — runs inside the dispatcher tick, and as `secretary checkpoint` | no — it reaches the board only through `data.py:export_board` |
-| `data.py` | **produces** `cards.json`, `cards.ndjson`, `sprints.json`, `sprints.ndjson`, `export.json`, validating the pair before publishing; **reads** the previous `<data>/board/kanboard-raw-*/data/db.sqlite` for `raw_active_task_count` (`_latest_raw_active_task_count`) | R+W | yes (checkpoint/backup) | **yes** — full group (b) reader; see §2.2 |
-| `bootstrap.py` | reads `<instance>/state/board/cards.ndjson` and takes each card's `swimlane` to seed lane discovery before it writes the Pipeline board (`:91-103`) | R | yes (bootstrap command, root) | **yes** — full group (b) writer; see §2.2 |
-| `board/normalized_checkpoint.py` | `cards.json` / `cards.ndjson` and their parity; card `reference` uniqueness; Product/Issue record validity | R | no — a validator inside its caller | no |
-| `board/analytics.py` | a sealed, copied `state/board`: `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `analytics-manifest.json` | R | no — offline, takes a directory rather than an installation | no |
-| `backup.py` | `board/cards.json`, `cards.ndjson`, `export.json`; filters Done cards out of a `core` archive (`_filter_core_board_export`) | R+W (tar under `<data>/backups`) | yes (backup command) | indirectly — it calls `data.py:export_all` and `raw_kanboard_dump` |
-| `backup_policy.py` | declares which board entries each policy requires; reads nothing itself | — | no — a policy table | no |
-| `restore.py` | the checkpoint's `sprints.ndjson` / `cards.ndjson` through `validated_normalized_cards` | R, then **W to Kanboard**: `addSwimlane`, sprint rows via `SprintWriter`, cards via `TaskWriter` / `task_restore.py` | yes (restore command) | **yes** — full group (b) writer; see §2.2 |
-| `installation.py` | `CHECKPOINT_BOARD` = `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `export.json`, to build a new local data plane | R, then **R from Kanboard**: `TaskReader(...).list()` to verify | yes (install/recovery command) | **yes** — group (b) reader; see §2.2 |
-| `state_repo.py` | owns `BOARD_RUNS_PATHSPEC` = `state/board`, `state/runs`; stages and commits it | W (git) | no — a library under the tick writer's lock | no |
-| `status.py` | `<data>/board/cards.ndjson` as the age/evidence fallback when the live read fails | R | yes (operator command) | **yes** — group (b) reader first |
-| `webproto/reads.py`, `webproto/sprint_reads.py`, `webproto/pause_reads.py` | the same `cards.ndjson` as each section's availability evidence | R | yes — inside `secretary-web.service` | **yes** — all three are group (b) readers first |
-| `cli.py` | wires `data export-board`; consumes nothing itself | — | no | no |
+Membership is **not** exclusive: `restore.py`, `installation.py`, `data.py`, `bootstrap.py`,
+`status.py` and the three `webproto` readers are in group (b) as well, and the "also (b)" column
+says so rather than leaving the reader with a contradiction. What is true of every member is only
+this: *the export path itself* never speaks to Kanboard.
+
+The **Hop** column says which copy of the export the module touches, so a later re-run can check the
+group against the flow rather than against a single search.
+
+| Module | Hop | Consumed fields | R/W | Own writer process? | Also (b)? |
+|---|---|---|---|---|---|
+| `checkpoint.py` | 1→2 | regenerates the exports, validates, publishes `state/board` + `state/runs` under `BOARD_RUNS_PATHSPEC`; seals `analytics-manifest.json`; reads `runs.ndjson` to refuse history loss | R+W (files, git) | yes — runs inside the dispatcher tick, and as `secretary checkpoint` | no — it reaches the board only through `data.py:export_board` |
+| `data.py` | 1 | **produces** `cards.json`, `cards.ndjson`, `sprints.json`, `sprints.ndjson`, `export.json`, validating the pair before publishing; **reads** the previous `<data>/board/kanboard-raw-*/data/db.sqlite` for `raw_active_task_count` (`_latest_raw_active_task_count`) | R+W | yes (checkpoint/backup) | **yes** — full group (b) reader; see §2.2 |
+| `bootstrap.py` | 2 | reads `<instance>/state/board/cards.ndjson` and takes each card's `swimlane` to seed lane discovery before it writes the Pipeline board (`:91-103`) | R | yes (bootstrap command, root) | **yes** — full group (b) writer; see §2.2 |
+| `board/normalized_checkpoint.py` | 1 | `cards.json` / `cards.ndjson` and their parity; card `reference` uniqueness; Product/Issue record validity | R | no — a validator inside its caller | no |
+| `board/analytics.py` | 2 | a sealed, copied `state/board`: `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `analytics-manifest.json` | R | no — offline, takes a directory rather than an installation | no |
+| `backup.py` | 1→3 | `board/cards.json`, `cards.ndjson`, `export.json`; filters Done cards out of a `core` archive (`_filter_core_board_export`) | R+W (tar under `<data>/backups`) | yes (backup command) | indirectly — it calls `data.py:export_all` and `raw_kanboard_dump` |
+| `backup_policy.py` | 3 | declares which board entries each policy requires; reads nothing itself | — | no — a policy table | no |
+| `backup_verify.py` | 3 | the export **inside the archive**: `archive/secretary-data/board/cards.json` → `cards[].reference` \| `cards[].id` and `cards[].column`, to fail a `core` archive that carries a Done card (`:265-278`); the `raw_board` component directory → `manifest.json` and any file under `data/**` (`_verify_raw_board_component`, `:235-247`); the archive paths `archive/secretary-data/board/kanboard-raw-*`, to fail a `core` archive carrying a raw dump (`:252-259`); component names, paths and checksums from `archive/versions.json` | R (tar) | yes — `secretary backup verify` is its own short-lived operator process (`cli.py:1515`); also a library inside `restore.py` (`_verify_plain_tar`) and re-exported by `backup.py` | no |
+| `backup_retention.py` | 3 | no card field: it consumes the export at archive granularity — the names of `<data>/backups/secretary-backup-(core\|full)-<UTC ts>.tar`, the kind parsed from the name, the timestamp parsed from the name (file `mtime` as fallback) — and **deletes** archives past `policy.retention_seconds`, keeping only the newest where retention is `None`. It decides how long each archived copy of the board export survives | R (names, mtimes) + W (deletes archives) | no — a library called inside the `secretary backup` process (`backup.py:153`), which is itself that process's own writer | no |
+| `restore.py` | 2, 3 | the checkpoint's `sprints.ndjson` / `cards.ndjson` through `validated_normalized_cards` (hop 2); when restoring from an archive, the same export through `backup_verify._verify_plain_tar` (`:27`, hop 3) | R, then **W to Kanboard**: `addSwimlane`, sprint rows via `SprintWriter`, cards via `TaskWriter` / `task_restore.py` | yes (restore command) | **yes** — full group (b) writer; see §2.2 |
+| `installation.py` | 2 | `CHECKPOINT_BOARD` = `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `export.json`, to build a new local data plane | R, then **R from Kanboard**: `TaskReader(...).list()` to verify | yes (install/recovery command) | **yes** — group (b) reader; see §2.2 |
+| `state_repo.py` | 2 | owns `BOARD_RUNS_PATHSPEC` = `state/board`, `state/runs`; stages and commits it | W (git) | no — a library under the tick writer's lock | no |
+| `status.py` | 1 | `<data>/board/cards.ndjson` as the age/evidence fallback when the live read fails | R | yes (operator command) | **yes** — group (b) reader first |
+| `webproto/reads.py`, `webproto/sprint_reads.py`, `webproto/pause_reads.py` | 1 | the same `cards.ndjson` as each section's availability evidence | R | yes — inside `secretary-web.service` | **yes** — all three are group (b) readers first |
+| `cli.py` | 1, 3 | wires `data export-board` (hop 1) and `backup create` / `backup verify` (hop 3, `:270`, `:1497`, `:1515-1516`); consumes no field itself | — | no — it is the argument surface of the process that does the consuming | no |
 
 ### 2.4 Consumers named by DoD 3, explicitly
 
@@ -229,60 +299,102 @@ every member is only this: *the export path itself* never speaks to Kanboard.
 ### 2.5 What each search contributed, and the arithmetic that closes it
 
 An inventory whose counts do not reconcile is not an inventory: "17 files, 12 rows" says nothing
-about the other five, and that is how a missing consumer survived two rounds of review. So every
+about the other five, and that is how a missing consumer survived three rounds of review. So every
 hit of every declared search is accounted for here as **either a table row or a named filtered
 entry with its reason**, and each line adds up.
 
 | Search | Hits | Rows | Filtered | Reconciles |
 |---|---|---|---|---|
-| `(a)` `BoardHost` / `board_host` | 7 | 5 | 2 | ✓ |
+| `(a)` `BoardHost` / `board_host` | 7 | 4 | 3 | ✓ |
+| `(a2)` `KanboardBoardHost` | 5 | 4 | 1 | ✓ |
 | `(b)` `KanboardClient` | 23 | 22 | 1 | ✓ |
 | `(b2)` reader/writer construction | 19 | 19 | 0 | ✓ |
 | `(b3)` any mention of a board type | 37 | 27 | 10 | ✓ |
-| `(c)` derived-export consumers | 17 | 15 | 2 | ✓ |
+| `(c1)` export module and pathspec names | 17 | 15 | 2 | ✓ |
+| `(c2)` export artefact filenames | 21 | 15 | 6 | ✓ |
+| `(c3)` hop 3, the archive carrying the export | 7 | 7 | 0 | ✓ |
 
-**`(a)` — 5 rows + 2 filtered.** Rows: `board/kanboard.py`, `tasks.py`, `sprints.py`,
-`product_issues.py`, `dispatcher.py`. Filtered: `board/host.py` (the `Protocol` definition itself)
-and `board/fake.py` (`FakeBoardHost`, a test double never constructed in production).
+`Rows` counts the hits of *that* search which are table rows; the same row is reached by several
+searches, so the column does not sum down the table. §2.1 prints 5 rows; §2.2 prints 28 rows over
+26 modules (`tasks.py` gets three, one per class); §2.3 prints 15 rows over 17 modules (the three
+`webproto` readers share one).
+
+**`(a)` — 4 rows + 3 filtered.** Rows: `board/kanboard.py`, `tasks.py`, `product_issues.py`,
+`dispatcher.py`. Filtered, per caution 6: `board/host.py` (the `Protocol` definition itself),
+`board/fake.py` (`FakeBoardHost`, a test double never constructed in production) and
+`board/__init__.py` (the package surface: docstring, `__all__`, and a lazy `__getattr__` that
+imports the adapter on demand).
+
+**`(a2)` — 4 rows + 1 filtered.** Rows: `board/kanboard.py` (it *is* the adapter), `tasks.py`,
+`product_issues.py` and **`sprints.py`**, which no other declared search reaches. Filtered:
+`board/__init__.py`, again for caution 6. The previous revision claimed `(a)` returned 5 rows and
+2 filtered; running `(a)` returns seven files that do not contain `sprints.py`, so those numbers
+could not both be true. §2.1 keeps all five rows and `(a2)` is what earns the fifth.
 
 **`(b)` — 22 rows + 1 filtered.** All 23 files appear in §2.2 except `webproto/__init__.py`, whose
 only match is the package docstring explaining that the layer reaches the board through
 `KanboardClient`. Filtered as prose.
 
-**`(b2)` — 19 files, all accounted for.** Seventeen were already rows from `(a)` or `(b)`; the two
-that were not are `webproto/admission.py` and `dispatcher_production.py`, which is exactly what
-this search exists to catch. Nothing is filtered here: constructing a reader or writer *is* a path.
+**`(b2)` — 19 files, all accounted for.** Seventeen were already rows from `(a)`, `(a2)` or `(b)`;
+the two that were not are `webproto/admission.py` and `dispatcher_production.py`, which is exactly
+what this search exists to catch. Nothing is filtered here: constructing a reader or writer *is* a
+path.
 
-**`(b3)` — 27 rows + 10 filtered.** The 27 are the union of `(a)`, `(b)` and `(b2)` plus
+**`(b3)` — 27 rows + 10 filtered.** The 27 are the union of `(a)`, `(a2)`, `(b)` and `(b2)` plus
 `board/reference_repair.py`, `board/steward_reports.py` and `board/done_retention.py` — the last
 two receive a `board_factory` / `reader_factory` callable instead of constructing one, so they
-match only `(b3)`. The 10 filtered are
-prose-only matches, named individually in caution 4 so a later re-run does not re-add them:
-`dispatcher_helpers.py`, `dispatcher_observer.py`, `dispatcher_watchdog.py`,
-`webproto/command_reads.py`, `webproto/commands.py`, `webproto/sprint_requests.py`,
-`webproto/__init__.py`, `web/app.py`, `board/card_transitions.py`,
+match only `(b3)`. The 10 filtered are prose-only matches, named individually in caution 4 so a
+later re-run does not re-add them: `dispatcher_helpers.py`, `dispatcher_observer.py`,
+`dispatcher_watchdog.py`, `webproto/command_reads.py`, `webproto/commands.py`,
+`webproto/sprint_requests.py`, `webproto/__init__.py`, `web/app.py`, `board/card_transitions.py`,
 `triggered_agents/runtime/redact.py`.
 
-**`(c)` — 15 rows + 2 filtered.** §2.3 has a row for each of `checkpoint.py`, `data.py`,
-`bootstrap.py`, `board/normalized_checkpoint.py`, `board/analytics.py`, `backup.py`,
+**`(c1)` — 15 rows + 2 filtered.** Fifteen of the 17 hits are §2.3 rows: `checkpoint.py`,
+`data.py`, `bootstrap.py`, `board/normalized_checkpoint.py`, `board/analytics.py`, `backup.py`,
 `backup_policy.py`, `restore.py`, `installation.py`, `state_repo.py`, `status.py`,
-`webproto/reads.py`, `webproto/sprint_reads.py`, `webproto/pause_reads.py`, `cli.py` — fifteen,
-counting the three `webproto` modules that share one row as three. Filtered: `knowledge_write.py`
+`webproto/reads.py`, `webproto/sprint_reads.py`, `webproto/pause_reads.py`, `cli.py` — counting the
+three `webproto` modules that share one printed row as three. Filtered: `knowledge_write.py`
 (module docstring, explaining that the tick writer commits `state/board`/`state/runs` in the same
 repo every minute) and `memory_write.py` (an inline comment saying a concurrent
 `state/board`/`state/runs` commit neither blocks nor is blocked by a memory write). Neither reads a
 board file; both mention the pathspec while explaining lock behaviour.
 
-Three of those `(c)` rows are dual-membership, and two of them were missing before this revision:
-`data.py` and `bootstrap.py` are direct Kanboard paths *and* derived-export consumers, so each has
-a row in both §2.2 and §2.3. `bootstrap.py` is the clearest case and the one that shows why the
-"never speaks to Kanboard" framing had to go: it reads `state/board/cards.ndjson` for lane
-discovery **and then creates the Pipeline board**, in that order, in one command.
+**`(c2)` — 15 rows + 6 filtered.** The rows are §2.3's 17 modules minus two that name no artefact
+filename: `state_repo.py` (it names the pathspec) and `backup_retention.py` (it names only the
+archive). The other six hits share a filename with the board export without touching it, per
+caution 7. Filtered, each with its file set: `board/reference_repair.py:70` and `triggered_agents/agents/steward/signals.py:425-453` —
+`<data>/runs/cards.json`, the run-state companion, not the board export (`reference_repair.py` is a
+§2.2 row for its Kanboard writes, and this hit is not what puts it there); `memory_journal.py:396`,
+`memory_reindex.py:32`, `memory_service.py:47`, `upgrade.py:570` — the *memory* export's
+`export.json` / `export.ndjson`. Six filtered, and 15 + 6 = 21.
 
-The first draft of this document ran only `(a)`, `(b)` and `(c)` and missed what `(b2)` finds. The
-second gave `(c)` no per-row columns and no arithmetic, and missed two consumers inside a group it
-had already listed. The table above is the fix for the class rather than for the two instances: a
-search whose hits do not equal rows plus named filtered entries is not finished.
+**`(c3)` — 7 rows + 0 filtered.** `backup.py`, `backup_policy.py`, `backup_verify.py`,
+`backup_retention.py`, `restore.py`, `data.py` (`LAYOUT_DIRS` creates `<data>/backups` and `:815`
+excludes it from the export it produces) and `cli.py` (the `backup` subcommands). Two of the seven
+— **`backup_verify.py` and `backup_retention.py`** — have no row in any other search, and this is
+the search that was missing when they fell out of the inventory three times running.
+
+**Why they fell out, stated so it does not recur.** Group (c) was defined by `(c1)`, a search over
+the export's *module and pathspec* names. `backup_verify.py` addresses the export through the
+archive (`archive/secretary-data/board/cards.json`) and `backup_retention.py` addresses it through
+the archive's filename alone; neither writes `cards.ndjson`, `state/board`, `export_board`,
+`normalized_checkpoint` or `validated_normalized_cards` anywhere. Three rounds of re-running the
+same search reproduced the same absence, because the search was the definition. §1 now defines the
+group by data flow and gives hop 3 its own search, which is the repair for the class rather than
+for the two instances.
+
+Six printed §2.3 rows, eight modules, are dual-membership: `data.py`, `bootstrap.py`,
+`restore.py`, `installation.py`, `status.py` and the three `webproto` readers are direct Kanboard
+paths *and* derived-export consumers, so each has a row in both §2.2 and §2.3. `bootstrap.py` is the clearest case and the one
+that shows why the "never speaks to Kanboard" framing had to go: it reads
+`state/board/cards.ndjson` for lane discovery **and then creates the Pipeline board**, in that
+order, in one command.
+
+The first draft of this document ran only `(a)`, `(b)` and `(c1)` and missed what `(b2)` finds. The
+second gave `(c)` no per-row columns and no arithmetic. The third still counted `(a)`'s hits as if
+`sprints.py` were among them and still defined `(c)` by a grep. The table above is the fix for the
+class: a search whose hits do not equal rows plus named filtered entries is not finished, and a
+group whose definition *is* a search cannot discover what the search cannot spell.
 
 ### 2.6 Gaps, listed as gaps
 
@@ -955,6 +1067,12 @@ promised and may have happened", which is exactly what `BoardEventPending` and t
 entry points mean today. A shape-A operation cannot leave one, because its only transaction either
 commits the whole thing or leaves nothing.
 
+Those two `COMMIT;` lines are the transaction boundaries, not statements to paste into a `psql`
+session: run under `psql`'s autocommit each statement is already its own transaction, and the
+`COMMIT` then warns `there is no transaction in progress` while changing nothing. The boundaries
+are what the driver opens and closes; the shape is two transactions with the external effect
+between them.
+
 **What writes a staged row:** T1 of a shape-B operation, and nothing else.
 **What reads one:**
 
@@ -1171,10 +1289,10 @@ The reasons, from the inventory and the host:
   installation mechanism, no new failure mode in `bootstrap.py`, and no new privileged step.
 - The host has **no `psql` and no `pg_dump`** (`which psql pg_dump` finds nothing). A system package
   would install a server *and* the client tools; a container installs the server and puts the
-  client tools inside it, reachable as `docker exec secretary-postgres-1 pg_dump …` (§5.7 gives the
-  command with its role and credential). Either works,
-  and the container keeps the client tools *version-matched to the server* without adding an apt
-  repository pin to `bootstrap.py`. §5.7 says what this means for backup.
+  client tools inside it, reachable as `docker exec secretary-postgres-1 psql …`. Either works, and
+  the container keeps the client tools *version-matched to the server* without adding an apt
+  repository pin to `bootstrap.py`. What a later card does with those client tools for backup is
+  §5.7's open question, not a claim made here.
 - The apt path would require choosing and pinning a PostgreSQL major version against whatever
   Ubuntu ships, which is a second version authority next to the image tag.
 
@@ -1208,7 +1326,8 @@ A named volume rather than a bind mount under `<data>`: `secretary-data` is the 
 `data.py:init_layout` creates and `backup.py` copies wholesale, and a live PostgreSQL data
 directory inside it would be copied mid-write by a file-level backup. Keeping it out of `<data>`
 makes "the database is not a file the checkpoint snapshots" a property of the layout, not a rule
-somebody has to remember. The database's backup path is §5.7.
+somebody has to remember. That holds whichever way §5.7's open question is answered: nothing the
+file-level backup copies is a live PostgreSQL data file.
 
 ### 5.3 Port publication
 
@@ -1400,79 +1519,57 @@ Board size for sizing: 1482 Pipeline cards, open and archived, on 2026-09-06
 is small; the /sprints/new budget the same measurement fixed (≤ 3 s, and 8 batched metadata reads
 instead of 3000) becomes one indexed join.
 
-### 5.7 Backup and restore of PostgreSQL, against the existing chain
+### 5.7 Backup and restore of PostgreSQL — open, and deliberately not decided here
 
-The existing chain, unchanged in its own terms:
+**This document does not design the backup and restore of the PostgreSQL store.** Not the artefact
+format, not where a dump sits in an archive, not the restore order, not how roles come back on a
+clean host. A later card in `sprint:1432` owns it, and owns it *together with the code it needs*.
 
-1. `checkpoint.py` regenerates the normalized exports, validates them
-   (`board/normalized_checkpoint.py`), seals `analytics-manifest.json`, and commits
-   `state/board` + `state/runs` into the private instance repository under `BOARD_RUNS_PATHSPEC`.
-   Once per dispatcher tick on change; pushed in a 30-minute window; durable RPO 30 minutes
-   (`docs/RECOVERY.md`, "Cadence and RPO").
-2. `backup.py` writes `core` and `full` tar archives; `core` carries `board/cards.json`,
-   `cards.ndjson`, `export.json`; `full` additionally carries a raw Kanboard `docker cp` dump.
-3. `restore.py` / `task_restore.py` rebuild the board from the normalized export.
+What is settled here is only why it cannot be settled here, as three facts about the existing
+chain. They are written down so nobody re-derives them, and so the later card starts from them
+rather than from a first reading of `backup_policy.py`:
 
-What changes:
+1. **A dump written under `<data>/backups/` never enters a `full` archive.**
+   `backup_policy.should_skip_data_entry` returns `True` for any relative path whose first part is
+   `backups` (`src/secretary/backup_policy.py:194-195`), before any component or policy check. So
+   the obvious placement — write `board-db.dump` beside the archives — produces a dump that no
+   archive carries.
+2. **A custom-format dump does not pass verification in the `raw_board` slot.** In `FULL_POLICY`
+   the `raw_board` component is the directory `board` with `requires_raw_board_data=True`
+   (`backup_policy.py:90-98`), and `_verify_raw_board_component` requires a `manifest.json` under
+   that component *and* at least one regular file under `data/**`
+   (`backup_verify.py:235-247`). A single `pg_dump -Fc` file satisfies neither, so reusing the slot
+   the Kanboard `docker cp` dump occupies fails `secretary backup verify`.
+3. **The roles are not in the dump.** PostgreSQL roles are cluster-global objects; `pg_dump` of a
+   single database does not contain them. After a restore onto a fresh cluster,
+   `secretary_app` and `secretary_read` therefore do not exist — while the restored
+   `schema_migrations` row already asserts that the migration which creates them has run
+   (§5.5, §7.4). Restore leaves the database claiming a state its cluster does not have.
 
-- **The normalized export stays, and stays the recovery canon.** It is generated from PostgreSQL
-  instead of from Kanboard. `export_board` swaps its reader; the file contract
-  (`cards.ndjson` / `sprints.ndjson` / `events.ndjson` / `export.json` + the seal), the validation
-  and the pathspecs do not change, so `docs/RECOVERY.md`'s "What the checkpoint contains" stays
-  true word for word and `board/analytics.py` keeps working on a copied `state/board` directory.
-- **A PostgreSQL dump is added as a second, derived artefact — not a second canon.** One
-  `pg_dump --format=custom` per backup run, taken through the container because §5.1 put the client
-  tools there, written to `<data>/backups/…/board-db.dump`, and carried by the **`full`** policy
-  only. **The role is `secretary_owner` and its credential comes from `board-store.env`**, resolved
-  by `BoardStore.owner_for_instance` — the same path §5.4 gives every other consumer, not an
-  unstated container identity:
+**The conclusion this document is obliged to state.** Each of the three is a property of code, not
+of prose. Carrying a PostgreSQL dump in the existing archive requires changing
+`backup.py`, `backup_policy.py` and `backup_verify.py` — a new component with its own policy and
+its own verifier, or an exemption in `should_skip_data_entry`, plus a role-bootstrap step outside
+the dump. That is a code change, so it belongs to a card that ships the code and the test, not to a
+design document. Anything this document decided about it would be decided without the one check
+that has actually caught defects here: executing it.
 
-  ```bash
-  docker exec -e PGPASSWORD="$SECRETARY_DB_OWNER_PASSWORD" secretary-postgres-1 \
-      pg_dump -h 127.0.0.1 -U secretary_owner -d secretary -Fc -f /tmp/board-db.dump
-  ```
+**What is unchanged and needs no card.** The normalized export stays the recovery canon. It is
+generated from PostgreSQL instead of from Kanboard; `export_board` swaps its reader while the file
+contract (`cards.ndjson` / `sprints.ndjson` / `events.ndjson` / `export.json` and the seal), the
+validation and the pathspecs stay as they are. `docs/RECOVERY.md`'s "What the checkpoint contains"
+and "Source of truth" stay true word for word — only the identity of the live backend changes — and
+`board/analytics.py` keeps working on a copied `state/board` directory. A `core` archive keeps
+carrying exactly that normalized, engine-independent set, and `restore_capability`
+(`normalized-core`, `full-snapshot`) keeps its meanings. The open question is the engine-specific
+artefact, not the portable one.
 
-  Three things about that line are settled by running it rather than by reading it. It is
-  `secretary_owner` and not `secretary`: no `secretary` role exists, because §5.5 initializes the
-  cluster as `secretary_owner`, and the previous revision's `-U secretary` failed with
-  `FATAL: role "secretary" does not exist`. It is not `secretary_read` either: a read-only role
-  cannot dump, because `pg_dump` reads sequence state and that failed with
-  `permission denied for sequence repositories_repository_id_seq`. And it connects over
-  `-h 127.0.0.1` with `PGPASSWORD` rather than over the container's unix socket, so the credential
-  is the documented one instead of whatever `trust` in the image's default `pg_hba.conf` would have
-  allowed — an identity this document does not control and should not depend on. `core` stays exactly what it is today: the normalized, portable, engine-independent
-  set. A `full` archive already carries the engine-specific raw board dump for Kanboard; the
-  PostgreSQL dump takes that slot after cutover.
-- **`full`'s `raw_board` component changes source, not meaning.** `data.py:raw_kanboard_dump`
-  (`docker cp` of `/var/www/app/data`) is replaced by the `pg_dump`; `backup_policy.py`'s
-  `requires_raw_board_data` flag and the `full` retention (48 h) apply unchanged.
-- **Consistency.** `pg_dump` takes a single consistent snapshot by itself; no writer pause is
-  needed for the backup, which is strictly better than the raw Kanboard `docker cp` it replaces.
-  `backup.py`'s existing pipeline pause is about the rest of the archive, not the database, and is
-  not weakened.
-- **Restore order.** Fast path: `pg_restore` the custom dump from a `full` archive, as the same
-  role and by the same credential path:
-
-  ```bash
-  docker exec -e PGPASSWORD="$SECRETARY_DB_OWNER_PASSWORD" secretary-postgres-1 \
-      pg_restore -h 127.0.0.1 -U secretary_owner -d secretary \
-                 --no-owner --no-privileges /tmp/board-db.dump
-  ```
-
-  `--no-owner --no-privileges` because the target cluster creates its own `secretary_owner` at init
-  and its `secretary_app`/`secretary_read` in migration `0001`: the dump's ownership and grant
-  statements would be re-applying what the target already established, and on a target whose roles
-  are not yet created they would fail. Portable path,
-  and the one `docs/RECOVERY.md` promises: migrate an empty database to the current schema version,
-  then import the normalized checkpoint through the same importer the cutover uses. The second path
-  is what makes a recovery on a clean host independent of the dump format and of the exact server
-  version.
-- **The `restore_capability` values (`normalized-core`, `full-snapshot`) keep their meanings.** A
-  `core` archive still restores the normalized board and nothing engine-specific.
-
-`docs/RECOVERY.md`'s "Source of truth" section — "the live board backend stays the operational
-store, the remote Git HEAD is the last confirmed recovery checkpoint" — is unchanged: only the
-identity of the live backend changes.
+**The open question, for the later card.** Does the `full` archive carry a PostgreSQL dump at all —
+and if it does, in which component, verified by what, and with roles restored how? Until that card
+answers it with code, a `full` archive after cutover carries the normalized export and no
+engine-specific board artefact. Nothing else in this document depends on the answer: §5.1 puts the
+client tools in the container and §5.2 keeps the data directory out of `<data>` so that a
+file-level backup cannot copy it mid-write, and both hold whichever way the question is decided.
 
 ### 5.8 The Python driver as a new core dependency
 
@@ -1956,7 +2053,7 @@ live installation, which this card only reads. **When the container and the docu
 container is right and the document changes.**
 
 This exists because reading is not enough. Two earlier revisions of this document each shipped a
-statement PostgreSQL refuses — a `pg_dump -U secretary` for a role no longer created, and an
+statement PostgreSQL refuses — a `-U secretary` connection for a role no longer created, and an
 `INSERT … status = 'committed'` without the `settled_at` its own `CHECK` requires — and both were
 found by executing them, not by review. Every defect of that class is cheap to catch and invisible
 to careful reading.
@@ -1970,11 +2067,14 @@ The procedure, which is the document's own order:
 | 3 | every §3 `CREATE` fence, then every §3 `ALTER` fence, in §3.13's two steps | `secretary_owner` |
 | 4 | prerequisite rows a sprint create references: a product, its repositories, its issue | `secretary_owner` |
 | 5 | the §7.1 canonical sprint-create transaction, verbatim, binds substituted | `secretary_app` |
-| 6 | the §5.7 `pg_dump` with the role and credential §5.7 names | `secretary_owner` |
-| 7 | `pg_restore` into a second, empty container; compare table, constraint and row counts | `secretary_owner` |
-| 8 | one negative probe per constraint this document claims (§4, §3.3, §3.8, §3.9, §3.12), and one positive probe per acceptance it claims | `secretary_app`, `secretary_read` |
+| 6 | the §3.1 registry-projection upserts, run twice, to show the projection is idempotent and that a removed binding sets `registry_present = false` rather than deleting a row | `secretary_app` |
+| 7 | one negative probe per constraint this document claims (§4, §3.3, §3.8, §3.9, §3.12), and one positive probe per acceptance it claims | `secretary_app`, `secretary_read` |
 
-Step 8 is what keeps a constraint from being decorative. A document may state that a partial unique
+`pg_dump` and `pg_restore` are **not** in this run. §5.7 leaves the dump an open question, so there
+is no statement of this document's for them to verify; the card that answers §5.7 runs them against
+the code it ships.
+
+Step 7 is what keeps a constraint from being decorative. A document may state that a partial unique
 index forbids a second live reservation; only executing the second insert shows the index is
 actually reachable, correctly predicated and attached to the right column.
 
@@ -1984,9 +2084,17 @@ step-3b, and the `BEGIN;` fence is step 5. That is also why §7.1 spells its ins
 eliding them as `(...)`: a placeholder cannot be executed, and an example nobody executes is exactly
 where the previous two defects lived.
 
+The run behind this revision executed 22 of this document's 23 SQL fences, in that order. The
+twenty-third is §4's restatement of §3.6's partial unique index; it was compared byte-for-byte with
+the original rather than created a second time, which is the check that statement actually needs.
+The result was a database of 22 tables carrying 34 `CHECK`, 36 foreign-key, 22 primary-key and 12
+unique constraints and 4 partial unique indexes. All 18 negative probes were refused, each by the
+constraint or the privilege it names; all 10 positive probes were accepted.
+
 The container is verification, not delivery. Nothing here stands the store up for use, imports any
 data, or touches the live installation; standing the schema up for real is the first implementation
-card's job.
+card's job. The container and the extraction script are deleted afterwards; neither is added to the
+repository.
 
 ---
 
@@ -1994,6 +2102,11 @@ card's job.
 
 - The SQL migration files, the importer, the dry-run report format, the parity check and the
   cutover procedure. Separate cards.
+- Backup and restore of the PostgreSQL store: the artefact format, its slot in the archive, the
+  restore order and the role bootstrap after a restore, and the changes to `backup.py`,
+  `backup_policy.py`, `backup_verify.py` and `docs/RECOVERY.md` that any of it needs. §5.7 states
+  the three facts that constrain the answer and hands the question to a later card that ships the
+  code with it.
 - Containerization of the application, the web transport, the dispatcher or the workers, and the
   removal of Orca. A separate slice the owner has not approved.
 - Any change to behaviour, UI, admission rules or project selection.
