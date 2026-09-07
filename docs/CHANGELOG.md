@@ -4,6 +4,40 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-07 — a sprint closes through the protocol, and its close writes a closeout (secretary-1578, sprint:1431)
+
+**A new protocol operation and a new read.** `sprint_close(request_id, actor, reference, reason,
+closeout, decisions)` closes a sprint and answers with `kind: sprint_closed`; `sprint_close_result(ref,
+event_id)` reads back what one close decided (`kind: sprint_close_result`) — the verdict on every
+declared issue, the disposition of every card, which reservations the installation still holds for the
+sprint, the closeout's path and the sprint's new status, each from the source that owns it. Both are
+published as the `web-sprint` schema. Every rule about what a close *is* stays in
+`SprintWriter.close` and `secretary.sprint_close`: the operation adds no second store, lock, index or
+scheduler.
+
+**A close now writes its closeout into `state/knowledge`.** The account of what became of the work is
+supplied by the closing PO and written by the close itself, through `write_knowledge_document` and no
+second writer, as a step of the terminal phase under a request id derived from the close's — so
+repeating a failed close continues the same operation and leaves exactly one document. It runs before
+the status is published, so an interrupted close still leaves the sprint open. **A close is not a
+completed Definition of Done**, and the result document, the closeout and the protocol each say so:
+closing states what became of the work, never that the goal was reached.
+
+**`secretary sprint close` requires `--reason` and `--closeout-file`,** and is now a client of the
+operation. Its existing exit statuses are unchanged: `2` for `validation`, `3` for `live_work` and
+`close_conflict`, `4` for a part-done close that has to be repeated under the same request id. What it
+prints has changed shape — the operation's document, whose `result.close` carries the fields the old
+writer result carried. New command: `secretary sprint close-result --ref --event-id`.
+
+**A PO comment on a closed or stopped sprint is accepted** (`issue:9eee1d8ee505bc4ecdc2`). It used to be
+refused with exit `3`, which is what sent a PO past this protocol into the board's own comment API.
+It changes nothing else: no status change, no reopen, no restored reservation, no head woken or
+launched. `sprint comment-delivery` answers such a comment `not_deliverable` — a new delivery state —
+rather than `saved`, which would imply a delivery that cannot happen. A current task and an observer
+resume are still refused on a sprint that has ended. See
+[PROTOCOLS](PROTOCOLS.md#the-decisions-a-close-carries) and
+[OPERATIONS](OPERATIONS.md#closing-a-sprint).
+
 ## 2026-09-07 — a pause command reports the action it decided under the lock (secretary-1577, sprint:1431)
 
 **No behaviour of a pause or a resume changed; what a command reports about itself did.** When the

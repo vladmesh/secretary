@@ -282,3 +282,89 @@ def _check_card_confirmations_match_reality(
                 f"card {entry['ref']} is in {carried}, not in {entry['actual']}",
                 2,
             )
+
+
+#: What a close is, said in one sentence wherever a close is answered, written down or documented.
+#:
+#: A close states what became of the work.  It is *not* a statement that the Definition of Done was
+#: reached, and the two are separate facts on purpose: a sprint may close with its contract only
+#: partly satisfied, and the file above is where the closing PO says which part.  A reader who takes
+#: `closed` for `done` reads a deferred finding as a delivered one, so the sentence is carried on the
+#: result document, in the closeout the close writes, and in `docs/PROTOCOLS.md` -- never left to be
+#: inferred from a status.
+CLOSE_NOT_DONE = (
+    "Closing a sprint states what became of its work. It is not a statement that the sprint's "
+    "Definition of Done was reached: a closed sprint is not a satisfied contract, and what was and "
+    "was not achieved is what the decisions and the closeout below say."
+)
+
+#: Where under `state/knowledge` a sprint's closeout is kept.
+CLOSEOUT_DIRECTORY = "closeouts"
+
+
+def closeout_path(reference: str, *, day: str) -> str:
+    """The document one sprint's closeout is written to, derived and never invented per call.
+
+    Frozen into the close's staged plan the moment the transaction opens, so a retry the next day
+    writes the same document rather than a second one beside it.
+    """
+    slug = "".join(character if character.isalnum() else "-" for character in reference).strip("-")
+    return f"{CLOSEOUT_DIRECTORY}/{day}-{slug}.md"
+
+
+def closeout_document(
+    *,
+    reference: str,
+    goal: str,
+    actor: str,
+    reason: str,
+    body: str,
+    decisions: dict[str, list[dict[str, str]]] | None,
+) -> str:
+    """The closeout as it is written: the caller's prose, under what only the close knows.
+
+    The operation does not invent what the sprint achieved -- `body` is the closing PO's own
+    account, and it is carried verbatim.  What is added around it is what the close, and only the
+    close, is in a position to state: which sprint this is, who closed it and why, the verdict on
+    every declared issue, the disposition of every card that was not done, and the one sentence that
+    keeps the whole document from being read as a satisfied contract.
+    """
+    plan = decisions or {}
+    lines = [
+        f"# Sprint closeout: {reference}",
+        "",
+        CLOSE_NOT_DONE,
+        "",
+        f"- Sprint: {reference}",
+        f"- Goal: {goal or 'not recorded on the sprint'}",
+        f"- Closed by: {actor}",
+        f"- Reason for closing: {reason or 'not stated'}",
+        "",
+        "## What became of the work",
+        "",
+        body.strip(),
+        "",
+        "## Declared issues",
+        "",
+    ]
+    lines.extend(_closeout_entries(plan.get("issues"), "This sprint declared no issue."))
+    lines.extend(["", "## Cards that were not done", ""])
+    lines.extend(
+        _closeout_entries(plan.get("cards"), "No card was left in a working state at the close.")
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _closeout_entries(entries: Any, empty: str) -> list[str]:
+    rows = [entry for entry in (entries or []) if isinstance(entry, dict)]
+    if not rows:
+        return [empty]
+    return [
+        "- {ref} — {verdict}{actual}: {reason}".format(
+            ref=entry.get("ref", ""),
+            verdict=entry.get("verdict", ""),
+            actual=f" ({entry['actual']})" if entry.get("actual") else "",
+            reason=entry.get("reason", ""),
+        )
+        for entry in rows
+    ]

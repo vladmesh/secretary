@@ -1,8 +1,10 @@
 """CLI handlers for sprint entities.
 
-Four of these are clients rather than implementations. `sprint list` and `sprint status` do not read
+Six of these are clients rather than implementations. `sprint list` and `sprint status` do not read
 a board or decide what a sprint's state is; `sprint comment` does not decide what a comment is or
-when a repeat is a repeat; `sprint comment-delivery` decides nothing about delivery at all. All four
+when a repeat is a repeat; `sprint comment-delivery` decides nothing about delivery at all; and
+`sprint close` decides nothing about what a close is -- which decisions it needs, what it writes and
+in what order, when a repeat resumes it -- while `sprint close-result` reads that back. All six
 call the named operations of :mod:`secretary.webproto.sprint_reads` and
 :mod:`secretary.webproto.sprint_ops`, print the document those return, and map a typed protocol code
 onto the exit status `secretary web-read` already uses. Until secretary-1573 the two reads built a
@@ -27,9 +29,18 @@ from secretary.sprint_observer import observer_choice
 from secretary.sprints import BUDGET_RECORDED_EVENT_TYPES, SprintReader, SprintWriter
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
 from secretary.tasks import KanboardClient, TaskError
-from secretary.webproto.commands import _EXIT_BY_CODE, _RUN_EXIT_BY_CODE, EXIT_BACKEND
-from secretary.webproto.errors import ReadError
-from secretary.webproto.sprint_ops import SPRINT_COMMENT_ROLES, SprintOperationLayer
+from secretary.webproto.commands import (
+    _EXIT_BY_CODE,
+    _RUN_EXIT_BY_CODE,
+    EXIT_BACKEND,
+    EXIT_PENDING,
+)
+from secretary.webproto.errors import OperationPending, ReadError
+from secretary.webproto.sprint_ops import (
+    SPRINT_CLOSE_ROLES,
+    SPRINT_COMMENT_ROLES,
+    SprintOperationLayer,
+)
 from secretary.webproto.sprint_reads import SprintReadLayer
 
 
@@ -89,6 +100,16 @@ def add_sprint_subcommands(subparsers) -> None:
     )
     _add_data_dir_args(delivery)
     delivery.set_defaults(handler=run_comment_delivery)
+    close_result = commands.add_parser(
+        "close-result",
+        help="what one close decided and what it left behind, as far as durable state can say",
+    )
+    close_result.add_argument("--ref", required=True)
+    close_result.add_argument(
+        "--event-id", required=True, help="the identifier `sprint close` answered with"
+    )
+    _add_data_dir_args(close_result)
+    close_result.set_defaults(handler=run_close_result)
     for name, handler, roles in (
         # The roles the writer admits, taken from the layer rather than spelled a second time:
         # a command offering a role the operation refuses would be offering a dead end.
@@ -97,7 +118,7 @@ def add_sprint_subcommands(subparsers) -> None:
         ("budget", run_budget, ("po", "dispatcher", "steward")),
         ("resume", run_resume, ("po", "dispatcher", "observer", "steward")),
         ("reopen", run_reopen, ("po",)),
-        ("close", run_close, ("po",)),
+        ("close", run_close, SPRINT_CLOSE_ROLES),
     ):
         command = commands.add_parser(name)
         command.add_argument("--ref", required=True)
@@ -122,6 +143,18 @@ def add_sprint_subcommands(subparsers) -> None:
                 "--decisions-file",
                 help="YAML file stating the verdict on every declared issue and the disposition "
                 "of every card that is not done",
+            )
+            command.add_argument(
+                "--reason",
+                required=True,
+                help="why the owner is closing this sprint",
+            )
+            command.add_argument(
+                "--closeout-file",
+                required=True,
+                help="markdown file stating what became of the work, what is left unfinished and "
+                "the owner's decision; the close writes it into state/knowledge and links it to "
+                "the sprint. Closing is not a claim that the Definition of Done was reached",
             )
         command.set_defaults(handler=handler)
     sprint.set_defaults(handler=not_implemented)
@@ -213,7 +246,10 @@ def _operation(args: argparse.Namespace, operation: Callable[[SprintReadLayer], 
 
 
 def _sprint_operation(
-    args: argparse.Namespace, operation: Callable[[SprintOperationLayer], object]
+    args: argparse.Namespace,
+    operation: Callable[[SprintOperationLayer], object],
+    *,
+    pending: int | None = None,
 ) -> int:
     """Run one mutating protocol operation, and answer exactly as the read client does.
 
@@ -229,13 +265,27 @@ def _sprint_operation(
     # world -- the sprint is closed -- and `web-run` already gives it its own status so a script can
     # tell it from a malformed request. It is also the status this command answered a closed sprint
     # with before it became a client, so nothing an operator scripts against moves.
-    return _answer(lambda: operation(layer), _RUN_EXIT_BY_CODE)
+    return _answer(lambda: operation(layer), _RUN_EXIT_BY_CODE, pending=pending)
 
 
-def _answer(call: Callable[[], object], statuses: dict[str, int]) -> int:
-    """One protocol answer on stdout, or one typed refusal on stderr with its exit status."""
+def _answer(
+    call: Callable[[], object], statuses: dict[str, int], *, pending: int | None = None
+) -> int:
+    """One protocol answer on stdout, or one typed refusal on stderr with its exit status.
+
+    `pending` is the status a half-finished operation answers with, for the commands that had one
+    before they became clients. A close has always told an operator that its transaction is
+    repairable with its own status, and a script that branches on it keeps working: the typed
+    failure carries the same fact (`OperationPending`, with the request id to repeat), and this is
+    the one place that turns it back into the number.
+    """
     try:
         document = call()
+    except OperationPending as exc:
+        if pending is None:
+            raise
+        print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
+        return pending
     except ReadError as exc:
         print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
         return statuses.get(exc.code, EXIT_BACKEND)
@@ -393,20 +443,35 @@ def run_reopen(args: argparse.Namespace) -> int:
 
 
 def run_close(args: argparse.Namespace) -> int:
+    """`secretary sprint close`, as a client of the named operation and nothing more.
+
+    Everything a close *is* -- which decisions it needs, what it writes and in what order, when a
+    repeat resumes it -- belongs to `SprintWriter.close` and to the operation that calls it. What is
+    left here is reading the two files, minting a request id when the operator gave none, and
+    turning a typed refusal back into the exit status this command has always answered with.
+    """
     from secretary.sprint_close import parse_close_decisions
 
     try:
         decisions = parse_close_decisions(_read_body(args.decisions_file)) if args.decisions_file else None
+        closeout = _read_body(args.closeout_file)
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
-    return _write(
+    return _sprint_operation(
         args,
-        lambda writer: writer.close(
-            role=args.role,
+        lambda layer: layer.sprint_close(
+            request_id=args.request_id or str(uuid.uuid4()),
             actor=args.actor or args.role,
             reference=args.ref,
+            reason=args.reason,
+            closeout=closeout,
             decisions=decisions,
-            request_id=args.request_id,
+            role=args.role,
         ),
+        pending=EXIT_PENDING,
     )
+
+
+def run_close_result(args: argparse.Namespace) -> int:
+    return _operation(args, lambda layer: layer.sprint_close_result(args.ref, args.event_id))

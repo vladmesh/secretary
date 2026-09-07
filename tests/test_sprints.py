@@ -22,6 +22,7 @@ from secretary.board import (
 from secretary.cli import main
 from secretary.config import load_config
 from secretary.data import normalize_sprint_entity
+from secretary.knowledge_write import list_knowledge_documents
 from secretary.product_issues import ProductIssueStore
 from secretary.sprint_close import parse_close_decisions
 from secretary.sprint_observer import (
@@ -50,7 +51,13 @@ from secretary.sprints import (
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.fakes.sprints import SprintFixture, SprintKanboard
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
-from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON, close_decisions
+from tests.sprint_close_fixtures import (
+    CLOSEOUT_BODY,
+    DROP_REASON,
+    KEEP_OPEN_REASON,
+    close_decisions,
+    init_state_repo,
+)
 
 # A close states a verdict on every issue its sprint declared, and every sprint this fixture
 # opens declares `issue:open`. The tests below are about the rest of the close, so they give
@@ -2761,8 +2768,11 @@ class SprintTests(SprintFixture):
             reference=ref,
             decisions=drop_cards("secretary-13"),
         )
-        with self.assertRaisesRegex(TaskError, "closed"):
-            self.writer.comment(role="worker", actor="worker", reference=ref, body="late")
+        # A comment is admitted on a closed sprint and changes nothing else about it
+        # (issue:9eee1d8ee505bc4ecdc2): adding the outcome after the fact is what a PO does, and
+        # this assertion used to be the refusal that sent one past the protocol into the board.
+        self.writer.comment(role="worker", actor="worker", reference=ref, body="late")
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
         with self.assertRaisesRegex(TaskError, "closed"):
             task_writer.create(
                 role="po",
@@ -5448,8 +5458,16 @@ class SprintCloseDecisionTests(SprintFixture):
         self.assertEqual(result["disposed_tasks"], [card])
 
     def test_cli_close_reads_its_decisions_from_a_file(self) -> None:
+        """The command is a client of the operation, and prints what the operation answered.
+
+        The decisions and the closeout arrive as files for the same reason: the reasons are prose,
+        and prose is written before the command runs.
+        """
+        init_state_repo(self.instance)
         ref = self._open(issues=["issue:open"])
         card = self._card(ref, "cli card", "cli-disposed")
+        closeout = Path(self.tmp.name) / "closeout.md"
+        closeout.write_text(CLOSEOUT_BODY, encoding="utf-8")
         path = Path(self.tmp.name) / "decisions.yaml"
         path.write_text(
             "issues:\n"
@@ -5485,6 +5503,10 @@ class SprintCloseDecisionTests(SprintFixture):
                     str(self.instance),
                     "--decisions-file",
                     str(path),
+                    "--reason",
+                    "the product moved on and the sprint is not worth extending",
+                    "--closeout-file",
+                    str(closeout),
                     "--request-id",
                     "cli-close",
                 ]
@@ -5492,13 +5514,24 @@ class SprintCloseDecisionTests(SprintFixture):
 
         self.assertEqual(errors.getvalue(), "")
         self.assertEqual(code, 0)
-        result = json.loads(output.getvalue())
-        self.assertEqual(result["closed_issues"], ["issue:open"])
-        self.assertEqual(result["disposed_tasks"], [card])
+        answer = json.loads(output.getvalue())
+        self.assertEqual(answer["kind"], "sprint_closed")
+        closed = answer["result"]["close"]
+        self.assertEqual(closed["closed_issues"], ["issue:open"])
+        self.assertEqual(closed["disposed_tasks"], [card])
         self.assertEqual(self._store().show_issue("issue:open")["close_reason"], "wont_do")
+        # The command prints the operation's document, and that document refuses to read as a
+        # satisfied contract.
+        self.assertFalse(answer["definition_of_done"]["satisfied"])
+        self.assertEqual(
+            list_knowledge_documents(self.instance), (closed["closeout"]["document"],)
+        )
 
     def test_cli_close_without_the_file_refuses_before_it_writes(self) -> None:
+        init_state_repo(self.instance)
         ref = self._open(issues=["issue:open"])
+        closeout = Path(self.tmp.name) / "closeout.md"
+        closeout.write_text(CLOSEOUT_BODY, encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
 
         with (
@@ -5520,6 +5553,10 @@ class SprintCloseDecisionTests(SprintFixture):
                     self.tmp.name,
                     "--instance",
                     str(self.instance),
+                    "--reason",
+                    "closing without deciding the issue",
+                    "--closeout-file",
+                    str(closeout),
                 ]
             )
 

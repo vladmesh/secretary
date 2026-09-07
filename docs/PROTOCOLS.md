@@ -892,7 +892,9 @@ python3 -P -m secretary sprint current-task --role dispatcher --ref sprint:ID --
 python3 -P -m secretary sprint budget --role dispatcher --ref sprint:ID --type red_ci
 python3 -P -m secretary sprint resume --role observer --ref sprint:ID --body-file RESUME.json
 python3 -P -m secretary sprint reopen --role po --ref sprint:ID --observer HEAD_PROFILE
-python3 -P -m secretary sprint close --role po --ref sprint:ID --decisions-file DECISIONS.yaml
+python3 -P -m secretary sprint close --role po --ref sprint:ID --reason WHY \
+  --decisions-file DECISIONS.yaml --closeout-file CLOSEOUT.md
+python3 -P -m secretary sprint close-result --ref sprint:ID --event-id evt_ID
 ```
 
 Stored fields are the goal, the Definition of Done text, repositories, the owning product, its issues,
@@ -1029,9 +1031,9 @@ the card's comment, and the archive carries it again. A card whose dispatcher wo
 disposable at all: the close refuses with `live_work` and names it, and the head is settled first.
 
 `closed` is published as the last step of the close. The terminal phase runs in one order — the verdicts
-on the declared issues, the archival of the Done cards, the dispositions, then the status, then the
-reserved-project index and the completion of the transaction — and an interrupted close therefore leaves
-the sprint open. That is what keeps a successor out of an unfinished close: an open sprint still reserves
+on the declared issues, the archival of the Done cards, the dispositions, the knowledge closeout, then the
+status, then the reserved-project index and the completion of the transaction — and an interrupted close
+therefore leaves the sprint open. That is what keeps a successor out of an unfinished close: an open sprint still reserves
 its projects, and `create` already refuses a second sprint on a reserved project, so the retry of the
 close finishes its dispositions before any successor can be opened. `close` also takes the admission lock
 (`sprints/admission.lock`) that `create` and `reopen` take, so a concurrent create waits for the answer
@@ -1076,6 +1078,54 @@ it carries; `already_moved` skips the disposition's move and archives the card w
 accepted only for the states a disposition of this close would have produced (`done`, `ready`), so a
 confirmation cannot take a card off the contract while it is still in a working state. Both are recorded
 in the close event with their prose, which is where the audit keeps why the sprint accepted them.
+
+#### The closeout a close writes
+
+A close writes one knowledge document, and it is a step of the close rather than something a person
+remembers to do afterwards. It is written into `state/knowledge` through `write_knowledge_document`, the
+only writer of that plane, and there is no second one. Its path is derived from the sprint and the day the
+close was staged (`closeouts/<day>-<sprint-ref>.md`) and frozen into the staged plan, so a retry the next
+day writes the same document rather than a second one beside it.
+
+The step runs under a request id derived from the close's, exactly as every other step of the terminal
+phase does, and that id's committed event is the only proof the document was written. So a failure at or
+after the step is repaired by repeating the same close request: the retry that finds the step committed
+skips it, and the retry that finds it pending drives the same write, whose content is already on disk and
+which therefore commits nothing further. Exactly one document, whatever failed. Its position in the order
+is before the status, so an interrupted close still leaves the sprint open and still holding its projects,
+and a sprint that reads `closed` has its closeout written.
+
+**What is in it is the closing PO's, not the operation's.** The account of what became of the work — what
+was achieved, what is left unfinished, and the decision the owner made about the remainder — is supplied
+by the caller and carried verbatim. What the close composes around it is what only the close knows: the
+sprint it is about, who closed it and why, the verdict on every declared issue and the disposition of
+every card that was not done. The operation never decides what the sprint achieved.
+
+**A close is not a completed Definition of Done, and every one of these says so.** The closeout carries
+that sentence, the answer to a close carries it in a `definition_of_done` field that is `satisfied:
+false` and nothing else, and this section is where it is stated: *closing a sprint states what became of
+its work; it is not a statement that the sprint's Definition of Done was reached.* A sprint may close with
+its contract only partly satisfied — that is the ordinary case, and it is why the decisions file exists —
+so no field, name or sentence of a close may let a closed sprint read as a satisfied contract.
+
+A close made with no closeout writes none. Requiring one belongs to the protocol operation
+([Closing one](#closing-one)), where the caller is a closing PO; the writer takes it as an option so that
+recovery and the callers that merely need a closed sprint are not made to invent an account of one.
+
+#### A comment on a sprint that has ended
+
+A closed or stopped sprint takes no further *semantic* work: no current task is set on it and no observer
+resume is recorded against it, because both are statements about work in progress under a contract that
+has ended. **A comment is not that, and it is accepted.** Adding the outcome after the fact is what a PO
+does with a sprint that is over, and refusing it is what sent one reaching past this protocol into the
+board's own comment API.
+
+What such a comment does not do is exhaustive: it does not change the sprint's status, does not reopen it,
+does not restore a reservation (the reserved-project index holds projects for *open* sprints only), and
+wakes or launches no head — the production tick stops the observer of a sprint that is no longer open and
+drops its record, so there is nothing to wake. It is idempotent on `request_id` by the same audit claim
+every sprint write is. Reading what happened to it answers `not_deliverable` rather than `saved`, because
+`saved` would say no batch carries it *yet*, and no batch ever will.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.
@@ -3095,16 +3145,17 @@ The same typed exceptions the reads use, plus the two only a mutation can make. 
 ## Opening and watching a sprint
 
 The third part of `secretary.webproto`, and the one that decides what the other two have to work
-on: a run is one head on one card, and the cards come from a sprint. Two operations open a sprint
-and comment on one, four reads answer what a sprint can be built from, what one sprint is doing,
-what every sprint of the installation is doing, and what happened to one comment. They hold the same
+on: a run is one head on one card, and the cards come from a sprint. Three operations open a sprint,
+comment on one and close one, five reads answer what a sprint can be built from, what one sprint is
+doing, what every sprint of the installation is doing, what happened to one comment, and what one
+close decided. They hold the same
 properties as the halves above — no HTTP, no sockets, no framework, no rendering, typed codes
 instead of status numbers, and every section of every document carrying its own availability — and
 they are the contract the web transport, the CLI and a future Telegram head all call.
 
 Every document validates against the packaged `web-sprint` schema and carries `schema_version`, a
-`kind` of `sprint_options`, `sprint`, `sprint_list`, `sprint_created`, `sprint_comment` or
-`sprint_comment_delivery`, and `observed_at`. The identities are the
+`kind` of `sprint_options`, `sprint`, `sprint_list`, `sprint_created`, `sprint_comment`,
+`sprint_comment_delivery`, `sprint_closed` or `sprint_close_result`, and `observed_at`. The identities are the
 ones this pipeline already has: a sprint is its `sprint:N` reference, a product its id, an issue its
 `issue:*` reference, a project its registered id, a head profile its registry id.
 
@@ -3273,8 +3324,10 @@ operation here that opens such a path.
 | `delivery` | the whole `sprint_comment_delivery` document below, embedded exactly as a create embeds the sprint |
 
 Every rule about what a comment may be stays with `SprintWriter.comment`: which roles may write one
-(`po`, `dispatcher`, `worker`, `reviewer`, `steward`, `retro`), that a body may not be empty, and
-that a closed or stopped sprint refuses one. The operation restates none of them and calls it.
+(`po`, `dispatcher`, `worker`, `reviewer`, `steward`, `retro`) and that a body may not be empty. The
+operation restates none of them and calls it. A closed or stopped sprint accepts one — see
+[A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended) for what it does and
+does not do, and `not_deliverable` below for how the delivery read answers it.
 
 **Idempotency is the audit's own claim, and there is no second index.** `SprintWriter._write`
 claims `request_id` in the committed audit before the board is touched, and a repeat is answered
@@ -3326,6 +3379,7 @@ the five `DeliveryStage` values plus the cases that are not a stage at all:
 | stage `delivery_intent` or `awaiting_ack`, `through_event` at or after this comment | `waiting` | the batch was fixed and sent and is not acknowledged |
 | stage `retry_deferred` over the same range | `error`, with `last_failure_reason` | the batch failed and the dispatcher is retrying it |
 | stage `idle`, or an active batch fixed *before* this comment arrived | `saved` | no batch carries it yet; an event appended after a delivery intent is deliberately left for the next batch |
+| the sprint is closed or stopped | `not_deliverable` | no batch will *ever* carry it: the tick stops the observer of a sprint that is no longer open and drops its record. Answered before the dispatcher is consulted at all, because a dropped record would otherwise read as `unknown` for something that is exactly known |
 
 `unknown` is never folded into any of the other four. "Nobody could say where this comment is" and
 "it is still waiting" are repaired by different people, and the read has to be able to tell an
@@ -3351,6 +3405,69 @@ published.
 
 **The read performs no delivery.** No wake, no nudge, no retry, no head launch and no write to the
 dispatcher's state — redelivery is the production tick's, and this reports what that tick recorded.
+
+### Closing one
+
+**`sprint_close(request_id, actor, reference, reason, closeout, decisions, role="po")`** closes a sprint
+and answers with `kind: sprint_closed`. It takes the owner's reason, the decisions file
+([The decisions a close carries](#the-decisions-a-close-carries)) and the closeout body, and it is a
+client of `SprintWriter.close` in exactly the sense the two operations above are clients of their
+writers.
+
+| field | what it carries |
+| --- | --- |
+| `request_id` | required; the idempotency key of this one close, and the id whose repeat resumes a half-finished one |
+| `ref` | the sprint that was closed |
+| `event_id` | the **durable identifier of the close**: the committed audit event id, and what `sprint_close_result` takes back |
+| `definition_of_done` | `satisfied: false`, always, with the sentence saying why the question is not what a close answers |
+| `result` | the whole `sprint_close_result` document below, embedded exactly as a comment embeds its delivery |
+
+**Every rule stays where it already is.** What a close *is* — the decision every declared issue and
+every card in a working state needs, the refusal before anything is written, the terminal phase and its
+order, the admission lock, the per-step request ids, `live_work`, `close_conflict`, the
+`already_closed`/`already_moved` confirmations, the `audit_pending` retry with the staged plan retained,
+and the knowledge closeout — belongs to `SprintWriter.close` and `secretary.sprint_close`. The operation
+re-decides none of it and adds no second store, lock or scheduler.
+
+**The closeout is required here and nowhere below.** A close made through this operation states what
+became of the work, because the caller is the closing PO. What the operation owns is the document's path,
+its link to the sprint and the fact that it is written exactly once; what is *in* it is the caller's, and
+nothing here generates it.
+
+**Idempotency is the staged close's own, and there is no second index.** `SprintWriter.close` stages the
+whole close under its request id: a repeat resumes it, repeats no step whose derived id already carries a
+committed event, and is refused with `validation` when it states other decisions, another reason or
+another closeout. A request index of this layer's own would be a second answer to that, and it could not
+carry the one amendment a `close_conflict` retry is allowed to make.
+
+**A half-finished close is repeated, never restarted.** `audit_pending` reaches the caller as an
+`OperationPending` carrying `backend_unavailable` and a `data` action naming `sprint_close` and *this*
+request id. `live_work` and `close_conflict` are `owner_conflict`: the request is well formed and refused
+on the state of the world — a card whose head is still running, or an object somebody else moved — and
+both are answered by settling that thing and repeating the close.
+
+**The close ends no head.** It releases the reservations, and the observer is ended by the lifecycle that
+already ends it: the production tick reconciles its observer records against the sprint board and stops
+the head of a sprint that is no longer open. There is no second teardown here and the close stops nothing
+itself.
+
+### What a close decided
+
+**`sprint_close_result(ref, event_id)`** is the read half, and the document a close answers with:
+
+* **`close`** — what the committed audit records this close decided: the verdict on each declared issue
+  and which of them were closed, the disposition of each card and which were archived, who closed the
+  sprint and the reason they gave, and the closeout's path and commit. `absent` is the journal's own
+  answer that it holds no such close; `unknown` is a journal nobody could read. Sourced `journal`;
+* **`reservations`** — which of the sprint's declared projects the installation still holds for it,
+  read from `sprints/active-repositories.json`, the index the board's own write guard authorises
+  against. Sourced `reservations`, needing `sprints`. An index nobody could read answers `null` and
+  never "released": reporting a project as free on the strength of a file nobody has seen is what would
+  admit a successor over a live reservation;
+* **`sprint`** — the sprint's own record, including its new status. Sourced `sprints`;
+* **`definition_of_done`** — read from no source at all, and always `satisfied: false`. It is this
+  contract saying, in the answer itself, that closing a sprint states what became of the work and never
+  that the goal was reached.
 
 ### One place says which source answered
 

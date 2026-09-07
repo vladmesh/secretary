@@ -32,12 +32,53 @@ class KnowledgeValidationError(KnowledgeError):
 
 
 @dataclass(frozen=True)
+class KnowledgeDocument:
+    """One knowledge write that has passed every check this writer makes before it writes.
+
+    The product of :func:`check_knowledge_document`, and what :func:`write_knowledge_document`
+    writes: the cleaned actor, the path relative to `state/knowledge`, the body, and the instance
+    repository the write lands in.
+    """
+
+    actor: str
+    document: PurePosixPath
+    text: str
+    instance_dir: Path
+
+
+@dataclass(frozen=True)
 class KnowledgeWriteResult:
     document: str
     path: Path
     commit: str
     actor: str
     changed: bool
+
+
+def check_knowledge_document(
+    instance_dir: Path,
+    *,
+    document: str,
+    actor: str,
+    text: str | None = None,
+    source_file: Path | None = None,
+) -> KnowledgeDocument:
+    """Everything :func:`write_knowledge_document` refuses, asked without writing anything.
+
+    The preflight half of the one writer, split out rather than restated: a caller that has to
+    know *before* it starts an operation whether the document at the end of it can be written --
+    a sprint close, which must refuse before its first board write rather than halfway through --
+    asks this, and the rules it is answered by are the write's own.
+    """
+    actor = _clean_actor(actor)
+    relative = _clean_document(document)
+    body = _document_text(text=text, source_file=source_file)
+    # Knowledge leaves the host with the rest of the checkpoint, and a brainstorm
+    # describes infrastructure by its nature, so it passes the same secret gate
+    # the tick and memory writers apply.
+    if redact(body) != body:
+        raise KnowledgeValidationError(f"secret detected in state/knowledge/{relative}")
+    return KnowledgeDocument(actor, relative, body, state_repo.require_repo(instance_dir))
 
 
 def write_knowledge_document(
@@ -54,16 +95,11 @@ def write_knowledge_document(
     `changed=False` means the document on disk already had this content; the
     commit is then the current HEAD and nothing was added to the history.
     """
-    actor = _clean_actor(actor)
-    relative = _clean_document(document)
-    body = _document_text(text=text, source_file=source_file)
-    # Knowledge leaves the host with the rest of the checkpoint, and a brainstorm
-    # describes infrastructure by its nature, so it passes the same secret gate
-    # the tick and memory writers apply.
-    if redact(body) != body:
-        raise KnowledgeValidationError(f"secret detected in state/knowledge/{relative}")
-
-    instance_dir = state_repo.require_repo(instance_dir)
+    checked = check_knowledge_document(
+        instance_dir, document=document, actor=actor, text=text, source_file=source_file
+    )
+    actor, relative, body = checked.actor, checked.document, checked.text
+    instance_dir = checked.instance_dir
     target = state_repo.knowledge_dir(instance_dir) / relative
     with state_repo.state_repo_lock(instance_dir):
         try:

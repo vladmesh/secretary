@@ -1,4 +1,5 @@
-"""The operations that open a sprint and comment on one, and nothing else about what a sprint is.
+"""The operations that open a sprint, comment on one and close one, and nothing else about what a
+sprint is.
 
 secretary-1562 gave this package operations over a product run. These are the operations over a
 sprint. `sprint_create`: a client -- the web transport, `secretary sprint create` today, a Telegram
@@ -6,6 +7,24 @@ head later -- states a product, a goal, a definition of done, the issues the spr
 projects it reserves, the head that observes it and, optionally, the heads its cards run on, and a
 sprint entity exists. `sprint_comment`: the one way a PO intervenes in a *running* sprint, by
 commenting on the entity -- there is deliberately no path here to edit the sprint's cards.
+`sprint_close`: the owner states why the sprint is ending, what became of every issue it declared
+and every card it still holds, and the account of the outcome the close writes into
+`state/knowledge`, and the sprint ends.
+
+**A close is not a completed Definition of Done.** The answer says so in a field of its own, the
+closeout the close writes says so in its first paragraph, and neither the operation nor the writer
+has a spelling that means the goal was reached. A sprint may close with its contract only partly
+satisfied -- that is the ordinary case, and it is why the decisions file exists. See
+:data:`secretary.sprint_close.CLOSE_NOT_DONE`.
+
+**A close needs no request index of this layer's own either**, and for a stronger reason than a
+comment: `SprintWriter.close` stages the whole close under its request id, so a repeat resumes that
+staged transaction, repeats no step whose derived id already carries a committed event, and refuses
+one that states other decisions. An index here would be a second answer to that, and it could not
+carry the one amendment a `close_conflict` retry is allowed to make. What this module adds is the
+same two things it adds everywhere: a typed refusal instead of a `TaskError` with an exit status,
+and a readable result -- which for a close is the read below, not a second description of what the
+writer just did.
 
 **A comment needs no request index of this layer's own.** `SprintWriter._write` already claims
 `request_id` in the committed audit, and a repeat is answered from that claim *without the mutation
@@ -104,6 +123,17 @@ COMMENT_PENDING_REASON = "sprint_comment_pending_repair"
 #: audit's own committed/pending claim on `request_id` is already what makes a repeat idempotent.
 SPRINT_COMMENT_OPERATION = "sprint_comment"
 
+#: The name a close is known by on a pending action, and deliberately not a record in
+#: :mod:`secretary.webproto.sprint_requests` either. `SprintWriter.close` already stages the whole
+#: close under its request id and resumes it there; a second index here would be a second answer to
+#: a question the staged transaction has already answered, and a second thing to keep in step with
+#: the amendment a `close_conflict` retry is allowed to carry.
+SPRINT_CLOSE_OPERATION = "sprint_close"
+CLOSE_PENDING_REASON = "sprint_close_pending_repair"
+
+#: The one role that may close a sprint, as `SprintWriter.close` already restricts it.
+SPRINT_CLOSE_ROLES = ("po",)
+
 #: The roles `SprintWriter.comment` admits, named here so a client can offer the choice. The refusal
 #: for anything else is still the writer's own, and the operation restates none of it.
 SPRINT_COMMENT_ROLES = ("po", "dispatcher", "worker", "reviewer", "steward", "retro")
@@ -130,6 +160,12 @@ _CODES: dict[str, Any] = {
     # formed and refused on the state of the world. This layer only says which of its codes carries
     # the writer's answer -- what `SprintWriter._write` refuses, and when, is unchanged.
     "closed": OwnerConflict,
+    # The two refusals a close makes on the state of the world, and the same reading: the request
+    # is well formed, and it is refused because something outside it holds -- a card whose head is
+    # still running, or an object somebody else moved while this close ran. Both are answered by
+    # settling that thing and repeating the close, which is what `owner_conflict` means here.
+    "live_work": OwnerConflict,
+    "close_conflict": OwnerConflict,
     "backend_error": RuntimeUnavailable,
 }
 
@@ -350,6 +386,88 @@ class SprintOperationLayer(ProtocolBoundary):
             "delivery": self._reads().sprint_comment_delivery(reference, comment_id),
         }
 
+    def sprint_close(
+        self,
+        *,
+        request_id: str,
+        actor: str,
+        reference: str,
+        reason: str,
+        closeout: str,
+        decisions: dict[str, list[dict[str, str]]] | None = None,
+        role: str = "po",
+    ) -> dict[str, Any]:
+        """Close one sprint, and answer with what became of its work.
+
+        The operation beside `sprint_create` and `sprint_comment`, and a client of
+        `SprintWriter.close` in exactly the sense those two are clients of their writers: every rule
+        about what a close *is* -- the decision each declared issue and each remaining card needs,
+        the order of the terminal phase, the admission lock, the per-step request ids, `live_work`,
+        `close_conflict`, the `already_closed`/`already_moved` confirmations and the `audit_pending`
+        retry -- stays in `SprintWriter.close` and :mod:`secretary.sprint_close`. Nothing is
+        re-decided here.
+
+        **The closeout is required here and nowhere below.** The closing PO states what became of
+        the work; the operation owns the document's path, its link to this sprint and the fact that
+        it is written exactly once, and it invents none of its content. `SprintWriter.close` takes
+        it as an option so that the callers that merely need a closed sprint -- recovery, tests, the
+        dispatcher's own fixtures -- are not made to invent an account of one.
+
+        **A repeat needs no request index of this layer's own.** The close is staged under its
+        request id by the writer's own transaction: a repeat resumes that staged close, repeats no
+        step it already committed, and is refused when it states other decisions. A second index
+        here would be a second answer to that, and it could not carry the one amendment a
+        `close_conflict` retry is allowed to make.
+
+        **A close is not a completed Definition of Done**, and the document says so
+        (:data:`secretary.sprint_close.CLOSE_NOT_DONE`) rather than leaving a reader to take
+        `closed` for `done`.
+        """
+        from secretary.sprint_close import CLOSE_NOT_DONE
+
+        now = self._clock()
+        if not str(request_id or "").strip():
+            raise ValidationRefused("a sprint operation names the request it is made under")
+        if not str(reference or "").strip():
+            raise ValidationRefused("a sprint close names the sprint it closes")
+        if not str(reason or "").strip():
+            raise ValidationRefused("a sprint close states why the owner is closing this sprint")
+        if not str(closeout or "").strip():
+            raise ValidationRefused(
+                "a sprint close states what became of the work: pass the closeout this close writes "
+                "into state/knowledge. It is the account of the outcome, not a claim that the "
+                "Definition of Done was reached"
+            )
+        report = self.report()
+        data_dir = self.data_dir(report)
+        try:
+            closed = self._writer(report, data_dir).close(
+                role=role,
+                actor=actor,
+                reference=reference,
+                decisions=decisions,
+                request_id=request_id,
+                reason=reason,
+                closeout=closeout,
+            )
+        except TaskError as exc:
+            raise self._close_refusal(exc, request_id=request_id) from None
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "sprint_closed",
+            "observed_at": sources.isoformat(now),
+            "request_id": request_id,
+            "ref": reference,
+            "event_id": str(closed.get("event_id") or ""),
+            # Said on the answer to the write as well as on the read below, because this is the
+            # document a closing PO actually reads.
+            "definition_of_done": {"satisfied": False, "reason": CLOSE_NOT_DONE},
+            # The result, read back through the protocol exactly as a comment reads its delivery:
+            # a caller that has just closed a sprint and one asking an hour later read the same
+            # document, built from the sources that own each half of it.
+            "result": self._reads().sprint_close_result(reference, str(closed.get("event_id") or "")),
+        }
+
     # -- the pieces the operation is made of -------------------------------------------------
 
     def _existing(self, store: SprintRequestStore, request_id: str, *, fingerprint: str) -> Any:
@@ -485,6 +603,22 @@ class SprintOperationLayer(ProtocolBoundary):
             reason=COMMENT_PENDING_REASON,
         )
 
+    def _close_refusal(self, exc: TaskError, *, request_id: str) -> Exception:
+        """One `TaskError` from `SprintWriter.close`, as this layer's own typed failure.
+
+        The same mapping every sprint write uses. `audit_pending` is the one that is not a plain
+        refusal: a close that has performed a step is never thrown away, so the answer is a pending
+        action naming *this* request id -- the id whose repeat resumes the staged close, keeps its
+        plan and repeats no step it already committed. A new id would open a second close beside a
+        half-finished one.
+        """
+        return self._refusal(
+            exc,
+            request_id=request_id,
+            operation=SPRINT_CLOSE_OPERATION,
+            reason=CLOSE_PENDING_REASON,
+        )
+
     def _refusal(
         self,
         exc: TaskError,
@@ -580,9 +714,12 @@ class SprintOperationLayer(ProtocolBoundary):
 
 
 __all__ = [
+    "CLOSE_PENDING_REASON",
     "COMMENT_PENDING_REASON",
     "PENDING_REASON",
     "SCHEMA_VERSION",
+    "SPRINT_CLOSE_OPERATION",
+    "SPRINT_CLOSE_ROLES",
     "SPRINT_COMMENT_OPERATION",
     "SPRINT_COMMENT_ROLES",
     "SPRINT_CREATE_ROLES",
