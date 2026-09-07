@@ -375,6 +375,19 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(url.database, "secretary")
         self.assertNotIn("p@ss/w:rd", str(url))  # never rendered, and never split into two fields
 
+    def test_an_invocation_with_no_injected_connection_refuses_and_names_the_entry_point(self) -> None:
+        """There is one supported way to run these migrations, and `env.py` says which.
+
+        The runner holds `pg_advisory_lock` on the session it migrates on (§7.4), so `env.py`
+        opening a connection of its own would migrate outside the lock — and would then reach the
+        initial revision with none of §5.5's generated passwords. It refuses here instead, before
+        anything connects, naming `secretary.board.migrate`.
+        """
+        from alembic import command
+
+        with self.assertRaisesRegex(RuntimeError, "migrations run only through secretary"):
+            command.upgrade(migrate.alembic_config(), "heads")
+
     def test_the_advisory_key_is_a_fixed_literal(self) -> None:
         """Two upgrades of one installation contend only if every checkout uses one key."""
         self.assertEqual(migrate.ADVISORY_LOCK_KEY, 0x2C5B1F4A6E9D0713)

@@ -1211,7 +1211,7 @@ is the order migration `0001` applies:
    `task_retry_heads`, `task_issues`, `task_dependencies`, `task_supersessions`), §3.6
    (`sprint_projects` and its partial unique index), §3.7 (`sprint_comments`, `task_comments`),
    §3.8 (`sprint_decisions` and its two partial unique indexes), §3.9 (`requests`, `board_events`),
-   §7.4 (`schema_migrations`).
+   §7.4 (Alembic's `alembic_version`, which the migration tool creates).
 2. **Add the deferred constraints**, in the same reading order: §3.3's two scoped sprint cursors,
    §3.4's `budget_card_is_in_this_sprint`, §3.8's two scoped decision subjects, §3.9's five
    `request_id` foreign keys.
@@ -1875,11 +1875,12 @@ dependencies beside `psycopg[binary]` (§5.8).
   and there is no down migration for the initial revision at all.
 - **The connection is never an `alembic.ini` literal.** There is no `alembic.ini` in this
   product. `secretary.board.migrate` builds Alembic's `Config` in code and hands `env.py` the
-  connection it opened from `board_store.resolve` (§5.4), as the `secretary_owner` role (§5.5);
-  an operator running `alembic` by hand names the installation instead (`-x instance=…`) and
-  `env.py` resolves the same way. `board_store.resolve` is also where the git-exclusion lifecycle
-  of `board-store.env` is enforced, so no route to a configured store can migrate on top of
-  credentials the instance repository is tracking.
+  connection it opened from `board_store.resolve` (§5.4), as the `secretary_owner` role (§5.5).
+  That is the only way in, and `env.py` refuses an invocation that supplies no connection rather
+  than opening one of its own: the runner holds the advisory lock on that session for the whole
+  apply, so a second connection would migrate outside the lock. `board_store.resolve` is also
+  where the git-exclusion lifecycle of `board-store.env` is enforced, so no route to a configured
+  store can migrate on top of credentials the instance repository is tracking.
 - **The two generated passwords §5.5 needs are parameters of the run**, read from
   `board-store.env` and passed in Alembic's `config.attributes`; they are never bytes of a
   revision file, and PostgreSQL takes no bound parameter in `CREATE ROLE`, so the revision renders
