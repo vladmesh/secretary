@@ -2483,7 +2483,10 @@ and is never turned into an action; and for a resume of a freeze whose own answe
 `restored`'s lists are `null` rather than `[]` — what it put back was in that answer, and an empty
 list would claim it put nothing back. `PauseCommandCompleted` carries the render failure's own code,
 message and exit status, so `secretary pause freeze` and the tick's auto-resume, which never ask what
-the command did, answer exactly as they did before. All of it is pinned hermetically over a
+the command did, answer exactly as they did before. The tick's auto-resume is the one caller that
+names a failed recovery by its exception class rather than by that code and message, so it unwraps
+the completed command and reports the render's own class; a wrapper added there later must do the
+same, or it renames a field no protocol client reads. All of it is pinned hermetically over a
 production state whose records refuse conversion, including the interleave above
 (`tests/test_web_pause_protocol.py::CompletedCommandTests`,
 `tests/test_web_pause_protocol.py::DecidedUnderTheLockTests`).

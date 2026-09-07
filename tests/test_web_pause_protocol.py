@@ -1194,6 +1194,41 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
         self.assertIs(completed.exception.cause, refused)
         self.assertEqual(completed.exception.decision, {"step": "pause", "action": "paused"})
 
+    def test_the_ticks_auto_resume_names_the_failure_by_the_class_that_raised_it(self) -> None:
+        """The one non-protocol caller that keys on the class name, pinned so a wrapper cannot rename it.
+
+        `auto_resume_expired_freeze` reports a failed recovery as `f"{type(exc).__name__}: {exc}"`,
+        which is not the code, message and exit status :class:`PauseCommandCompleted` preserves for
+        every caller that reads those. So the wrapper is unwrapped at that boundary and the tick
+        emits the render's own class, exactly as it did before the class existed. The loop is over
+        the two shapes a render can refuse in -- a `DispatcherError` carrying a code, and anything
+        else -- because the wrapper rewrites the message of the second one as well as its class.
+        """
+        for cause in (
+            DispatcherError("unsupported_legacy_record", "the records do not convert", 1),
+            RuntimeError("the state file was truncated"),
+        ):
+            with self.subTest(cause=type(cause).__name__):
+                self.tracked_head()
+                dispatcher_pause(
+                    self.runtime, mode="freeze", actor="pipeline", reason="a backup that was killed"
+                )
+                stale = {**self.pause_payload(), "since": "2020-01-01T00:00:00Z"}
+                self.pause_file().write_text(json.dumps(stale), encoding="utf-8")
+
+                with mock.patch.object(dispatcher_pause_ops, "pause_status", side_effect=cause):
+                    outcome = dispatcher_pause_ops.auto_resume_expired_freeze(self.runtime, source="tick")
+
+                assert outcome is not None
+                self.assertTrue(outcome["eligible"])
+                self.assertEqual(outcome["source"], "tick")
+                self.assertFalse(outcome["resumed"])
+                self.assertEqual(outcome["error"], f"{type(cause).__name__}: {cause}")
+                self.assertNotIn(PauseCommandCompleted.__name__, outcome["error"])
+                # The resume itself happened; only its render refused, which is what makes the
+                # error field the one thing this caller reports about it.
+                self.assertFalse(self.pause_file().exists())
+
     def test_the_published_prose_says_where_the_action_is_decided(self) -> None:
         """Criterion 6: the sentence that keeps the next reader from reintroducing the inference."""
         protocols = (Path(__file__).resolve().parents[1] / "docs" / "PROTOCOLS.md").read_text(

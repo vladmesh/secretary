@@ -249,7 +249,12 @@ def auto_resume_expired_freeze(runtime: Any, *, source: str) -> dict[str, Any] |
     try:
         result = resume_locked(runtime, actor="auto-resume")
     except Exception as exc:  # noqa: BLE001 — a failed recovery is reported, it does not kill the tick
-        return {**outcome, "resumed": False, "error": f"{type(exc).__name__}: {exc}"}
+        # This caller is outside the pause protocol: it names the failure by its class rather than
+        # by the code, message and exit status :class:`PauseCommandCompleted` preserves. So unwrap
+        # it here, and the tick's auto-resume reports the render's own failure exactly as it did
+        # before that class existed.
+        surfaced = exc.cause if isinstance(exc, PauseCommandCompleted) else exc
+        return {**outcome, "resumed": False, "error": f"{type(surfaced).__name__}: {surfaced}"}
     return {
         **outcome,
         "resumed": True,
