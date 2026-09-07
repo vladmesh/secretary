@@ -2038,9 +2038,17 @@ routing was never reset, and no moved card beside a `requests` row still `staged
 any of those points rolls the column effect back together with the record, and the caller is told
 the mutation did not happen rather than that a repair is owed. `recover_transition` and the
 pending typed record it settles therefore have nothing to do here, which is what the
-`BoardEventPending` row of the table above already says. On Kanboard all three states remain real
-and so do their recovery paths; that is a difference between the two backends, not a difference in
-what a caller may ask for.
+`BoardEventPending` row of the table above already says. Done retention closes a card the same
+way and therefore stands on the same boundary: `TaskWriter.retire_done` runs its freshness guard,
+its `closeTask`, the proof of that close and the record inside one `_mutation()`, so this backend
+holds no archived card beside a staged request either. And because the refusal is the only thing
+a caller can act on, it says which of the two facts is true: on Kanboard the effect may have
+outlived its record and the caller still gets `audit_pending` — "backend write committed; audit
+repair is required", exit status 4, the entry point to `recover_*` — while here the same failure
+answers an ordinary refusal that carries no repair obligation, because a caller told to await a
+repair would be waiting for one `reconcile` can never perform. On Kanboard all of these states
+remain real and so do their recovery paths; that is a difference between the two backends, not a
+difference in what a caller may ask for.
 
 The namespace is the part most easily lost by accident, so it is worth saying plainly what would
 have gone wrong without §3.9's `requests` table. Had each table owned its own `request_id UNIQUE`,

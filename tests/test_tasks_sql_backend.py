@@ -248,6 +248,21 @@ class SqlTaskWriterTests(SqlBoardCase):
         with mock.patch.object(self.client, "call", side_effect=call):
             yield
 
+    def assertNoRepairIsOwed(self, error: TaskError) -> None:
+        """The refusal says the mutation did not happen, and the audit agrees with it.
+
+        The point of the check is the *absence* of a repair obligation. `audit_pending` promises
+        the caller that a board write is committed and that `reconcile` owes it a repair; after a
+        rollback both halves are false, and a caller that believed the sentence would wait for a
+        repair `SqlTaskAudit.reconcile` can never perform.
+        """
+        self.assertNotEqual(error.code, "audit_pending")
+        self.assertEqual(error.code, "backend_error")
+        self.assertEqual(error.exit_code, 1)
+        self.assertIn("no repair is owed", str(error))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.writer.reconcile(), (0, 0))
+
     def assertNothingSurvived(self, request_id: str) -> None:
         """Neither half of the mutation is there: no request row, and no published event."""
         self.assertEqual(
@@ -286,7 +301,7 @@ class SqlTaskWriterTests(SqlBoardCase):
                 request_id="rq-move-lost-read-back",
             )
 
-        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertNoRepairIsOwed(raised.exception)
         self.assertEqual(self.reader.show("secretary-468")["state"], "in_progress")
         self.assertNothingSurvived("rq-move-lost-read-back")
 
@@ -314,7 +329,7 @@ class SqlTaskWriterTests(SqlBoardCase):
                 request_id="rq-claim-lost-metadata-reply",
             )
 
-        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertNoRepairIsOwed(raised.exception)
         card = self.reader.show("secretary-468")
         self.assertEqual(card["state"], "ready")
         self.assertIsNone(card["claim"]["worker"])
@@ -349,13 +364,137 @@ class SqlTaskWriterTests(SqlBoardCase):
                 request_id="rq-ready-lost-reset-reply",
             )
 
-        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertNoRepairIsOwed(raised.exception)
         card = self.reader.show("secretary-468")
         self.assertEqual(card["state"], "in_progress")
         self.assertEqual(card["routing"]["resolved_worker_head"], "codex-terra")
         self.assertEqual(card["routing"]["resolved_review_head"], "codex-reviewer")
         self.assertEqual(card["claim"]["worker"], "codex-terra")
         self.assertNothingSurvived("rq-ready-lost-reset-reply")
+
+    # --- Done retention, the fourth path with a board effect -------------------------
+
+    @contextlib.contextmanager
+    def _card_moved_at(self, reference: str, moved_at: int):
+        """Answer `date_moved` for one card, which this store has no column for.
+
+        This is the one fact the fixture supplies rather than the product, and it is named here
+        rather than hidden: `tasks` has no column for when a card entered its column, so
+        `SqlCardClient._row` answers no `date_moved` and `TaskWriter._retention_matches` refuses
+        every candidate on this backend before a close is ever issued (see
+        `test_done_retention_is_unreachable_on_this_backend_without_a_date_moved`).  That absence
+        is a finding about the schema, not the subject of the case below: what is under test is
+        that when the close *is* reached, it and its record stand or fall together.  Everything
+        else — the freshness guard, `closeTask`, the proof and the append — is the product's.
+        """
+        served = self.client.call
+        number = int(self.reader.show(reference)["id"].rsplit("_", 1)[1])
+
+        def call(name: str, /, **params):
+            result = served(name, **params)
+            if name == "getAllTasks" and isinstance(result, list):
+                for row in result:
+                    if isinstance(row, dict) and int(row.get("id") or 0) == number:
+                        row["date_moved"] = moved_at
+            return result
+
+        with mock.patch.object(self.client, "call", side_effect=call):
+            yield
+
+    def test_done_retention_is_unreachable_on_this_backend_without_a_date_moved(self) -> None:
+        """Why the case below has to supply one field, stated as an assertion rather than a claim.
+
+        `tasks` holds no column for when a card entered its column, and §8.6 does not list the
+        field among the ones the store deliberately drops, so `SqlCardClient` answers no
+        `date_moved` at all.  `TaskWriter._retention_matches` compares that against the episode the
+        caller names, so every candidate is refused: retention on this backend closes nothing,
+        stages nothing, and reports itself skipped.  A finding for the schema, not a licence to add
+        a column here (AC6).
+        """
+        self._place("secretary-468", "done")
+
+        result = self.writer.retire_done(
+            reference="secretary-468",
+            expected_date_moved=100,
+            cutoff=101,
+            retention_days=14,
+            request_id="rq-retire-unreachable",
+        )
+
+        self.assertTrue(result["skipped"])
+        self.assertFalse(result["retired"])
+        self.assertTrue(self.reader.show("secretary-468")["state"] == "done")
+        self.assertNothingSurvived("rq-retire-unreachable")
+
+    def test_a_lost_close_reply_in_done_retention_leaves_neither_the_close_nor_a_staged_request(
+        self,
+    ) -> None:
+        """The counterpart `DoneRetentionTests.test_lost_close_reply_recovers_through_generic_reconcile` had none of.
+
+        That case is retention's half of the §7.3 class: `closeTask` landed, its reply was lost,
+        and an archived card survived beside a staged request for `reconcile` to settle.  Until
+        secretary-1591 `retire_done` staged its request and issued the close outside
+        `_mutation()`, so on this backend both committed at `_depth == 0` and the same
+        half-applied state was reachable the moment the store could name a Done episode.  The
+        whole of it — the freshness guard, the close, its proof and the record — is now one
+        transaction, so the lost reply takes the close with it.
+        """
+        self._place("secretary-468", "done")
+
+        with (
+            self._card_moved_at("secretary-468", 100),
+            self._loses_the_reply_to("closeTask"),
+            self.assertRaises(TaskError) as raised,
+        ):
+            self.writer.retire_done(
+                reference="secretary-468",
+                expected_date_moved=100,
+                cutoff=101,
+                retention_days=14,
+                request_id="rq-retire-lost-close-reply",
+            )
+
+        self.assertNoRepairIsOwed(raised.exception)
+        card = self.reader.show("secretary-468")
+        self.assertEqual(card["state"], "done")
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM tasks WHERE task_ref = %s AND archived", ("secretary-468",)
+            ),
+            [(0,)],
+        )
+        self.assertNothingSurvived("rq-retire-lost-close-reply")
+
+    def test_done_retention_that_completes_closes_the_card_and_commits_its_record(self) -> None:
+        """The positive control for the case above: with no failure the same path retires.
+
+        Without it the rollback proof would be satisfied by a fixture that never reached the
+        close at all, which is exactly the vacuity the parked-case block is about.
+        """
+        self._place("secretary-468", "done")
+
+        with self._card_moved_at("secretary-468", 100):
+            result = self.writer.retire_done(
+                reference="secretary-468",
+                expected_date_moved=100,
+                cutoff=101,
+                retention_days=14,
+                request_id="rq-retire-committed",
+            )
+
+        self.assertTrue(result["retired"])
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM tasks WHERE task_ref = %s AND archived", ("secretary-468",)
+            ),
+            [(1,)],
+        )
+        self.assertEqual(
+            self.client._query(
+                "SELECT status FROM requests WHERE request_id = %s", ("rq-retire-committed",)
+            ),
+            [("committed",)],
+        )
 
     def test_a_comment_lands_with_its_request_row_committed(self) -> None:
         result = self.writer.comment(
@@ -454,9 +593,15 @@ class SqlTaskWriterTests(SqlBoardCase):
         journal, a pending file to reconcile.  §7.3 says that class of half-applied write does not
         exist on this backend; it only actually did not once the whole create became one
         transaction.
-        """
-        from secretary.tasks import TaskError
 
+        What it still asserts about the *refusal* is the create's own contract and not this
+        card's: `audit_pending` here says "backend write committed; audit repair is required"
+        beside two `count(*) = 0` checks that prove the opposite, and secretary-1591 repaired that
+        sentence only for the two paths its observer decision named — the transition and Done
+        retention (`TaskWriter._post_effect_refusal`).  The create, `_write_effect` and
+        `_marker_write` still answer the old sentence, and the report of that round carries it as
+        a finding rather than changing it here.
+        """
         with (
             mock.patch.object(
                 type(self.client),

@@ -3192,11 +3192,7 @@ class TaskWriter:
                     finish=finish,
                 )
         except BoardEventPending:
-            raise TaskError(
-                "audit_pending",
-                "backend write committed; audit repair is required",
-                4,
-            ) from None
+            raise self._post_effect_refusal("the card transition") from None
         except ValueError as exc:
             raise TaskError("validation", str(exc), 2) from None
         except CardTransitionForbidden as exc:
@@ -3883,49 +3879,55 @@ class TaskWriter:
             "request_id": request_id,
             "payload": identity,
         }
-        self.audit.stage(request_id, event)
-        try:
-            # This is the final guard immediately before the destructive call.
-            guarded = self._retention_card(reference, task_id=task_id)
-            if guarded is None:
-                self.audit.discard(request_id, event)
-                return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
-            _guarded_id, latest, latest_metadata, latest_done_id = guarded
-            self._check_retention_record(latest_metadata)
-            if not self._retention_matches(
-                latest, latest_metadata, expected_date_moved, cutoff_value, latest_done_id
-            ):
-                self.audit.discard(request_id, event)
-                return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
-            if not self.client.call("closeTask", task_id=task_id):
-                raise TaskError("backend_error", "Kanboard rejected Done retention", 1)
-        except _CommittedWriteError:
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        except TaskError as exc:
-            # A transport error after close is ambiguous; leave its pending
-            # evidence.  A definite local guard/validation failure is not.
-            if exc.code == "backend_unavailable":
-                raise TaskError(
-                    "audit_pending", "backend write committed; audit repair is required", 4
-                ) from None
-            current = self.audit.pending_event(request_id)
-            if current == event:
-                try:
+        # The same boundary the card protocol's other mutations stand on (§7.1): the freshness
+        # guard, the destructive close, its proof and the record are one transaction where the
+        # backend has one.  Retention is a Card protocol mutation with a board effect, not an
+        # effect outside the board, so leaving it at `_depth == 0` left exactly the half-applied
+        # state §7.3 says this backend does not have: a closed card beside a staged request.  On
+        # Kanboard `_mutation()` is nothing at all, so the ambiguity below — and the pending
+        # record `reconcile` settles from it — is untouched.
+        with self._mutation():
+            self.audit.stage(request_id, event)
+            try:
+                # This is the final guard immediately before the destructive call.
+                guarded = self._retention_card(reference, task_id=task_id)
+                if guarded is None:
                     self.audit.discard(request_id, event)
-                except (OSError, TaskError):
-                    pass
-            raise
-        except Exception:  # noqa: BLE001 - an unknown close reply is deliberately ambiguous.
-            # JSON-RPC transport failures can occur after Kanboard applied the
-            # close, so reconciliation must prove or safely retry this episode.
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        try:
-            self._finish_pending_retired(event)
-            self._prove_retired_closed(event)
-            self.audit.append(request_id, event)
-        except (TaskError, OSError, KeyError, TypeError, ValueError):
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        return {"action": "retired", "reference": reference, "retired": True, "replayed": False}
+                    return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
+                _guarded_id, latest, latest_metadata, latest_done_id = guarded
+                self._check_retention_record(latest_metadata)
+                if not self._retention_matches(
+                    latest, latest_metadata, expected_date_moved, cutoff_value, latest_done_id
+                ):
+                    self.audit.discard(request_id, event)
+                    return {"action": "retired", "reference": reference, "retired": False, "skipped": True}
+                if not self.client.call("closeTask", task_id=task_id):
+                    raise TaskError("backend_error", "Kanboard rejected Done retention", 1)
+            except _CommittedWriteError:
+                raise self._post_effect_refusal("the Done retention close") from None
+            except TaskError as exc:
+                # A transport error after close is ambiguous; leave its pending
+                # evidence.  A definite local guard/validation failure is not.
+                if exc.code == "backend_unavailable":
+                    raise self._post_effect_refusal("the Done retention close") from None
+                current = self.audit.pending_event(request_id)
+                if current == event:
+                    try:
+                        self.audit.discard(request_id, event)
+                    except (OSError, TaskError):
+                        pass
+                raise
+            except Exception:  # noqa: BLE001 - an unknown close reply is deliberately ambiguous.
+                # JSON-RPC transport failures can occur after Kanboard applied the
+                # close, so reconciliation must prove or safely retry this episode.
+                raise self._post_effect_refusal("the Done retention close") from None
+            try:
+                self._finish_pending_retired(event)
+                self._prove_retired_closed(event)
+                self.audit.append(request_id, event)
+            except (TaskError, OSError, KeyError, TypeError, ValueError):
+                raise self._post_effect_refusal("the Done retention close") from None
+            return {"action": "retired", "reference": reference, "retired": True, "replayed": False}
 
     def restore_card(
         self,
@@ -4098,6 +4100,15 @@ class TaskWriter:
                 kind, role, actor, reference, request_id, payload, mutation, identity=identity
             )
 
+    @property
+    def _transactional(self) -> bool:
+        """Whether `_mutation()` is a real transaction on this backend, asked in one place.
+
+        The boundary and the refusal it produces have to agree about this, so they read the same
+        predicate rather than each deciding for itself.
+        """
+        return getattr(self.client, "transaction", None) is not None
+
     @contextlib.contextmanager
     def _mutation(self) -> Iterator[None]:
         """One transaction per protocol mutation, where the backend has transactions (§7.1).
@@ -4113,6 +4124,32 @@ class TaskWriter:
             return
         with scope():
             yield
+
+    def _post_effect_refusal(self, subject: str) -> TaskError:
+        """The refusal a mutation inside `_mutation()` owes when it fails after its board effect.
+
+        One sentence used to carry two different facts, and only one of them can be true at a time.
+        Where `_mutation()` is nothing — Kanboard — the effect may well have landed while its
+        record did not, and *"backend write committed; audit repair is required"* with exit status
+        4 is exactly that fact: it is what `BoardEventPending`, the pending record and the
+        `recover_*` entry points exist for, and none of it changes.
+
+        Where `_mutation()` is a real transaction, the same failure has already rolled the effect
+        back together with the staged request (§7.1), so that sentence would be false in both
+        halves: nothing was committed and nothing is owed.  A caller that believed it would wait
+        for a repair `SqlTaskAudit.reconcile` can never perform — it answers `(0, 0)` because there
+        is nothing staged — and would treat a retry with the same request id as a resumption when
+        the rollback has made it a first attempt.  So there the caller gets an ordinary refusal
+        that carries no repair obligation, which is what §7.3 means by the state not existing.
+        """
+        if not self._transactional:
+            return TaskError("audit_pending", "backend write committed; audit repair is required", 4)
+        return TaskError(
+            "backend_error",
+            f"{subject} did not happen: it was rolled back together with its record, "
+            "so nothing was written and no repair is owed",
+            1,
+        )
 
     def _write_effect(
         self,
