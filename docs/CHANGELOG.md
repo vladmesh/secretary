@@ -4,6 +4,20 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-07 — a pause command reports the action it decided under the lock (secretary-1577, sprint:1431)
+
+**No behaviour of a pause or a resume changed; what a command reports about itself did.** When the
+status render after a `pause_drain` or `pause_resume` refuses — a `production-state.json` this
+release cannot convert — the document's `action` is now the one `secretary.dispatcher_pause_ops`
+decided inside the production tick lock and carried out of it on the new
+`PauseCommandCompleted`, instead of being inferred from the pause flag read before and after the
+call. That inference could be wrong under concurrency: with the pipeline already drained, a second
+`pause_drain` that ran after somebody else's `resume` observed `drain` on both sides and was reported
+as `noop` over a flag carrying its own actor and reason. `pause_drain` and `pause_resume` documents
+are unchanged in shape, and `secretary pause freeze`, `secretary resume` and the tick's auto-resume
+answer exactly as before. See [PROTOCOLS](PROTOCOLS.md#the-pause-as-protocol-operations) and
+[OPERATIONS](OPERATIONS.md#read-the-scope-first-then-decide).
+
 ## 2026-09-06 — the pause is reachable as a protocol operation, and its scope is readable first (secretary-1576, sprint:1431)
 
 **Two new protocol operations and two new reads.** `pause_drain(actor, reason)` sets the pipeline-wide

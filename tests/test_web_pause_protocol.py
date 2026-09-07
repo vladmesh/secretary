@@ -20,8 +20,11 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+from secretary import dispatcher_pause_ops
 from secretary.config import validate
+from secretary.dispatcher_pause_ops import PauseCommandCompleted
 from secretary.dispatcher_pause_ops import pause as dispatcher_pause
+from secretary.dispatcher_pause_ops import resume as dispatcher_resume
 from secretary.dispatcher_types import DispatcherError
 from secretary.webproto.errors import OwnerConflict, ReadError, ValidationRefused
 from secretary.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
@@ -1016,6 +1019,204 @@ class CompletedCommandTests(PauseProtocolFixture):
             with self.subTest(action=document["action"]):
                 self.assertEqual(validate(document, "web-pause", document["kind"]), [])
                 json.dumps(document)
+
+
+class DecidedUnderTheLockTests(PauseProtocolFixture):
+    """Criteria 1 and 2: the action is the one decided where the command was serialised.
+
+    secretary-1576's last round established what a completed command reports by reading the pause
+    flag before the call and again after a failure. Both reads are outside the tick lock, and a flag
+    observed before and after an unlocked command is not evidence of which command set it: another
+    operator command fits between the two reads and leaves exactly the observations this one expects.
+    The interleave below is the reviewer's own reproduction, and it runs against the fixture and its
+    `FakeHost` like everything else here.
+    """
+
+    def _state_that_refuses_conversion(self) -> None:
+        """The production state that makes the status render refuse after the flag is written."""
+        self.tracked_head(worker_retained_at=1)
+
+    def _flag_mode(self) -> str:
+        """What the flag holds, as the removed inference read it: a mode, or nothing at all."""
+        return self.pause_payload()["mode"] if self.pause_file().exists() else ""
+
+    def _interleaving(self, command):
+        """Run `command`, with one `resume` taking the tick lock just before it gets there.
+
+        The interleave is placed at the lock rather than by threads on purpose: what has to be
+        exercised is the window between a caller entering the command and the command being
+        serialised, and a hook on the lock puts another command in exactly that window, once,
+        deterministically. The interleaved resume's own status render refuses over this state --
+        that is the point of the state -- so what it did travels on `PauseCommandCompleted` and is
+        of no interest to the command being tested.
+        """
+        real_lock = dispatcher_pause_ops.file_lock
+        interleaved: list[str] = []
+
+        def hook(path):
+            if not interleaved:
+                interleaved.append("resume")
+                try:
+                    dispatcher_resume(self.runtime, actor="somebody-else")
+                except PauseCommandCompleted as completed:
+                    self.assertEqual(completed.decision["action"], "resumed")
+            return real_lock(path)
+
+        with mock.patch.object(dispatcher_pause_ops, "file_lock", hook):
+            document = command()
+        self.assertEqual(interleaved, ["resume"])
+        return document
+
+    def test_a_second_drain_that_wrote_the_flag_is_told_from_one_that_found_it_held(self) -> None:
+        """The reproduction: both drains see `drain` on either side of the call, and did not do the same thing."""
+        self._state_that_refuses_conversion()
+        self.pause_ops().pause_drain(actor="operator", reason="host maintenance")
+
+        # No interleave: this one really did find the mode already held, and writes nothing.
+        held = self.pause_payload()
+        repeat = self.pause_ops().pause_drain(actor="second-operator", reason="the same window")
+        self.assertEqual(repeat["action"], "noop")
+        self.assertFalse(repeat["changed"])
+        self.assertEqual(self.pause_payload(), held)
+
+        # The interleave: a resume clears the flag before this drain reaches the lock, so this drain
+        # sets the pause the pipeline now holds. A flag read before and after it says `drain` both
+        # times -- the same pair the repeat above produced -- and the two are still told apart.
+        before = self._flag_mode()
+        document = self._interleaving(
+            lambda: self.pause_ops().pause_drain(actor="third-operator", reason="a different window")
+        )
+        # The pair the removed inference ran on, and why it could not work: it is the pair a genuine
+        # repeat produces, and this command did the other thing.
+        self.assertEqual((before, self._flag_mode()), (DRAIN, DRAIN))
+        self.assertEqual(document["action"], "paused")
+        self.assertTrue(document["changed"])
+        self.assertEqual(self.pause_payload()["actor"], "third-operator")
+        self.assertEqual(self.pause_payload()["reason"], "a different window")
+
+    def test_a_resume_that_lifted_nothing_is_told_from_one_that_lifted_a_pause(self) -> None:
+        """The same interleave the other way round, where the inference read `resumed` for a no-op."""
+        self._state_that_refuses_conversion()
+        self.pause_ops().pause_drain(actor="operator", reason="host maintenance")
+
+        # Another resume lifts the drain first, so this one arrives at a pipeline that is not paused.
+        before = self._flag_mode()
+        document = self._interleaving(lambda: self.pause_ops().pause_resume(actor="operator"))
+        # And the pair a resume that really lifted the drain produces, over one that lifted nothing.
+        self.assertEqual((before, self._flag_mode()), (DRAIN, ""))
+        self.assertEqual(document["action"], "noop")
+        self.assertFalse(document["changed"])
+        self.assertIsNone(document["restored"]["resumed_mode"])
+        self.assertIn("was not paused", document["restored"]["statement"])
+        self.assertFalse(self.pause_file().exists())
+
+    def test_the_action_is_decided_inside_the_tick_lock_and_assigned_nowhere_else(self) -> None:
+        """Where the decision is made, checked on the source rather than by calling it.
+
+        A test that only calls the operations passes for as long as nobody moves the decision back
+        out; this fails the moment the assignment leaves the locked span.
+        """
+        tree = ast.parse(
+            (Path(__file__).resolve().parents[1] / "src" / "secretary" / "dispatcher_pause_ops.py").read_text(
+                encoding="utf-8"
+            )
+        )
+        functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        locked = next(
+            node
+            for node in ast.walk(functions["pause"])
+            if isinstance(node, ast.With) and _takes_the_tick_lock(node)
+        )
+        inside = {id(node) for node in ast.walk(locked)}
+        actions = [
+            node
+            for node in ast.walk(functions["pause"])
+            if isinstance(node, ast.Assign)
+            and any(getattr(target, "id", "") == "action" for target in node.targets)
+        ]
+        decided = sorted(node.value.value for node in actions)  # type: ignore[attr-defined]
+        self.assertEqual(decided, ["noop", "paused"])
+        for node in actions:
+            self.assertIn(id(node), inside)
+        # And the render is outside it: it walks every record, and holding the tick lock across it
+        # would make a corrupt-state read a contention problem on the dispatcher's own lock.
+        self.assertNotIn("_with_status", [_called(node) for node in ast.walk(locked)])
+        resume_lock = next(
+            node
+            for node in ast.walk(functions["resume"])
+            if isinstance(node, ast.With) and _takes_the_tick_lock(node)
+        )
+        called = [_called(node) for node in ast.walk(resume_lock)]
+        self.assertIn("_resume_under_lock", called)
+        self.assertNotIn("_with_status", called)
+
+    def test_no_operation_of_the_layer_reads_the_flag_to_decide_what_it_did(self) -> None:
+        """Criterion 1 at the layer: there is no flag read here to infer an action from."""
+        source = (
+            Path(__file__).resolve().parents[1] / "src" / "secretary" / "webproto" / "pause_ops.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        layer = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "PauseOperationLayer"
+        )
+        # The runtime is handed to the dispatcher and never asked anything by this layer.
+        self.assertEqual(
+            sorted(
+                {
+                    node.attr
+                    for node in ast.walk(layer)
+                    if isinstance(node, ast.Attribute) and getattr(node.value, "id", "") == "runtime"
+                }
+            ),
+            [],
+        )
+        for spelling in ("pause.load", "normalize_pause_mode", "UNREADABLE_FLAG"):
+            self.assertNotIn(spelling, source)
+
+    def test_a_caller_that_does_not_know_the_decision_answers_exactly_as_before(self) -> None:
+        """`secretary pause freeze` and the tick's auto-resume are not clients of this, and stay put.
+
+        The completed command reaches them as the `DispatcherError` the render raised -- same code,
+        same message, same exit status -- so a path that never asked what the command did cannot be
+        changed by the answer being available.
+        """
+        refused = DispatcherError("unsupported_legacy_record", "the records do not convert", 1)
+        with (
+            mock.patch("secretary.dispatcher_pause_ops.pause_status", side_effect=refused),
+            self.assertRaises(PauseCommandCompleted) as completed,
+        ):
+            dispatcher_pause(self.runtime, mode="drain", actor="operator", reason="host maintenance")
+        self.assertEqual(completed.exception.code, refused.code)
+        self.assertEqual(completed.exception.message, refused.message)
+        self.assertEqual(completed.exception.exit_code, refused.exit_code)
+        self.assertIs(completed.exception.cause, refused)
+        self.assertEqual(completed.exception.decision, {"step": "pause", "action": "paused"})
+
+    def test_the_published_prose_says_where_the_action_is_decided(self) -> None:
+        """Criterion 6: the sentence that keeps the next reader from reintroducing the inference."""
+        protocols = (Path(__file__).resolve().parents[1] / "docs" / "PROTOCOLS.md").read_text(
+            encoding="utf-8"
+        )
+        for promise in (
+            "decided inside the production tick lock",
+            "is not evidence of which command set it",
+            "PauseCommandCompleted",
+        ):
+            self.assertIn(promise, protocols)
+
+
+def _takes_the_tick_lock(node: ast.With) -> bool:
+    return any(_called(item.context_expr) == "file_lock" for item in node.items)
+
+
+def _called(node: ast.AST) -> str:
+    """The name a call node calls, or the empty string for anything else."""
+    if not isinstance(node, ast.Call):
+        return ""
+    function = node.func
+    return getattr(function, "id", "") or getattr(function, "attr", "")
 
 
 if __name__ == "__main__":

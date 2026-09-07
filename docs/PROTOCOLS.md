@@ -2459,18 +2459,34 @@ refusal is not an action at all and never reaches a document.
 semantically corrupt (a record shape this release no longer stores, a non-integer `attempt_round`, a
 partial write) makes that last step refuse over a pause that has already taken. Reported as
 `backend_unavailable` with no action, that tells an operator the safety control did not take while
-it silently did, in exactly the situation the command exists for. So the operation settles it
-against the one durable thing that says what a pause is: it reads the flag back, and a flag holding
-exactly what the command intended — `drain` for a drain, no pause at all for a resume — is an action
-to report. The caller gets the ordinary `pause_command` document: its `action` and `changed`, the
-dispatcher's refusal under `warnings`, and the embedded `state` read with the source that could not
-answer marked unavailable — the same shape a read of a half-readable installation has. Nothing is
-repaired or re-decided: a flag that did not reach the intended state means the command really failed
-and its refusal travels unchanged, an unreadable flag establishes nothing and does the same, and a
-`validation` or `pause_conflict` refusal is a decision made before anything was written and is never
-turned into an action. It is pinned hermetically over a production state whose records refuse
-conversion (`tests/test_web_pause_protocol.py::CompletedCommandTests`), on the flag and on what the
-caller was told.
+it silently did, in exactly the situation the command exists for. So the caller gets the ordinary
+`pause_command` document instead: its `action` and `changed`, the dispatcher's refusal under
+`warnings`, and the embedded `state` read with the source that could not answer marked unavailable —
+the same shape a read of a half-readable installation has.
+
+**Where that action comes from, and why it cannot come from anywhere else.** It is the action
+`dispatcher_pause_ops` **decided inside the production tick lock**, in the code that performed the
+command: `pause` knows there whether it wrote the flag or found the mode already held, and `resume`
+knows which mode it lifted. That decision travels out of the lock with the failure of the render, on
+`dispatcher_pause_ops.PauseCommandCompleted`, and the protocol layer reports it. It is not
+established by observing the flag, at any layer, because **a flag observed before and after an
+unlocked command is not evidence of which command set it**: with the pipeline already drained, a
+second `pause_drain` that sees `drain` before its call and `drain` after it may have found the mode
+held, or may have written its own drain after another command's `resume` cleared the flag in
+between — two different actions behind identical observations. The rendering of the state is
+deliberately left outside the lock, because it walks every dispatcher record and holding the tick
+lock across it would make each corrupt-state read a contention problem on the dispatcher's own lock.
+
+Nothing is repaired or re-decided: a command that did not complete raises, and its refusal travels
+unchanged; a `validation` or `pause_conflict` refusal is a decision made before anything was written
+and is never turned into an action; and for a resume of a freeze whose own answer never arrived,
+`restored`'s lists are `null` rather than `[]` — what it put back was in that answer, and an empty
+list would claim it put nothing back. `PauseCommandCompleted` carries the render failure's own code,
+message and exit status, so `secretary pause freeze` and the tick's auto-resume, which never ask what
+the command did, answer exactly as they did before. All of it is pinned hermetically over a
+production state whose records refuse conversion, including the interleave above
+(`tests/test_web_pause_protocol.py::CompletedCommandTests`,
+`tests/test_web_pause_protocol.py::DecidedUnderTheLockTests`).
 
 **The sources, and the precedence they are consulted in.** Every section goes through
 `SourceSet.decide` or `mark`, and a refused source reaches no claim:

@@ -1819,6 +1819,13 @@ that was refused is not a drain that half-happened. For a resume of a freeze in 
 `restored`'s lists are `null` rather than empty: what it put back could not be read, which is not the
 same as putting nothing back.
 
+That `action` is the one the dispatcher decided while it held the tick lock, so it stays right when
+two operators act at once: a `pause drain` that reaches the lock just after somebody else's `resume`
+reports `paused` because it really did set the pause the pipeline now holds, and a `pause drain` that
+found the drain already there reports `noop` — even though the flag reads `drain` on both sides of
+either one. Do not read a pause's `action` off `pause-status` before and after: those two reads say
+what the pipeline is, not which command made it so.
+
 ### Pause or breakage
 
 `pause-status` shows the product dispatcher's state as the protocol document of the pause layer: `state` carries

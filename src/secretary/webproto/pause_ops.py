@@ -32,15 +32,22 @@ pipeline is now from the same sections it would have read before the call.
 `dispatcher_pause_ops.pause` and `resume` set the flag and then render the status through
 `pause_status`, which converts every dispatcher record -- so a production state that is semantically
 corrupt (an obsolete record shape, an `attempt_round` that is not an integer, a truncated write)
-makes that last step refuse over a pause that has already taken. This layer is what promises a
-readable result, so it is where that is repaired: :meth:`PauseOperationLayer._perform` treats a
-failure of the dispatcher call as possibly-after-the-fact, reads the one durable flag back, and when
-the flag holds exactly what the command intended it reports the action it performed with the
-refusal as a warning and an unavailable section on the embedded state read. It re-decides nothing
-and repairs nothing: a flag that did not reach the intended mode means the command really did fail,
-and the refusal travels unchanged. A refusal of the pause's own rules -- `validation`,
-`pause_conflict` -- never enters that span, because those are decisions made before anything is
-written.
+makes that last step refuse over a pause that has already taken. What this layer reports then is the
+action the command itself decided under the production tick lock:
+`dispatcher_pause_ops.PauseCommandCompleted` carries that decision out of the lock with the failure
+of the render, and :meth:`PauseOperationLayer._perform` reports it with the refusal as a warning and
+an unavailable section on the embedded state read.
+
+**The action is never inferred here, and cannot be.** This layer reads no flag of its own, before or
+after a command. A flag read taken outside the lock is not evidence of which command set what it
+holds: with the pipeline already drained, a second `pause_drain` that observes `drain` on both sides
+of its call may have found the mode already held, or may have written its own drain after another
+command's `resume` cleared the flag between those two reads -- the same two observations for two
+different actions (secretary-1577, reproduced on secretary-1576's round 4). So the decision comes
+from where the command was serialised against every other one, and nothing else is consulted.
+`_perform` re-decides nothing and repairs nothing: a failure that is not a completed command travels
+unchanged, and a refusal of the pause's own rules -- `validation`, `pause_conflict` -- never reaches
+that path at all, because those are decisions made before anything is written.
 
 **And a resume says what it put back**, from the lists the stop itself wrote: `relaunched`, `parked`
 and `skipped` as `resume` produced them, with the mode that was lifted. A drain relaunches nothing
@@ -56,7 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.dispatcher import runtime_from_args
-from secretary.dispatcher_pause import normalize_pause_mode
+from secretary.dispatcher_pause_ops import PauseCommandCompleted
 from secretary.dispatcher_pause_ops import pause as _pause
 from secretary.dispatcher_pause_ops import resume as _resume
 from secretary.dispatcher_types import DispatcherError, HostError
@@ -75,16 +82,6 @@ from secretary.webproto.pause_reads import (
 #: The operations of this module, named so a client can offer them without spelling either twice.
 PAUSE_DRAIN_OPERATION = "pause_drain"
 PAUSE_RESUME_OPERATION = "pause_resume"
-
-#: The mode a resume intends the flag to hold afterwards: none. It is a state of the flag and not a
-#: pause mode, which is why it is the empty string `normalize_pause_mode` already answers with for a
-#: pipeline that is not paused, and why it is spelled here rather than written as a bare `""`.
-LIFTED = ""
-
-#: The flag could not be read at all -- neither a mode nor the absence of one. Not a pause mode and
-#: never compared equal to what a command intended: an unreadable flag establishes nothing, so a
-#: command whose outcome is only knowable from the flag is reported as the failure it raised.
-UNREADABLE_FLAG = "?"
 
 #: The error contract of the pause half, in one place, for the four operations of both its modules.
 #:
@@ -173,11 +170,7 @@ class PauseOperationLayer(ProtocolBoundary):
         """
         now = self._clock()
         runtime = self._runtime()
-        result = self._perform(
-            lambda: _pause(runtime, mode=DRAIN, actor=actor, reason=reason),
-            runtime=runtime,
-            intended=DRAIN,
-        )
+        result = self._perform(lambda: _pause(runtime, mode=DRAIN, actor=actor, reason=reason))
         return self._document(PAUSE_DRAIN_OPERATION, result, actor=actor, now=now, restored=None)
 
     def pause_resume(self, *, actor: str) -> dict[str, Any]:
@@ -195,7 +188,7 @@ class PauseOperationLayer(ProtocolBoundary):
         """
         now = self._clock()
         runtime = self._runtime()
-        result = self._perform(lambda: _resume(runtime, actor=actor), runtime=runtime, intended=LIFTED)
+        result = self._perform(lambda: _resume(runtime, actor=actor))
         return self._document(
             PAUSE_RESUME_OPERATION,
             result,
@@ -235,64 +228,54 @@ class PauseOperationLayer(ProtocolBoundary):
         """
         try:
             return operation()
+        except PauseCommandCompleted:
+            # Not a failure of the command: the command happened, and this carries what it did. The
+            # caller of `_call` that knows what to do with it is `_perform`; translating it here
+            # would turn a completed pause into `backend_unavailable` again.
+            raise
         except DispatcherError as exc:
             raise _CODES.get(exc.code, RuntimeUnavailable)(exc.message) from None
         except HostError as exc:
             raise RuntimeUnavailable(f"the host could not answer this pause command: {exc}") from None
 
-    def _perform(
-        self,
-        operation: Callable[[], Any],
-        *,
-        runtime: Any,
-        intended: str,
-    ) -> dict[str, Any]:
-        """One pause command, and the answer to "did it happen" when the call itself could not say.
+    def _perform(self, operation: Callable[[], Any]) -> dict[str, Any]:
+        """One pause command, and its own answer to "what did I do" when the state cannot be read.
 
-        `dispatcher_pause_ops.pause` and `resume` write the flag and *then* render the status through
-        `pause_status`, which converts every dispatcher record. So a production state that no longer
-        converts -- a record shape this release does not store, an `attempt_round` that is not an
-        integer, a file a partial write truncated -- raises after the pause has already taken. That
-        ordering is the dispatcher's and this does not change it; what this changes is what the
-        caller hears, because a completed drain reported as `backend_unavailable` tells an operator
-        the safety control did not take while it silently did, in exactly the situation the command
-        exists for.
+        `dispatcher_pause_ops.pause` and `resume` write the flag and *then* render the status
+        through `pause_status`, which converts every dispatcher record. So a production state that
+        no longer converts -- a record shape this release does not store, an `attempt_round` that is
+        not an integer, a file a partial write truncated -- raises after the pause has already
+        taken. That ordering is the dispatcher's and this does not change it; what this changes is
+        what the caller hears, because a completed drain reported as `backend_unavailable` tells an
+        operator the safety control did not take while it silently did, in exactly the situation the
+        command exists for.
 
-        So the failure of the dispatcher call is treated as possibly-after-the-fact, and settled
-        against the one durable thing that says what a pause *is*: the flag. It is read back, and
-        only a flag holding exactly what this command intended -- `drain` for a drain, nothing at
-        all for a resume -- makes this an action to report. Anything else, an unreadable flag
-        included, is a command that really did fail, and its refusal travels unchanged.
+        So the dispatcher hands the failure over with the decision it made under the tick lock
+        attached (:class:`~secretary.dispatcher_pause_ops.PauseCommandCompleted`), and this reports
+        that decision. There is nothing to establish here and nothing is read to establish it: the
+        action is `paused`, `noop` or `resumed` as the code that performed it decided, and what a
+        flag holds now is somebody else's command as much as it is this one's.
 
-        The decisions never enter the span. A `validation` refusal and a `pause_conflict` are made
-        before anything is written, and are re-raised as themselves; this re-decides nothing, retries
-        nothing, and writes nothing of its own -- the only call it adds is a read of a file the
-        dispatcher had just read.
+        Everything else travels unchanged. A `validation` refusal and a `pause_conflict` are made
+        before anything is written and are re-raised as themselves; any other failure is a command
+        that did not complete, and it reaches the caller as the refusal it is.
         """
-        held = _mode_now(runtime)
         try:
             return self._call(operation)
-        except (ValidationRefused, OwnerConflict):
-            # A refusal, not a failed call: the pause's own rules said no before anything was
-            # written, and there is nothing after the fact to report.
-            raise
-        except Exception as refused:
-            action = _landed(held, _mode_now(runtime), intended)
-            if action is None:
-                raise
+        except PauseCommandCompleted as completed:
             return {
-                "action": action,
-                "resumed_mode": held,
+                **completed.decision,
                 # The lists a freeze's resume produced were in the answer that never arrived. Said
                 # as unknown rather than as empty, which would be the claim that it put nothing back.
                 "reported": False,
                 "warnings": [
+                    *completed.warnings,
                     (
-                        f"the command completed -- the pause flag holds {_said(intended)} -- but "
-                        f"the dispatcher could not render the pipeline state afterwards: {refused}."
+                        f"the command completed -- {_did(completed.decision)} -- but the dispatcher "
+                        f"could not render the pipeline state afterwards: {completed.cause}."
                         " What could be established is on `state`, where the source that did not "
                         "answer is marked unavailable"
-                    )
+                    ),
                 ],
             }
 
@@ -344,40 +327,21 @@ class PauseOperationLayer(ProtocolBoundary):
         )
 
 
-def _mode_now(runtime: Any) -> str:
-    """The pause mode the flag holds this instant, or :data:`UNREADABLE_FLAG`.
+def _did(decision: dict[str, Any]) -> str:
+    """What the command did, in the words the operator's warning needs it in.
 
-    `ProductionPause.load` and `normalize_pause_mode` answer it -- the same pair the production tick
-    reads the flag with -- so this opens no second flag and holds no second rule. A flag the class
-    marks corrupt is not an answer here: the tick's rule that an unreadable flag is read as a freeze
-    is about what the pipeline *does*, and cannot stand in for what a command did.
+    Read off the decision the dispatcher made under the lock, and never off a state of the world:
+    this only spells an action that was already established.
     """
-    try:
-        state = runtime.pause.load()
-        if state.get("corrupt"):
-            return UNREADABLE_FLAG
-        return normalize_pause_mode(state.get("mode"))
-    except Exception:  # noqa: BLE001 -- a flag that cannot be read establishes nothing, and says so
-        return UNREADABLE_FLAG
-
-
-def _landed(held: str, now: str, intended: str) -> str | None:
-    """The action a command performed, from the flag before and after it. None when it performed none.
-
-    The whole rule: a command landed when the flag holds what it intended, and which of the two
-    outcomes it was is what the flag held before. A drain over a drain changed nothing and is the
-    `noop` a repeat has always been; a resume of a pipeline that was not paused is the same. A flag
-    that could not be read on either side answers nothing at all.
-    """
-    if UNREADABLE_FLAG in (held, now) or now != intended:
-        return None
-    if intended == LIFTED:
-        return "resumed" if held else "noop"
-    return "noop" if held == intended else "paused"
-
-
-def _said(intended: str) -> str:
-    return f"mode {intended}" if intended else "no pause"
+    action = str(decision.get("action") or "")
+    if action == "paused":
+        return "the pipeline-wide pause was set"
+    if action == "resumed":
+        mode = str(decision.get("resumed_mode") or "")
+        return f"the {mode} was lifted" if mode else "the pause was lifted"
+    if decision.get("step") == "resume":
+        return "the pipeline was not paused, so nothing was lifted"
+    return "the pipeline already held the mode asked for, so nothing was written"
 
 
 def _restored(result: dict[str, Any]) -> dict[str, Any]:
