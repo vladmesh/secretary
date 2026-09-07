@@ -4,9 +4,12 @@
 document each shipped a statement PostgreSQL refuses, and both were found by executing them, not
 by reading them. The same applies to the schema's transcription into SQLAlchemy models, so the
 Alembic revision is executed here and the result is counted against the numbers the document's own
-run produced — 22 tables, 34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique constraints, and
-4 partial unique indexes. The 22nd table and the 22nd primary key are Alembic's `alembic_version`,
-which since the owner's decision of 2026-09-07 stands where §7.4's `schema_migrations` stood.
+run produced. Two revisions ship now, so there are two sets of numbers and §3.13 records both:
+`0001_initial` built 22 tables, 34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique
+constraints and 4 partial unique indexes; `0002_board_gaps`, which closes the gaps the first import
+of real data found, makes that 23, 37, 38, 23, 13 and 4. The last table and the last primary key
+are Alembic's `alembic_version`, which since the owner's decision of 2026-09-07 stands where
+§7.4's `schema_migrations` stood.
 
 The counting is not the strongest thing here. `test_the_migrated_database_still_matches_the_models`
 asks Alembic to autogenerate a diff between the database this revision built and the models, and
@@ -62,9 +65,13 @@ SELECT
     WHERE n.nspname = 'public' AND i.indisunique AND i.indpred IS NOT NULL)
 """
 
-#: What §10 counted after running the same schema against `postgres:16`. A disagreement here is a
-#: defect of the transcription into models, not of the document.
-DOCUMENTED_COUNTS = (22, 34, 36, 22, 12, 4)
+#: What the same schema makes of a `postgres:16` at the head revision, and what §3.13 records
+#: beside `0001`'s own numbers. A disagreement here is a defect of the transcription into models,
+#: not of the document.
+DOCUMENTED_COUNTS = (23, 37, 38, 23, 13, 4)
+
+#: Every revision this build ships, oldest first: what an empty database owes.
+REVISIONS = ("0001_initial", "0002_board_gaps")
 
 
 def docker(*arguments: str) -> str:
@@ -188,15 +195,15 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
     # --- the schema itself -------------------------------------------------------------
 
-    def test_the_initial_revision_reproduces_the_documents_own_numbers(self) -> None:
+    def test_the_revisions_reproduce_the_numbers_the_document_records(self) -> None:
         connection = self.owner_connection()
 
-        self.assertEqual(self.run_migrations(connection), ("0001_initial",))
+        self.assertEqual(self.run_migrations(connection), REVISIONS)
 
         self.assertEqual(
             self.counts(connection),
             DOCUMENTED_COUNTS,
-            "tables, CHECK, FK, PK, UNIQUE and partial unique indexes must match §10's run",
+            "tables, CHECK, FK, PK, UNIQUE and partial unique indexes must match §3.13's numbers",
         )
 
     def test_the_migrated_database_still_matches_the_models(self) -> None:
@@ -239,7 +246,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         stamped = connection.exec_driver_sql("SELECT version_num FROM alembic_version").fetchall()
 
-        self.assertEqual(stamped, [("0001_initial",)])
+        self.assertEqual(stamped, [(REVISIONS[-1],)])
         self.assertIsNone(
             connection.exec_driver_sql("SELECT to_regclass('public.schema_migrations')").fetchone()[0],
             "the hand-rolled version table is gone; Alembic's is the version",
@@ -251,7 +258,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.run_migrations(connection)
 
         with self.assertRaisesRegex(BoardStoreError, "refusing to write"):
-            migrate.assert_schema_revision(connection, expected="0002_something_later")
+            migrate.assert_schema_revision(connection, expected="0003_something_later")
 
     def test_a_second_run_applies_nothing_and_leaves_the_schema_alone(self) -> None:
         connection = self.owner_connection()
@@ -270,7 +277,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         owed = self.run_migrations(connection, dry_run=True)
 
-        self.assertEqual(owed, ("0001_initial",))
+        self.assertEqual(owed, REVISIONS)
         self.assertIsNone(
             connection.exec_driver_sql("SELECT to_regclass('public.products')").fetchone()[0]
         )
@@ -282,8 +289,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
         """PostgreSQL's transactional DDL, which is why §7.4 needs no down migration.
 
         The failure is a real one rather than a fabricated statement: §5.5's `CREATE ROLE` is the
-        last thing the revision does, so a cluster that already has `secretary_app` fails it after
-        all 21 tables have been created. Nothing may survive that.
+        last thing the initial revision does, so a cluster that already has `secretary_app` fails it
+        after all 21 tables have been created. Nothing may survive that.
         """
         import psycopg
 
@@ -319,6 +326,227 @@ class BoardStoreSchemaTests(unittest.TestCase):
             migrate.apply(connection, passwords={})
 
         connection.rollback()
+
+    # --- the records `secretary-1583` found the schema could not carry ------------------
+    #
+    # Each of these is a row the live board holds today and `0001_initial` refused. They are
+    # written here as inserts rather than as a reading of the model, because "the schema can
+    # represent it" is only true if PostgreSQL accepts it.
+
+    def prepared(self):
+        """A migrated database carrying the few rows the cases below reference."""
+        connection = self.owner_connection()
+        self.run_migrations(connection)
+        connection.exec_driver_sql(
+            "INSERT INTO products (product_id, title, created_at, updated_at) "
+            "VALUES ('secretary', 'Secretary', now(), now())"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO projects (project_id) VALUES ('secretary')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO issues (issue_id, product_id, title, issue_kind, priority, "
+            "created_at, updated_at) VALUES ('2fdac531', 'secretary', 'An issue', 'bug', "
+            "'P1', now(), now())"
+        )
+        return connection
+
+    def sprint(self, connection, ref: str, number: int | None) -> None:
+        connection.exec_driver_sql(
+            "INSERT INTO sprints (ref, sprint_number, goal, definition_of_done, created_at, "
+            "updated_at) VALUES (%s, %s, 'g', 'd', now(), now())",
+            (ref, number),
+        )
+
+    def card(self, connection, ref: str, *, project: str | None = "secretary", sprint=None) -> None:
+        connection.exec_driver_sql(
+            "INSERT INTO tasks (task_ref, project_id, task_number, title, task_type, state, "
+            "sprint_ref, created_at, updated_at) VALUES (%s, %s, %s, 'A card', 'code', 'ready', "
+            "%s, now(), now())",
+            (ref, project, int(ref.rsplit("-", 1)[1]), sprint),
+        )
+
+    def test_a_comment_on_an_issue_has_a_table_and_a_product_comment_has_none(self) -> None:
+        """AC 1: 479 comments live on Issue rows; the same read counted 0 on Product rows."""
+        connection = self.prepared()
+
+        connection.exec_driver_sql(
+            "INSERT INTO issue_comments (issue_id, marker, body, actor_role, created_at) "
+            "VALUES ('2fdac531', 'issue:closed', 'closed as resolved', 'po', now())"
+        )
+
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT issue_id, marker, body, issue_ref FROM issue_comments"
+            ).fetchall(),
+            [("2fdac531", "issue:closed", "closed as resolved", "issue:2fdac531")],
+        )
+        self.assertIsNone(
+            connection.exec_driver_sql("SELECT to_regclass('public.product_comments')").fetchone()[0],
+            "the live board carries no comment on a Product row, so there is no table for one",
+        )
+
+    def test_an_issue_keeps_the_metadata_keys_the_model_does_not_name(self) -> None:
+        """AC 2: nine metadata keys ride on 158 Issue rows, and a lane that is not the product's."""
+        connection = self.prepared()
+
+        connection.exec_driver_sql(
+            "UPDATE issues SET extensions = %s::jsonb WHERE issue_id = '2fdac531'",
+            ('{"kanboard": {"slug": "an-issue", "swimlane": "Codegen"}}',),
+        )
+
+        stored, default = connection.exec_driver_sql(
+            "SELECT (SELECT extensions FROM issues), "
+            "(SELECT column_default FROM information_schema.columns "
+            " WHERE table_name = 'issues' AND column_name = 'extensions')"
+        ).fetchone()
+        self.assertEqual(stored["kanboard"]["swimlane"], "Codegen")
+        self.assertIn("'{}'::jsonb", default)
+
+    def test_a_sprint_reference_that_carries_no_number_is_a_row_and_keeps_its_cards(self) -> None:
+        """AC 3: both canary sprints, and the two cards that lost their link to them."""
+        connection = self.prepared()
+
+        self.sprint(connection, "sprint:canary-terra-20260813", None)
+        self.sprint(connection, "sprint:canary-terra-final-20260813", None)
+        self.sprint(connection, "sprint:1037", 1037)
+        self.card(connection, "secretary-1438", sprint="sprint:canary-terra-20260813")
+        self.card(connection, "secretary-1439", sprint="sprint:canary-terra-final-20260813")
+
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT task_ref, sprint_ref FROM tasks ORDER BY task_ref"
+            ).fetchall(),
+            [
+                ("secretary-1438", "sprint:canary-terra-20260813"),
+                ("secretary-1439", "sprint:canary-terra-final-20260813"),
+            ],
+        )
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT ref FROM sprints WHERE sprint_number IS NULL ORDER BY ref"
+            ).fetchall(),
+            [("sprint:canary-terra-20260813",), ("sprint:canary-terra-final-20260813",)],
+        )
+
+    def test_the_number_and_the_reference_may_not_disagree(self) -> None:
+        """§9's spelling, as a constraint: a numbered reference carries exactly its number."""
+        import sqlalchemy as sa
+
+        connection = self.prepared()
+
+        for ref, number in (("sprint:1037", 42), ("sprint:1037", None), ("sprint:x", 7)):
+            with self.subTest(ref=ref, number=number):
+                with self.assertRaises(sa.exc.IntegrityError):
+                    self.sprint(connection, ref, number)
+                connection.rollback()
+
+    def test_one_reference_is_still_one_sprint(self) -> None:
+        """The other half of §9: `sprints.ref` is the key, so a duplicate is refused, not stored.
+
+        This is the finding the report names — `sprint:1037` is on the board twice, a live row and
+        an archived one — recorded here as what the schema actually does with it.
+        """
+        import sqlalchemy as sa
+
+        connection = self.prepared()
+        self.sprint(connection, "sprint:1037", 1037)
+
+        with self.assertRaises(sa.exc.IntegrityError):
+            self.sprint(connection, "sprint:1037", 1037)
+        connection.rollback()
+
+    def test_the_sprint_cursor_is_still_scoped_to_its_own_sprint(self) -> None:
+        """AC 3: the composite keys move to the reference without losing their reach."""
+        import sqlalchemy as sa
+
+        connection = self.prepared()
+        self.sprint(connection, "sprint:1", 1)
+        self.sprint(connection, "sprint:2", 2)
+        self.card(connection, "secretary-1", sprint="sprint:2")
+        connection.commit()
+
+        with self.assertRaises(sa.exc.IntegrityError):
+            connection.exec_driver_sql(
+                "UPDATE sprints SET current_task_ref = 'secretary-1' WHERE ref = 'sprint:1'"
+            )
+            connection.commit()
+        connection.rollback()
+
+        connection.exec_driver_sql(
+            "UPDATE sprints SET current_task_ref = 'secretary-1' WHERE ref = 'sprint:2'"
+        )
+        connection.commit()
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT current_task_ref FROM sprints WHERE ref = 'sprint:2'"
+            ).fetchone()[0],
+            "secretary-1",
+        )
+
+    def test_section_9s_allocator_still_hands_out_numbers(self) -> None:
+        connection = self.prepared()
+
+        connection.exec_driver_sql("SELECT setval('sprint_number_seq', 1037)")
+        number = connection.exec_driver_sql("SELECT nextval('sprint_number_seq')").fetchone()[0]
+        self.sprint(connection, f"sprint:{number}", number)
+
+        self.assertEqual(number, 1038)
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT ref FROM sprints WHERE sprint_number = 1038"
+            ).fetchone()[0],
+            "sprint:1038",
+        )
+
+    def test_a_card_whose_metadata_names_no_project_is_still_a_row(self) -> None:
+        """AC 5: `secretary-583` carries no `project`, and the board holds it anyway."""
+        connection = self.prepared()
+
+        self.card(connection, "secretary-583", project=None)
+
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT project_id FROM tasks WHERE task_ref = 'secretary-583'"
+            ).fetchone()[0],
+            None,
+        )
+
+    def test_a_dependency_on_a_card_the_board_does_not_hold_is_kept(self) -> None:
+        """AC 5: nine `blocked_by` values name cards that are not on this board."""
+        import sqlalchemy as sa
+
+        connection = self.prepared()
+        self.card(connection, "secretary-1584")
+        self.card(connection, "secretary-1583")
+
+        connection.exec_driver_sql(
+            "INSERT INTO task_dependencies (task_ref, depends_on, depends_on_task) VALUES "
+            "('secretary-1584', 'memory-mcp-12', NULL), "
+            "('secretary-1584', 'secretary-1583', 'secretary-1583')"
+        )
+        connection.commit()
+
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT depends_on, depends_on_task FROM task_dependencies ORDER BY depends_on"
+            ).fetchall(),
+            [("memory-mcp-12", None), ("secretary-1583", "secretary-1583")],
+        )
+        # The foreign key still means what it meant: a resolution that names another card, or a
+        # card that is not there, is refused rather than silently kept.
+        for depends_on, resolved in (
+            ("secretary-1583", "secretary-1582"),
+            ("triggered-agents-9", "triggered-agents-9"),
+        ):
+            with self.subTest(depends_on=depends_on):
+                with self.assertRaises(sa.exc.IntegrityError):
+                    connection.exec_driver_sql(
+                        "INSERT INTO task_dependencies (task_ref, depends_on, depends_on_task) "
+                        "VALUES ('secretary-1583', %s, %s)",
+                        (depends_on, resolved),
+                    )
+                connection.rollback()
 
     # --- §7.4's lock -------------------------------------------------------------------
 
@@ -444,6 +672,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             preview = upgrade.step_board_store(self.context(instance, dry_run=True))
             self.assertEqual(preview.status, "would-change")
             self.assertIn("0001", preview.detail)
+            self.assertIn("0002", preview.detail)
 
             connection = self.owner_connection()
             self.assertIsNone(
@@ -455,6 +684,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             applied = upgrade.step_board_store(self.context(instance))
             self.assertEqual(applied.status, "changed")
             self.assertIn("0001", applied.detail)
+            self.assertIn("0002", applied.detail)
 
             again = upgrade.step_board_store(self.context(instance))
             self.assertEqual(again.status, "unchanged")

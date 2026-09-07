@@ -11,11 +11,21 @@ Everything §3 constrains is declared here, including the parts an ORM does not 
 
 * every closed vocabulary of §3.12 is a `CheckConstraint`, never a reference table;
 * the four partial unique indexes of §3.6 and §3.8 are `Index(..., postgresql_where=...)`;
-* the four `ref` columns are `Computed(..., persisted=True)`, PostgreSQL generated columns;
+* the three `ref`-shaped generated columns are `Computed(..., persisted=True)`, PostgreSQL
+  generated columns — `products.ref`, `issues.ref` and `issue_comments.issue_ref`;
 * §3.3's two scoped sprint cursors are `DEFERRABLE INITIALLY DEFERRED` composite foreign keys,
   and every constraint §3.13 defers to step 2 carries ``use_alter=True`` so it is emitted as an
   ``ALTER TABLE`` after the tables exist, exactly as §3.13 orders it;
-* the five `jsonb` columns are the five §3.10 names and no others.
+* the six `jsonb` columns are the six §3.10 names and no others.
+
+Revision `0002_board_gaps` moved four things here, each named by the import run of
+`secretary-1583` on the live board (2026-09-07) that found it: `issue_comments` (479 comments on
+Issue rows had no table), `issues.extensions` (nine metadata keys on 158 Issue rows had no home),
+the sprint's identity (`sprints.ref` is the primary key and `sprint_number` a nullable unique
+number, because two live sprints are `sprint:canary-terra-20260813` and
+`sprint:canary-terra-final-20260813` and an `integer` primary key cannot hold them), and the two
+records that had no representable field — a card with no `project` metadata and nine `blocked_by`
+values naming cards that are not on the board.
 
 The version table is Alembic's ``alembic_version`` and is not declared here: it is the migration
 tool's own bookkeeping, it is created by the tool, and inventing a second one beside it is what
@@ -124,6 +134,10 @@ class Issue(Base):
     priority = sa.Column(sa.Text, nullable=False)
     state = sa.Column(sa.Text, nullable=False, server_default=sa.text("'open'"))
     close_reason = sa.Column(sa.Text)
+    # 0002: nine leftover metadata keys ride on 158 Issue rows, and 72 Issues sit in a lane that
+    # is not their product's.  Without this column the import drops them; with it they are
+    # provenance a query can find, exactly as `tasks.extensions` is (§8.2).
+    extensions = sa.Column(JSONB, nullable=False, server_default=sa.text("'{}'::jsonb"))  # (J6)
     created_at = sa.Column(TIMESTAMPTZ, nullable=False)
     updated_at = sa.Column(TIMESTAMPTZ, nullable=False)
 
@@ -147,8 +161,11 @@ class Issue(Base):
 class Sprint(Base):
     __tablename__ = "sprints"
 
-    sprint_number = sa.Column(sa.Integer, primary_key=True, autoincrement=False)  # N in sprint:N
-    ref = sa.Column(sa.Text, sa.Computed("'sprint:' || sprint_number", persisted=True))
+    # §9's stable identifier *is* the identity: a reference the board carries is representable
+    # here whatever it spells.  `sprint_number` stays for §9's allocator and for the numbering
+    # rule, as a nullable unique column rather than as the key.
+    ref = sa.Column(sa.Text, primary_key=True)  # "sprint:1037", "sprint:canary-terra-20260813"
+    sprint_number = sa.Column(sa.Integer, autoincrement=False)  # N in sprint:N, NULL when unnumbered
     goal = sa.Column(sa.Text, nullable=False)
     definition_of_done = sa.Column(sa.Text, nullable=False)
     product_id = sa.Column(sa.Text, sa.ForeignKey("products.product_id"))
@@ -168,22 +185,30 @@ class Sprint(Base):
     closed_at = sa.Column(TIMESTAMPTZ)
 
     __table_args__ = (
-        sa.UniqueConstraint("ref"),
+        sa.UniqueConstraint("sprint_number"),
+        sa.CheckConstraint("ref ~ '^sprint:'", name="sprint_ref_is_a_sprint_reference"),
+        # A numbered reference keeps its number, and only a numbered reference has one: this is
+        # what stops `sprint_number_seq` from handing out a number some `sprint:N` already spells.
+        sa.CheckConstraint(
+            "(ref ~ '^sprint:[0-9]+$') = (sprint_number IS NOT NULL) AND "
+            "(sprint_number IS NULL OR ref = 'sprint:' || sprint_number)",
+            name="sprint_number_agrees_with_ref",
+        ),
         sa.CheckConstraint("status IN ('open','closed','stopped')"),
         sa.CheckConstraint("(status = 'open') = (closed_at IS NULL)", name="sprint_closed_has_time"),
         # §3.13 step 2: `tasks` and `sprint_resumes` do not exist yet, and both relations are
         # mutual, so these are emitted as ALTER TABLE after every table is created.
         sa.ForeignKeyConstraint(
-            ["current_task_ref", "sprint_number"],
-            ["tasks.task_ref", "tasks.sprint_number"],
+            ["current_task_ref", "ref"],
+            ["tasks.task_ref", "tasks.sprint_ref"],
             name="sprint_current_task_is_in_this_sprint",
             deferrable=True,
             initially="DEFERRED",
             use_alter=True,
         ),
         sa.ForeignKeyConstraint(
-            ["resume_id", "sprint_number"],
-            ["sprint_resumes.resume_id", "sprint_resumes.sprint_number"],
+            ["resume_id", "ref"],
+            ["sprint_resumes.resume_id", "sprint_resumes.sprint_ref"],
             name="sprint_resume_is_of_this_sprint",
             deferrable=True,
             initially="DEFERRED",
@@ -195,11 +220,8 @@ class Sprint(Base):
 class SprintRepository(Base):
     __tablename__ = "sprint_repositories"
 
-    sprint_number = sa.Column(
-        sa.Integer,
-        sa.ForeignKey("sprints.sprint_number", ondelete="CASCADE"),
-        primary_key=True,
-        autoincrement=False,
+    sprint_ref = sa.Column(
+        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True
     )
     repository_id = sa.Column(
         sa.BigInteger, sa.ForeignKey("repositories.repository_id"), primary_key=True
@@ -209,11 +231,8 @@ class SprintRepository(Base):
 class SprintIssue(Base):
     __tablename__ = "sprint_issues"
 
-    sprint_number = sa.Column(
-        sa.Integer,
-        sa.ForeignKey("sprints.sprint_number", ondelete="CASCADE"),
-        primary_key=True,
-        autoincrement=False,
+    sprint_ref = sa.Column(
+        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True
     )
     issue_id = sa.Column(sa.Text, sa.ForeignKey("issues.issue_id"), primary_key=True)
 
@@ -224,8 +243,8 @@ class SprintResume(Base):
     __tablename__ = "sprint_resumes"
 
     resume_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    sprint_number = sa.Column(
-        sa.Integer, sa.ForeignKey("sprints.sprint_number", ondelete="CASCADE"), nullable=False
+    sprint_ref = sa.Column(
+        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False
     )
     selected_step = sa.Column(sa.Text, nullable=False)
     selected_why = sa.Column(sa.Text, nullable=False)
@@ -236,7 +255,7 @@ class SprintResume(Base):
     recorded_at = sa.Column(TIMESTAMPTZ, nullable=False)
 
     # The target a scoped foreign key needs; redundant with the primary key by design.
-    __table_args__ = (sa.UniqueConstraint("resume_id", "sprint_number"),)
+    __table_args__ = (sa.UniqueConstraint("resume_id", "sprint_ref"),)
 
 
 # --- §3.4 Budget --------------------------------------------------------------------------
@@ -246,8 +265,10 @@ class SprintBudgetEvent(Base):
     __tablename__ = "sprint_budget_events"
 
     budget_event_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    sprint_number = sa.Column(
-        sa.Integer, sa.ForeignKey("sprints.sprint_number", ondelete="CASCADE"), nullable=False
+    # Since the sprint's identity is its reference, this is the reference itself: the generated
+    # `sprint_ref` column §3.9's claim key used to need is now the scoping column.
+    sprint_ref = sa.Column(
+        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False
     )
     event_type = sa.Column(sa.Text, nullable=False)
     charged = sa.Column(sa.Boolean, nullable=False)
@@ -255,8 +276,6 @@ class SprintBudgetEvent(Base):
     reason = sa.Column(sa.Text, nullable=False)
     request_id = sa.Column(sa.Text, nullable=False)  # references `requests`; see §3.9
     occurred_at = sa.Column(TIMESTAMPTZ, nullable=False)
-    # §3.13 step 2 (§3.9's generated sprint ref, added by ALTER TABLE).
-    sprint_ref = sa.Column(sa.Text, sa.Computed("'sprint:' || sprint_number", persisted=True))
 
     __table_args__ = (
         sa.UniqueConstraint("request_id"),
@@ -268,8 +287,8 @@ class SprintBudgetEvent(Base):
             "charged = (event_type <> 'infrastructure_blocked')", name="budget_charge_matches_type"
         ),
         sa.ForeignKeyConstraint(
-            ["task_ref", "sprint_number"],
-            ["tasks.task_ref", "tasks.sprint_number"],
+            ["task_ref", "sprint_ref"],
+            ["tasks.task_ref", "tasks.sprint_ref"],
             name="budget_card_is_in_this_sprint",
             use_alter=True,
         ),
@@ -289,7 +308,9 @@ class Task(Base):
     __tablename__ = "tasks"
 
     task_ref = sa.Column(sa.Text, primary_key=True)  # "secretary-1580"
-    project_id = sa.Column(sa.Text, sa.ForeignKey("projects.project_id"), nullable=False)
+    # Nullable since 0002: `secretary-583` carries no `project` metadata, and a NOT NULL column
+    # would have made that card the one record the board holds and the store cannot (§8.6).
+    project_id = sa.Column(sa.Text, sa.ForeignKey("projects.project_id"))
     task_number = sa.Column(sa.Integer, nullable=False)
     title = sa.Column(sa.Text, nullable=False)
     description = sa.Column(sa.Text, nullable=False, server_default=sa.text("''"))
@@ -297,7 +318,7 @@ class Task(Base):
     state = sa.Column(sa.Text, nullable=False)
     archived = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false"))
     position = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
-    sprint_number = sa.Column(sa.Integer, sa.ForeignKey("sprints.sprint_number"))
+    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref"))
     claim_worker = sa.Column(sa.Text)
     claimed_at = sa.Column(TIMESTAMPTZ)
     # workspace
@@ -336,7 +357,7 @@ class Task(Base):
         sa.UniqueConstraint("project_id", "task_number"),
         # The target the sprint's scoped cursor and decision keys need (§3.3, §3.8).
         # Redundant with the primary key by design.
-        sa.UniqueConstraint("task_ref", "sprint_number"),
+        sa.UniqueConstraint("task_ref", "sprint_ref"),
     )
 
 
@@ -362,16 +383,30 @@ class TaskIssue(Base):
 
 
 class TaskDependency(Base):
-    """`blocked_by`."""
+    """`blocked_by`.
+
+    Two columns since 0002, because nine `blocked_by` values on this board name cards that are
+    not on it (`triggered-agents-*`, `memory-mcp-*`).  `depends_on` is the reference as the card
+    writes it and is always kept; `depends_on_task` is the same reference *as a foreign key* and
+    is set exactly when the board holds that card, so a dependency that resolves is still checked
+    relationally and one that does not is still a row (§8.6).
+    """
 
     __tablename__ = "task_dependencies"
 
     task_ref = sa.Column(
         sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), primary_key=True
     )
-    depends_on = sa.Column(sa.Text, sa.ForeignKey("tasks.task_ref"), primary_key=True)
+    depends_on = sa.Column(sa.Text, primary_key=True)
+    depends_on_task = sa.Column(sa.Text, sa.ForeignKey("tasks.task_ref"))
 
-    __table_args__ = (sa.CheckConstraint("task_ref <> depends_on", name="no_self_dependency"),)
+    __table_args__ = (
+        sa.CheckConstraint("task_ref <> depends_on", name="no_self_dependency"),
+        sa.CheckConstraint(
+            "depends_on_task IS NULL OR depends_on_task = depends_on",
+            name="dependency_resolution_is_the_same_reference",
+        ),
+    )
 
 
 class TaskSupersession(Base):
@@ -394,11 +429,8 @@ class TaskSupersession(Base):
 class SprintProject(Base):
     __tablename__ = "sprint_projects"
 
-    sprint_number = sa.Column(
-        sa.Integer,
-        sa.ForeignKey("sprints.sprint_number", ondelete="CASCADE"),
-        primary_key=True,
-        autoincrement=False,
+    sprint_ref = sa.Column(
+        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True
     )
     project_id = sa.Column(sa.Text, sa.ForeignKey("projects.project_id"), primary_key=True)
     reserved = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("true"))
@@ -423,8 +455,8 @@ class SprintComment(Base):
     __tablename__ = "sprint_comments"
 
     comment_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    sprint_number = sa.Column(
-        sa.Integer, sa.ForeignKey("sprints.sprint_number", ondelete="CASCADE"), nullable=False
+    sprint_ref = sa.Column(
+        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False
     )
     marker = sa.Column(sa.Text)  # "po", "sprint:resume", NULL for unmarked
     body = sa.Column(sa.Text, nullable=False)
@@ -434,8 +466,6 @@ class SprintComment(Base):
     # created later, so the foreign key is a §3.13 step 2 constraint.
     request_id = sa.Column(sa.Text)
     created_at = sa.Column(TIMESTAMPTZ, nullable=False)
-    # §3.13 step 2 (§3.9's generated sprint ref, added by ALTER TABLE).
-    sprint_ref = sa.Column(sa.Text, sa.Computed("'sprint:' || sprint_number", persisted=True))
 
     __table_args__ = (
         sa.UniqueConstraint("request_id"),
@@ -474,6 +504,45 @@ class TaskComment(Base):
     )
 
 
+class IssueComment(Base):
+    """The third comment table, added by 0002.
+
+    `secretary-1583` read the live board and found 479 comments on Issue rows with nowhere to go:
+    §3.7 declared two comment tables and both are foreign-keyed to their own entity, so a comment
+    on an Issue was the largest single record loss the import found.  This is §3.7's shape again,
+    unchanged — the same columns, the same claim key, the same place in §3.13 — with `issues` as
+    the entity.  The same read counted **0** comments on Product rows, so there is no
+    `product_comments` table and the counted zero is what §3.7 records instead.
+    """
+
+    __tablename__ = "issue_comments"
+
+    comment_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
+    issue_id = sa.Column(
+        sa.Text, sa.ForeignKey("issues.issue_id", ondelete="CASCADE"), nullable=False
+    )
+    marker = sa.Column(sa.Text)  # role, or issue:* — the same vocabulary §8.1 lists
+    body = sa.Column(sa.Text, nullable=False)
+    actor_role = sa.Column(sa.Text)
+    actor_id = sa.Column(sa.Text)
+    request_id = sa.Column(sa.Text)  # FK added in §3.13 step 2
+    created_at = sa.Column(TIMESTAMPTZ, nullable=False)
+    # §3.13 step 2: the generated ref the composite claim key joins on, exactly as the sprint
+    # tables did before the sprint's identity became its reference.
+    issue_ref = sa.Column(sa.Text, sa.Computed("'issue:' || issue_id", persisted=True))
+
+    __table_args__ = (
+        sa.UniqueConstraint("request_id"),
+        sa.Index("issue_comments_by_issue", "issue_id", "created_at"),
+        sa.ForeignKeyConstraint(
+            ["request_id", "issue_ref"],
+            ["requests.request_id", "requests.ref"],
+            name="issue_comment_claims_its_request",
+            use_alter=True,
+        ),
+    )
+
+
 # --- §3.8 Sprint decisions ----------------------------------------------------------------
 
 
@@ -481,8 +550,8 @@ class SprintDecision(Base):
     __tablename__ = "sprint_decisions"
 
     decision_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    sprint_number = sa.Column(
-        sa.Integer, sa.ForeignKey("sprints.sprint_number", ondelete="CASCADE"), nullable=False
+    sprint_ref = sa.Column(
+        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False
     )
     subject_kind = sa.Column(sa.Text, nullable=False)
     # Both subjects are scoped to this sprint below; neither is a bare existence check.
@@ -495,8 +564,6 @@ class SprintDecision(Base):
     # writes one decision per declared issue and per remaining card (§3.9).
     request_id = sa.Column(sa.Text, nullable=False)
     decided_at = sa.Column(TIMESTAMPTZ, nullable=False)
-    # §3.13 step 2 (§3.9's generated sprint ref, added by ALTER TABLE).
-    sprint_ref = sa.Column(sa.Text, sa.Computed("'sprint:' || sprint_number", persisted=True))
 
     __table_args__ = (
         sa.CheckConstraint("subject_kind IN ('issue','card')"),
@@ -518,27 +585,27 @@ class SprintDecision(Base):
         sa.CheckConstraint("reason <> ''"),
         sa.Index(
             "sprint_decisions_one_per_issue",
-            "sprint_number",
+            "sprint_ref",
             "issue_id",
             unique=True,
             postgresql_where=sa.text("issue_id IS NOT NULL"),
         ),
         sa.Index(
             "sprint_decisions_one_per_card",
-            "sprint_number",
+            "sprint_ref",
             "task_ref",
             unique=True,
             postgresql_where=sa.text("task_ref IS NOT NULL"),
         ),
         sa.ForeignKeyConstraint(
-            ["sprint_number", "issue_id"],
-            ["sprint_issues.sprint_number", "sprint_issues.issue_id"],
+            ["sprint_ref", "issue_id"],
+            ["sprint_issues.sprint_ref", "sprint_issues.issue_id"],
             name="decided_issue_is_declared_by_this_sprint",
             use_alter=True,
         ),
         sa.ForeignKeyConstraint(
-            ["task_ref", "sprint_number"],
-            ["tasks.task_ref", "tasks.sprint_number"],
+            ["task_ref", "sprint_ref"],
+            ["tasks.task_ref", "tasks.sprint_ref"],
             name="decided_card_is_in_this_sprint",
             use_alter=True,
         ),
@@ -637,6 +704,7 @@ JSONB_COLUMNS = (
     ("sprints", "observer"),
     ("sprints", "source_audit"),
     ("tasks", "extensions"),
+    ("issues", "extensions"),
     ("board_events", "data"),
     ("requests", "intent"),
 )
@@ -650,6 +718,7 @@ DEFERRED_CONSTRAINTS = (
     "decided_card_is_in_this_sprint",
     "board_event_claims_its_request",
     "task_comment_claims_its_request",
+    "issue_comment_claims_its_request",
     "sprint_comment_claims_its_request",
     "budget_event_claims_its_request",
     "decision_belongs_to_its_close_request",
@@ -667,6 +736,7 @@ __all__ = [
     "Base",
     "BoardEvent",
     "Issue",
+    "IssueComment",
     "Product",
     "ProductProject",
     "Project",
