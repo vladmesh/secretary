@@ -14,7 +14,9 @@ entity as a field that was never written (`ExecutorPinTests`).
 
 from __future__ import annotations
 
+import ast
 import contextlib
+import inspect
 import io
 import json
 import re
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
+from secretary import sprints as sprints_module
 from secretary.cli import main
 from secretary.config import validate
 from secretary.knowledge_write import KnowledgeError, list_knowledge_documents
@@ -91,6 +94,38 @@ _WRITE_METHODS = {
     "createComment",
     "removeTask",
 }
+
+
+
+def _write_kinds() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The kinds `SprintWriter` gives `_write`, read from the writer instead of restated here.
+
+    `docs/PROTOCOLS.md` publishes what a terminal sprint answers for each of them, and a list kept
+    by hand beside that table is what let the table claim to be complete while it was not. The
+    writer's own calls are the only enumeration that cannot fall behind the writer.
+    """
+    module = ast.parse(inspect.getsource(sprints_module))
+    writer = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name == "SprintWriter"
+    )
+    kinds: set[str] = set()
+    underivable: set[str] = set()
+    for node in ast.walk(writer):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if not isinstance(function, ast.Attribute) or function.attr != "_write":
+            continue
+        if not isinstance(function.value, ast.Name) or function.value.id != "self":
+            continue
+        kind = node.args[0] if node.args else None
+        if isinstance(kind, ast.Constant) and isinstance(kind.value, str):
+            kinds.add(kind.value)
+        else:
+            underivable.add(ast.unparse(kind) if kind is not None else "<no positional kind>")
+    return tuple(sorted(kinds)), tuple(sorted(underivable))
 
 
 class CreateTests(SprintProtocolFixture):
@@ -2768,17 +2803,30 @@ class PostCloseCommentTests(CloseFixture):
 
 
 class TerminalSprintWriteTests(SprintProtocolFixture):
-    """The documented terminal-sprint table, held to what `SprintWriter._write` actually refuses.
+    """The documented terminal-sprint table, held to what `SprintWriter._write` actually does.
 
-    Three edits to `docs/PROTOCOLS.md` would have answered the finding that sent this card back; the
-    pin is asked for instead, and it is the deliverable. A promise the prose makes and no test holds
-    is exactly how this page came to refuse a comment the code had started accepting. So every write
-    a sprint can be given after it has ended is driven here against both terminal statuses, through
-    `_write` itself rather than through a caller that could refuse first for a reason of its own, and
-    the answers are compared with the rows the document publishes.
+    The first version of this pin carried a hand-written list of three kinds and a document that
+    claimed to describe the writer "in full". It was wrong -- `budget_recorded` and `restored` are
+    accepted on a sprint that has ended -- and, being its own authority on what to check, it could
+    not notice. So the set is not written here. It is read out of `SprintWriter`'s own calls to
+    `_write`, which is where the kinds actually are, and a write added to the writer tomorrow either
+    appears in the published table or fails `test_the_document_names_every_write_the_writer_makes`.
+
+    Each kind is driven through `_write` itself rather than through its public caller, which could
+    refuse first for a reason of its own -- a role, a payload, an observer identity -- and hide what
+    the terminal guard would have done.
     """
 
-    KINDS = ("commented", "resume_recorded", "current_task_set")
+    #: The kinds `SprintWriter` passes to `_write`, taken from the writer's own source. A call whose
+    #: kind is not a literal would leave a kind untested without saying so, so it is collected too
+    #: and asserted away rather than skipped.
+    KINDS: ClassVar[tuple[str, ...]]
+    UNDERIVABLE: ClassVar[tuple[str, ...]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.KINDS, cls.UNDERIVABLE = _write_kinds()
 
     def setUp(self) -> None:
         super().setUp()
@@ -2788,7 +2836,7 @@ class TerminalSprintWriteTests(SprintProtocolFixture):
         }
 
     def _answer(self, reference: str, kind: str) -> tuple[str, ...]:
-        """What `_write` does with this kind on this sprint, as the table's cells would say it."""
+        """What `_write` does with this kind on this sprint, as the table's cells say it."""
         from secretary.sprints import SprintWriter
 
         writer = SprintWriter(self.board, data_dir=self.data_dir, instance=self.instance)
@@ -2807,21 +2855,33 @@ class TerminalSprintWriteTests(SprintProtocolFixture):
         return ("accepted",)
 
     def _documented(self) -> dict[str, tuple[str, ...]]:
-        rows: dict[str, tuple[str, ...]] = {}
+        """The published table, read as rows rather than looked up by the kinds this test knows.
+
+        Looking rows up would let a row for a kind the writer no longer has survive unnoticed, which
+        is the same shape of hole from the other side.
+        """
         protocols = (Path(__file__).resolve().parents[1] / "docs" / "PROTOCOLS.md").read_text(
             encoding="utf-8"
         )
-        for line in protocols.splitlines():
+        lines = protocols.splitlines()
+        header = lines.index("| sprint write | a `closed` or `stopped` sprint |")
+        rows: dict[str, tuple[str, ...]] = {}
+        for line in lines[header + 2 :]:
+            if not line.startswith("|"):
+                break
             cells = [cell.strip() for cell in line.split("|")]
-            if len(cells) != 4:
-                continue
             kind = re.fullmatch(r"`([a-z_]+)`", cells[1])
-            if kind is None or kind.group(1) not in self.KINDS:
-                continue
+            self.assertIsNotNone(kind, f"unreadable row in the terminal-write table: {line}")
+            assert kind is not None
             rows[kind.group(1)] = tuple(re.findall(r"`([a-z_0-9]+)`", cells[2]))
         return rows
 
-    def test_the_document_names_every_write_a_sprint_can_be_given_after_it_ends(self) -> None:
+    def test_every_kind_the_writer_passes_to_write_was_derivable(self) -> None:
+        """The derivation is only a pin while it can see every call. It says so when it cannot."""
+        self.assertEqual(self.UNDERIVABLE, ())
+        self.assertIn("commented", self.KINDS)
+
+    def test_the_document_names_every_write_the_writer_makes(self) -> None:
         self.assertEqual(sorted(self._documented()), sorted(self.KINDS))
 
     def test_each_documented_row_is_what_the_writer_actually_answers(self) -> None:
@@ -2829,10 +2889,16 @@ class TerminalSprintWriteTests(SprintProtocolFixture):
         for status, reference in self.terminal.items():
             for kind in self.KINDS:
                 with self.subTest(status=status, kind=kind):
+                    self.assertIn(kind, documented, f"{kind} is a sprint write the table omits")
                     self.assertEqual(self._answer(reference, kind), documented[kind])
 
-    def test_a_comment_is_the_one_it_accepts(self) -> None:
-        """The direction of the table, stated once so a table of three refusals cannot pass."""
+    def test_the_two_semantic_writes_are_the_refused_ones(self) -> None:
+        """The direction, stated outright, so a table of five acceptances could not pass by symmetry.
+
+        Only these two are named by hand, because only these two are this card's own contract: a
+        comment is accepted where it used to be refused, and the writes that state work in progress
+        are still refused. What the rest answer is settled by the derivation above, not here.
+        """
         for status, reference in self.terminal.items():
             with self.subTest(status=status):
                 self.assertEqual(self._answer(reference, "commented"), ("accepted",))

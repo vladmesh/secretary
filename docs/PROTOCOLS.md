@@ -1127,17 +1127,28 @@ drops its record, so there is nothing to wake. It is idempotent on `request_id` 
 every sprint write is. Reading what happened to it answers `not_deliverable` rather than `saved`, because
 `saved` would say no batch carries it *yet*, and no batch ever will.
 
-What `SprintWriter._write` does with each sprint write when the sprint is `closed` or `stopped`, in full:
+What `SprintWriter._write` does with every sprint write it handles when the sprint is `closed` or
+`stopped`. This is the whole set, not the interesting part of it:
 
 | sprint write | a `closed` or `stopped` sprint |
 | --- | --- |
+| `budget_recorded` | `accepted` |
 | `commented` | `accepted` |
-| `resume_recorded` | `refused` — `closed`, exit status `3` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
+| `restored` | `accepted` |
+| `resume_recorded` | `refused` — `closed`, exit status `3` |
 
-That table is the contract and it is pinned: a test drives all three writes against both terminal statuses
-and holds the answers to the rows above, so the code and this sentence cannot drift apart the way they did
-when comments were admitted and this page went on refusing them.
+The two refusals are the semantic ones, for the reason above. The three acceptances are each deliberate
+and each predate the accepted comment. A **budget** charge on a sprint that has ended is recorded like any
+other: the hard-limit edge that stops a sprint is taken only from `open`, so a late charge changes the
+totals `show` reports and can neither re-stop the sprint nor move its status. A **restore** is not an
+operator's mutation of a sprint at all — it is the recovery path that rebuilds a sprint's fields from a
+backup, and refusing it on the status it is restoring would make a closed sprint unrecoverable.
+
+That table is the contract and it is pinned, and the pin does not trust this list: the test reads the kinds
+out of `SprintWriter`'s own calls to `_write`, drives every one of them against both terminal statuses, and
+holds each answer to the row here. A write added to the writer tomorrow and left out of this table fails
+that test — which is what the first version of this pin, carrying a hand-written three, could not do.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.

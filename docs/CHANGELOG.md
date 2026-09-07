@@ -34,10 +34,12 @@ refused with exit `3`, which is what sent a PO past this protocol into the board
 It changes nothing else: no status change, no reopen, no restored reservation, no head woken or
 launched. `sprint comment-delivery` answers such a comment `not_deliverable` — a new delivery state —
 rather than `saved`, which would imply a delivery that cannot happen. A current task and an observer
-resume are still refused on a sprint that has ended. What a terminal sprint answers for each of the
-three writes is published as a table in
-[PROTOCOLS](PROTOCOLS.md#a-comment-on-a-sprint-that-has-ended), and a test drives all three against
-both terminal statuses and holds the answers to it. See also
+resume are still refused on a sprint that has ended. What a terminal sprint answers for **every** write
+the sprint writer makes — the two refusals above, and `commented`, `budget_recorded` and `restored`
+accepted — is published as a table in
+[PROTOCOLS](PROTOCOLS.md#a-comment-on-a-sprint-that-has-ended). A test reads that set out of the writer's
+own calls rather than restating it, drives each one against both terminal statuses and holds the answers
+to the table, so a write added later cannot quietly go undocumented. See also
 [PROTOCOLS](PROTOCOLS.md#the-decisions-a-close-carries) and
 [OPERATIONS](OPERATIONS.md#closing-a-sprint).
 
