@@ -173,18 +173,21 @@ Membership is **not** exclusive: `restore.py` and `installation.py` are in group
 the "also (b)" column says so rather than leaving the reader with a contradiction. What is true of
 every member is only this: *the export path itself* never speaks to Kanboard.
 
-| Module | Consumes | Writes | Also (b)? |
-|---|---|---|---|
-| `checkpoint.py` | regenerates the exports, validates, publishes into `state/board`, `state/runs` under `BOARD_RUNS_PATHSPEC`; seals `analytics-manifest.json` | the private instance repo | no — it reads the board *through* `data.py:export_board` and never calls Kanboard itself |
-| `board/normalized_checkpoint.py` | validates the `cards.json` / `cards.ndjson` pair and their parity | — | no |
-| `board/analytics.py` | offline projection over a sealed `state/board` copy; joins outcome to usage by explicit event ids | — | no — it takes a copied directory, not an installation |
-| `backup.py`, `backup_policy.py`, `backup_verify.py`, `backup_retention.py` | `core` archives carry `board/cards.json`, `cards.ndjson`, `export.json`; `full` additionally carries the raw Kanboard dump | tar archives under `<data>/backups` | `backup.py` only, indirectly: it calls `data.py:export_all` and `raw_kanboard_dump` |
-| `restore.py` | reads the checkpoint's `sprints.ndjson`/`cards.ndjson` | **Kanboard**: `addSwimlane`, sprint rows through `SprintWriter`, cards through `TaskWriter`/`task_restore.py` | **yes** — it is a full group (b) writer; see its row in §2.2 |
-| `installation.py` | reads the whole checkpoint to build a new local data plane | **Kanboard**: `TaskReader(...).list()` to verify the result | **yes** — group (b) reader; see its row in §2.2 |
-| `restore_commands.py` | CLI wiring for the above | — | no, but it starts a process that is |
-| `state_repo.py` | owns the six disjoint pathspecs of the private repo | git | no |
-| `status.py`, `webproto/reads.py`, `webproto/sprint_reads.py`, `webproto/pause_reads.py` | fall back to export freshness when a live read fails | — | **yes** — all four are group (b) readers first and fall back to the export second |
-| `cli.py` | wires the above | — | no |
+| Module | Consumed fields | R/W | Own writer process? | Also (b)? |
+|---|---|---|---|---|
+| `checkpoint.py` | regenerates the exports, validates, publishes `state/board` + `state/runs` under `BOARD_RUNS_PATHSPEC`; seals `analytics-manifest.json`; reads `runs.ndjson` to refuse history loss | R+W (files, git) | yes — runs inside the dispatcher tick, and as `secretary checkpoint` | no — it reaches the board only through `data.py:export_board` |
+| `data.py` | **produces** `cards.json`, `cards.ndjson`, `sprints.json`, `sprints.ndjson`, `export.json`, validating the pair before publishing; **reads** the previous `<data>/board/kanboard-raw-*/data/db.sqlite` for `raw_active_task_count` (`_latest_raw_active_task_count`) | R+W | yes (checkpoint/backup) | **yes** — full group (b) reader; see §2.2 |
+| `bootstrap.py` | reads `<instance>/state/board/cards.ndjson` and takes each card's `swimlane` to seed lane discovery before it writes the Pipeline board (`:91-103`) | R | yes (bootstrap command, root) | **yes** — full group (b) writer; see §2.2 |
+| `board/normalized_checkpoint.py` | `cards.json` / `cards.ndjson` and their parity; card `reference` uniqueness; Product/Issue record validity | R | no — a validator inside its caller | no |
+| `board/analytics.py` | a sealed, copied `state/board`: `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `analytics-manifest.json` | R | no — offline, takes a directory rather than an installation | no |
+| `backup.py` | `board/cards.json`, `cards.ndjson`, `export.json`; filters Done cards out of a `core` archive (`_filter_core_board_export`) | R+W (tar under `<data>/backups`) | yes (backup command) | indirectly — it calls `data.py:export_all` and `raw_kanboard_dump` |
+| `backup_policy.py` | declares which board entries each policy requires; reads nothing itself | — | no — a policy table | no |
+| `restore.py` | the checkpoint's `sprints.ndjson` / `cards.ndjson` through `validated_normalized_cards` | R, then **W to Kanboard**: `addSwimlane`, sprint rows via `SprintWriter`, cards via `TaskWriter` / `task_restore.py` | yes (restore command) | **yes** — full group (b) writer; see §2.2 |
+| `installation.py` | `CHECKPOINT_BOARD` = `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `export.json`, to build a new local data plane | R, then **R from Kanboard**: `TaskReader(...).list()` to verify | yes (install/recovery command) | **yes** — group (b) reader; see §2.2 |
+| `state_repo.py` | owns `BOARD_RUNS_PATHSPEC` = `state/board`, `state/runs`; stages and commits it | W (git) | no — a library under the tick writer's lock | no |
+| `status.py` | `<data>/board/cards.ndjson` as the age/evidence fallback when the live read fails | R | yes (operator command) | **yes** — group (b) reader first |
+| `webproto/reads.py`, `webproto/sprint_reads.py`, `webproto/pause_reads.py` | the same `cards.ndjson` as each section's availability evidence | R | yes — inside `secretary-web.service` | **yes** — all three are group (b) readers first |
+| `cli.py` | wires `data export-board`; consumes nothing itself | — | no | no |
 
 ### 2.4 Consumers named by DoD 3, explicitly
 
@@ -223,21 +226,63 @@ every member is only this: *the export path itself* never speaks to Kanboard.
   `MutationEventTransaction`, `ProductIssueTransaction`
   (`<data>/board/product-issue-transactions/v1-<sha256>.json`). Files, never Kanboard.
 
-### 2.5 What each search contributed
+### 2.5 What each search contributed, and the arithmetic that closes it
 
-So a later re-run can tell a real miss from a filtered false positive:
+An inventory whose counts do not reconcile is not an inventory: "17 files, 12 rows" says nothing
+about the other five, and that is how a missing consumer survived two rounds of review. So every
+hit of every declared search is accounted for here as **either a table row or a named filtered
+entry with its reason**, and each line adds up.
 
-| Search | Files returned | Contributed to the tables |
-|---|---|---|
-| `(a)` `BoardHost` / `board_host` | 7 | 5 (the other 2 are `board/host.py` and `board/fake.py`: the protocol and its test double) |
-| `(b)` `KanboardClient` | 23 | 22 (`webproto/__init__.py` matches in prose only) |
-| `(b2)` reader/writer construction | 20 | 2 **not already in (a) or (b)**: `webproto/admission.py`, `dispatcher_production.py` |
-| `(b3)` any mention of a board type | 37 | 2 by hand (`board/steward_reports.py`, `board/done_retention.py`, which receive a factory rather than constructing); 10 filtered as prose-only by caution 4; the rest already covered |
-| `(c)` derived-export consumers | 17 | 12 rows, 6 of them marked "also (b)" |
+| Search | Hits | Rows | Filtered | Reconciles |
+|---|---|---|---|---|
+| `(a)` `BoardHost` / `board_host` | 7 | 5 | 2 | ✓ |
+| `(b)` `KanboardClient` | 23 | 22 | 1 | ✓ |
+| `(b2)` reader/writer construction | 19 | 19 | 0 | ✓ |
+| `(b3)` any mention of a board type | 37 | 27 | 10 | ✓ |
+| `(c)` derived-export consumers | 17 | 15 | 2 | ✓ |
 
-The first draft of this document ran only `(a)`, `(b)` and `(c)` and therefore missed exactly the
-two modules `(b2)` finds. That is the reason `(b2)` and `(b3)` exist in §1: the method is the part
-that has to be right, because it is what a later re-run repeats.
+**`(a)` — 5 rows + 2 filtered.** Rows: `board/kanboard.py`, `tasks.py`, `sprints.py`,
+`product_issues.py`, `dispatcher.py`. Filtered: `board/host.py` (the `Protocol` definition itself)
+and `board/fake.py` (`FakeBoardHost`, a test double never constructed in production).
+
+**`(b)` — 22 rows + 1 filtered.** All 23 files appear in §2.2 except `webproto/__init__.py`, whose
+only match is the package docstring explaining that the layer reaches the board through
+`KanboardClient`. Filtered as prose.
+
+**`(b2)` — 19 files, all accounted for.** Seventeen were already rows from `(a)` or `(b)`; the two
+that were not are `webproto/admission.py` and `dispatcher_production.py`, which is exactly what
+this search exists to catch. Nothing is filtered here: constructing a reader or writer *is* a path.
+
+**`(b3)` — 27 rows + 10 filtered.** The 27 are the union of `(a)`, `(b)` and `(b2)` plus
+`board/reference_repair.py`, `board/steward_reports.py` and `board/done_retention.py` — the last
+two receive a `board_factory` / `reader_factory` callable instead of constructing one, so they
+match only `(b3)`. The 10 filtered are
+prose-only matches, named individually in caution 4 so a later re-run does not re-add them:
+`dispatcher_helpers.py`, `dispatcher_observer.py`, `dispatcher_watchdog.py`,
+`webproto/command_reads.py`, `webproto/commands.py`, `webproto/sprint_requests.py`,
+`webproto/__init__.py`, `web/app.py`, `board/card_transitions.py`,
+`triggered_agents/runtime/redact.py`.
+
+**`(c)` — 15 rows + 2 filtered.** §2.3 has a row for each of `checkpoint.py`, `data.py`,
+`bootstrap.py`, `board/normalized_checkpoint.py`, `board/analytics.py`, `backup.py`,
+`backup_policy.py`, `restore.py`, `installation.py`, `state_repo.py`, `status.py`,
+`webproto/reads.py`, `webproto/sprint_reads.py`, `webproto/pause_reads.py`, `cli.py` — fifteen,
+counting the three `webproto` modules that share one row as three. Filtered: `knowledge_write.py`
+(module docstring, explaining that the tick writer commits `state/board`/`state/runs` in the same
+repo every minute) and `memory_write.py` (an inline comment saying a concurrent
+`state/board`/`state/runs` commit neither blocks nor is blocked by a memory write). Neither reads a
+board file; both mention the pathspec while explaining lock behaviour.
+
+Three of those `(c)` rows are dual-membership, and two of them were missing before this revision:
+`data.py` and `bootstrap.py` are direct Kanboard paths *and* derived-export consumers, so each has
+a row in both §2.2 and §2.3. `bootstrap.py` is the clearest case and the one that shows why the
+"never speaks to Kanboard" framing had to go: it reads `state/board/cards.ndjson` for lane
+discovery **and then creates the Pipeline board**, in that order, in one command.
+
+The first draft of this document ran only `(a)`, `(b)` and `(c)` and missed what `(b2)` finds. The
+second gave `(c)` no per-row columns and no arithmetic, and missed two consumers inside a group it
+had already listed. The table above is the fix for the class rather than for the two instances: a
+search whose hits do not equal rows plus named filtered entries is not finished.
 
 ### 2.6 Gaps, listed as gaps
 
@@ -327,8 +372,57 @@ CREATE TABLE product_projects (                       -- Product.projects, today
 `projects` and `repositories` are present "to the extent of existing links" only: the registry file
 stays canonical for the binding (§6), and these tables exist so that `sprint_projects.project_id`,
 `tasks.project_id` and `sprint_repositories.repository_id` can be real foreign keys instead of free
-text. `registry_present = false` is how a historical row survives when its `.yaml` was deleted; see
-§8.3.
+text. `registry_present = false` is how a historical row survives when its `.yaml` was deleted.
+
+**These two tables are a projection of the file registry, and the projection needs a writer.**
+Without one they are a mirror nobody updates, and the first ordinary project addition after cutover
+turns from an admitted operation into a foreign-key failure: `registered_projects()` reads
+`<instance>/projects/*.yaml` directly (`product_issues.py:124-140`), sprint admission accepts a
+newly added id from it (`sprints.py:1506-1508`), and the write that follows would insert a
+`tasks.project_id` or `sprint_projects.project_id` with no `projects` row behind it. §8.3 only
+described the *import*; that is the gap, and it is closed here.
+
+**The writer is one function, `board_store.sync_project_registry(instance, conn)`**, and it runs at
+two points:
+
+1. **Inside the mutation's own transaction**, immediately before any insert that references a
+   project id. It reads the registry files — which are still canonical — and upserts the rows the
+   mutation is about to reference:
+
+   ```sql
+   INSERT INTO projects (project_id, enabled, plane, adapter, orca_binding, registry_present)
+        VALUES (:id, :enabled, :plane, :adapter, :orca_binding, true)
+   ON CONFLICT (project_id) DO UPDATE
+       SET enabled = EXCLUDED.enabled, plane = EXCLUDED.plane, adapter = EXCLUDED.adapter,
+           orca_binding = EXCLUDED.orca_binding, registry_present = true;
+
+   INSERT INTO repositories (project_id, path, remote, default_branch, role)
+        VALUES (:project_id, :path, :remote, :default_branch, 'primary')
+   ON CONFLICT (path) DO UPDATE
+       SET project_id = EXCLUDED.project_id, remote = EXCLUDED.remote,
+           default_branch = EXCLUDED.default_branch;
+   ```
+
+   Because it is in the same transaction, a first write against a freshly added `projects/new.yaml`
+   succeeds exactly as it does today. Behaviour does not change, which DoD 2 requires: admission
+   still reads the files and still decides, and this adds no rule of its own.
+
+2. **In `secretary reconcile apply` and `secretary upgrade`**, over the whole registry, so a
+   binding that was edited but not yet referenced by any write is projected anyway and an operator
+   can see the table agree with the files.
+
+**A binding the operator removes is never deleted from the database.** History references it —
+`tasks.project_id`, `sprint_projects.project_id` on closed sprints — and deleting the row would
+either fail on those foreign keys or lose records, which §8.3's rule forbids. Reconciliation sets
+`registry_present = false` for every id it no longer finds in the files, and nothing else. A
+re-added binding flips it back to `true` on the next projection. `enabled` mirrors the file for
+whichever ids the file still has; for an absent binding it keeps its last value and
+`registry_present = false` is the field that says the value is stale.
+
+**This is not a second canon and not a second writer of the registry.** Nothing writes
+`projects/*.yaml`; the operator does, as §6.2 says. The database rows are derived, one function
+produces them, and every consumer that asks "is this project registered?" keeps asking
+`registered_projects()` — the files — exactly as it does now.
 
 ### 3.2 Issues
 
@@ -424,6 +518,8 @@ opposite of DoD 1's requirement that links and checkable rules be relational.
 
 So both cursors carry the sprint into the key:
 
+Deferred constraints (they reference `tasks` and `sprint_resumes`; §3.13 places them):
+
 ```sql
 ALTER TABLE sprints
   ADD CONSTRAINT sprint_current_task_is_in_this_sprint
@@ -473,6 +569,8 @@ CREATE TABLE sprint_budget_events (
         CHECK (charged = (event_type <> 'infrastructure_blocked'))
 );
 ```
+
+Deferred constraint (it references `tasks`; §3.13 places it):
 
 ```sql
 ALTER TABLE sprint_budget_events
@@ -602,8 +700,9 @@ CREATE TABLE sprint_comments (
     body          text NOT NULL,
     actor_role    text,
     actor_id      text,
-    -- Unique *per claimed request*; the namespace itself is `requests` (§3.9).
-    request_id    text UNIQUE REFERENCES requests(request_id),
+    -- Unique *per claimed request*; the namespace itself is `requests` (§3.9), which is
+    -- created later, so the foreign key is a deferred constraint added in §3.13 step 2.
+    request_id    text UNIQUE,
     created_at    timestamptz NOT NULL
 );
 
@@ -614,7 +713,7 @@ CREATE TABLE task_comments (
     body        text NOT NULL,
     actor_role  text,
     actor_id    text,
-    request_id  text UNIQUE REFERENCES requests(request_id),
+    request_id  text UNIQUE,                          -- FK added in §3.13 step 2
     created_at  timestamptz NOT NULL
 );
 CREATE INDEX task_comments_by_task ON task_comments (task_ref, created_at);
@@ -656,7 +755,11 @@ CREATE UNIQUE INDEX sprint_decisions_one_per_issue
     ON sprint_decisions (sprint_number, issue_id) WHERE issue_id IS NOT NULL;
 CREATE UNIQUE INDEX sprint_decisions_one_per_card
     ON sprint_decisions (sprint_number, task_ref) WHERE task_ref IS NOT NULL;
+```
 
+Deferred constraints (they reference `tasks`, so they are applied in the last step of §3.13):
+
+```sql
 ALTER TABLE sprint_decisions
   ADD CONSTRAINT decided_issue_is_declared_by_this_sprint
       FOREIGN KEY (sprint_number, issue_id)
@@ -713,7 +816,10 @@ CREATE TABLE requests (
     created_at  timestamptz NOT NULL,
     settled_at  timestamptz,
     CONSTRAINT request_settled_matches_status
-        CHECK ((status = 'staged') = (settled_at IS NULL))
+        CHECK ((status = 'staged') = (settled_at IS NULL)),
+    -- The target of every child's composite claim key below.  Redundant with the
+    -- primary key by design, exactly as the scoped sprint keys of §3.3 are.
+    CONSTRAINT requests_ref_identity UNIQUE (request_id, ref)
 );
 
 CREATE TABLE board_events (
@@ -744,55 +850,143 @@ CREATE INDEX board_events_by_ref ON board_events (ref, occurred_at);
 ```
 
 Every other table that carries a `request_id` now references this one instead of owning its own
-uniqueness:
+uniqueness. These are deferred constraints too — `task_comments` and the rest are created before
+`requests` in reading order — and §3.13 places them. The three sprint-owned children first gain the
+generated column their key needs, and this fence runs **before** the keys below it:
 
 ```sql
-ALTER TABLE task_comments
-  ADD CONSTRAINT task_comment_claims_its_request
-      FOREIGN KEY (request_id) REFERENCES requests(request_id);
 ALTER TABLE sprint_comments
-  ADD CONSTRAINT sprint_comment_claims_its_request
-      FOREIGN KEY (request_id) REFERENCES requests(request_id);
+  ADD COLUMN sprint_ref text GENERATED ALWAYS AS ('sprint:' || sprint_number) STORED;
 ALTER TABLE sprint_budget_events
-  ADD CONSTRAINT budget_event_claims_its_request
-      FOREIGN KEY (request_id) REFERENCES requests(request_id);
+  ADD COLUMN sprint_ref text GENERATED ALWAYS AS ('sprint:' || sprint_number) STORED;
 ALTER TABLE sprint_decisions
-  ADD CONSTRAINT decision_belongs_to_its_close_request
-      FOREIGN KEY (request_id) REFERENCES requests(request_id);
+  ADD COLUMN sprint_ref text GENERATED ALWAYS AS ('sprint:' || sprint_number) STORED;
 ```
 
-The `UNIQUE` constraints those three tables carried in their own definitions stay, and they now
-mean something narrower and correct: at most one comment, and at most one budget charge, *per
-claimed request*. `sprint_decisions.request_id` is deliberately **not** unique — one sprint-close
-request legitimately produces many decision rows, all children of the one claim.
+```sql
+ALTER TABLE board_events
+  ADD CONSTRAINT board_event_claims_its_request
+      FOREIGN KEY (request_id, ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
+ALTER TABLE task_comments
+  ADD CONSTRAINT task_comment_claims_its_request
+      FOREIGN KEY (request_id, task_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
+ALTER TABLE sprint_comments
+  ADD CONSTRAINT sprint_comment_claims_its_request
+      FOREIGN KEY (request_id, sprint_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
+ALTER TABLE sprint_budget_events
+  ADD CONSTRAINT budget_event_claims_its_request
+      FOREIGN KEY (request_id, sprint_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
+ALTER TABLE sprint_decisions
+  ADD CONSTRAINT decision_belongs_to_its_close_request
+      FOREIGN KEY (request_id, sprint_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
+```
 
-**How a mutation claims.** Every mutation, typed or generic, opens with the same statement:
+The `UNIQUE` constraints those tables carried in their own definitions stay, and they now mean
+something narrower and correct: at most one comment, and at most one budget charge, *per claimed
+request*. `sprint_decisions.request_id` is deliberately **not** unique — one sprint-close request
+legitimately produces many decision rows, all children of the one claim.
+
+**Why the key is composite, and not `request_id` alone.** A plain
+`FOREIGN KEY (request_id) REFERENCES requests(request_id)` proves only that *somebody* claimed the
+id. It does not prove the child belongs to *that* claim, and running it proved the gap: with the
+plain key, `INSERT INTO task_comments (task_ref, …, request_id) VALUES ('secretary-1580', …,
+'req-sprint-1432-create')` was accepted — a card comment hanging off a `sprint.create` claim whose
+`ref` is `sprint:1432`. Carrying the entity's own reference into the key refuses it, with the same
+construction §3.3 uses for the sprint's cursors and §3.8 for its decision subjects. The three
+sprint-owned children reach their reference through one generated column each, added by the fence
+above this one.
+
+What stays the writer's job, and is named here so nobody mistakes the key for it: comparing the
+stored `operation` and `intent` on a conflicting claim. The database now enforces *one id, one
+owner, one entity*; whether a retry carries the same payload is the step-1 comparison below, which
+is exactly the division `TaskAudit` draws today between its journal index and
+`_require_same_event`.
+
+#### The request lifecycle, stated once
+
+Two shapes of mutation exist, they have different lifecycles, and the previous revision of this
+section conflated them — which is how it came to prescribe an `INSERT` its own `CHECK` rejects.
+The rule is now explicit, and `request_settled_matches_status` is what enforces it.
+
+**Shape A — the mutation is entirely inside the database.** This is almost every operation: card
+transitions, comments, budget charges, sprint create, Product/Issue writes. It is one transaction
+(§7.1), so it claims **directly as `committed`, with `settled_at` set in the same statement**:
 
 ```sql
-INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, ref, created_at)
-     VALUES (:rid, :operation, :intent, 'staged', :protocol, :entity_kind, :ref, now())
+INSERT INTO requests (request_id, operation, intent, status, protocol,
+                      entity_kind, ref, created_at, settled_at)
+     VALUES (:rid, :operation, :intent, 'committed', :protocol,
+             :entity_kind, :ref, now(), now())
 ON CONFLICT (request_id) DO NOTHING
 RETURNING request_id;
 ```
 
-Zero rows returned means the id is already owned. The transaction then reads the stored row and
-compares `operation` and `intent` for equality:
+A shape-A operation **never writes a `staged` row**. If the transaction rolls back, the row is gone
+with everything else it wrote; if it commits, the claim and its effects commit together. There is
+no window between them, so there is nothing to recover and no partial state to interpret.
+
+**Shape B — the mutation has a durable effect outside the database.** There are exactly two in this
+product: writing a sprint's knowledge closeout through the knowledge writer (a git commit in the
+private instance repo) and launching a head. These cannot join a database transaction, so they keep
+the stage-then-settle contour the current `MutationEventTransaction` already uses, in **two**
+transactions:
+
+```sql
+-- T1: claim the obligation.  This transaction COMMITS, so the staged row is durable.
+INSERT INTO requests (request_id, operation, intent, status, protocol,
+                      entity_kind, ref, created_at)
+     VALUES (:rid, :operation, :intent, 'staged', :protocol,
+             :entity_kind, :ref, now())
+ON CONFLICT (request_id) DO NOTHING
+RETURNING request_id;
+COMMIT;
+
+--   … the external effect happens here: the closeout is written, or the head is launched …
+
+-- T2: settle it.
+UPDATE requests SET status = 'committed', settled_at = now()
+ WHERE request_id = :rid AND status = 'staged';
+COMMIT;
+```
+
+**Can a staged row outlive its transaction? Yes — for shape B, and only for shape B.** That is the
+entire point of it: a `staged` row that survives is the durable statement "an external effect was
+promised and may have happened", which is exactly what `BoardEventPending` and the `recover_*`
+entry points mean today. A shape-A operation cannot leave one, because its only transaction either
+commits the whole thing or leaves nothing.
+
+**What writes a staged row:** T1 of a shape-B operation, and nothing else.
+**What reads one:**
+
+- the operation's own retry, which finds its claim, re-checks whether the external effect landed
+  the way `recover_marker_comment` and friends do today, then runs T2;
+- `export_board`'s refusal gate — `SELECT 1 FROM requests WHERE status = 'staged'` — which is the
+  relational form of the existing "board export blocked by N unresolved pending audit record(s)"
+  (§6.3);
+- `secretary status`, for the operator.
+
+`discarded` is the third status and belongs to shape B alone: an abandoned obligation an operator
+settles deliberately, with `settled_at` set. A shape-A rollback is not a discard; it leaves no row
+to discard.
+
+**On conflict.** Zero rows returned means the id is already owned. The transaction reads the stored
+row and compares `operation` and `intent` for equality:
 
 - **different** → `"request id belongs to another operation or payload"`, the exact refusal
   `_require_same_event` gives today, and the transaction rolls back having written nothing;
 - **same, `status = 'committed'`** → a replay: return the existing result and commit nothing new;
-- **same, `status = 'staged'`** → resume, which after §7.1 means the previous attempt's transaction
-  never committed, so there is nothing to resume and the row is re-driven to completion.
+- **same, `status = 'staged'`** → necessarily a shape-B claim, because shape A leaves no staged
+  row. Resume it: re-check the external effect, then run T2.
 
 `operation` and `intent` are immutable once claimed. Only `status` and `settled_at` ever move, and
-they move once. The one released exception is `TaskAudit`'s generic-stage replacement
-(`_pending_owner`'s `replace_generic_pending`): a generic `stage` may replace a *generic* pending
-record and never a protocol one. That is why `requests.protocol` exists, and the only permitted
-update to a claimed intent is:
+for a given row they move at most once. The one released exception is `TaskAudit`'s generic-stage
+replacement (`_pending_owner`'s `replace_generic_pending`): a generic `stage` may replace a
+*generic* pending record and never a protocol one. That is why `requests.protocol` exists, and
+because only shape B has a staged row to replace, the rule now has a precise scope:
 
 ```sql
 UPDATE requests SET intent = :intent
- WHERE request_id = :rid AND status = 'staged' AND NOT protocol AND :protocol = false;
+ WHERE request_id = :rid AND status = 'staged' AND NOT protocol;
 ```
 
 **What this preserves, and what it does not change.** The caller contract is untouched: the same
@@ -886,6 +1080,32 @@ their values come from the head registry or from an operator, and the head regis
 schema by DoD 3 (§3.11). Constraining them here would put a second copy of the registry in the
 database, which is the drift this section's rule exists to avoid.
 
+### 3.13 Executable order
+
+The DDL above is grouped by entity so it can be read. That is **not** the order it executes in, and
+saying "the document's order" without saying which order is how a reader ends up running
+`ALTER TABLE sprints … REFERENCES tasks` before `tasks` exists. So the order is stated here, and it
+is the order migration `0001` applies:
+
+1. **Create tables**, in §3 reading order: §3.1 (`products`, `projects`, `repositories`,
+   `product_projects`), §3.2 (`issues`), §3.3 (`sprints`, `sprint_repositories`, `sprint_issues`,
+   `sprint_resumes`, `sprint_number_seq`), §3.4 (`sprint_budget_events`), §3.5 (`tasks`,
+   `task_retry_heads`, `task_issues`, `task_dependencies`, `task_supersessions`), §3.6
+   (`sprint_projects` and its partial unique index), §3.7 (`sprint_comments`, `task_comments`),
+   §3.8 (`sprint_decisions` and its two partial unique indexes), §3.9 (`requests`, `board_events`),
+   §7.4 (`schema_migrations`).
+2. **Add the deferred constraints**, in the same reading order: §3.3's two scoped sprint cursors,
+   §3.4's `budget_card_is_in_this_sprint`, §3.8's two scoped decision subjects, §3.9's four
+   `request_id` foreign keys.
+
+Every fence in §3 that begins `ALTER TABLE` is a step-2 fence and is labelled as one. Every fence
+that begins `CREATE` is a step-1 fence. Nothing else needs to be decided at execution time.
+
+The split exists because four of the schema's relations are forward or mutual, and a scoped
+foreign key (§3.3) makes that unavoidable rather than incidental: `sprints` must exist before
+`tasks` can reference it, and `tasks` must exist before `sprints`' cursor can be scoped to it.
+Splitting create from constrain is the ordinary answer and costs one extra step.
+
 ---
 
 ## 4. Reservations
@@ -951,7 +1171,8 @@ The reasons, from the inventory and the host:
   installation mechanism, no new failure mode in `bootstrap.py`, and no new privileged step.
 - The host has **no `psql` and no `pg_dump`** (`which psql pg_dump` finds nothing). A system package
   would install a server *and* the client tools; a container installs the server and puts the
-  client tools inside it, reachable as `docker exec secretary-postgres-1 pg_dump …`. Either works,
+  client tools inside it, reachable as `docker exec secretary-postgres-1 pg_dump …` (§5.7 gives the
+  command with its role and credential). Either works,
   and the container keeps the client tools *version-matched to the server* without adding an apt
   repository pin to `bootstrap.py`. §5.7 says what this means for backup.
 - The apt path would require choosing and pinning a PostgreSQL major version against whatever
@@ -1200,10 +1421,26 @@ What changes:
   and the pathspecs do not change, so `docs/RECOVERY.md`'s "What the checkpoint contains" stays
   true word for word and `board/analytics.py` keeps working on a copied `state/board` directory.
 - **A PostgreSQL dump is added as a second, derived artefact — not a second canon.** One
-  `pg_dump --format=custom` per backup run, taken through the container
-  (`docker exec secretary-postgres-1 pg_dump -U secretary -Fc secretary`) because §5.1 put the
-  client tools there, written to `<data>/backups/…/board-db.dump`, and carried by the **`full`**
-  policy only. `core` stays exactly what it is today: the normalized, portable, engine-independent
+  `pg_dump --format=custom` per backup run, taken through the container because §5.1 put the client
+  tools there, written to `<data>/backups/…/board-db.dump`, and carried by the **`full`** policy
+  only. **The role is `secretary_owner` and its credential comes from `board-store.env`**, resolved
+  by `BoardStore.owner_for_instance` — the same path §5.4 gives every other consumer, not an
+  unstated container identity:
+
+  ```bash
+  docker exec -e PGPASSWORD="$SECRETARY_DB_OWNER_PASSWORD" secretary-postgres-1 \
+      pg_dump -h 127.0.0.1 -U secretary_owner -d secretary -Fc -f /tmp/board-db.dump
+  ```
+
+  Three things about that line are settled by running it rather than by reading it. It is
+  `secretary_owner` and not `secretary`: no `secretary` role exists, because §5.5 initializes the
+  cluster as `secretary_owner`, and the previous revision's `-U secretary` failed with
+  `FATAL: role "secretary" does not exist`. It is not `secretary_read` either: a read-only role
+  cannot dump, because `pg_dump` reads sequence state and that failed with
+  `permission denied for sequence repositories_repository_id_seq`. And it connects over
+  `-h 127.0.0.1` with `PGPASSWORD` rather than over the container's unix socket, so the credential
+  is the documented one instead of whatever `trust` in the image's default `pg_hba.conf` would have
+  allowed — an identity this document does not control and should not depend on. `core` stays exactly what it is today: the normalized, portable, engine-independent
   set. A `full` archive already carries the engine-specific raw board dump for Kanboard; the
   PostgreSQL dump takes that slot after cutover.
 - **`full`'s `raw_board` component changes source, not meaning.** `data.py:raw_kanboard_dump`
@@ -1213,7 +1450,19 @@ What changes:
   needed for the backup, which is strictly better than the raw Kanboard `docker cp` it replaces.
   `backup.py`'s existing pipeline pause is about the rest of the archive, not the database, and is
   not weakened.
-- **Restore order.** Fast path: `pg_restore` the custom dump from a `full` archive. Portable path,
+- **Restore order.** Fast path: `pg_restore` the custom dump from a `full` archive, as the same
+  role and by the same credential path:
+
+  ```bash
+  docker exec -e PGPASSWORD="$SECRETARY_DB_OWNER_PASSWORD" secretary-postgres-1 \
+      pg_restore -h 127.0.0.1 -U secretary_owner -d secretary \
+                 --no-owner --no-privileges /tmp/board-db.dump
+  ```
+
+  `--no-owner --no-privileges` because the target cluster creates its own `secretary_owner` at init
+  and its `secretary_app`/`secretary_read` in migration `0001`: the dump's ownership and grant
+  statements would be re-applying what the target already established, and on a target whose roles
+  are not yet created they would fail. Portable path,
   and the one `docs/RECOVERY.md` promises: migrate an empty database to the current schema version,
   then import the normalized checkpoint through the same importer the cutover uses. The second path
   is what makes a recovery on a clean host independent of the dump format and of the exact server
@@ -1270,6 +1519,7 @@ After cutover, for each thing: what is canonical, and who writes it.
 |---|---|
 | products, issues, sprints, tasks | `secretary_app`, through the board protocol: dispatcher tick, CLI commands, `webproto/ops.py` and `webproto/sprint_ops.py` |
 | `product_projects`, `sprint_projects`, `sprint_repositories`, `sprint_issues`, `task_issues` | same |
+| `projects`, `repositories` — **derived, not canonical** | `board_store.sync_project_registry`, projecting `<instance>/projects/*.yaml` inside the referencing transaction and again on `reconcile apply` / `upgrade` (§3.1). The files stay canonical (§6.2); a removed binding sets `registry_present = false` and is never deleted |
 | `task_dependencies`, `task_supersessions` | same |
 | `sprint_comments`, `task_comments` | same |
 | `sprint_decisions`, sprint close reason and closeout document *path* | `SprintWriter.close` |
@@ -1282,7 +1532,7 @@ After cutover, for each thing: what is canonical, and who writes it.
 
 | Data | Location | Writer after cutover | Changed? |
 |---|---|---|---|
-| project/repository bindings | `<instance>/projects/*.yaml` | the operator, by hand | no |
+| project/repository bindings | `<instance>/projects/*.yaml` | the operator, by hand | no — and `registered_projects()` keeps reading the files, so admission is unchanged. The `projects`/`repositories` tables are a derived projection of these files with a named writer (§3.1, §6.1), not a second canon |
 | adapters, personas, policies, heads canon | `<instance>/adapters/`, `persona/`, `policies/`, `heads/` | operator; `heads/` by the heads writer (`HEADS_PATHSPEC`) | no |
 | secrets | `<instance>/secrets/**` | the secret store (`SECRETS_PATHSPEC`) | no |
 | memory facts | `<instance>/state/memory/facts/**` | the memory writer (`MEMORY_PATHSPEC`) | no |
@@ -1333,26 +1583,63 @@ In PostgreSQL the whole of that becomes one transaction:
 ```sql
 BEGIN;                                            -- READ COMMITTED, see §7.2
   SET CONSTRAINTS ALL DEFERRED;                   -- the sprint and its cursors land together
-  -- 1. claim the id in the one global namespace (§3.9).  Zero rows means it is already owned:
-  --    read the row, compare operation and intent, and either refuse or return the prior result.
-  INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, ref, created_at)
-       VALUES (:rid, 'sprint.create', :intent, 'committed', true, 'sprint', :ref, now())
+  -- 1. claim the id in the one global namespace (§3.9).  Sprint create is shape A -- entirely
+  --    inside the database -- so it claims as 'committed' with settled_at in the same statement.
+  --    Zero rows means it is already owned: read the row, compare operation and intent, and
+  --    either refuse or return the prior result.
+  INSERT INTO requests (request_id, operation, intent, status, protocol,
+                        entity_kind, ref, created_at, settled_at)
+       VALUES (:'rid', 'sprint.create', :'intent'::jsonb, 'committed', true,
+               'sprint', :'ref', now(), now())
   ON CONFLICT (request_id) DO NOTHING
   RETURNING request_id;
-  -- 2. the entity and every link that is part of the same fact
-  INSERT INTO sprints (...) VALUES (...);
-  INSERT INTO sprint_projects (...) SELECT ...;   -- may raise on the partial unique index (§4)
-  INSERT INTO sprint_issues (...) SELECT ...;
-  INSERT INTO sprint_repositories (...) SELECT ...;
-  -- 3. the event, which references the claim
-  INSERT INTO board_events (event_id, request_id, ...) VALUES (:eid, :rid, ..., true, now());
+  -- 2. project the registry rows this create is about to reference (§3.1), then the entity
+  --    and every link that is part of the same fact.
+  INSERT INTO projects (project_id, enabled, registry_present)
+       VALUES ('secretary', true, true), ('secretary-instance', true, true)
+  ON CONFLICT (project_id) DO UPDATE
+      SET enabled = EXCLUDED.enabled, registry_present = true;
+
+  INSERT INTO sprints (sprint_number, goal, definition_of_done, product_id,
+                       status, observer, created_at, updated_at)
+       VALUES (1432, :'goal', :'dod', 'secretary', 'open',
+               '{"kind":"head","profile":"claude-observer-medium"}'::jsonb, now(), now());
+
+  INSERT INTO sprint_projects (sprint_number, project_id, reserved, reserved_at)
+       SELECT 1432, project_id, true, now()
+         FROM projects
+        WHERE project_id IN ('secretary', 'secretary-instance');   -- may raise on §4's index
+
+  INSERT INTO sprint_issues (sprint_number, issue_id)
+       SELECT 1432, issue_id FROM issues WHERE issue_id = '7ebdf89a53c541a8d44b';
+
+  INSERT INTO sprint_repositories (sprint_number, repository_id)
+       SELECT 1432, repository_id FROM repositories
+        WHERE path IN ('/home/dev/secretary', '/home/dev/secretary-instance');
+
+  -- 3. the event, whose (request_id, ref) pair claims the request of step 1
+  INSERT INTO board_events (event_id, request_id, kind, entity_kind, ref, actor_role, actor_id,
+                            reason, target_state, occurred_at, committed, committed_at)
+       VALUES (:'eid', :'rid', 'entity.created', 'sprint', :'ref', 'po', :'actor',
+               'sprint opened', 'open', now(), true, now());
 COMMIT;
 ```
+
+The statements are written out rather than elided as `(...)`, because an example with placeholders
+cannot be executed and an example nobody executes is how the two defects of the previous revision
+reached a reviewer. This one is run as written (§10); the only substitutions are the `:'name'`
+bind parameters.
 
 Step 1 is not decoration and it is not specific to sprint create: **every** mutation opens with it,
 including the ones that write no `board_events` row at all — an ordinary role comment, a budget
 charge. That is what keeps the request-id namespace whole (§3.9), and it is why the claim is a
 separate first statement rather than a column on whichever table the operation happens to touch.
+
+`settled_at` is set in the same statement because `request_settled_matches_status` requires it:
+`staged` means "settled_at IS NULL" and nothing else. A shape-A mutation is never staged (§3.9), so
+omitting `settled_at` here would make this transaction unexecutable — which is precisely what the
+previous revision of this document prescribed, and what running it against a real `postgres:16`
+caught.
 
 A sprint create either lands whole — row, reservations, issue links, repository links and its event
 — or lands not at all. A close does the same for the card archives, the issue closures, the
@@ -1405,7 +1692,8 @@ multi-pass Kanboard export does not have.
 | `TaskAudit.event_id_owner` — which request id already published an event id | `board_events.event_id` PRIMARY KEY, globally unique |
 | `_require_same_event`: "request id belongs to another operation or payload" | the same comparison against the stored `requests.operation` / `requests.intent`, for typed and generic operations alike |
 | `MutationEventTransaction`'s stage → effect → confirm → finish → commit | one transaction; `confirm` disappears, because a committed transaction *is* the confirmation |
-| `BoardEventPending` and the four `recover_*` entry points | a transaction that does not commit leaves nothing; nothing to recover |
+| `BoardEventPending` and the four `recover_*` entry points, for a mutation entirely inside the board | **gone**: a shape-A transaction that does not commit leaves nothing, so there is nothing to recover |
+| The same, for the two effects outside the board (knowledge closeout, head launch) | **kept**, as shape B: a durable `requests` row with `status = 'staged'`, settled by its own second transaction after the effect is re-checked (§3.9) |
 | `ProductIssueTransaction` staged intent documents | `requests` rows with `status = 'staged'` |
 | `marker_comment_lock` (per-card flock, because marker prose carries no request id) | `task_comments.request_id` unique **and** referencing `requests`; markers get a request id at the seam |
 
@@ -1426,7 +1714,9 @@ which is exactly the failure DoD 5 is about.
 `pending-audit/` and the staged transaction documents must be **empty at cutover**, not migrated: a
 pending record describes a half-applied Kanboard write, and there is nothing in PostgreSQL for it
 to be half-applied to. `export_board`'s existing refusal to export while any pending record exists
-is exactly the precondition, and the cutover card should use it as its gate.
+is exactly the precondition, and the cutover card should use it as its gate. After cutover the same
+gate reads `requests WHERE status = 'staged'`, which by §3.9 can only be an unsettled shape-B
+obligation — a closeout or a launch — and never a half-applied board write.
 
 The audit journal itself — `state/board/events.ndjson` — keeps being written, generated from
 `board_events` by the checkpoint. `board/analytics.py` reads a sealed copy and is untouched.
@@ -1658,7 +1948,49 @@ renumbers, rewrites or re-derives an existing `sprint:N` or task ref.
 
 ---
 
-## 10. What this document does not decide
+## 10. How the executable parts of this document are verified
+
+Every SQL statement and shell command above is executed before this document is published, in the
+order §3.13 and §5 prescribe, against a **throwaway `postgres:16` container** — never against the
+live installation, which this card only reads. **When the container and the document disagree, the
+container is right and the document changes.**
+
+This exists because reading is not enough. Two earlier revisions of this document each shipped a
+statement PostgreSQL refuses — a `pg_dump -U secretary` for a role no longer created, and an
+`INSERT … status = 'committed'` without the `settled_at` its own `CHECK` requires — and both were
+found by executing them, not by review. Every defect of that class is cheap to catch and invisible
+to careful reading.
+
+The procedure, which is the document's own order:
+
+| Step | What runs | As |
+|---|---|---|
+| 1 | `docker run postgres:16` with the §5.2 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | — |
+| 2 | the §5.5 `CREATE ROLE` and `GRANT` fence | `secretary_owner` |
+| 3 | every §3 `CREATE` fence, then every §3 `ALTER` fence, in §3.13's two steps | `secretary_owner` |
+| 4 | prerequisite rows a sprint create references: a product, its repositories, its issue | `secretary_owner` |
+| 5 | the §7.1 canonical sprint-create transaction, verbatim, binds substituted | `secretary_app` |
+| 6 | the §5.7 `pg_dump` with the role and credential §5.7 names | `secretary_owner` |
+| 7 | `pg_restore` into a second, empty container; compare table, constraint and row counts | `secretary_owner` |
+| 8 | one negative probe per constraint this document claims (§4, §3.3, §3.8, §3.9, §3.12), and one positive probe per acceptance it claims | `secretary_app`, `secretary_read` |
+
+Step 8 is what keeps a constraint from being decorative. A document may state that a partial unique
+index forbids a second live reservation; only executing the second insert shows the index is
+actually reachable, correctly predicated and attached to the right column.
+
+The statements are extracted from this file rather than retyped, so what runs is what is published.
+Fenced blocks are classified by their first keyword: `CREATE` fences are step-3a, `ALTER` fences are
+step-3b, and the `BEGIN;` fence is step 5. That is also why §7.1 spells its inserts out instead of
+eliding them as `(...)`: a placeholder cannot be executed, and an example nobody executes is exactly
+where the previous two defects lived.
+
+The container is verification, not delivery. Nothing here stands the store up for use, imports any
+data, or touches the live installation; standing the schema up for real is the first implementation
+card's job.
+
+---
+
+## 11. What this document does not decide
 
 - The SQL migration files, the importer, the dry-run report format, the parity check and the
   cutover procedure. Separate cards.
