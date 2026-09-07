@@ -1353,12 +1353,17 @@ Release is an `UPDATE`, never a `DELETE`:
 ```sql
 UPDATE sprint_projects
    SET reserved = false, released_at = now()
- WHERE sprint_number = 1432 AND reserved;
+ WHERE sprint_ref = 'sprint:1432' AND reserved;
 ```
 
-After it, `SELECT * FROM sprint_projects WHERE sprint_number = 1432` still returns both rows, with
-`reserved = false` and a `released_at`. That is the history the DoD asks to keep, and
+After it, `SELECT * FROM sprint_projects WHERE sprint_ref = 'sprint:1432'` still returns both rows,
+with `reserved = false` and a `released_at`. That is the history the DoD asks to keep, and
 `reserved_matches_release` makes "released but still marked reserved" unrepresentable.
+
+The scoping column is the sprint's reference, not its number: `0002_board_gaps` made
+`sprints.ref` the primary key (§3.3, §9), so every table that names a sprint names it the way the
+board spells it. The statement above is executed as written by §10's step 7, which is how this
+paragraph stopped being a statement about a column that no longer exists.
 
 **What this replaces.** Today the same rule is held by three cooperating things outside the store:
 `sprints._refuse_shared_reservations` compares candidate reservations against the other open
@@ -1822,21 +1827,21 @@ BEGIN;                                            -- READ COMMITTED, see §7.2
   ON CONFLICT (project_id) DO UPDATE
       SET enabled = EXCLUDED.enabled, registry_present = true;
 
-  INSERT INTO sprints (sprint_number, goal, definition_of_done, product_id,
+  INSERT INTO sprints (ref, sprint_number, goal, definition_of_done, product_id,
                        status, observer, created_at, updated_at)
-       VALUES (1432, :'goal', :'dod', 'secretary', 'open',
+       VALUES ('sprint:1432', 1432, :'goal', :'dod', 'secretary', 'open',
                '{"kind":"head","profile":"claude-observer-medium"}'::jsonb, now(), now());
 
-  INSERT INTO sprint_projects (sprint_number, project_id, reserved, reserved_at)
-       SELECT 1432, project_id, true, now()
+  INSERT INTO sprint_projects (sprint_ref, project_id, reserved, reserved_at)
+       SELECT 'sprint:1432', project_id, true, now()
          FROM projects
         WHERE project_id IN ('secretary', 'secretary-instance');   -- may raise on §4's index
 
-  INSERT INTO sprint_issues (sprint_number, issue_id)
-       SELECT 1432, issue_id FROM issues WHERE issue_id = '7ebdf89a53c541a8d44b';
+  INSERT INTO sprint_issues (sprint_ref, issue_id)
+       SELECT 'sprint:1432', issue_id FROM issues WHERE issue_id = '7ebdf89a53c541a8d44b';
 
-  INSERT INTO sprint_repositories (sprint_number, repository_id)
-       SELECT 1432, repository_id FROM repositories
+  INSERT INTO sprint_repositories (sprint_ref, repository_id)
+       SELECT 'sprint:1432', repository_id FROM repositories
         WHERE path IN ('/home/dev/secretary', '/home/dev/secretary-instance');
 
   -- 3. the event, whose (request_id, ref) pair claims the request of step 1
@@ -1851,6 +1856,14 @@ The statements are written out rather than elided as `(...)`, because an example
 cannot be executed and an example nobody executes is how the two defects of the previous revision
 reached a reviewer. This one is run as written (§10); the only substitutions are the `:'name'`
 bind parameters.
+
+The sprint is inserted with both `ref` and `sprint_number`, and the four links that follow name the
+reference: `0002_board_gaps` made `sprints.ref` the primary key (§3.3, §9) and moved every scoped
+key onto it. `sprint_number` is still written — `sprint:1432` is a numbered reference and
+`sprint_number_agrees_with_ref` requires the number of a numbered one — and `sprint_number_seq` is
+still what allocated the 1432. This is a third defect of exactly the class §10 exists to catch: the
+transaction above was executable against `0001` and unexecutable against `0002`, and running it is
+what said so.
 
 Step 1 is not decoration and it is not specific to sprint create: **every** mutation opens with it,
 including the ones that write no `board_events` row at all — an ordinary role comment, a budget
@@ -2150,9 +2163,15 @@ sign the importer missed something.
 
 The resolution: the table is created empty, and the importer's report states "task_issues: 0 rows,
 no source field exists" so that nobody later reads an empty table as data loss. A card's issue
-association is reachable today through its sprint (`tasks.sprint_number` → `sprint_issues`), which
-is what the current product actually uses. Populating `task_issues` per card is a product change
-and belongs to a later card, not to the import.
+association is reachable today through its sprint (`tasks.sprint_ref` → `sprint_issues.sprint_ref`),
+which is what the current product actually uses. Populating `task_issues` per card is a product
+change and belongs to a later card, not to the import.
+
+The join is spelled on the reference because `0002_board_gaps` made the sprint's reference its
+identity (§3.3, §9); `tasks.sprint_number` never existed after that revision, and this sentence
+named it until 2026-09-07. Unlike §4 and §7.1 it is prose and not a fence, so §10's extraction
+could not catch it — which is worth saying plainly: executing the document finds every defect in
+the statements it runs and none in the sentences around them.
 
 ### 8.5 Sprint close decisions have no board home
 
@@ -2304,7 +2323,7 @@ The procedure, which is the document's own order:
 | 4 | prerequisite rows a sprint create references: a product, its repositories, its issue | `secretary_owner` |
 | 5 | the §7.1 canonical sprint-create transaction, verbatim, binds substituted | `secretary_app` |
 | 6 | the §3.1 registry-projection upserts, run twice, to show the projection is idempotent and that a removed binding sets `registry_present = false` rather than deleting a row | `secretary_app` |
-| 7 | one negative probe per constraint this document claims (§4, §3.3, §3.8, §3.9, §3.12), and one positive probe per acceptance it claims | `secretary_app`, `secretary_read` |
+| 7 | one negative probe per constraint this document claims (§4, §3.3, §3.5, §3.8, §3.9, §3.12, §5.5), and one positive probe per acceptance it claims | `secretary_app`, `secretary_read` |
 
 `pg_dump` and `pg_restore` are **not** in this run. §5.7 leaves the dump an open question, so there
 is no statement of this document's for them to verify; the card that answers §5.7 runs them against
@@ -2324,27 +2343,45 @@ is also why §7.1 spells its inserts out instead of eliding them as `(...)`: a p
 executed, and an example nobody executes is exactly where the previous two defects lived.
 
 **The fence accounting, so a later card can check it rather than trust it.** This document contains
-**23** fenced SQL blocks. Twenty-two of them open at column 0 and one — §3.1's registry-projection
-fence, line 504 of this revision — is indented three spaces because it sits inside a numbered list
+**22** fenced SQL blocks. Twenty-one of them open at column 0 and one — §3.1's registry-projection
+fence, line 514 of this revision — is indented three spaces because it sits inside a numbered list
 item. A count
-that anchors the fence to the start of the line therefore returns 22 and silently misses that one:
+that anchors the fence to the start of the line therefore returns 21 and silently misses that one:
 
 ```bash
-grep -c '^```sql'            docs/BOARD_STORE.md   # 22 -- misses the indented fence
-grep -cE '^[[:space:]]*```sql' docs/BOARD_STORE.md  # 23 -- the real total
+grep -c '^```sql'            docs/BOARD_STORE.md   # 21 -- misses the indented fence
+grep -cE '^[[:space:]]*```sql' docs/BOARD_STORE.md  # 22 -- the real total
 ```
 
-Of those 23, **22 were executed** and exactly **one deliberately was not**: §4's restatement of
+Of those 22, **21 were executed** and exactly **one deliberately was not**: §4's restatement of
 §3.6's `sprint_projects_one_live_reservation` index. It is a repetition, not a second statement, so
 running it would only raise "already exists"; the check it actually needs is that the two spellings
 have not drifted apart, and the run does that by comparing them byte for byte. No other fence is
 illustrative: every remaining one, including §3.9's three lifecycle fences and §4's release
-`UPDATE`, was run verbatim with its `:name` binds supplied. That is 22 executed + 1 compared = 23, and the
+`UPDATE`, was run verbatim with its `:name` binds supplied. That is 21 executed + 1 compared = 22, and the
 transcript quoted in this round's report has a line for each.
 
-The result was a database of 22 tables carrying 34 `CHECK`, 36 foreign-key, 22 primary-key and 12
-unique constraints and 4 partial unique indexes. All 18 negative probes were refused, each by the
-constraint or the privilege it names; all 10 positive probes were accepted.
+The result was a database of 22 tables carrying 37 `CHECK`, 38 foreign-key, 22 primary-key and 13
+unique constraints and 4 partial unique indexes — §3.13's `0002_board_gaps` row without
+`alembic_version`, which this run does not create because Alembic is what creates it and this run
+executes the document rather than the migration. All 18 negative probes were refused, each by the
+constraint or the privilege it names; all 13 positive probes were accepted.
+
+**What the 2026-09-07 re-run found (`secretary-1585`).** `0002_board_gaps` changed §3 and left
+three places elsewhere naming a column it had removed, and executing the document is what separated
+the two that are statements from the one that is prose. §4's release `UPDATE` and §7.1's canonical
+sprint-create transaction both named `sprint_number` on tables whose scoping column is now
+`sprints.ref`, and both were refused by PostgreSQL — the third and fourth defects of exactly the
+class this section exists to catch. §8.4's `tasks.sprint_number` was the same mistake in a sentence,
+and no extraction could have caught it, because §10 executes the statements a document makes and
+not the claims it makes around them. That is the honest boundary of this procedure, and it is worth
+stating where the procedure is described: running the document proves the SQL, and nothing else.
+
+The five probes added in that re-run are the five things `0002` made true and `0001` did not: a
+comment on an Issue has a table and a generated `issue_ref`, a card with no project is a row, a
+dependency naming a card the board does not hold is a row, and a reference and its number may not
+disagree. Each is a positive probe except the last, which is negative, because that is which
+direction each of them claims.
 
 The container is verification, not delivery. Nothing here stands the store up for use, imports any
 data, or touches the live installation; standing the schema up for real is the first implementation
