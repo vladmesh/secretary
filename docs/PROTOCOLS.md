@@ -1127,6 +1127,18 @@ drops its record, so there is nothing to wake. It is idempotent on `request_id` 
 every sprint write is. Reading what happened to it answers `not_deliverable` rather than `saved`, because
 `saved` would say no batch carries it *yet*, and no batch ever will.
 
+What `SprintWriter._write` does with each sprint write when the sprint is `closed` or `stopped`, in full:
+
+| sprint write | a `closed` or `stopped` sprint |
+| --- | --- |
+| `commented` | `accepted` |
+| `resume_recorded` | `refused` — `closed`, exit status `3` |
+| `current_task_set` | `refused` — `closed`, exit status `3` |
+
+That table is the contract and it is pinned: a test drives all three writes against both terminal statuses
+and holds the answers to the rows above, so the code and this sentence cannot drift apart the way they did
+when comments were admitted and this page went on refusing them.
+
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.
 Each charge is a `budget_recorded` audit event; the charge that stops a sprint is paired with a
@@ -1144,9 +1156,12 @@ observer work: a card entering Assessment, Blocked or Done; a budget event; or a
 sprint. Claims, reports, Validate moves, reviewer launches, routing and observer-authored events do not make a
 resume stale. Missing data is `resume_missing`; a semantic transition may trail its resume for up to five
 minutes, then is `resume_stale`. That comparison belongs to an open sprint. A closed or stopped sprint
-takes no further semantic work — it accepts no resume, comment or current task — so the record on its row
-is the last one anybody wrote, and freshness for it is read from that record alone: no later event ages it
-and no status path reads the audit for it. `reopen` puts the sprint back under the ordinary comparison.
+records no resume and takes no current task — both are statements about work in progress under a contract
+that has ended — so the record on its row is the last one anybody wrote, and freshness for it is read from
+that record alone: no later event ages it and no status path reads the audit for it. A post-close comment
+is accepted ([A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended)) and does not
+disturb that: a terminal sprint's freshness never reads the audit the comment is recorded in, so there is
+no event for it to age the frozen record with. `reopen` puts the sprint back under the ordinary comparison.
 A sprint summary therefore reads the committed audit at most once per operation, and an installation whose
 sprints have all finished does not read it at all. Neither command reads an observer transcript. The dispatcher records a
 durable delivery batch before it wakes or replaces an observer, coalesces pending semantic events to one
@@ -3628,7 +3643,12 @@ codes to (`not_found`/`validation` → 2, `backend_unavailable` → 1). `secreta
 `secretary sprint comment-delivery` are clients of the two comment operations in exactly the same
 sense: argument parsing, the document on stdout, and that same table -- with `sprint comment`, which
 mutates, using `web-run`'s table instead, so `owner_conflict` keeps the exit status `3` it has always
-answered a closed sprint with. The comment command mints a
+answered with. What it no longer answers `3` for is a terminal sprint: `sprint comment` on a `closed` or
+`stopped` sprint succeeds with exit status `0` and the saved comment on stdout
+([A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended)), and the delivery of that
+comment reads `not_deliverable`. `owner_conflict` and its `3` are left for the refusals that remain —
+`sprint resume` and `sprint current-task` on a sprint that has ended, and the conflicts a create or a close
+answers. The comment command mints a
 `--request-id` when the operator gave none, which is a convenience of the command and not a rule —
 a person retrying a comment types the same one to get the same comment back.
 
@@ -3656,8 +3676,8 @@ re-decides a refusal:
 | --- | --- | --- | --- |
 | `validation`, `role_forbidden` | `ValidationRefused` | `validation` | a closed or foreign issue, an unregistered project, an unknown observer or executor profile, a missing request id, a repeat over different inputs |
 | `not_found` | `TaskNotFound` | `not_found` | the board holds no such product, issue or sprint |
-| `sprint_conflict`, `resource_conflict`, `closed` | `OwnerConflict` | `owner_conflict` | an open sprint already reserves one of these projects, this installation is at its open-sprint limit, or the sprint a comment names is closed or stopped |
-| `audit_pending` | `OperationPending` | `backend_unavailable` | the create or the comment is part-done and repairable with the same request id (above); the `data` action names which operation |
+| `sprint_conflict`, `resource_conflict`, `closed` | `OwnerConflict` | `owner_conflict` | an open sprint already reserves one of these projects, this installation is at its open-sprint limit, or the sprint a resume or a current task names has ended (a comment on it is accepted, not refused) |
+| `audit_pending` | `OperationPending` | `backend_unavailable` | the create, the comment or the close is part-done and repairable with the same request id (above); a repeated close continues the same terminal phase and writes no second closeout; the `data` action names which operation |
 | `backend_error`, anything else | `RuntimeUnavailable` | `backend_unavailable` | a durable source of this installation refused |
 
 ## Serving the pipeline locally

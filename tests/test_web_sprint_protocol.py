@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -2766,6 +2767,83 @@ class PostCloseCommentTests(CloseFixture):
         self.assertEqual(answered["delivery"]["delivery"]["state"], DELIVERY_NOT_DELIVERABLE)
 
 
+class TerminalSprintWriteTests(SprintProtocolFixture):
+    """The documented terminal-sprint table, held to what `SprintWriter._write` actually refuses.
+
+    Three edits to `docs/PROTOCOLS.md` would have answered the finding that sent this card back; the
+    pin is asked for instead, and it is the deliverable. A promise the prose makes and no test holds
+    is exactly how this page came to refuse a comment the code had started accepting. So every write
+    a sprint can be given after it has ended is driven here against both terminal statuses, through
+    `_write` itself rather than through a caller that could refuse first for a reason of its own, and
+    the answers are compared with the rows the document publishes.
+    """
+
+    KINDS = ("commented", "resume_recorded", "current_task_set")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.terminal = {
+            "closed": self.add_sprint_row("sprint:9200", status="closed"),
+            "stopped": self.add_sprint_row("sprint:9201", status="stopped"),
+        }
+
+    def _answer(self, reference: str, kind: str) -> tuple[str, ...]:
+        """What `_write` does with this kind on this sprint, as the table's cells would say it."""
+        from secretary.sprints import SprintWriter
+
+        writer = SprintWriter(self.board, data_dir=self.data_dir, instance=self.instance)
+        try:
+            writer._write(
+                kind,
+                "po",
+                "operator",
+                reference,
+                f"{kind}-on-{reference}",
+                {},
+                lambda sprint: None,
+            )
+        except TaskError as refused:
+            return ("refused", refused.code, str(refused.exit_code))
+        return ("accepted",)
+
+    def _documented(self) -> dict[str, tuple[str, ...]]:
+        rows: dict[str, tuple[str, ...]] = {}
+        protocols = (Path(__file__).resolve().parents[1] / "docs" / "PROTOCOLS.md").read_text(
+            encoding="utf-8"
+        )
+        for line in protocols.splitlines():
+            cells = [cell.strip() for cell in line.split("|")]
+            if len(cells) != 4:
+                continue
+            kind = re.fullmatch(r"`([a-z_]+)`", cells[1])
+            if kind is None or kind.group(1) not in self.KINDS:
+                continue
+            rows[kind.group(1)] = tuple(re.findall(r"`([a-z_0-9]+)`", cells[2]))
+        return rows
+
+    def test_the_document_names_every_write_a_sprint_can_be_given_after_it_ends(self) -> None:
+        self.assertEqual(sorted(self._documented()), sorted(self.KINDS))
+
+    def test_each_documented_row_is_what_the_writer_actually_answers(self) -> None:
+        documented = self._documented()
+        for status, reference in self.terminal.items():
+            for kind in self.KINDS:
+                with self.subTest(status=status, kind=kind):
+                    self.assertEqual(self._answer(reference, kind), documented[kind])
+
+    def test_a_comment_is_the_one_it_accepts(self) -> None:
+        """The direction of the table, stated once so a table of three refusals cannot pass."""
+        for status, reference in self.terminal.items():
+            with self.subTest(status=status):
+                self.assertEqual(self._answer(reference, "commented"), ("accepted",))
+                self.assertEqual(
+                    self._answer(reference, "resume_recorded"), ("refused", "closed", "3")
+                )
+                self.assertEqual(
+                    self._answer(reference, "current_task_set"), ("refused", "closed", "3")
+                )
+
+
 class CloseResultFaultTests(CloseFixture):
     """Criterion 7: every source of the result refuses on its own, and nothing claims for it."""
 
@@ -2982,6 +3060,28 @@ class ClosePublishedPromiseTests(unittest.TestCase):
             "closeouts/<day>-<sprint-ref>.md",
             "#### A comment on a sprint that has ended",
             "`not_deliverable`",
+        ):
+            with self.subTest(promise=promise):
+                self.assertIn(promise, protocols)
+
+    def test_the_passages_a_terminal_sprint_is_read_through_agree_with_the_accepted_comment(
+        self,
+    ) -> None:
+        """The three passages the finding named, beside `TerminalSprintWriteTests` which pins them.
+
+        The table there holds the behaviour; these hold the sentences an operator reads *around* it,
+        which is where the contradiction actually lived: the CLI's exit status, the errors table's
+        two rows, and the resume-freshness paragraph whose reasoning had to survive the narrowing.
+        """
+        protocols = " ".join(self._document("PROTOCOLS.md").split())
+        for promise in (
+            "`sprint comment` on a `closed` or `stopped` sprint succeeds with exit status `0`",
+            (
+                "the sprint a resume or a current task names has ended "
+                "(a comment on it is accepted, not refused)"
+            ),
+            "the create, the comment or the close is part-done and repairable with the same request id",
+            "a terminal sprint's freshness never reads the audit the comment is recorded in",
         ):
             with self.subTest(promise=promise):
                 self.assertIn(promise, protocols)
