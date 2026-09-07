@@ -103,9 +103,15 @@ class BoardFixture:
     tests/test_tasks_sql_backend.py).  A case built on these runs unchanged on both.
 
     `self.rpc` is the transport log, and it is the test's own rather than a fake's: it records
-    what the product asked the *client interface* for, so it says the same thing whichever client
-    is under it.  Counting a `moveTaskPosition` is still a transport fact, but it is now a fact
-    about the product's own calls, not about one backend's bookkeeping.
+    what the product asked the *client interface* for.  That makes it truthful on either backend,
+    but it does not make it the right thing to assert: **where the fact is an effect, assert the
+    effect.**  A refused write is `assertBoardUnchanged`, a scrubbed comment is the comment the
+    reader returns, an archive is the card reading as closed — each is stronger than a call count
+    and backend-neutral by construction rather than by argument.  A count survives only where the
+    claim *is* the absence of a call and no state distinguishes it; there are five such cases and
+    each says so at the assertion.  Anything whose subject is Kanboard's wire behaviour — the
+    batch log below, the order two writes were issued in — is named in `KANBOARD_ONLY`
+    (tests/test_tasks_sql_backend.py).
     """
 
     #: Neither client selects a card by the project id; both take it because the RPC carries one.
@@ -169,7 +175,35 @@ class BoardFixture:
     def board_writes(self) -> list[str]:
         return [name for name, _params in self.rpc if name in self.WRITE_METHODS]
 
+    @contextlib.contextmanager
+    def _off_the_record(self):
+        """A fixture read the transport log does not see.
+
+        `self.rpc` answers "what did the *product* ask the client for", and a case that asserts
+        it saw no call at all must not be defeated by the assertion's own read.
+        """
+        rpc, batches = self.rpc, self.rpc_batches
+        self.rpc, self.rpc_batches = [], []
+        try:
+            yield
+        finally:
+            self.rpc, self.rpc_batches = rpc, batches
+
     # --- reading the card through the product's own read path ------------------------
+
+    def board_snapshot(self) -> dict[str, dict]:
+        """Every card the board holds, live and archived, as `TaskReader` returns it.
+
+        The effect-shaped answer to "nothing was written": a refused operation leaves this
+        equal to what it was, and any write at all — a column, a metadata key, a comment, a new
+        card — changes it.  Stronger than counting the calls that did not happen, and true or
+        false on either backend by construction.
+        """
+        with self._off_the_record():
+            return self.board_read().restore_snapshot()
+
+    def assertBoardUnchanged(self, before: dict[str, dict]) -> None:
+        self.assertEqual(self.board_snapshot(), before)
 
     def board_read(self) -> TaskReader:
         raise NotImplementedError
@@ -1112,19 +1146,26 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_forbidden_role_does_not_write(self) -> None:
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:
             self.writer.report(role="reviewer", actor="r", reference="secretary-468", kind="done", body="")
         self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertBoardUnchanged(before)
+        # The claim the effect cannot carry: the guard refused before the board was touched at
+        # all, not even for a read.  There is no card state that distinguishes "read and
+        # refused" from "refused without reading", so the absence of the call is the assertion.
         self.assertEqual(self.rpc, [])
 
     def test_stale_transition_does_not_write(self) -> None:
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "may not move") as raised:
             self.writer.move(role="po", actor="p", reference="secretary-468", target="ready", reason="")
         self.assertEqual(raised.exception.code, "transition_forbidden")
-        self.assertEqual(self.board_call_count("moveTaskPosition"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_generic_create_keeps_in_progress_closed_to_steward_reports(self) -> None:
         self.assertNotIn("steward_report", inspect.signature(self.writer.create).parameters)
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "only a steward report") as raised:
             self.writer.create(
                 role="steward",
@@ -1136,7 +1177,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                 slug="not-a-report",
             )
         self.assertEqual(raised.exception.code, "transition_forbidden")
-        self.assertEqual(self.board_call_count("createTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_steward_report_create_is_audited_directly_in_progress_and_replays(self) -> None:
         self.add_card(
@@ -1207,7 +1248,10 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                 "comments": [],
             },
         )
+        # A card created directly in In progress and one created in Issues and then moved read
+        # the same afterwards, so this too is a claim only the call log can carry.
         self.assertEqual(self.board_call_count("moveTaskPosition"), 0)
+        after_create = self.board_snapshot()
         event = self.writer.audit.committed_event("steward-report-create")
         assert event is not None
         self.assertTrue(event["payload"]["steward_report"])
@@ -1220,7 +1264,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             request_id="steward-report-create",
         )
         self.assertTrue(replay["replayed"])
-        self.assertEqual(self.board_call_count("createTask"), 1)
+        self.assertBoardUnchanged(after_create)
 
     def test_steward_report_pending_metadata_recovers_without_duplicate_create(self) -> None:
         with (
@@ -1250,6 +1294,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
     def test_steward_cannot_close_an_ordinary_in_progress_card(self) -> None:
         self.place_card("secretary-468", "in_progress")
         self.clear_card_metadata("secretary-468", "steward_report")
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "only for its own report") as raised:
             self.writer.move(
                 role="steward",
@@ -1260,7 +1305,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                 request_id="ordinary-steward-close",
             )
         self.assertEqual(raised.exception.code, "transition_forbidden")
-        self.assertEqual(self.board_call_count("moveTaskPosition"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_steward_can_close_its_in_progress_report(self) -> None:
         self.place_card("secretary-468", "in_progress")
@@ -1499,6 +1544,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         self.assertEqual(self.card_state("secretary-468"), "blocked")
 
     def test_a_refused_card_edge_stages_no_typed_event(self) -> None:
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "may not move") as raised:
             self.writer.move(
                 role="po",
@@ -1510,7 +1556,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "transition_forbidden")
-        self.assertEqual(self.board_call_count("moveTaskPosition"), 0)
+        self.assertBoardUnchanged(before)
         self.assertIsNone(self.writer.audit.event("refused-edge"))
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual(self.writer.audit.events(), [])
@@ -1537,6 +1583,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         contender = self._released_move_record("contended-transition", to="validate")
         contender["event_id"] = "legacy-contender"
         self.writer.audit.stage("contended-transition", contender)
+        before = self.board_snapshot()
 
         with self.assertRaisesRegex(TaskError, "another operation or payload") as raised:
             self.writer.move(
@@ -1552,7 +1599,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         pending = self.writer.audit.pending_event("contended-transition")
         self.assertEqual(pending["event_id"], "legacy-contender")
         self.assertNotIn("record_type", pending)
-        self.assertEqual(self.board_call_count("moveTaskPosition"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_a_released_generic_move_id_still_replays_after_the_migration(self) -> None:
         """The upgrade does not turn a pre-migration move id into a validation error.
@@ -1571,6 +1618,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         )
         self.writer.audit.stage("released-move", released)
         self.writer.audit.append("released-move", released)
+        before = self.board_snapshot()
 
         replayed = self.writer.move(
             role="dispatcher",
@@ -1584,7 +1632,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         self.assertEqual(replayed["action"], "moved")
         self.assertIs(replayed["replayed"], True)
         self.assertEqual(replayed["event_id"], "evt_released-move")
-        self.assertEqual(self.board_call_count("moveTaskPosition"), 0)
+        self.assertBoardUnchanged(before)
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual(len(self.writer.audit.events()), 1)
 
@@ -1607,9 +1655,11 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         )
 
         self.assertIs(replayed["replayed"], True)
-        self.assertEqual(self.board_call_count("moveTaskPosition"), 0)
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         task = self.writer.reader.show("secretary-468")
+        # Recovery finished the Ready reset and moved nothing: the card is where the released
+        # half-move already left it.
+        self.assertEqual(task["state"], "ready")
         self.assertIsNone(task["claim"]["worker"])
         self.assertNotIn("record_type", self.writer.audit.events()[0])
 
@@ -1621,7 +1671,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             role="worker", actor="w", reference="secretary-468", body="safe", request_id="same"
         )
         self.assertEqual(result["event_id"], second["event_id"])
-        self.assertEqual(self.board_call_count("createComment"), 1)
+        self.assertEqual(sum("safe" in body for body in self.card_comments("secretary-468")), 1)
         self.assertEqual(len(self.writer.audit.events()), 1)
 
     def test_comment_scrubs_runtime_secret_before_board_and_audit(self) -> None:
@@ -1639,8 +1689,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                 request_id="scrubbed-comment",
             )
 
-        comment = self.board_calls("createComment")[-1]
-        content = str(comment["content"])
+        content = self.card_comments("secretary-468")[-1]
         self.assertIn(url, content)
         self.assertNotIn(secret, content)
         self.assertIn("«REDACTED»:env-value", content)
@@ -1674,7 +1723,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             request_id="ordinary-long-verdict",
         )
 
-        comments = [str(params["content"]) for params in self.board_calls("createComment")]
+        comments = self.card_comments("secretary-468")
         self.assertTrue(all(ordinary in content for content in comments[-3:]))
 
     def test_custom_catalog_value_is_scrubbed_before_a_board_comment(self) -> None:
@@ -1688,7 +1737,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                 request_id="custom-catalog-scrub",
             )
 
-        content = str(self.board_calls("createComment")[-1]["content"])
+        content = self.card_comments("secretary-468")[-1]
         self.assertNotIn(secret, content)
         self.assertIn("«REDACTED»:env-value", content)
 
@@ -1720,26 +1769,33 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_edit_is_po_only_and_requires_a_change(self) -> None:
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:
             self.writer.edit(role="worker", actor="w", reference="secretary-468", description="new spec")
         self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertBoardUnchanged(before)
+        # As in test_forbidden_role_does_not_write: both guards refuse before the board is
+        # touched at all, and only the empty call log says so.
         self.assertEqual(self.rpc, [])
 
         with self.assertRaisesRegex(TaskError, "requires a new") as raised:
             self.writer.edit(role="po", actor="operator", reference="secretary-468")
         self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
         self.assertEqual(self.rpc, [])
 
     def test_edit_refuses_active_states(self) -> None:
         self.place_card("secretary-468", "in_progress")
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "Ready or Blocked") as raised:
             self.writer.edit(role="po", actor="operator", reference="secretary-468", description="new spec")
         self.assertEqual(raised.exception.code, "edit_forbidden")
-        self.assertEqual(self.board_call_count("updateTask"), 0)
+        self.assertBoardUnchanged(before)
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_edit_updates_spec_and_routing_and_writes_audit(self) -> None:
-        old_description = str(self.card("secretary-468")["description"])
+        before = self.card("secretary-468")
+        old_description = str(before["description"])
 
         result = self.writer.edit(
             role="po",
@@ -1753,11 +1809,23 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
 
         self.assertEqual(result["action"], "edited")
         self.assertEqual(result["task"]["description"], "revised spec")
-        update = self.board_calls("updateTask")[0]
-        self.assertEqual(update["description"], "revised spec")
-        self.assertEqual(update["id"], self.backend_id("secretary-468"))
-        metadata = self.board_calls("saveTaskMetadata")[0]
-        self.assertEqual(metadata["values"], {"head": "codex-terra", "review_head": "claude-opus"})
+        # The exhaustive half of what the two board writes used to say: the description and the
+        # two routing overrides changed, and the card is otherwise the card it was.  Reading it
+        # back proves more than the calls did — a field written and then overwritten by another
+        # write would still be caught here.
+        after = self.card("secretary-468")
+        self.assertEqual(
+            {key: value for key, value in after.items() if key != "audit"},
+            {
+                **{key: value for key, value in before.items() if key != "audit"},
+                "description": "revised spec",
+                "routing": {
+                    **before["routing"],
+                    "head_override": "codex-terra",
+                    "review_head_override": "claude-opus",
+                },
+            },
+        )
         event = self.writer.audit.events()[0]
         self.assertEqual(event["kind"], "edited")
         payload = event["payload"]
@@ -1781,31 +1849,37 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             role="po", actor="operator", reference="secretary-468", description="v2", request_id="same-edit"
         )
         self.assertEqual(first["event_id"], second["event_id"])
+        self.assertEqual(self.card("secretary-468")["description"], "v2")
+        # A repeated write of the same description leaves the same card, so the only observation
+        # of "it did not write twice" is the count of the product's own calls.
         self.assertEqual(self.board_call_count("updateTask"), 1)
 
     def test_archive_is_po_only_and_requires_reason(self) -> None:
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:
             self.writer.archive(role="worker", actor="w", reference="secretary-468", reason="cleanup")
         self.assertEqual(raised.exception.code, "role_forbidden")
-        self.assertEqual(self.board_call_count("closeTask"), 0)
+        self.assertBoardUnchanged(before)
 
         with self.assertRaisesRegex(TaskError, "non-empty reason") as raised:
             self.writer.archive(role="po", actor="operator", reference="secretary-468", reason=" ")
         self.assertEqual(raised.exception.code, "validation")
-        self.assertEqual(self.board_call_count("closeTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_archive_refuses_live_work_or_active_claim(self) -> None:
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "active claim") as raised:
             self.writer.archive(role="po", actor="operator", reference="secretary-468", reason="cleanup")
         self.assertEqual(raised.exception.code, "live_work")
-        self.assertEqual(self.board_call_count("closeTask"), 0)
+        self.assertBoardUnchanged(before)
 
         self.clear_card_metadata("secretary-468", "claim")
         self.place_card("secretary-468", "validate")
+        parked = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "live worker or reviewer") as raised:
             self.writer.archive(role="po", actor="operator", reference="secretary-468", reason="cleanup")
         self.assertEqual(raised.exception.code, "live_work")
-        self.assertEqual(self.board_call_count("closeTask"), 0)
+        self.assertBoardUnchanged(parked)
 
     def test_archive_closes_card_and_writes_audit(self) -> None:
         self.clear_card_metadata("secretary-468", "claim")
@@ -1820,9 +1894,13 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
 
         self.assertEqual(result["action"], "archived")
         self.assertTrue(self.card("secretary-468")["closed"])
+        # One reason comment, stored, and no second one.  The order in which the two board
+        # writes were issued is the subject of
+        # test_archive_retry_after_failed_comment_recreates_reason_before_close, which is
+        # Kanboard-only for exactly that reason.
         self.assertEqual(
-            [name for name in self.board_writes() if name in {"createComment", "closeTask"}],
-            ["createComment", "closeTask"],
+            [body for body in self.card_comments("secretary-468") if body.startswith("[archive]")],
+            ["[archive]\nbacklog cleanup"],
         )
         event = self.writer.audit.events()[0]
         self.assertEqual(event["kind"], "archived")
@@ -1925,6 +2003,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             encoding="utf-8",
         )
 
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "live dispatcher work") as raised:
             self.writer.archive(
                 role="po",
@@ -1935,7 +2014,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "live_work")
-        self.assertEqual(self.board_call_count("closeTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_pending_is_visible_and_reconciles_without_backend_retry(self) -> None:
         with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
@@ -2369,6 +2448,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         )
 
     def test_auto_reference_enumeration_failure_writes_no_card(self) -> None:
+        before = self.board_snapshot()
         original_call = self.client.call
 
         def invalid_task_list(method: str, **params: object) -> object:
@@ -2393,9 +2473,10 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "backend_error")
-        self.assertEqual(self.board_call_count("createTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_auto_reference_refuses_null_or_false_enumeration(self) -> None:
+        before = self.board_snapshot()
         original_call = self.client.call
 
         for reply in (None, False):
@@ -2423,7 +2504,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                 )
 
             self.assertEqual(raised.exception.code, "backend_error")
-            self.assertEqual(self.board_call_count("createTask"), 0)
+            self.assertBoardUnchanged(before)
 
     def test_create_passes_reference_to_atomic_backend_write(self) -> None:
         with (
@@ -2440,8 +2521,12 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                 sprint=sprint,
             )
 
-        created = self.board_calls("createTask")
-        self.assertEqual(created[-1]["reference"], result["task"]["ref"])
+        # The effect: the card exists under the reference the create answered with.
+        self.assertEqual(self.card(result["task"]["ref"])["ref"], result["task"]["ref"])
+        # And the claim that has no effect to read: the reference was never patched in by a
+        # second write.  A card that was created blank and then updated reads exactly the same,
+        # so the absence of the call is the only observation there is.  It is the product's own
+        # call either way, so it holds on both backends.
         self.assertEqual(self.board_call_count("updateTask"), 0)
 
     def test_pending_atomic_create_without_recorded_id_stays_unresolved(self) -> None:
@@ -2610,6 +2695,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         An enumeration that missed a row is simulated by allocating a reference the board already
         holds: the card must not be created under someone else's reference.
         """
+        before = self.board_snapshot()
         with mock.patch.object(tasks, "next_project_reference", return_value="secretary-468"):
             with self.open_sprint() as sprint:
                 with self.assertRaisesRegex(TaskError, "secretary-468 is already claimed") as raised:
@@ -2624,9 +2710,10 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                     )
 
         self.assertEqual(raised.exception.code, "validation")
-        self.assertEqual(self.board_call_count("createTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_explicit_reference_collision_is_still_refused(self) -> None:
+        before = self.board_snapshot()
         with self.open_sprint() as sprint:
             with self.assertRaisesRegex(TaskError, "secretary-468 is already claimed") as raised:
                 self.writer.create(
@@ -2641,7 +2728,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
                 )
 
         self.assertEqual(raised.exception.code, "validation")
-        self.assertEqual(self.board_call_count("createTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_pending_create_replay_restores_metadata_before_audit(self) -> None:
         with self.open_sprint() as sprint:
@@ -2696,6 +2783,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         self.assertEqual(self.card("secretary-468")["routing"]["codex_launch_mode"], "tui")
 
     def test_create_rejects_invalid_codex_launch_mode_without_write(self) -> None:
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "codex launch mode") as raised:
             self.writer.create(
                 role="observer",
@@ -2707,10 +2795,11 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.exit_code, 2)
-        self.assertEqual(self.board_call_count("createTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_create_rejects_the_retired_exec_launch_mode_without_write(self) -> None:
         """The service layer refuses it too, not only the command that usually calls it."""
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "codex launch mode must be tui") as raised:
             self.writer.create(
                 role="observer",
@@ -2722,7 +2811,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.exit_code, 2)
-        self.assertEqual(self.board_call_count("createTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_a_card_already_carrying_exec_reads_as_carrying_no_mode(self) -> None:
         """Legacy routing data, not authority: the field no longer names anything launchable."""
@@ -2733,6 +2822,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         self.assertIsNone(task["routing"]["codex_launch_mode"])
 
     def test_worker_create_ready_is_forbidden_without_backend_write(self) -> None:
+        before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "only proposals in Issues") as raised:
             self.writer.create(
                 role="worker",
@@ -2744,7 +2834,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "role_forbidden")
-        self.assertEqual(self.board_call_count("createTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def _failed_claim(self, request_id: str, worker: str = "secretary-468-runtime") -> None:
         """A claim whose column move is refused: the whole attempt leaves nothing behind."""
@@ -2818,7 +2908,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             state="in_progress",
             metadata={"project": "secretary", "task_type": "code", "claim": "other-worker"},
         )
-        moves = self.board_call_count("moveTaskPosition")
+        before = self.board_snapshot()
 
         with self.assertRaisesRegex(TaskError, "one active code task") as raised:
             self.writer.claim(
@@ -2831,7 +2921,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "capacity_reached")
-        self.assertEqual(moves, self.board_call_count("moveTaskPosition"))
+        self.assertBoardUnchanged(before)
         task = self.writer.reader.show("secretary-468")
         self.assertEqual(task["state"], "ready")
         self.assertIsNone(task["claim"]["worker"])
@@ -2877,6 +2967,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
     def test_a_claim_on_a_held_card_is_refused_even_when_it_names_the_same_worker(self) -> None:
         """A live claim closes the door, and naming its holder is not a key to it."""
         held = str(self.card("secretary-468")["claim"]["worker"])
+        before = self.board_snapshot()
 
         with self.assertRaisesRegex(TaskError, "already claimed") as raised:
             self.writer.claim(
@@ -2889,7 +2980,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "claim_conflict")
-        self.assertEqual(self.board_call_count("moveTaskPosition"), 0)
+        self.assertBoardUnchanged(before)
         self.assertEqual(self.card("secretary-468")["routing"]["head_override"], "codex-terra")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
@@ -3049,6 +3140,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             state="in_progress",
             metadata={"project": "secretary", "task_type": "code", "claim": "other-worker"},
         )
+        before = self.board_snapshot()
 
         with self.assertRaisesRegex(TaskError, "one active code task") as raised:
             self.writer.claim(
@@ -3059,7 +3151,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "capacity_reached")
-        self.assertEqual(self.board_call_count("saveTaskMetadata"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_claim_counts_a_parked_card_as_an_active_code_task(self) -> None:
         """A parked card holds a retained worker and its checkout: a second writer in the same
@@ -3071,6 +3163,7 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             state="assessment",
             metadata={"project": "secretary", "task_type": "code", "claim": "other-worker"},
         )
+        before = self.board_snapshot()
 
         with self.assertRaisesRegex(TaskError, "one active code task") as raised:
             self.writer.claim(
@@ -3081,18 +3174,19 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "capacity_reached")
-        self.assertEqual(self.board_call_count("saveTaskMetadata"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_archive_refuses_a_parked_card(self) -> None:
         """Assessment is a wait, not a resting place: the worker and workspace are still owned."""
         self.clear_card_metadata("secretary-468", "claim")
         self.place_card("secretary-468", "assessment")
+        before = self.board_snapshot()
 
         with self.assertRaisesRegex(TaskError, "live worker or reviewer") as raised:
             self.writer.archive(role="po", actor="operator", reference="secretary-468", reason="cleanup")
 
         self.assertEqual(raised.exception.code, "live_work")
-        self.assertEqual(self.board_call_count("closeTask"), 0)
+        self.assertBoardUnchanged(before)
 
     def test_reviewer_verdict_uses_review_marker(self) -> None:
         result = self.writer.verdict(
@@ -3105,8 +3199,8 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         )
 
         self.assertEqual(result["action"], "verdict")
-        comment = self.board_calls("createComment")[-1]
-        self.assertEqual(comment["content"], "[review:green]\nok")
+        self.assertEqual(self.card_comments("secretary-468")[-1], "[review:green]\nok")
+        self.assertEqual(self.card("secretary-468")["comments"][-1]["marker"], "review:green")
 
     def test_validate_to_in_progress_rework_is_dispatcher_only(self) -> None:
         self.place_card("secretary-468", "validate")
@@ -3134,13 +3228,12 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
             reason="",
             request_id="ready-done",
         )
-        metadata_writes = self.board_call_count("saveTaskMetadata")
-
         self.place_card("secretary-468", "validate")
         self.set_card_metadata("secretary-468", claim="codex-terra")
         self.set_card_metadata("secretary-468", resolved_head="codex-terra")
         self.set_card_metadata("secretary-468", resolved_review_head="codex-reviewer")
         self.set_card_metadata("secretary-468", retry_same="1")
+        before = self.card("secretary-468")
         second = self.writer.move(
             role="dispatcher",
             actor="d",
@@ -3151,9 +3244,9 @@ class TaskWriterTests(BoardFixture, unittest.TestCase):
         )
 
         self.assertEqual(second["task"]["state"], "validate")
-        self.assertEqual(
-            metadata_writes, self.board_call_count("saveTaskMetadata")
-        )
+        # Nothing was reset a second time: the whole card is what the fixture left, claim and
+        # resolved heads and retry counters included.
+        self.assertEqual(self.card("secretary-468"), before)
         self.assertEqual(self.card("secretary-468")["claim"]["worker"], "codex-terra")
         self.assertEqual(len(self.writer.audit.events()), 1)
 

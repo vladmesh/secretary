@@ -341,12 +341,16 @@ if __name__ == "__main__":  # pragma: no cover
 #: which one it is:
 #:
 #: * a Kanboard *transport* fact with no equivalent here (a malformed row on the wire, two
-#:   threads on one connection);
+#:   threads on one connection, a batch that is a round trip, the order two writes were issued
+#:   in);
 #: * a board state the store's constraints make unrepresentable (§9's primary key and task
 #:   number, §3.5's CHECKs);
-#: * a half-applied write, which §7.3 says this backend does not have: the effect and the record
-#:   are statements of one transaction (§7.1), so there is no "the board moved, the journal did
-#:   not" for recovery to repair.  `SqlTaskWriterTests` proves that property directly.
+#: * a half-applied write of the kind §7.3 removes, where the whole mutation is one transaction
+#:   (§7.1) and the failure leaves nothing to recover.  `SqlTaskWriterTests` proves that
+#:   property directly for the paths that have it;
+#: * a half-applied write the transition path still *has* — the fourth kind, and the one that is
+#:   a defect rather than a difference.  See the block that names those cases below: they are
+#:   parked here until the product change lands, not excluded for being impossible.
 KANBOARD_ONLY = {
     "test_duplicate_reference_retry_reallocates_a_stolen_pending_target": (
         "two cards under one reference again; `tasks.task_ref` is the primary key (§9)"
@@ -388,6 +392,51 @@ KANBOARD_ONLY = {
         "id.  Reading an archived card is covered here by "
         "SqlTaskReaderTests.test_restore_snapshot_returns_every_card_by_reference"
     ),
+    # --- The transition is not yet one transaction on this backend, and these cases would be
+    # proving the wrong thing here.  `TaskWriter._transition_card` calls `board_host.transition`
+    # without entering `_mutation()`, so with `SqlCardClient._depth == 0` the staged `requests`
+    # row and the card RPC commit separately: a post-effect failure really does leave a moved
+    # card beside a staged request.  Every case below asserts exactly that state and would
+    # therefore pass here *because* §7.1's promise is broken, which is not parity.  They are not
+    # excluded as impossible states either — the state is possible today and should not be.
+    # They come back, and are the proof, when the card that makes the SQL transition one
+    # transaction lands.  Reported as a finding of secretary-1590; the repair is a product
+    # change and is out of this card's scope.
+    "test_typed_pending_transition_recovers_only_after_proving_the_live_target": (
+        "asserts an In progress card beside a pending protocol record after the journal append "
+        "failed; see the header above"
+    ),
+    "test_reconcile_publishes_a_typed_pending_transition_whose_board_work_is_done": (
+        "recovers from that same half-applied move (`_pending_typed_move`)"
+    ),
+    "test_recovery_refuses_a_typed_pending_transition_the_board_contradicts": (
+        "the same half-applied move, refused by recovery"
+    ),
+    "test_recovery_refuses_a_typed_pending_transition_whose_card_vanished": (
+        "the same half-applied move, with the card gone"
+    ),
+    "test_a_transport_failure_after_the_move_keeps_the_typed_pending_record": (
+        "asserts a moved Validate card beside one pending record after the read back was lost"
+    ),
+    "test_a_state_race_after_the_move_keeps_the_typed_pending_record": (
+        "its twin: the move landed, another writer moved the card on, and the record stays "
+        "pending beside it"
+    ),
+    "test_a_claim_whose_metadata_write_fails_keeps_its_pending_event": (
+        "asserts the column moved and the claim metadata did not, with the event held open"
+    ),
+    "test_reconcile_publishes_a_proven_start_and_leaves_the_claim_to_the_dispatcher": (
+        "recovery over that same half-applied claim"
+    ),
+    "test_pending_ready_replay_finishes_cleanup_before_success_audit": (
+        "asserts a moved card and a pending record after the Ready reset's metadata write failed"
+    ),
+    "test_reconcile_completes_stale_ready_cleanup_before_closing_pending": (
+        "the same half-applied Ready reset, from the reconcile side"
+    ),
+    "test_partial_move_failure_keeps_pending_until_reconcile": (
+        "asserts a moved Validate card and a pending record after the follow-up comment failed"
+    ),
     # --- Kanboard's wire behaviour, not the product's request.  These three assert what a
     # *batch* is: one JSON-RPC round trip carrying several reads, in the order they were asked
     # for.  `SqlCardClient.call_batch` is `[self.call(...) for ...]` — one batch because there is
@@ -401,6 +450,12 @@ KANBOARD_ONLY = {
         "same: its bound is the number of JSON-RPC batches.  The projection it also asserts is "
         "covered on this backend by SqlTaskReaderTests.test_steward_signal_cards_report_the_"
         "bounded_view"
+    ),
+    "test_archive_retry_after_failed_comment_recreates_reason_before_close": (
+        "its subject is the order of two board writes — the reason comment is recreated before "
+        "the close — which is a claim about the sequence of calls rather than about any state a "
+        "reader can see.  The archive's own effects are covered on both backends by "
+        "test_archive_closes_card_and_writes_audit"
     ),
     "test_steward_report_read_is_bounded_and_exposes_no_backend_row": (
         "same bound, and the case builds its own Kanboard board rather than taking "
