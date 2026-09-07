@@ -180,6 +180,11 @@ def _event_lines(snapshot: dict[str, Any]):
 #: refusal about the state of the world rather than a malformed request, so it gets its own status:
 #: a script can then tell "somebody else has this card" from "I asked wrongly".
 EXIT_CONFLICT = 3
+#: The status an operation that is durably part-done and repairable answers with. It is the status
+#: `SprintWriter.close` has always given `audit_pending`, kept here so the command that maps it and
+#: the table beside it cannot drift: the typed failure is an `OperationPending` carrying the request
+#: id to repeat, and this is the number a shell script branches on.
+EXIT_PENDING = 4
 _RUN_EXIT_BY_CODE = {
     "not_found": 2,
     "validation": 2,

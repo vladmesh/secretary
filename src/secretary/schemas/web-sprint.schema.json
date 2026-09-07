@@ -2,55 +2,148 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "web-sprint.schema.json",
   "title": "Transport-independent sprint operations and reads",
-  "description": "The documents secretary.webproto's sprint layer returns: what a sprint can be built from, what every sprint of the installation is doing, what one sprint is doing, the answer to opening one, and the answer to commenting on one together with what durable state says happened to that comment. Every section carries the availability of the source that answered it and names that source, and no section is assembled anywhere but secretary.webproto.section -- so a source that refused can neither answer nor take away an answer another source gave. No failure here is a status number.",
+  "description": "The documents secretary.webproto's sprint layer returns: what a sprint can be built from, what every sprint of the installation is doing, what one sprint is doing, the answer to opening one, and the answer to commenting on one together with what durable state says happened to that comment. Every section carries the availability of the source that answered it and names that source, and no section is assembled anywhere but secretary.webproto.section -- so a source that refused can neither answer nor take away an answer another source gave. No failure here is a status number. A close is answered the same way, and says in a field of its own that closing a sprint states what became of the work rather than that its Definition of Done was reached.",
   "oneOf": [
-    { "$ref": "#/$defs/options" },
-    { "$ref": "#/$defs/sprint" },
-    { "$ref": "#/$defs/listing" },
-    { "$ref": "#/$defs/created" },
-    { "$ref": "#/$defs/comment_delivery" },
-    { "$ref": "#/$defs/commented" }
+    {
+      "$ref": "#/$defs/options"
+    },
+    {
+      "$ref": "#/$defs/sprint"
+    },
+    {
+      "$ref": "#/$defs/listing"
+    },
+    {
+      "$ref": "#/$defs/created"
+    },
+    {
+      "$ref": "#/$defs/comment_delivery"
+    },
+    {
+      "$ref": "#/$defs/commented"
+    },
+    {
+      "$ref": "#/$defs/close_result"
+    },
+    {
+      "$ref": "#/$defs/closed"
+    }
   ],
   "$defs": {
     "source": {
       "type": "object",
       "description": "Whether one source answered this section, and which source it was. The name is part of the contract and not decoration: two sources that both answered carry the same four availability fields, so without it a reader cannot tell an answer the board established from one the dispatcher established.",
-      "required": ["state", "reason", "observed_at", "data_age_seconds", "name"],
+      "required": [
+        "state",
+        "reason",
+        "observed_at",
+        "data_age_seconds",
+        "name"
+      ],
       "properties": {
-        "state": { "enum": ["available", "unavailable"] },
-        "reason": { "type": ["string", "null"] },
-        "observed_at": { "type": ["string", "null"] },
-        "data_age_seconds": { "type": ["number", "null"] },
+        "state": {
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data_age_seconds": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "name": {
-          "enum": ["installation", "sprints", "cards", "journal", "liveness", "catalogue", "registry", "heads"],
-          "description": "The source that answered: the installation config, the sprint board, the Pipeline listing, the committed audit journal, the dispatcher's production state, or -- on the catalogue -- the board, the project registry and the head registry."
+          "enum": [
+            "installation",
+            "sprints",
+            "cards",
+            "journal",
+            "liveness",
+            "catalogue",
+            "registry",
+            "heads",
+            "reservations"
+          ],
+          "description": "The source that answered: the installation config, the sprint board, the Pipeline listing, the committed audit journal, the dispatcher's production state, or -- on the catalogue -- the board, the project registry and the head registry. On a close result the reserved-project index is a source of its own."
         }
       }
     },
     "options": {
       "type": "object",
       "description": "What a sprint of this installation can be built from. Each section is read from the source that already owns the rule it feeds, and fails apart from the others.",
-      "required": ["schema_version", "kind", "observed_at", "products", "issues", "projects", "heads", "installation"],
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "products",
+        "issues",
+        "projects",
+        "heads",
+        "installation"
+      ],
       "properties": {
-        "schema_version": { "type": "integer" },
-        "kind": { "const": "sprint_options" },
-        "observed_at": { "type": "string" },
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "sprint_options"
+        },
+        "observed_at": {
+          "type": "string"
+        },
         "products": {
           "type": "object",
-          "required": ["source", "items"],
+          "required": [
+            "source",
+            "items"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
+            "source": {
+              "$ref": "#/$defs/source"
+            },
             "items": {
-              "type": ["array", "null"],
+              "type": [
+                "array",
+                "null"
+              ],
               "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that this installation has none, which is the opposite of a source nobody could read.",
               "items": {
                 "type": "object",
-                "required": ["id", "label", "ref", "projects"],
+                "required": [
+                  "id",
+                  "label",
+                  "ref",
+                  "projects"
+                ],
                 "properties": {
-                  "id": { "type": "string" },
-                  "label": { "type": "string" },
-                  "ref": { "type": "string" },
-                  "projects": { "type": "array", "items": { "type": "string" } }
+                  "id": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "ref": {
+                    "type": "string"
+                  },
+                  "projects": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
@@ -59,21 +152,51 @@
         "issues": {
           "type": "object",
           "description": "Exactly the issues a create will admit: the open ones, each carrying the product that owns it.",
-          "required": ["source", "items"],
+          "required": [
+            "source",
+            "items"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
+            "source": {
+              "$ref": "#/$defs/source"
+            },
             "items": {
-              "type": ["array", "null"],
+              "type": [
+                "array",
+                "null"
+              ],
               "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that this installation has none, which is the opposite of a source nobody could read.",
               "items": {
                 "type": "object",
-                "required": ["ref", "label", "product", "kind", "priority"],
+                "required": [
+                  "ref",
+                  "label",
+                  "product",
+                  "kind",
+                  "priority"
+                ],
                 "properties": {
-                  "ref": { "type": "string" },
-                  "label": { "type": "string" },
-                  "product": { "type": "string" },
-                  "kind": { "type": ["string", "null"] },
-                  "priority": { "type": ["string", "null"] }
+                  "ref": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "product": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "priority": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
                 }
               }
             }
@@ -81,22 +204,43 @@
         },
         "projects": {
           "type": "object",
-          "required": ["source", "items"],
+          "required": [
+            "source",
+            "items"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
+            "source": {
+              "$ref": "#/$defs/source"
+            },
             "items": {
-              "type": ["array", "null"],
+              "type": [
+                "array",
+                "null"
+              ],
               "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that this installation has none, which is the opposite of a source nobody could read.",
               "items": {
                 "type": "object",
-                "required": ["id", "label", "reserved_by"],
+                "required": [
+                  "id",
+                  "label",
+                  "reserved_by"
+                ],
                 "properties": {
-                  "id": { "type": "string" },
-                  "label": { "type": "string" },
+                  "id": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
                   "reserved_by": {
-                    "type": ["array", "null"],
+                    "type": [
+                      "array",
+                      "null"
+                    ],
                     "description": "The open sprints holding this project, or null when the reservation index itself could not be established -- which is not the same as being held by nobody.",
-                    "items": { "type": "string" }
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -106,81 +250,205 @@
         "heads": {
           "type": "object",
           "description": "The head profiles this installation runs off, read from its installed registry and never from a constant in the product.",
-          "required": ["source", "items", "observer", "role_defaults", "executor_roles"],
+          "required": [
+            "source",
+            "items",
+            "observer",
+            "role_defaults",
+            "executor_roles"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
+            "source": {
+              "$ref": "#/$defs/source"
+            },
             "items": {
-              "type": ["array", "null"],
+              "type": [
+                "array",
+                "null"
+              ],
               "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that this installation has none, which is the opposite of a source nobody could read.",
               "items": {
                 "type": "object",
-                "required": ["id", "label", "adapter", "model", "effort", "observer", "observer_reason", "role_default_for"],
+                "required": [
+                  "id",
+                  "label",
+                  "adapter",
+                  "model",
+                  "effort",
+                  "observer",
+                  "observer_reason",
+                  "role_default_for"
+                ],
                 "properties": {
-                  "id": { "type": "string" },
-                  "label": { "type": "string" },
-                  "adapter": { "type": ["string", "null"] },
-                  "model": { "type": ["string", "null"] },
-                  "effort": { "type": ["string", "null"] },
-                  "resource": { "type": ["string", "null"] },
+                  "id": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "adapter": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "effort": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "resource": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "observer": {
                     "type": "boolean",
                     "description": "Whether a sprint may declare this profile as its observer, decided by asking the same check a create makes."
                   },
-                  "observer_reason": { "type": ["string", "null"] },
-                  "role_default_for": { "type": "array", "items": { "type": "string" } }
+                  "observer_reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "role_default_for": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             },
             "observer": {
               "type": "object",
               "description": "The observer field takes one answer that is not a profile id.",
-              "required": ["none", "default"],
+              "required": [
+                "none",
+                "default"
+              ],
               "properties": {
-                "none": { "type": "string" },
-                "default": { "type": ["string", "null"] }
+                "none": {
+                  "type": "string"
+                },
+                "default": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
               }
             },
-            "role_defaults": { "type": "object" },
-            "executor_roles": { "type": "array", "items": { "type": "string" } }
+            "role_defaults": {
+              "type": "object"
+            },
+            "executor_roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         },
         "installation": {
           "type": "object",
           "description": "The installation config this catalogue was read under, which refuses like any other source.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         }
       }
     },
     "work": {
       "type": "object",
       "description": "What one sprint is doing. The same object in a listing item and in a watched sprint, built by the same call, so the two surfaces cannot answer this differently. Each section names the source that answered it: the sprint board, the Pipeline listing, or the dispatcher's production state.",
-      "required": ["current_task", "decision", "cards", "degraded_cards", "checks", "waiting"],
+      "required": [
+        "current_task",
+        "decision",
+        "cards",
+        "degraded_cards",
+        "checks",
+        "waiting"
+      ],
       "properties": {
         "current_task": {
           "type": "object",
           "description": "The sprint's current card, and whether it names work in progress. `live` is false for a closed or stopped sprint: the card is kept, because it is where the sprint got to, and it is qualified, because nobody is working on it.",
-          "required": ["source", "ref", "live", "reason"],
+          "required": [
+            "source",
+            "ref",
+            "live",
+            "reason"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
-            "ref": { "type": ["string", "null"] },
-            "live": { "type": "boolean" },
-            "reason": { "type": ["string", "null"] }
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "live": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         },
         "decision": {
           "type": "object",
           "description": "The last observer resume entry, and the freshness verdict on it. An open sprint's verdict is judged against its linked cards, so it is unavailable when those could not be listed rather than computed over cards nobody read.",
-          "required": ["source", "entry", "freshness"],
+          "required": [
+            "source",
+            "entry",
+            "freshness"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
-            "entry": { "type": ["object", "null"] },
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "entry": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "freshness": {
               "type": "object",
-              "required": ["source", "value"],
+              "required": [
+                "source",
+                "value"
+              ],
               "properties": {
-                "source": { "$ref": "#/$defs/source" },
-                "value": { "type": ["object", "null"] }
+                "source": {
+                  "$ref": "#/$defs/source"
+                },
+                "value": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                }
               }
             }
           }
@@ -188,41 +456,110 @@
         "cards": {
           "type": "object",
           "description": "This sprint's cards by board state. `states` is null and never an empty mapping when the Pipeline board could not be listed.",
-          "required": ["source", "states"],
+          "required": [
+            "source",
+            "states"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
-            "states": { "type": ["object", "null"] }
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "states": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
           }
         },
         "degraded_cards": {
           "type": "object",
           "description": "Cards of this sprint standing in an active column with no worker the dispatcher can name. Null items is a production state nobody could read, which is not the answer that nothing is degraded.",
-          "required": ["source", "items"],
+          "required": [
+            "source",
+            "items"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
-            "items": { "type": ["object", "null"] }
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "items": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
           }
         },
         "checks": {
           "type": "object",
           "description": "The mandatory checks of the current card, as the dispatcher's own record holds them. Nothing is re-run and no CI backend is called: `unknown` is what a card no record names looks like, and it is never folded into `not_green`.",
-          "required": ["source", "state", "reason", "card", "gate"],
+          "required": [
+            "source",
+            "state",
+            "reason",
+            "card",
+            "gate"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
-            "state": { "enum": ["green", "not_green", "unknown", "not_applicable"] },
-            "reason": { "type": ["string", "null"] },
-            "card": { "type": ["string", "null"] },
-            "gate": { "type": ["object", "null"] }
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "state": {
+              "enum": [
+                "green",
+                "not_green",
+                "unknown",
+                "not_applicable"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "card": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "gate": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
           }
         },
         "waiting": {
           "type": "object",
           "description": "Where the sprint stands, and what it is standing on.",
-          "required": ["source", "state", "reason"],
+          "required": [
+            "source",
+            "state",
+            "reason"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
-            "state": { "enum": ["working", "waiting", "blocked", "ended", "unknown"] },
-            "reason": { "type": ["string", "null"] }
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "state": {
+              "enum": [
+                "working",
+                "waiting",
+                "blocked",
+                "ended",
+                "unknown"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         }
       }
@@ -230,30 +567,81 @@
     "observer": {
       "type": "object",
       "description": "What the sprint declared, and whether that observer is up. Shared by the listing and the watched sprint, which read it from the same classification of the same production state.",
-      "required": ["declared", "launch"],
+      "required": [
+        "declared",
+        "launch"
+      ],
       "properties": {
         "declared": {
           "type": "object",
           "description": "The observer the sprint row declares, in the three states a row can be in -- and `unknown`, which is not a state of a row but the absence of one. A sprint board nobody could read leaves `unknown`, because `absent` would be an affirmative claim about a row nobody has seen, and no other source can establish it: the production state proves only that it holds no observer for this reference.",
-          "required": ["source", "state", "value", "profile"],
+          "required": [
+            "source",
+            "state",
+            "value",
+            "profile"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
-            "state": { "enum": ["declared", "absent", "malformed", "unknown"] },
-            "value": { "type": ["object", "null"] },
-            "profile": { "type": ["string", "null"] }
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "state": {
+              "enum": [
+                "declared",
+                "absent",
+                "malformed",
+                "unknown"
+              ]
+            },
+            "value": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         },
         "launch": {
           "type": "object",
           "description": "Whether an observer is actually up, read from the dispatcher's durable production state. A terminal is never evidence and is never consulted.",
-          "required": ["source", "state", "reason", "record"],
+          "required": [
+            "source",
+            "state",
+            "reason",
+            "record"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
-            "state": {
-              "enum": ["not_started", "running", "unavailable", "stopped", "not_declared", "ended"]
+            "source": {
+              "$ref": "#/$defs/source"
             },
-            "reason": { "type": ["string", "null"] },
-            "record": { "type": ["object", "null"] }
+            "state": {
+              "enum": [
+                "not_started",
+                "running",
+                "unavailable",
+                "stopped",
+                "not_declared",
+                "ended"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "record": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
           }
         }
       }
@@ -261,89 +649,232 @@
     "entry": {
       "type": "object",
       "description": "One sprint of the listing: which sprint it is, what it is doing, and its observer.",
-      "required": ["ref", "goal", "status", "product", "issues", "reservations", "repositories", "executors", "budget", "observer"],
+      "required": [
+        "ref",
+        "goal",
+        "status",
+        "product",
+        "issues",
+        "reservations",
+        "repositories",
+        "executors",
+        "budget",
+        "observer"
+      ],
       "properties": {
-        "ref": { "type": "string" },
-        "goal": { "type": "string" },
-        "status": { "type": "string" },
-        "product": { "type": ["string", "null"] },
-        "issues": { "type": ["array", "null"], "items": { "type": "string" } },
-        "reservations": { "type": ["array", "null"], "items": { "type": "string" } },
-        "repositories": { "type": "array", "items": { "type": "string" } },
-        "executors": { "type": "object" },
-        "budget": { "type": ["object", "null"] },
-        "observer": { "$ref": "#/$defs/observer" }
+        "ref": {
+          "type": "string"
+        },
+        "goal": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "product": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issues": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "reservations": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "repositories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "executors": {
+          "type": "object"
+        },
+        "budget": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "observer": {
+          "$ref": "#/$defs/observer"
+        }
       },
-      "allOf": [{ "$ref": "#/$defs/work" }]
+      "allOf": [
+        {
+          "$ref": "#/$defs/work"
+        }
+      ]
     },
     "listing": {
       "type": "object",
       "description": "Every sprint of the installation, with what each one is doing. One sprint-board pass, one Pipeline listing and one production-state read for the whole document, whatever the number of sprints.",
-      "required": ["schema_version", "kind", "observed_at", "filter", "sprints", "cards", "journal", "liveness", "installation"],
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "filter",
+        "sprints",
+        "cards",
+        "journal",
+        "liveness",
+        "installation"
+      ],
       "properties": {
-        "schema_version": { "type": "integer" },
-        "kind": { "const": "sprint_list" },
-        "observed_at": { "type": "string" },
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "sprint_list"
+        },
+        "observed_at": {
+          "type": "string"
+        },
         "filter": {
           "type": "object",
           "description": "What was asked for. An empty status filter is every sprint; a status this product does not have is refused rather than answered with an empty listing.",
-          "required": ["statuses"],
-          "properties": { "statuses": { "type": "array", "items": { "type": "string" } } }
+          "required": [
+            "statuses"
+          ],
+          "properties": {
+            "statuses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
         },
         "sprints": {
           "type": "object",
-          "required": ["source", "items"],
+          "required": [
+            "source",
+            "items"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
+            "source": {
+              "$ref": "#/$defs/source"
+            },
             "items": {
-              "type": ["array", "null"],
+              "type": [
+                "array",
+                "null"
+              ],
               "description": "Null and never an empty array when the sprint board refused: an empty listing is the affirmative claim that this installation holds no sprints.",
-              "items": { "$ref": "#/$defs/entry" }
+              "items": {
+                "$ref": "#/$defs/entry"
+              }
             }
           }
         },
         "cards": {
           "type": "object",
           "description": "The Pipeline listing every item's card sections were built from, said once for the document too: a board that will not answer leaves no items to say it.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         },
         "journal": {
           "type": "object",
           "description": "The committed audit journal an open sprint's resume freshness is judged against. A source of its own and not a corner of the sprint board: an unreadable `board/events.ndjson` marks the freshness section unavailable and leaves the sprint rows, the current card and the observer standing.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         },
         "liveness": {
           "type": "object",
           "description": "The dispatcher's production state, said once for the document for the same reason.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         },
         "installation": {
           "type": "object",
           "description": "The installation config this document was read under. It refuses like any other source: with an explicit data directory, a config that does not validate is reported here and the rest of the document is still answered by the sources that did answer.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         }
       }
     },
     "sprint": {
       "type": "object",
       "description": "One sprint: what it was opened with, where it is now, and whether its observer is up.",
-      "required": ["schema_version", "kind", "observed_at", "ref", "sprint", "observer", "work", "cards", "journal", "liveness", "installation"],
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "ref",
+        "sprint",
+        "observer",
+        "work",
+        "cards",
+        "journal",
+        "liveness",
+        "installation"
+      ],
       "properties": {
-        "schema_version": { "type": "integer" },
-        "kind": { "const": "sprint" },
-        "observed_at": { "type": "string" },
-        "ref": { "type": "string" },
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "sprint"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
         "sprint": {
           "type": "object",
-          "required": ["source", "value"],
+          "required": [
+            "source",
+            "value"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
+            "source": {
+              "$ref": "#/$defs/source"
+            },
             "value": {
-              "type": ["object", "null"],
+              "type": [
+                "object",
+                "null"
+              ],
               "required": [
                 "ref",
                 "goal",
@@ -358,87 +889,217 @@
                 "resume"
               ],
               "properties": {
-                "ref": { "type": "string" },
-                "goal": { "type": "string" },
-                "definition_of_done": { "type": "string" },
-                "status": { "type": "string" },
-                "product": { "type": ["string", "null"] },
-                "issues": { "type": ["array", "null"], "items": { "type": "string" } },
-                "reservations": { "type": ["array", "null"], "items": { "type": "string" } },
-                "repositories": { "type": "array", "items": { "type": "string" } },
-                "current_task": { "type": ["string", "null"] },
+                "ref": {
+                  "type": "string"
+                },
+                "goal": {
+                  "type": "string"
+                },
+                "definition_of_done": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "product": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "issues": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reservations": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "repositories": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "current_task": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "executors": {
                   "type": "object",
                   "description": "Both executor roles, always, each with one of its three states. An unpinned role is `unset` and never a missing key.",
                   "additionalProperties": {
                     "type": "object",
-                    "required": ["state"],
+                    "required": [
+                      "state"
+                    ],
                     "properties": {
-                      "state": { "enum": ["unset", "pinned", "malformed"] },
-                      "profile": { "type": "string" }
+                      "state": {
+                        "enum": [
+                          "unset",
+                          "pinned",
+                          "malformed"
+                        ]
+                      },
+                      "profile": {
+                        "type": "string"
+                      }
                     }
                   }
                 },
-                "resume": { "type": ["object", "null"] },
-                "budget": { "type": ["object", "null"] },
-                "audit": { "type": ["object", "null"] }
+                "resume": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "budget": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "audit": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                }
               }
             }
           }
         },
-        "observer": { "$ref": "#/$defs/observer" },
-        "work": { "$ref": "#/$defs/work" },
+        "observer": {
+          "$ref": "#/$defs/observer"
+        },
+        "work": {
+          "$ref": "#/$defs/work"
+        },
         "cards": {
           "type": "object",
           "description": "The Pipeline listing the card sections were built from, said once for the document too.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         },
         "journal": {
           "type": "object",
           "description": "The committed audit journal the resume freshness is judged against, said once for the document.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         },
         "liveness": {
           "type": "object",
           "description": "The dispatcher's production state, said once for the document.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         },
         "installation": {
           "type": "object",
           "description": "The installation config this document was read under, which refuses like any other source.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         }
       }
     },
     "created": {
       "type": "object",
       "description": "The answer to opening a sprint: the request it was made under, and the sprint as the read above reads it.",
-      "required": ["schema_version", "kind", "observed_at", "request_id", "created", "sprint"],
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "request_id",
+        "created",
+        "sprint"
+      ],
       "properties": {
-        "schema_version": { "type": "integer" },
-        "kind": { "const": "sprint_created" },
-        "observed_at": { "type": "string" },
-        "request_id": { "type": "string" },
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "sprint_created"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
         "created": {
           "type": "boolean",
           "description": "Whether this call claimed the request. A repeat answers false and creates nothing."
         },
-        "sprint": { "$ref": "#/$defs/sprint" }
+        "sprint": {
+          "$ref": "#/$defs/sprint"
+        }
       }
     },
     "comment_delivery": {
       "type": "object",
       "description": "What happened to one saved sprint comment: whether the committed audit holds it, where the dispatcher's observer delivery machinery has got it to, and what neither of those means.",
-      "required": ["schema_version", "kind", "observed_at", "ref", "comment_id", "comment", "delivery", "acceptance", "cards", "journal", "liveness", "installation"],
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "ref",
+        "comment_id",
+        "comment",
+        "delivery",
+        "acceptance",
+        "cards",
+        "journal",
+        "liveness",
+        "installation"
+      ],
       "properties": {
-        "schema_version": { "type": "integer" },
-        "kind": { "const": "sprint_comment_delivery" },
-        "observed_at": { "type": "string" },
-        "ref": { "type": "string" },
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "sprint_comment_delivery"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
         "comment_id": {
           "type": "string",
           "description": "The durable identifier the write answered with: the committed audit event id of the comment, and never a board row number."
@@ -446,46 +1107,155 @@
         "comment": {
           "type": "object",
           "description": "Whether the committed audit holds this comment on this sprint. `absent` is the journal's own answer that no such event is on it; `unknown` is a journal nobody could read, and the two are never spelled the same way.",
-          "required": ["source", "id", "state", "occurred_at", "role", "reason"],
+          "required": [
+            "source",
+            "id",
+            "state",
+            "occurred_at",
+            "role",
+            "reason"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
+            "source": {
+              "$ref": "#/$defs/source"
+            },
             "id": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Which comment the answer is about. Narration and not a claim: it is carried even when the source that would say refused."
             },
-            "state": { "enum": ["saved", "absent", "unknown"] },
-            "occurred_at": { "type": ["string", "null"] },
-            "role": { "type": ["string", "null"], "description": "The role that wrote it, as the audit event's actor has it." },
-            "reason": { "type": ["string", "null"] }
+            "state": {
+              "enum": [
+                "saved",
+                "absent",
+                "unknown"
+              ]
+            },
+            "occurred_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The role that wrote it, as the audit event's actor has it."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         },
         "delivery": {
           "type": "object",
           "description": "Where the dispatcher's own observer delivery machinery has got this comment to, derived from the relation between the comment's audit event and the delivery cursors and from nothing else. A technical fact about a batch, and never a statement that the observer read, accepted or took the comment into account -- see `acceptance`.",
-          "required": ["source", "state", "reason", "batch"],
+          "required": [
+            "source",
+            "state",
+            "reason",
+            "batch"
+          ],
           "properties": {
-            "source": { "$ref": "#/$defs/source" },
-            "state": {
-              "enum": ["saved", "waiting", "handed_over", "error", "unknown"],
-              "description": "saved: no delivery batch carries it yet. waiting: a batch that carries it is held for an idle head, or was sent and is not acknowledged. handed_over: the batch carrying it was acknowledged. error: that batch failed and is deferred for retry, with the recorded reason. unknown: the production state could not be read, holds no observer record for this sprint, or holds a cursor the committed audit cannot place -- never folded into any of the other four."
+            "source": {
+              "$ref": "#/$defs/source"
             },
-            "reason": { "type": ["string", "null"] },
+            "state": {
+              "enum": [
+                "saved",
+                "waiting",
+                "handed_over",
+                "error",
+                "not_deliverable",
+                "unknown"
+              ],
+              "description": "saved: no delivery batch carries it yet. waiting: a batch that carries it is held for an idle head, or was sent and is not acknowledged. handed_over: the batch carrying it was acknowledged. error: that batch failed and is deferred for retry, with the recorded reason. unknown: the production state could not be read, holds no observer record for this sprint, or holds a cursor the committed audit cannot place -- never folded into any of the other four. not_deliverable: the sprint has ended, so no batch will ever carry it -- the tick stops the observer of a sprint that is no longer open and drops its record. The comment is saved; a PO adding the outcome after the fact is what that is."
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "batch": {
-              "type": ["object", "null"],
+              "type": [
+                "object",
+                "null"
+              ],
               "description": "The part of the observer's delivery record this answer stands on, or null when there is no record to stand on. Nothing of the dispatcher's internals is published beyond these fields.",
-              "required": ["stage", "delivery_id", "through_event", "acknowledged_through", "acknowledged_delivery_id", "wake_attempts", "wake_failures", "launch_delivery_failures", "last_failure_reason", "evidence"],
+              "required": [
+                "stage",
+                "delivery_id",
+                "through_event",
+                "acknowledged_through",
+                "acknowledged_delivery_id",
+                "wake_attempts",
+                "wake_failures",
+                "launch_delivery_failures",
+                "last_failure_reason",
+                "evidence"
+              ],
               "properties": {
-                "stage": { "enum": ["idle", "waiting_for_idle", "delivery_intent", "awaiting_ack", "retry_deferred"] },
-                "delivery_id": { "type": ["string", "null"] },
-                "through_event": { "type": ["string", "null"] },
-                "acknowledged_through": { "type": ["string", "null"] },
-                "acknowledged_delivery_id": { "type": ["string", "null"] },
-                "wake_attempts": { "type": "integer" },
-                "wake_failures": { "type": "integer" },
-                "launch_delivery_failures": { "type": "integer" },
-                "last_failure_reason": { "type": ["string", "null"] },
+                "stage": {
+                  "enum": [
+                    "idle",
+                    "waiting_for_idle",
+                    "delivery_intent",
+                    "awaiting_ack",
+                    "retry_deferred"
+                  ]
+                },
+                "delivery_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "through_event": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "acknowledged_through": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "acknowledged_delivery_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "wake_attempts": {
+                  "type": "integer"
+                },
+                "wake_failures": {
+                  "type": "integer"
+                },
+                "launch_delivery_failures": {
+                  "type": "integer"
+                },
+                "last_failure_reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "evidence": {
-                  "type": ["string", "null"],
+                  "type": [
+                    "string",
+                    "null"
+                  ],
                   "description": "The one delivery-evidence line `delivery_evidence_summary` composes, so this document and the head that reports its own delivery history cannot disagree."
                 }
               }
@@ -495,52 +1265,103 @@
         "acceptance": {
           "type": "object",
           "description": "What this document deliberately does not establish. It is read from no source: it is this product saying, in the answer itself, that delivery is not acceptance, and naming the deferred issue that would establish acceptance.",
-          "required": ["established", "issue", "reason"],
+          "required": [
+            "established",
+            "issue",
+            "reason"
+          ],
           "properties": {
             "established": {
               "const": false,
               "description": "Always false, and there is no spelling that makes it true: no operation, state or field of this contract says the observer read, accepted or took a comment into account."
             },
-            "issue": { "type": "string" },
-            "reason": { "type": "string" }
+            "issue": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
           }
         },
         "cards": {
           "type": "object",
           "description": "The Pipeline listing, said once for the document as every sprint document says it.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         },
         "journal": {
           "type": "object",
           "description": "The committed audit journal the comment and the delivery cursors are placed in, said once for the document.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         },
         "liveness": {
           "type": "object",
           "description": "The dispatcher's production state, where the delivery cursors live, said once for the document.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         },
         "installation": {
           "type": "object",
           "description": "The installation config this document was read under, which refuses like any other source.",
-          "required": ["source"],
-          "properties": { "source": { "$ref": "#/$defs/source" } }
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            }
+          }
         }
       }
     },
     "commented": {
       "type": "object",
       "description": "The answer to commenting on a sprint: the request it was made under, whether this call saved the comment or found it already saved, the durable identifier of the comment, and the delivery read above.",
-      "required": ["schema_version", "kind", "observed_at", "request_id", "ref", "comment_id", "saved", "delivery"],
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "request_id",
+        "ref",
+        "comment_id",
+        "saved",
+        "delivery"
+      ],
       "properties": {
-        "schema_version": { "type": "integer" },
-        "kind": { "const": "sprint_comment" },
-        "observed_at": { "type": "string" },
-        "request_id": { "type": "string" },
-        "ref": { "type": "string" },
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "sprint_comment"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
         "comment_id": {
           "type": "string",
           "description": "The committed audit event id of the comment. Stable across repeats of the same request id, and the identifier a later read takes back; never a board row number a caller has to interpret."
@@ -549,7 +1370,444 @@
           "type": "boolean",
           "description": "Whether this call saved the comment. A repeat of the same request id answers false and writes nothing -- no second comment, no second event, and therefore no second observer wake or head launch."
         },
-        "delivery": { "$ref": "#/$defs/comment_delivery" }
+        "delivery": {
+          "$ref": "#/$defs/comment_delivery"
+        }
+      }
+    },
+    "close_result": {
+      "type": "object",
+      "description": "What one close decided and what it left behind: the verdicts and dispositions the committed audit holds, which of the sprint's reserved projects the installation still holds for it, where the closeout was written, and the sprint's new status. It says in one field what a close is not: closing states what became of the work and never that the Definition of Done was reached.",
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "ref",
+        "event_id",
+        "close",
+        "reservations",
+        "sprint",
+        "definition_of_done",
+        "cards",
+        "journal",
+        "liveness",
+        "installation"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "sprint_close_result"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "event_id": {
+          "type": "string",
+          "description": "The durable identifier the close answered with: the committed audit event id of the close."
+        },
+        "close": {
+          "type": "object",
+          "description": "What the committed audit records this close decided. `absent` is the journal's own answer that it holds no such close; `unknown` is a journal nobody could read, and the two are never spelled the same way.",
+          "required": [
+            "source",
+            "id",
+            "state",
+            "occurred_at",
+            "closed_by",
+            "closing_reason",
+            "issue_decisions",
+            "closed_issues",
+            "card_dispositions",
+            "archived_tasks",
+            "disposed_tasks",
+            "closeout",
+            "reason"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "enum": [
+                "recorded",
+                "absent",
+                "unknown"
+              ]
+            },
+            "occurred_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "closed_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "closing_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the owner closed this sprint, as the close was made with."
+            },
+            "issue_decisions": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that the close decided nothing, which is the opposite of a source nobody could read.",
+              "items": {
+                "type": "object"
+              }
+            },
+            "closed_issues": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "card_dispositions": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "description": "Null and never an empty array when the source refused: an empty list is the affirmative claim that the close decided nothing, which is the opposite of a source nobody could read.",
+              "items": {
+                "type": "object"
+              }
+            },
+            "archived_tasks": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "disposed_tasks": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "closeout": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "The knowledge document this close wrote, or null when it wrote none. Never a claim that the sprint's goal was reached.",
+              "required": [
+                "document",
+                "commit",
+                "written"
+              ],
+              "properties": {
+                "document": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "written": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "reservations": {
+          "type": "object",
+          "description": "Which of this sprint's reserved projects the installation still holds for it. Null and never an empty array when the index could not be read: reporting a project as released on the strength of a file nobody has seen is what would admit a successor over a live reservation.",
+          "required": [
+            "source",
+            "declared",
+            "released",
+            "held",
+            "reason"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "declared": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "released": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "held": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "sprint": {
+          "type": "object",
+          "required": [
+            "source",
+            "value"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "value": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "required": [
+                "ref",
+                "goal",
+                "definition_of_done",
+                "status",
+                "product",
+                "issues",
+                "reservations",
+                "repositories",
+                "current_task",
+                "executors",
+                "resume"
+              ],
+              "properties": {
+                "ref": {
+                  "type": "string"
+                },
+                "goal": {
+                  "type": "string"
+                },
+                "definition_of_done": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "product": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "issues": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reservations": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "repositories": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "current_task": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "executors": {
+                  "type": "object",
+                  "description": "Both executor roles, always, each with one of its three states. An unpinned role is `unset` and never a missing key.",
+                  "additionalProperties": {
+                    "type": "object",
+                    "required": [
+                      "state"
+                    ],
+                    "properties": {
+                      "state": {
+                        "enum": [
+                          "unset",
+                          "pinned",
+                          "malformed"
+                        ]
+                      },
+                      "profile": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "resume": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "budget": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "audit": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "definition_of_done": {
+          "type": "object",
+          "description": "Not a section, because it is read from nothing: it is this product stating that a close says what became of the work and never that the goal was reached.",
+          "required": [
+            "satisfied",
+            "reason"
+          ],
+          "properties": {
+            "satisfied": {
+              "const": false
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        "cards": {
+          "$ref": "#/$defs/source_mark"
+        },
+        "journal": {
+          "$ref": "#/$defs/source_mark"
+        },
+        "liveness": {
+          "$ref": "#/$defs/source_mark"
+        },
+        "installation": {
+          "$ref": "#/$defs/source_mark"
+        }
+      }
+    },
+    "closed": {
+      "type": "object",
+      "description": "The answer to closing a sprint: the request it was made under, the durable identifier of the close, and the result above. It states that a close is not a completed Definition of Done rather than leaving a reader to take `closed` for `done`.",
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "request_id",
+        "ref",
+        "event_id",
+        "definition_of_done",
+        "result"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "sprint_closed"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "event_id": {
+          "type": "string",
+          "description": "The committed audit event id of the close. Stable across repeats of the same request id, and the identifier `sprint close-result` takes back."
+        },
+        "definition_of_done": {
+          "type": "object",
+          "required": [
+            "satisfied",
+            "reason"
+          ],
+          "properties": {
+            "satisfied": {
+              "const": false
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        "result": {
+          "$ref": "#/$defs/close_result"
+        }
+      }
+    },
+    "source_mark": {
+      "type": "object",
+      "description": "One source of this document, said once for the document as a whole and claiming nothing of its own.",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        }
       }
     }
   }

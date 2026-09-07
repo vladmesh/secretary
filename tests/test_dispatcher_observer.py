@@ -4849,6 +4849,52 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # The open sprint's card in flight keeps riding its cycle.
         self.assertIn("secretary-510-neighbor", self.advanced(result))
 
+    def test_a_po_comment_after_the_close_wakes_nothing_and_the_tick_still_ends_the_head(self) -> None:
+        """Criteria 4 and 5 of secretary-1578, against the production tick itself.
+
+        A PO may add the outcome to a sprint after it closed (issue:9eee1d8ee505bc4ecdc2). That
+        comment is a semantic event on an entity whose observer is over, and what must not happen is
+        a wake or a launch for it. The probe is the tick: the close stops no head itself, and the
+        reconciliation of the observer records against the sprint board is what ends this one --
+        `dispatcher_observer`, "closed or gone sprint -> stop the head and drop the record".
+        """
+        self.settled_pair()
+        self.assertEqual(self.host.observers, ["sprint:1"])
+
+        settle_dispatcher_work(
+            self.data_dir,
+            [card["ref"] for card in self.runtime.sprints.show(self.FIRST)["cards"]],
+        )
+        self.sprint_writer.close(
+            role="po",
+            actor="operator",
+            reference=self.FIRST,
+            decisions=close_decisions(self.sprint_writer, self.FIRST),
+        )
+        # The close itself took no head down: that is the tick's, and it has not run yet.
+        self.assertEqual(self.host.stopped_observers, [])
+        self.sprint_writer.comment(
+            role="po",
+            actor="operator",
+            reference=self.FIRST,
+            body="PO: the deferred findings ride on the next sprint",
+            request_id="po-after-close",
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        self.assertEqual(self.observers(), {})
+        # Nothing was woken or launched for the comment: the sprint is not open, so the tick never
+        # reaches the event state it would have woken a head from. `host.observers` is every head
+        # this host was ever asked to raise, so what is asserted is that it gained none.
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(
+            [action["action"] for action in self.actions(result) if action["sprint"] == self.FIRST],
+            ["observer-stopped"],
+        )
+        self.assertEqual(self.runtime.sprints.show(self.FIRST)["status"], "closed")
+
     def test_closing_the_second_sprint_leaves_the_first_live_and_claiming(self) -> None:
         """The other way round: the sprint closed here is not the first one opened."""
         self.settled_pair()

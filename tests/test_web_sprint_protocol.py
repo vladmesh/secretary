@@ -14,24 +14,31 @@ entity as a field that was never written (`ExecutorPinTests`).
 
 from __future__ import annotations
 
+import ast
 import contextlib
+import inspect
 import io
 import json
+import re
+import subprocess
 import unittest
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
+from secretary import sprints as sprints_module
 from secretary.cli import main
 from secretary.config import validate
+from secretary.knowledge_write import KnowledgeError, list_knowledge_documents
+from secretary.sprint_close import CLOSE_NOT_DONE
 from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
-from secretary.sprints import SPRINT_BOARD_NAME
-from secretary.tasks import TaskError
+from secretary.sprints import SPRINT_BOARD_NAME, SPRINT_CLOSEOUT, _close_step_request_id
+from secretary.tasks import TaskAudit, TaskError, TaskWriter
 from secretary.webproto import section as section_module
 from secretary.webproto import sources, sprint_requests, store_io
 from secretary.webproto import sprint_reads as sprint_reads_module
 from secretary.webproto.boundary import GUARDED, operations
-from secretary.webproto.commands import _EXIT_BY_CODE, EXIT_CONFLICT
+from secretary.webproto.commands import _EXIT_BY_CODE, EXIT_CONFLICT, EXIT_PENDING
 from secretary.webproto.errors import (
     OperationPending,
     OwnerConflict,
@@ -42,8 +49,10 @@ from secretary.webproto.errors import (
 )
 from secretary.webproto.runs import RunStoreError
 from secretary.webproto.sprint_ops import (
+    CLOSE_PENDING_REASON,
     COMMENT_PENDING_REASON,
     PENDING_REASON,
+    SPRINT_CLOSE_OPERATION,
     SPRINT_COMMENT_OPERATION,
     SprintOperationLayer,
 )
@@ -54,6 +63,7 @@ from secretary.webproto.sprint_reads import (
     COMMENT_UNKNOWN,
     DELIVERY_ERROR,
     DELIVERY_HANDED_OVER,
+    DELIVERY_NOT_DELIVERABLE,
     DELIVERY_SAVED,
     DELIVERY_STATES,
     DELIVERY_UNKNOWN,
@@ -64,6 +74,8 @@ from secretary.webproto.sprint_reads import (
     SprintReadLayer,
 )
 from secretary.webproto.sprint_requests import SprintRequestStore
+from tests.observer_identity import bind_observer
+from tests.sprint_close_fixtures import CLOSEOUT_BODY, init_state_repo
 from tests.webproto_sprint_fixtures import (
     OBSERVER_PROFILE,
     REVIEWER_PROFILE,
@@ -82,6 +94,38 @@ _WRITE_METHODS = {
     "createComment",
     "removeTask",
 }
+
+
+
+def _write_kinds() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The kinds `SprintWriter` gives `_write`, read from the writer instead of restated here.
+
+    `docs/PROTOCOLS.md` publishes what a terminal sprint answers for each of them, and a list kept
+    by hand beside that table is what let the table claim to be complete while it was not. The
+    writer's own calls are the only enumeration that cannot fall behind the writer.
+    """
+    module = ast.parse(inspect.getsource(sprints_module))
+    writer = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name == "SprintWriter"
+    )
+    kinds: set[str] = set()
+    underivable: set[str] = set()
+    for node in ast.walk(writer):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if not isinstance(function, ast.Attribute) or function.attr != "_write":
+            continue
+        if not isinstance(function.value, ast.Name) or function.value.id != "self":
+            continue
+        kind = node.args[0] if node.args else None
+        if isinstance(kind, ast.Constant) and isinstance(kind.value, str):
+            kinds.add(kind.value)
+        else:
+            underivable.add(ast.unparse(kind) if kind is not None else "<no positional kind>")
+    return tuple(sorted(kinds)), tuple(sorted(underivable))
 
 
 class CreateTests(SprintProtocolFixture):
@@ -1413,11 +1457,13 @@ class CommentTests(CommentFixture):
             self.comment(request_id="  ")
         self.assertEqual(self.board_comments(), [])
 
-    def test_the_writer_keeps_every_rule_including_the_closed_sprint(self) -> None:
-        """This card changes no rule of `SprintWriter`; it only says which code carries its answer."""
-        closed = self.add_sprint_row("sprint:9002", status="closed")
-        with self.assertRaises(OwnerConflict):
-            self.comment(request_id="po-closed", reference=closed)
+    def test_the_writer_keeps_every_rule_it_has(self) -> None:
+        """The operation restates no rule of `SprintWriter`; it says which code carries its answer.
+
+        The closed sprint used to be one of these, and it is not any more: secretary-1578 admits a
+        PO comment on a sprint that has ended (issue:9eee1d8ee505bc4ecdc2), which
+        `PostCloseCommentTests` pins. What is left here is a rule the writer still holds.
+        """
         with self.assertRaises(ValidationRefused):
             self.comment(request_id="po-role", role="observer")
 
@@ -1520,11 +1566,22 @@ class CommentDeliveryTests(CommentFixture):
                 self.assertEqual(delivery["state"], DELIVERY_UNKNOWN)
                 self.assertIn("evt_gone", delivery["reason"])
 
-    def test_the_states_are_the_five_and_none_of_them_is_acceptance(self) -> None:
-        """Criterion 5, as a property of the vocabulary rather than of one document."""
+    def test_the_states_are_the_six_and_none_of_them_is_acceptance(self) -> None:
+        """Criterion 5, as a property of the vocabulary rather than of one document.
+
+        Six since secretary-1578: a comment on a sprint that has ended is `not_deliverable`, which
+        is neither "no batch carries it yet" nor "nobody could say". None of the six is acceptance.
+        """
         self.assertEqual(
             set(DELIVERY_STATES),
-            {DELIVERY_SAVED, DELIVERY_WAITING, DELIVERY_HANDED_OVER, DELIVERY_ERROR, DELIVERY_UNKNOWN},
+            {
+                DELIVERY_SAVED,
+                DELIVERY_WAITING,
+                DELIVERY_HANDED_OVER,
+                DELIVERY_ERROR,
+                DELIVERY_NOT_DELIVERABLE,
+                DELIVERY_UNKNOWN,
+            },
         )
         self.delivery_record(acknowledged_through=self.comment_id)
         for document in (
@@ -1707,8 +1764,13 @@ class CommentCommandTests(CommentFixture):
         self.assertEqual(output, "")
         self.assertEqual(json.loads(errors)["error"]["code"], "validation")
 
-    def test_a_closed_sprint_keeps_the_exit_status_this_command_has_always_given_it(self) -> None:
-        """The refusal is the writer's and is unchanged; only the code that carries it is named."""
+    def test_a_closed_sprint_takes_a_comment_through_the_command_too(self) -> None:
+        """The outcome added after the fact, from the command a PO actually has.
+
+        This case asserted the opposite until secretary-1578: `sprint comment` answered a closed
+        sprint with a conflict, which is what sent a PO past this protocol into Kanboard's own
+        `createComment` (issue:9eee1d8ee505bc4ecdc2). The sprint's status is unchanged by it.
+        """
         closed = self.add_sprint_row("sprint:9003", status="closed")
         code, output, errors = self._run(
             [
@@ -1716,9 +1778,9 @@ class CommentCommandTests(CommentFixture):
                 "--request-id", "cli-closed", "--body-file", self._body_file(self.BODY),
             ]
         )
-        self.assertEqual(code, EXIT_CONFLICT)
-        self.assertEqual(output, "")
-        self.assertEqual(json.loads(errors)["error"]["code"], "owner_conflict")
+        self.assertEqual(code, 0, errors)
+        self.assertTrue(json.loads(output)["saved"])
+        self.assertEqual(self.reads().sprint_state(closed)["sprint"]["value"]["status"], "closed")
 
     def test_sprint_comment_delivery_reads_what_happened_to_it(self) -> None:
         self.delivery_record(acknowledged_through=self.comment()["comment_id"])
@@ -1934,6 +1996,11 @@ class SectionSeamTests(SprintProtocolFixture):
         delivery = commented["delivery"]
         self.assertEqual(self._paths(delivery), marks | {"comment", "delivery"})
         self.assertNotIn("acceptance", self._paths(delivery))
+        # And the close result, whose `definition_of_done` is deliberately not a section either: it
+        # is this product saying what a close is not, read from no source at all.
+        closed = self.reads().sprint_close_result(reference, "evt_nobody")
+        self.assertEqual(self._paths(closed), marks | {"close", "reservations", "sprint"})
+        self.assertNotIn("definition_of_done", self._paths(closed))
         # And every one of them names the source that answered it.
         for document in (listing, watched, delivery):
             for path in self._paths(document):
@@ -2248,6 +2315,863 @@ class SourceIsolationMatrixTests(SprintWorkFixture):
         self.assertIsNone(watched["sprint"]["value"])
         self.assertEqual(watched["sprint"]["source"]["name"], "sprints")
         self.assertEqual(watched["observer"]["declared"]["state"], sprint_reads_module.OBSERVER_UNKNOWN)
+
+
+class CloseFixture(SprintProtocolFixture):
+    """One sprint that does not close tidily, and the pieces the close suites drive.
+
+    Deliberately not a tidy sprint, because sprint:1431 is not one: two declared issues decided
+    differently, a card that reached Done and a card that never will, and a closeout that says the
+    findings are deferred rather than fixed. A fixture with nothing left over would pass with an
+    operation that assumed a sprint closes with no remainder.
+    """
+
+    REASON = "the goal is reached far enough to cut the next sprint, and the rest is deferred"
+
+    def setUp(self) -> None:
+        super().setUp()
+        init_state_repo(self.instance)
+        self.board._record(
+            30,
+            "issue:second",
+            "Second issue",
+            {
+                "record_type": "issue",
+                "issue_product": "secretary",
+                "issue_kind": "bug",
+                "issue_priority": "P1",
+            },
+        )
+        self.tasks = TaskWriter(self.board, data_dir=self.data_dir)
+        self.reference = self.reference_of(self.create(issues=["issue:open", "issue:second"]))
+        # The cards below are written as this sprint's observer head, bound to it exactly as the
+        # dispatcher binds a head it launches.
+        bind_observer(self, self.reference)
+        self.done = self._card("landed in this sprint", "card-done")
+        self._take_to_done(self.done)
+        self.left = self._card("superseded by the next cut", "card-left")
+
+    # -- the sprint's shape --------------------------------------------------------------------
+
+    def _card(self, title: str, request_id: str) -> str:
+        return self.tasks.create(
+            role="observer",
+            actor="observer",
+            project="secretary",
+            task_type="code",
+            title=title,
+            target="ready",
+            sprint=self.reference,
+            request_id=request_id,
+        )["task"]["ref"]
+
+    def _take_to_done(self, reference: str) -> None:
+        self.tasks.claim(
+            role="dispatcher",
+            actor="dispatcher",
+            reference=reference,
+            worker="worker",
+            request_id=f"claim-{reference}",
+        )
+        for target in ("validate", "done"):
+            self.tasks.move(
+                role="dispatcher",
+                actor="dispatcher",
+                reference=reference,
+                target=target,
+                reason="",
+                request_id=f"move-{reference}-{target}",
+            )
+
+    # -- the operation -------------------------------------------------------------------------
+
+    def decisions(self, **overrides: Any) -> dict[str, list[dict[str, str]]]:
+        decided: dict[str, list[dict[str, str]]] = {
+            "issues": [
+                {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed on this card"},
+                {
+                    "ref": "issue:second",
+                    "verdict": "open",
+                    "reason": "the sprint ran out before this one was reached",
+                },
+            ],
+            "cards": [
+                {
+                    "ref": self.left,
+                    "verdict": "drop",
+                    "reason": "superseded by the next sprint's cut",
+                }
+            ],
+        }
+        decided.update(overrides)
+        return decided
+
+    def close(self, **kwargs: Any) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "request_id": "close-1",
+            "actor": "operator",
+            "reference": self.reference,
+            "reason": self.REASON,
+            "closeout": CLOSEOUT_BODY,
+            "decisions": self.decisions(),
+            "role": "po",
+        }
+        request.update(kwargs)
+        return self.ops().sprint_close(**request)
+
+    # -- what it left behind -------------------------------------------------------------------
+
+    def knowledge(self) -> tuple[str, ...]:
+        return list_knowledge_documents(self.instance)
+
+    def closeout_text(self, document: str) -> str:
+        return (self.instance / "state" / "knowledge" / document).read_text(encoding="utf-8")
+
+    def knowledge_commits(self) -> list[str]:
+        result = subprocess.run(
+            ["git", "-C", str(self.instance), "log", "--format=%s"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return [line for line in result.stdout.splitlines() if line.startswith("knowledge:")]
+
+    def status_of(self, reference: str = "") -> str:
+        value = self.reads().sprint_state(reference or self.reference)["sprint"]["value"]
+        return str(value["status"])
+
+    def production_bytes(self) -> bytes:
+        return (self.data_dir / "dispatcher" / "production-state.json").read_bytes()
+
+    def observer_record(self) -> None:
+        """The observer record the tick would have written for this sprint, so a stop is visible."""
+        self._production(
+            {
+                self.reference: {
+                    "sprint": self.reference,
+                    "head": OBSERVER_PROFILE,
+                    "state": "working",
+                    "launches": 1,
+                    "bound": True,
+                }
+            }
+        )
+
+
+class CloseOperationTests(CloseFixture):
+    """Criterion 1: a named operation closes a sprint and answers with what became of the work."""
+
+    def test_the_operation_answers_with_every_decision_the_close_made(self) -> None:
+        answered = self.close()
+
+        self.assertEqual(answered["kind"], "sprint_closed")
+        self.assertEqual(answered["ref"], self.reference)
+        self.assertEqual(validate(answered, "web-sprint", answered["kind"]), [])
+        closed = answered["result"]["close"]
+        self.assertEqual(closed["state"], sprint_reads_module.CLOSE_RECORDED)
+        self.assertEqual(closed["source"]["name"], "journal")
+        self.assertEqual(closed["closed_by"], "operator")
+        self.assertEqual(closed["closing_reason"], self.REASON)
+        self.assertEqual(
+            [(entry["ref"], entry["verdict"]) for entry in closed["issue_decisions"]],
+            [("issue:open", "resolved"), ("issue:second", "open")],
+        )
+        self.assertEqual(closed["closed_issues"], ["issue:open"])
+        self.assertEqual(
+            [(entry["ref"], entry["verdict"]) for entry in closed["card_dispositions"]],
+            [(self.left, "drop")],
+        )
+        self.assertEqual(closed["archived_tasks"], [self.done])
+        self.assertEqual(closed["disposed_tasks"], [self.left])
+        self.assertEqual(answered["result"]["sprint"]["value"]["status"], "closed")
+
+    def test_the_result_names_the_reservations_the_close_released(self) -> None:
+        answered = self.close()
+
+        released = answered["result"]["reservations"]
+        self.assertEqual(released["source"]["name"], "reservations")
+        self.assertEqual(released["declared"], ["secretary"])
+        self.assertEqual(released["released"], ["secretary"])
+        self.assertEqual(released["held"], [])
+
+    def test_the_close_is_not_a_completed_definition_of_done(self) -> None:
+        """Criterion 3, on the answer: no field, name or sentence lets this read as a satisfied contract."""
+        answered = self.close()
+
+        for document in (answered, answered["result"]):
+            with self.subTest(kind=document["kind"]):
+                self.assertFalse(document["definition_of_done"]["satisfied"])
+                self.assertEqual(document["definition_of_done"]["reason"], CLOSE_NOT_DONE)
+        self.assertIn("not a statement", CLOSE_NOT_DONE)
+
+    def test_the_result_is_read_back_afterwards_through_the_protocol(self) -> None:
+        answered = self.close()
+
+        later = self.reads().sprint_close_result(self.reference, answered["event_id"])
+
+        self.assertEqual(later["kind"], "sprint_close_result")
+        self.assertEqual(validate(later, "web-sprint", later["kind"]), [])
+        self.assertEqual(later["close"], answered["result"]["close"])
+
+    def test_the_operation_re_decides_nothing_and_the_writer_keeps_every_rule(self) -> None:
+        """A close short of a decision is refused by the writer, before anything at all is written."""
+        with self.assertRaises(ValidationRefused) as refused:
+            self.close(decisions={"issues": [], "cards": []})
+
+        self.assertIn("issue:open", refused.exception.message)
+        self.assertEqual(self.status_of(), "open")
+        self.assertEqual(self.knowledge(), ())
+
+    def test_a_close_states_its_reason_and_its_closeout_or_it_is_refused(self) -> None:
+        for label, request in (("reason", {"reason": "  "}), ("closeout", {"closeout": ""})):
+            with self.subTest(missing=label), self.assertRaises(ValidationRefused):
+                self.close(**request)
+        self.assertEqual(self.status_of(), "open")
+        self.assertEqual(self.knowledge(), ())
+
+    def test_a_close_of_a_sprint_nobody_holds_is_refused(self) -> None:
+        with self.assertRaises(ReadError) as refused:
+            self.close(reference="sprint:9999", request_id="close-missing")
+        self.assertEqual(refused.exception.code, "not_found")
+
+    def test_a_repeat_of_the_same_request_closes_nothing_a_second_time(self) -> None:
+        first = self.close()
+        documents, commits = self.knowledge(), self.knowledge_commits()
+        events = [event["event_id"] for event in self.audit_events()]
+
+        repeated = self.close()
+
+        self.assertEqual(repeated["event_id"], first["event_id"])
+        self.assertEqual(self.knowledge(), documents)
+        self.assertEqual(self.knowledge_commits(), commits)
+        self.assertEqual([event["event_id"] for event in self.audit_events()], events)
+
+    def test_a_repeat_that_states_another_closeout_is_refused(self) -> None:
+        """Compared exactly, and never by containment.
+
+        The shortened body is the case that matters: it is a *substring* of the prose this close was
+        staged with, so a containment test accepted it and answered the caller with the completed
+        close -- telling them a close succeeded with an account no document ever carried. Ordinary
+        editing during a retry is enough to produce it, which is why all three shapes are pinned.
+        """
+        self.close()
+        first_sentence = CLOSEOUT_BODY.split(".")[0] + "."
+        self.assertIn(first_sentence, CLOSEOUT_BODY)
+        for label, body in (
+            ("another account entirely", "actually the sprint achieved everything"),
+            ("a shortened body", first_sentence),
+            ("an extended body", CLOSEOUT_BODY + "\nAnd one more paragraph nobody staged.\n"),
+        ):
+            with self.subTest(closeout=label):
+                with self.assertRaises(ValidationRefused) as refused:
+                    self.close(closeout=body)
+                self.assertIn("staged with another closeout", refused.exception.message)
+        # The body it was staged with still answers from the record and writes nothing new.
+        self.assertTrue(self.close()["result"]["close"]["closeout"]["written"])
+        self.assertEqual(len(self.knowledge()), 1)
+        self.assertEqual(len(self.knowledge_commits()), 1)
+
+    def test_a_retry_of_a_half_finished_close_is_held_to_the_same_comparison(self) -> None:
+        """The staged half of the same rule: a close that stopped mid-transaction refuses it too."""
+        with mock.patch(
+            "secretary.knowledge_write.write_knowledge_document",
+            side_effect=KnowledgeError("the instance repo would not commit"),
+        ), self.assertRaises(OperationPending):
+            self.close()
+
+        with self.assertRaises(ValidationRefused) as refused:
+            self.close(closeout=CLOSEOUT_BODY.split(".")[0] + ".")
+        self.assertIn("staged with another closeout", refused.exception.message)
+
+        # And the retry that carries the body it was staged with finishes the same close.
+        answered = self.close()
+        self.assertTrue(answered["result"]["close"]["closeout"]["written"])
+        self.assertEqual(len(self.knowledge()), 1)
+
+    def audit_events(self) -> list[dict[str, Any]]:
+        from secretary.tasks import TaskAudit
+
+        return TaskAudit(self.data_dir).events()
+
+
+class CloseoutTests(CloseFixture):
+    """Criterion 2: the closeout is a step of the close, written through the one writer, exactly once."""
+
+    def test_the_closeout_is_written_by_the_close_and_names_the_sprint(self) -> None:
+        answered = self.close()
+
+        written = answered["result"]["close"]["closeout"]
+        self.assertEqual(self.knowledge(), (written["document"],))
+        self.assertTrue(written["written"])
+        self.assertTrue(written["commit"])
+        text = self.closeout_text(written["document"])
+        self.assertIn(self.reference, text)
+        # The outcome the caller stated, verbatim: the operation writes and links what it is given.
+        self.assertIn(CLOSEOUT_BODY.strip(), text)
+        # What is left unfinished, and the owner's decision about it.
+        self.assertIn(self.left, text)
+        self.assertIn("superseded by the next sprint's cut", text)
+        self.assertIn("issue:second", text)
+        self.assertIn(self.REASON, text)
+        # Criterion 3, in the document itself.
+        self.assertIn(CLOSE_NOT_DONE, text)
+
+    def test_the_closeout_step_carries_an_id_derived_from_the_close_request(self) -> None:
+        answered = self.close()
+
+        step = _close_step_request_id("close-1", "closeout", self.reference)
+        committed = TaskAudit(self.data_dir).committed_event(step)
+        self.assertIsNotNone(committed)
+        self.assertEqual(committed["kind"], SPRINT_CLOSEOUT)
+        self.assertEqual(committed["ref"], self.reference)
+        self.assertEqual(
+            committed["payload"]["document"], answered["result"]["close"]["closeout"]["document"]
+        )
+        self.assertEqual(committed["payload"]["close_request_id"], "close-1")
+
+    def test_a_failure_at_the_closeout_is_repaired_by_repeating_the_same_request(self) -> None:
+        """Criterion 2's own case: fail the step, retry the request, one document at the end.
+
+        The failure is the knowledge writer's own, raised where the write happens, so what is
+        exercised is the step's recovery and not a stub of it.
+        """
+        with mock.patch(
+            "secretary.knowledge_write.write_knowledge_document",
+            side_effect=KnowledgeError("the instance repo would not commit"),
+        ), self.assertRaises(OperationPending) as refused:
+            self.close()
+
+        self.assertEqual(refused.exception.data["reason"], CLOSE_PENDING_REASON)
+        action = refused.exception.data["action"]
+        self.assertEqual(action["operation"], SPRINT_CLOSE_OPERATION)
+        self.assertEqual(action["request_id"], "close-1")
+        self.assertTrue(action["repeat_request"])
+        # The closeout runs before the status is published, so an interrupted close leaves the
+        # sprint open and still holding its projects -- which is what keeps a successor out.
+        self.assertEqual(self.status_of(), "open")
+        self.assertEqual(self.knowledge(), ())
+
+        answered = self.close()
+
+        self.assertEqual(self.status_of(), "closed")
+        self.assertEqual(len(self.knowledge()), 1)
+        self.assertEqual(len(self.knowledge_commits()), 1)
+        self.assertTrue(answered["result"]["close"]["closeout"]["written"])
+
+    def test_a_failure_after_the_closeout_leaves_exactly_one_document(self) -> None:
+        """The other half: the step landed, the close did not, and the retry writes no second one."""
+        from secretary.sprints import SprintWriter
+
+        with mock.patch.object(
+            SprintWriter,
+            "_transition_host",
+            side_effect=TaskError("backend_error", "the board would not publish the status", 1),
+        ), self.assertRaises(OperationPending):
+            self.close()
+
+        self.assertEqual(len(self.knowledge()), 1)
+        commits = self.knowledge_commits()
+
+        self.close()
+
+        self.assertEqual(self.status_of(), "closed")
+        self.assertEqual(len(self.knowledge()), 1)
+        self.assertEqual(self.knowledge_commits(), commits)
+
+    def test_a_closeout_this_installation_cannot_write_is_refused_before_anything_is(self) -> None:
+        """The preflight: an instance that is not a state repository refuses, and nothing is written."""
+        subprocess.run(
+            ["rm", "-rf", str(self.instance / ".git")], check=True, capture_output=True
+        )
+        before = len(self.board.tasks)
+
+        with self.assertRaises(ValidationRefused) as refused:
+            self.close()
+
+        self.assertIn("closeout", refused.exception.message)
+        self.assertEqual(self.status_of(), "open")
+        self.assertEqual(len(self.board.tasks), before)
+
+
+class ClosedSprintObserverTests(CloseFixture):
+    """Criterion 5: the close releases the reservations and stops no head itself."""
+
+    def test_the_close_touches_no_dispatcher_state_and_stops_no_head(self) -> None:
+        self.observer_record()
+        production = self.production_bytes()
+
+        self.close()
+
+        # The observer of a closed sprint is ended by the production tick reconciling against the
+        # sprint board -- `secretary.dispatcher_observer`, "closed or gone sprint -> stop the head
+        # and drop the record". The close adds no second teardown, so the dispatcher's own state is
+        # byte for byte what it was: no stop, no launch, no cursor moved.
+        self.assertEqual(self.production_bytes(), production)
+
+    def test_the_reservations_are_released_by_the_close_itself(self) -> None:
+        from secretary.sprints import active_sprint_projects
+
+        self.assertEqual(active_sprint_projects(self.data_dir), {"secretary": [self.reference]})
+
+        self.close()
+
+        self.assertEqual(active_sprint_projects(self.data_dir), {})
+
+
+class PostCloseCommentTests(CloseFixture):
+    """Criterion 4: a PO adds the outcome after the fact, and nothing else moves."""
+
+    BODY = "PO: the deferred findings are on the next sprint's cut, not lost"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.closed = self.close()
+
+    def comment(self, **kwargs: Any) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "request_id": "po-after-close",
+            "actor": "operator",
+            "reference": self.reference,
+            "body": self.BODY,
+            "role": "po",
+        }
+        request.update(kwargs)
+        return self.ops().sprint_comment(**request)
+
+    def test_a_comment_on_a_closed_sprint_is_accepted_and_audited(self) -> None:
+        answered = self.comment()
+
+        self.assertTrue(answered["saved"])
+        self.assertEqual(validate(answered, "web-sprint", answered["kind"]), [])
+        committed = TaskAudit(self.data_dir).committed_event("po-after-close")
+        self.assertEqual(committed["event_id"], answered["comment_id"])
+        self.assertEqual(committed["kind"], "commented")
+
+    def test_it_changes_nothing_about_the_sprint(self) -> None:
+        from secretary.sprints import active_sprint_projects
+
+        self.comment()
+
+        self.assertEqual(self.status_of(), "closed")
+        self.assertEqual(active_sprint_projects(self.data_dir), {})
+
+    def test_it_wakes_no_head_and_launches_none(self) -> None:
+        """Asserted separately, as secretary-1575 asserted its no-second-wake.
+
+        A wake, a launch, a deferral or a moved cursor all write to the dispatcher's production
+        state, so the file is compared byte for byte. The observer record is the one the tick would
+        have written for this sprint, so "unchanged" is not "there was nothing to change".
+        """
+        self.observer_record()
+        production = self.production_bytes()
+
+        self.comment()
+
+        self.assertEqual(self.production_bytes(), production)
+
+    def test_the_delivery_read_says_no_batch_will_ever_carry_it(self) -> None:
+        answered = self.comment()
+
+        delivery = answered["delivery"]["delivery"]
+        self.assertEqual(delivery["state"], DELIVERY_NOT_DELIVERABLE)
+        self.assertEqual(delivery["source"]["name"], "sprints")
+        self.assertIn("closed", delivery["reason"])
+        self.assertIsNone(delivery["batch"])
+        # And the comment itself is saved: the two facts are separate and both are answered.
+        self.assertEqual(answered["delivery"]["comment"]["state"], COMMENT_SAVED)
+
+    def test_a_repeat_is_idempotent_on_the_request_id(self) -> None:
+        first = self.comment()
+        events = [event["event_id"] for event in TaskAudit(self.data_dir).events()]
+
+        repeated = self.comment()
+
+        self.assertFalse(repeated["saved"])
+        self.assertEqual(repeated["comment_id"], first["comment_id"])
+        self.assertEqual([event["event_id"] for event in TaskAudit(self.data_dir).events()], events)
+
+    def test_a_repeat_over_different_content_is_refused(self) -> None:
+        self.comment()
+        with self.assertRaises(ValidationRefused):
+            self.comment(body="PO: something else entirely")
+
+    def test_a_stopped_sprint_takes_one_too(self) -> None:
+        stopped = self.add_sprint_row("sprint:9100", status="stopped")
+        answered = self.comment(reference=stopped, request_id="po-after-stop")
+        self.assertTrue(answered["saved"])
+        self.assertEqual(answered["delivery"]["delivery"]["state"], DELIVERY_NOT_DELIVERABLE)
+
+
+class TerminalSprintWriteTests(SprintProtocolFixture):
+    """The documented terminal-sprint table, held to what `SprintWriter._write` actually does.
+
+    The first version of this pin carried a hand-written list of three kinds and a document that
+    claimed to describe the writer "in full". It was wrong -- `budget_recorded` and `restored` are
+    accepted on a sprint that has ended -- and, being its own authority on what to check, it could
+    not notice. So the set is not written here. It is read out of `SprintWriter`'s own calls to
+    `_write`, which is where the kinds actually are, and a write added to the writer tomorrow either
+    appears in the published table or fails `test_the_document_names_every_write_the_writer_makes`.
+
+    Each kind is driven through `_write` itself rather than through its public caller, which could
+    refuse first for a reason of its own -- a role, a payload, an observer identity -- and hide what
+    the terminal guard would have done.
+    """
+
+    #: The kinds `SprintWriter` passes to `_write`, taken from the writer's own source. A call whose
+    #: kind is not a literal would leave a kind untested without saying so, so it is collected too
+    #: and asserted away rather than skipped.
+    KINDS: ClassVar[tuple[str, ...]]
+    UNDERIVABLE: ClassVar[tuple[str, ...]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.KINDS, cls.UNDERIVABLE = _write_kinds()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.terminal = {
+            "closed": self.add_sprint_row("sprint:9200", status="closed"),
+            "stopped": self.add_sprint_row("sprint:9201", status="stopped"),
+        }
+
+    def _answer(self, reference: str, kind: str) -> tuple[str, ...]:
+        """What `_write` does with this kind on this sprint, as the table's cells say it."""
+        from secretary.sprints import SprintWriter
+
+        writer = SprintWriter(self.board, data_dir=self.data_dir, instance=self.instance)
+        try:
+            writer._write(
+                kind,
+                "po",
+                "operator",
+                reference,
+                f"{kind}-on-{reference}",
+                {},
+                lambda sprint: None,
+            )
+        except TaskError as refused:
+            return ("refused", refused.code, str(refused.exit_code))
+        return ("accepted",)
+
+    def _documented(self) -> dict[str, tuple[str, ...]]:
+        """The published table, read as rows rather than looked up by the kinds this test knows.
+
+        Looking rows up would let a row for a kind the writer no longer has survive unnoticed, which
+        is the same shape of hole from the other side.
+        """
+        protocols = (Path(__file__).resolve().parents[1] / "docs" / "PROTOCOLS.md").read_text(
+            encoding="utf-8"
+        )
+        lines = protocols.splitlines()
+        header = lines.index("| sprint write | a `closed` or `stopped` sprint |")
+        rows: dict[str, tuple[str, ...]] = {}
+        for line in lines[header + 2 :]:
+            if not line.startswith("|"):
+                break
+            cells = [cell.strip() for cell in line.split("|")]
+            kind = re.fullmatch(r"`([a-z_]+)`", cells[1])
+            self.assertIsNotNone(kind, f"unreadable row in the terminal-write table: {line}")
+            assert kind is not None
+            rows[kind.group(1)] = tuple(re.findall(r"`([a-z_0-9]+)`", cells[2]))
+        return rows
+
+    def test_every_kind_the_writer_passes_to_write_was_derivable(self) -> None:
+        """The derivation is only a pin while it can see every call. It says so when it cannot."""
+        self.assertEqual(self.UNDERIVABLE, ())
+        self.assertIn("commented", self.KINDS)
+
+    def test_the_document_names_every_write_the_writer_makes(self) -> None:
+        self.assertEqual(sorted(self._documented()), sorted(self.KINDS))
+
+    def test_each_documented_row_is_what_the_writer_actually_answers(self) -> None:
+        documented = self._documented()
+        for status, reference in self.terminal.items():
+            for kind in self.KINDS:
+                with self.subTest(status=status, kind=kind):
+                    self.assertIn(kind, documented, f"{kind} is a sprint write the table omits")
+                    self.assertEqual(self._answer(reference, kind), documented[kind])
+
+    def test_the_two_semantic_writes_are_the_refused_ones(self) -> None:
+        """The direction, stated outright, so a table of five acceptances could not pass by symmetry.
+
+        Only these two are named by hand, because only these two are this card's own contract: a
+        comment is accepted where it used to be refused, and the writes that state work in progress
+        are still refused. What the rest answer is settled by the derivation above, not here.
+        """
+        for status, reference in self.terminal.items():
+            with self.subTest(status=status):
+                self.assertEqual(self._answer(reference, "commented"), ("accepted",))
+                self.assertEqual(
+                    self._answer(reference, "resume_recorded"), ("refused", "closed", "3")
+                )
+                self.assertEqual(
+                    self._answer(reference, "current_task_set"), ("refused", "closed", "3")
+                )
+
+
+class CloseResultFaultTests(CloseFixture):
+    """Criterion 7: every source of the result refuses on its own, and nothing claims for it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.event_id = self.close()["event_id"]
+
+    @contextlib.contextmanager
+    def _journal_refuses(self) -> Any:
+        with mock.patch.object(TaskAudit, "events", side_effect=PermissionError("audit journal denied")):
+            yield
+
+    @contextlib.contextmanager
+    def _index_refuses(self) -> Any:
+        path = self.data_dir / "sprints" / "active-repositories.json"
+        kept = path.read_bytes()
+        path.write_bytes(b"{")
+        try:
+            yield
+        finally:
+            path.write_bytes(kept)
+
+    def result(self) -> dict[str, Any]:
+        document = self.reads().sprint_close_result(self.reference, self.event_id)
+        self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
+        return document
+
+    def test_a_journal_nobody_can_read_leaves_the_close_unknown(self) -> None:
+        with self._journal_refuses():
+            document = self.result()
+
+        close = document["close"]
+        self.assertEqual(close["state"], sprint_reads_module.CLOSE_UNKNOWN)
+        self.assertEqual(close["source"]["name"], "journal")
+        self.assertEqual(close["source"]["state"], "unavailable")
+        self.assertIsNone(close["issue_decisions"])
+        self.assertIsNone(close["closeout"])
+        # And it takes nothing away from the sources that answered.
+        self.assertEqual(document["reservations"]["source"]["state"], "available")
+        self.assertEqual(document["sprint"]["value"]["status"], "closed")
+
+    def test_an_index_nobody_can_read_never_reports_a_reservation_as_released(self) -> None:
+        with self._index_refuses():
+            document = self.result()
+
+        released = document["reservations"]
+        self.assertEqual(released["source"]["name"], "reservations")
+        self.assertEqual(released["source"]["state"], "unavailable")
+        self.assertIsNone(released["released"])
+        self.assertIsNone(released["held"])
+        self.assertEqual(document["close"]["state"], sprint_reads_module.CLOSE_RECORDED)
+
+    def test_a_board_nobody_can_read_leaves_the_close_and_the_reservations_standing(self) -> None:
+        original = self.board.call
+        board = self.board.projects[SPRINT_BOARD_NAME]
+
+        def refuse(method: str, **params: Any) -> Any:
+            if method == "getAllTasks" and params.get("project_id") == board:
+                raise TaskError("backend_error", "the sprint board is unavailable", 1)
+            return original(method, **params)
+
+        self.board.call = refuse  # type: ignore[method-assign]
+        try:
+            document = self.result()
+        finally:
+            self.board.call = original  # type: ignore[method-assign]
+
+        self.assertIsNone(document["sprint"]["value"])
+        self.assertIsNone(document["reservations"]["declared"])
+        self.assertEqual(document["reservations"]["source"]["name"], "sprints")
+        self.assertEqual(document["close"]["state"], sprint_reads_module.CLOSE_RECORDED)
+
+    def test_an_identifier_this_sprint_does_not_hold_is_absent_rather_than_unknown(self) -> None:
+        self.event_id = "evt_nobody"
+        document = self.result()
+        self.assertEqual(document["close"]["state"], sprint_reads_module.CLOSE_ABSENT)
+        self.assertEqual(document["close"]["source"]["name"], "journal")
+
+    def test_a_close_result_needs_the_identifier_the_close_answered_with(self) -> None:
+        with self.assertRaises(ValidationRefused):
+            self.reads().sprint_close_result(self.reference, "")
+
+
+class CloseCommandTests(CloseFixture):
+    """Criterion 8: `secretary sprint close` is a client, and its exit statuses are unchanged."""
+
+    def _run(self, argv: list[str]) -> tuple[int, str, str]:
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch(
+                "secretary.webproto.sprint_reads.KanboardClient.for_instance", return_value=self.board
+            ),
+            mock.patch(
+                "secretary.webproto.sprint_ops.KanboardClient.for_instance", return_value=self.board
+            ),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main([*argv, "--instance", str(self.instance), "--data-dir", str(self.data_dir)])
+        return code, output.getvalue(), errors.getvalue()
+
+    def _file(self, name: str, text: str) -> str:
+        path = self.tmp / name
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def _decisions_file(self) -> str:
+        return self._file(
+            "decisions.yaml",
+            "issues:\n"
+            "  - ref: issue:open\n"
+            "    verdict: resolved\n"
+            "    reason: the fix landed on this card\n"
+            "  - ref: issue:second\n"
+            "    verdict: open\n"
+            "    reason: the sprint ran out before this one was reached\n"
+            "cards:\n"
+            f"  - ref: {self.left}\n"
+            "    verdict: drop\n"
+            "    reason: superseded by the next sprint's cut\n",
+        )
+
+    def _argv(self, **overrides: str) -> list[str]:
+        argv = {
+            "--ref": self.reference,
+            "--role": "po",
+            "--actor": "operator",
+            "--request-id": "cli-close",
+            "--reason": self.REASON,
+            "--decisions-file": self._decisions_file(),
+            "--closeout-file": self._file("closeout.md", CLOSEOUT_BODY),
+        }
+        argv.update(overrides)
+        return ["sprint", "close", *[part for pair in argv.items() for part in pair]]
+
+    def test_the_command_prints_the_document_the_operation_answered(self) -> None:
+        code, output, errors = self._run(self._argv())
+
+        self.assertEqual(code, 0, errors)
+        document = json.loads(output)
+        self.assertEqual(document["kind"], "sprint_closed")
+        self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
+        self.assertEqual(document["result"]["close"]["closed_issues"], ["issue:open"])
+        self.assertFalse(document["definition_of_done"]["satisfied"])
+
+    def test_a_refused_close_keeps_the_exit_status_this_command_has_always_given_it(self) -> None:
+        code, output, errors = self._run(
+            self._argv(**{"--decisions-file": self._file("empty.yaml", "issues: []\n")})
+        )
+
+        self.assertEqual(code, _EXIT_BY_CODE["validation"])
+        self.assertEqual(output, "")
+        self.assertEqual(json.loads(errors)["error"]["code"], "validation")
+
+    def test_a_half_written_close_keeps_the_status_that_says_repeat_it(self) -> None:
+        """`audit_pending` was exit 4 before this command became a client, and it still is."""
+        from secretary.sprints import SprintWriter
+
+        with mock.patch.object(
+            SprintWriter, "close", side_effect=TaskError("audit_pending", "repair required", 4)
+        ):
+            code, output, errors = self._run(self._argv())
+
+        self.assertEqual(code, EXIT_PENDING)
+        self.assertEqual(output, "")
+        failure = json.loads(errors)["error"]
+        self.assertEqual(failure["data"]["action"]["operation"], SPRINT_CLOSE_OPERATION)
+
+    def test_a_card_whose_work_is_live_keeps_its_conflict_status(self) -> None:
+        from secretary.sprints import SprintWriter
+
+        with mock.patch.object(
+            SprintWriter, "close", side_effect=TaskError("live_work", "settle the head first", 3)
+        ):
+            code, _output, errors = self._run(self._argv())
+
+        self.assertEqual(code, EXIT_CONFLICT)
+        self.assertEqual(json.loads(errors)["error"]["code"], "owner_conflict")
+
+    def test_close_result_reads_what_the_close_decided(self) -> None:
+        code, output, errors = self._run(self._argv())
+        self.assertEqual(code, 0, errors)
+        event_id = json.loads(output)["event_id"]
+
+        code, output, errors = self._run(
+            ["sprint", "close-result", "--ref", self.reference, "--event-id", event_id]
+        )
+
+        self.assertEqual(code, 0, errors)
+        document = json.loads(output)
+        self.assertEqual(document["kind"], "sprint_close_result")
+        self.assertEqual(document["close"]["disposed_tasks"], [self.left])
+        self.assertFalse(document["definition_of_done"]["satisfied"])
+
+
+class ClosePublishedPromiseTests(unittest.TestCase):
+    """Criterion 9: the published prose is held to the contract rather than trusted to keep up.
+
+    Each promise below is one this card's code makes. A change that moves the behaviour without the
+    sentence, or the sentence without the behaviour, fails here instead of leaving a public claim
+    behind.
+    """
+
+    def _document(self, name: str) -> str:
+        return (Path(__file__).resolve().parents[1] / "docs" / name).read_text(encoding="utf-8")
+
+    def test_the_protocol_records_the_operation_the_closeout_step_and_the_post_close_comment(self) -> None:
+        protocols = self._document("PROTOCOLS.md")
+        for promise in (
+            "**`sprint_close(request_id, actor, reference, reason, closeout, decisions, role=\"po\")`**",
+            "**`sprint_close_result(ref, event_id)`**",
+            # The terminal phase order, with the step this card added in its place.
+            "the dispositions, the knowledge closeout, then the\nstatus",
+            "closeouts/<day>-<sprint-ref>.md",
+            "#### A comment on a sprint that has ended",
+            "`not_deliverable`",
+        ):
+            with self.subTest(promise=promise):
+                self.assertIn(promise, protocols)
+
+    def test_the_passages_a_terminal_sprint_is_read_through_agree_with_the_accepted_comment(
+        self,
+    ) -> None:
+        """The three passages the finding named, beside `TerminalSprintWriteTests` which pins them.
+
+        The table there holds the behaviour; these hold the sentences an operator reads *around* it,
+        which is where the contradiction actually lived: the CLI's exit status, the errors table's
+        two rows, and the resume-freshness paragraph whose reasoning had to survive the narrowing.
+        """
+        protocols = " ".join(self._document("PROTOCOLS.md").split())
+        for promise in (
+            "`sprint comment` on a `closed` or `stopped` sprint succeeds with exit status `0`",
+            (
+                "the sprint a resume or a current task names has ended "
+                "(a comment on it is accepted, not refused)"
+            ),
+            "the create, the comment or the close is part-done and repairable with the same request id",
+            "a terminal sprint's freshness never reads the audit the comment is recorded in",
+        ):
+            with self.subTest(promise=promise):
+                self.assertIn(promise, protocols)
+
+    def test_the_operator_scenario_is_written_down_end_to_end(self) -> None:
+        operations = self._document("OPERATIONS.md")
+        for promise in (
+            "## Closing a sprint",
+            "--closeout-file CLOSEOUT.md",
+            "sprint close-result --ref sprint:1431 --event-id",
+            "### Commenting after the close",
+            "A close is not a completed Definition of Done.",
+        ):
+            with self.subTest(promise=promise):
+                self.assertIn(promise, operations)
+
+    def test_the_sentence_the_documents_carry_is_the_one_the_code_carries(self) -> None:
+        """The one claim that may not drift: a close is not a satisfied contract."""
+        clause = "it is not a statement that the sprint's definition of done was reached"
+        self.assertIn(clause, CLOSE_NOT_DONE.lower())
+        for name in ("PROTOCOLS.md", "OPERATIONS.md", "CHANGELOG.md"):
+            with self.subTest(document=name):
+                self.assertIn("definition of done", self._document(name).lower())
+        self.assertIn(clause, self._document("PROTOCOLS.md").lower())
 
 
 if __name__ == "__main__":

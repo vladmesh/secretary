@@ -1,11 +1,12 @@
 """The read half of the sprint surface: what a sprint can be built from, and what sprints are doing.
 
-Four reads, and they are the halves of one screen plus the page in front of it. Before a sprint
+Five reads, and they are the halves of one screen plus the pages in front of it. Before a sprint
 exists a client has to be able to *offer* the choices this installation actually has -- its
 products, the issues those products still have open, the projects it has registered, and the head
 profiles it runs off -- after it exists somebody has to watch it, somebody standing in front of
-the whole installation has to be able to ask what is being worked on right now, and a PO who left a
-comment on a running sprint has to be able to ask what happened to it. None of the four is
+the whole installation has to be able to ask what is being worked on right now, a PO who left a
+comment on a running sprint has to be able to ask what happened to it, and after it ends somebody
+has to be able to read what its close decided. None of the five is
 a new fact. Every value below is read from the source that already owns it:
 
 * products and issues from :class:`secretary.product_issues.ProductIssueStore`, the store
@@ -17,6 +18,10 @@ a new fact. Every value below is read from the source that already owns it:
   :func:`secretary.head_registry.installed_heads`, with observer eligibility decided by calling
   :func:`secretary.sprint_observer.check_observer_profile` -- the check a create makes -- rather
   than by restating its rule here;
+* what a close decided from the committed audit event it wrote, and which reservations survived it
+  from `sprints/active-repositories.json` -- the index the board's own write guard authorises
+  against, refused rather than answered `{}` here, because "this sprint holds no project any more"
+  and "nobody could read the index" are opposite answers;
 * the sprint itself from :class:`secretary.sprints.SprintReader`, and the observer's liveness from
   :func:`secretary.dispatcher_observer.observer_snapshot` over the dispatcher's own production
   state.
@@ -111,6 +116,7 @@ from secretary.dispatcher_observer import (
 )
 from secretary.head_registry import installed_heads
 from secretary.product_issues import ProductIssueStore, registered_projects
+from secretary.sprint_close import CLOSE_NOT_DONE
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     NONE_SPELLING,
@@ -122,11 +128,13 @@ from secretary.sprint_observer import (
     stored_executors,
 )
 from secretary.sprints import (
+    SPRINT_CLOSED,
     SPRINT_STATUSES,
     SPRINT_TERMINAL_STATUSES,
     SprintReader,
     active_sprint_projects,
     audit_traversal,
+    require_active_sprint_projects,
     sprint_guard_index_initialized,
 )
 from secretary.tasks import KanboardClient, TaskAudit
@@ -147,6 +155,12 @@ SOURCE_SPRINTS = "sprints"
 SOURCE_CARDS = "cards"
 SOURCE_JOURNAL = "journal"
 SOURCE_LIVENESS = "liveness"
+#: And the reserved-project index, `sprints/active-repositories.json`. A source of its own for the
+#: reason the journal is one: it is a different file, it fails for its own reasons, and a close is
+#: answered about the reservations it released from it and from nothing else. Reading the sprint's
+#: own declared reservations off the board says which projects the sprint holds; only this index says
+#: whether the installation still holds them for it.
+SOURCE_RESERVATIONS = "reservations"
 
 #: The sources of the catalogue, in the same sense: the board the products and issues come off, the
 #: project registry a refusal reads, and the installed head registry.
@@ -252,12 +266,20 @@ DELIVERY_ERROR = "error"
 #: names an event the committed audit cannot place. "Nobody could say where this comment is" and
 #: "it is still waiting" are repaired by different people.
 DELIVERY_UNKNOWN = "unknown"
+#: And the sixth, which is the honest answer for a comment on a sprint that has ended. A PO may
+#: comment on a closed or stopped sprint -- that is how the outcome is added after the fact -- and
+#: no delivery batch will ever carry it: the production tick stops the observer of a sprint that is
+#: no longer open and drops its record, so there is no head to wake and no cursor to move. Answering
+#: `saved` there would say the batch has not carried it *yet*, which implies a delivery that cannot
+#: happen; answering `unknown` would say nobody could tell, when this is exactly known.
+DELIVERY_NOT_DELIVERABLE = "not_deliverable"
 
 DELIVERY_STATES = (
     DELIVERY_SAVED,
     DELIVERY_WAITING,
     DELIVERY_HANDED_OVER,
     DELIVERY_ERROR,
+    DELIVERY_NOT_DELIVERABLE,
     DELIVERY_UNKNOWN,
 )
 
@@ -276,6 +298,15 @@ ACCEPTANCE_NOTICE = (
     "is saved and where the dispatcher's own delivery machinery has got it to. A semantic "
     f"acknowledgement is deferred by the owner and tracked as {ACCEPTANCE_ISSUE}."
 )
+
+#: Whether the committed audit holds the close this result is about. The same three states, kept
+#: apart for the same reason: `absent` is the journal's own answer that no such close is on it, and
+#: `unknown` is a journal nobody could read.
+CLOSE_RECORDED = "recorded"
+CLOSE_ABSENT = "absent"
+CLOSE_UNKNOWN = "unknown"
+
+CLOSE_STATES = (CLOSE_RECORDED, CLOSE_ABSENT, CLOSE_UNKNOWN)
 
 #: Failures a source read may answer with instead of a value, caught per section exactly as the
 #: card reads catch theirs.
@@ -772,6 +803,23 @@ class SprintSections(SectionSet):
                 "batch": None,
             }
 
+        def sprint_has_ended(
+            sprint: _Sprint, events: list[dict[str, Any]]
+        ) -> dict[str, Any] | None:
+            _ref, status, _current = _subject(sprint)
+            if sprint[0] is None or status not in SPRINT_TERMINAL_STATUSES:
+                return None
+            return {
+                "state": DELIVERY_NOT_DELIVERABLE,
+                "reason": (
+                    f"{reference} is {status}, so no delivery batch will carry this comment: the "
+                    "production tick stops the observer of a sprint that is no longer open and drops "
+                    "its record. The comment is saved on the committed audit, which is what a PO "
+                    "adding the outcome after the fact is doing"
+                ),
+                "batch": None,
+            }
+
         def from_dispatcher(
             events: list[dict[str, Any]], production: _Production
         ) -> dict[str, Any] | None:
@@ -791,8 +839,101 @@ class SprintSections(SectionSet):
 
         return read.decide(
             Rule(SOURCE_JOURNAL, (SOURCE_JOURNAL,), not_in_the_journal),
+            # Before the dispatcher is consulted at all: a sprint that has ended has no observer to
+            # deliver to, and its production record is dropped by the tick, so asking the cursors
+            # would answer `unknown` -- "nobody could say" -- for something that is exactly known.
+            Rule(SOURCE_SPRINTS, (SOURCE_SPRINTS, SOURCE_JOURNAL), sprint_has_ended),
             Rule(SOURCE_LIVENESS, (SOURCE_JOURNAL, SOURCE_LIVENESS), from_dispatcher),
             blank={"state": DELIVERY_UNKNOWN, "reason": None, "batch": None},
+        )
+
+    # -- one close, and what it decided ------------------------------------------------------
+
+    def close(self, read: SourceSet, reference: str, event_id: str) -> Section:
+        """What the committed audit records this close decided, and nothing this layer re-decides.
+
+        The subject is an identifier the write answered with, exactly as a comment's is, and the only
+        thing that may answer is the journal the close's own event landed in. Every field below is
+        copied out of that event: the verdict on each declared issue, the disposition of each card
+        that was not done, what was archived, the closeout the close wrote and where it is. A journal
+        that could not be read leaves `unknown` -- never `absent`, which would be the affirmative
+        claim that this installation never closed the sprint.
+
+        Nothing here says the sprint's Definition of Done was reached; the document carries
+        :data:`secretary.sprint_close.CLOSE_NOT_DONE` beside this section for the reader who might
+        otherwise take `closed` for `done`.
+        """
+
+        def from_journal(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+            event = _close_event(events, reference, event_id)
+            if event is None:
+                return {
+                    **_CLOSE_BLANK,
+                    "id": event_id,
+                    "state": CLOSE_ABSENT,
+                    "reason": f"the committed audit holds no close {event_id} of {reference}",
+                }
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            decisions = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
+            actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+            return {
+                "id": event_id,
+                "state": CLOSE_RECORDED,
+                "occurred_at": str(event.get("occurred_at") or "") or None,
+                "closed_by": str(actor.get("id") or "") or None,
+                "closing_reason": str(payload.get("reason") or "") or None,
+                "issue_decisions": list(decisions.get("issues") or []),
+                "closed_issues": list(payload.get("closed_issues") or []),
+                "card_dispositions": list(decisions.get("cards") or []),
+                "archived_tasks": list(payload.get("archived_tasks") or []),
+                "disposed_tasks": list(payload.get("disposed_tasks") or []),
+                "closeout": _closeout_of(payload.get("closeout")),
+                "reason": f"the committed audit holds this close of {reference}",
+            }
+
+        return read.decide(
+            rule(SOURCE_JOURNAL, from_journal),
+            blank=dict(_CLOSE_BLANK),
+            # `id` is which close the answer would have been about, not a claim about it.
+            narrates=("reason", "id"),
+            unresolved=lambda reading: {
+                **_CLOSE_BLANK,
+                "id": event_id,
+                "reason": reading.source.reason,
+            },
+        )
+
+    def reservations(self, read: SourceSet, reference: str) -> Section:
+        """Which of this sprint's reserved projects the installation still holds for it.
+
+        Two sources and both are needed: the sprint's row says which projects it reserved, and the
+        reserved-project index -- the file the board's own write guard authorises against -- says
+        which of them are still held. Neither can do the other's job, and an index nobody could read
+        is never folded into "released": that would report a successor as admissible on the strength
+        of a file nobody has seen.
+        """
+
+        def from_index(sprint: _Sprint, index: dict[str, list[str]]) -> dict[str, Any] | None:
+            row = sprint[0]
+            if row is None:
+                return None
+            declared = [str(project) for project in row.get("reservations") or []]
+            held = [project for project in declared if reference in (index.get(project) or [])]
+            released = [project for project in declared if project not in held]
+            return {
+                "declared": declared,
+                "released": released,
+                "held": held,
+                "reason": (
+                    f"the reserved-project index still holds {', '.join(held)} for {reference}"
+                    if held
+                    else f"the reserved-project index holds no project for {reference}"
+                ),
+            }
+
+        return read.decide(
+            Rule(SOURCE_RESERVATIONS, (SOURCE_SPRINTS, SOURCE_RESERVATIONS), from_index),
+            blank={"declared": None, "released": None, "held": None, "reason": None},
         )
 
     # -- the catalogue -----------------------------------------------------------------------
@@ -1062,9 +1203,13 @@ class SprintReadLayer(ProtocolBoundary):
             )
         report, installation = self._installation(now=now)
         read = self._read_once(report, installation, self.data_dir(report), now=now)
-        row, _view = _find(read, reference)
+        row, view = _find(read, reference)
         if row is None and read.answered(SOURCE_SPRINTS):
             raise TaskNotFound(f"the board holds no sprint {reference!r}")
+        # Narrowed to this sprint before any section is decided, exactly as a watched sprint is: the
+        # delivery answer turns on whether *this* sprint has ended, and a section handed the whole
+        # board could not tell.
+        read = read.replacing(SOURCE_SPRINTS, (row, view))
         return render(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -1077,6 +1222,53 @@ class SprintReadLayer(ProtocolBoundary):
                 # Not a section, because it is not read from anything: it is this product saying
                 # what its own answer does not mean, and it says it whatever every source did.
                 "acceptance": {"established": False, "issue": ACCEPTANCE_ISSUE, "reason": ACCEPTANCE_NOTICE},
+                **self._marks(read),
+            }
+        )
+
+    def sprint_close_result(self, ref: str, event_id: str) -> dict[str, Any]:
+        """What one close decided and what it left behind, as far as durable state can say.
+
+        The read half of the close scenario, and the answer a
+        :meth:`~secretary.webproto.sprint_ops.SprintOperationLayer.sprint_close` carries back: what
+        was decided for each declared issue and each remaining card, which reservations the
+        installation still holds, where the closeout was written, and the sprint's new status. Each
+        of those comes from the source that owns it -- the committed audit, the reserved-project
+        index and the sprint board -- and they fail apart.
+
+        **It says in one field and one sentence what a close is not.** `definition_of_done` is not a
+        section, because it is not read from anything: it is this product stating that closing a
+        sprint says what became of the work and never that the goal was reached. It says it whatever
+        every source did.
+
+        A read in the full sense: it writes nothing, closes nothing and reopens nothing.
+        """
+        now = self._clock()
+        reference = str(ref or "")
+        if not reference:
+            raise TaskNotFound("a sprint reference is required")
+        identifier = str(event_id or "")
+        if not identifier:
+            raise ValidationRefused(
+                "reading what a close decided needs the identifier the close answered with"
+            )
+        report, installation = self._installation(now=now)
+        read = self._read_once(report, installation, self.data_dir(report), now=now)
+        row, view = _find(read, reference)
+        if row is None and read.answered(SOURCE_SPRINTS):
+            raise TaskNotFound(f"the board holds no sprint {reference!r}")
+        sprint = read.replacing(SOURCE_SPRINTS, (row, view))
+        return render(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "sprint_close_result",
+                "observed_at": sources.isoformat(now),
+                "ref": reference,
+                "event_id": identifier,
+                "close": SECTIONS.close(sprint, reference, identifier),
+                "reservations": SECTIONS.reservations(sprint, reference),
+                "sprint": SECTIONS.sprint(sprint),
+                "definition_of_done": {"satisfied": False, "reason": CLOSE_NOT_DONE},
                 **self._marks(read),
             }
         )
@@ -1164,7 +1356,31 @@ class SprintReadLayer(ProtocolBoundary):
                 ),
                 None,
             )
-        return SourceSet([installation, sprints, cards, journal, liveness])
+        return SourceSet(
+            [installation, sprints, cards, journal, liveness, self._reservations(data_dir, now=now)]
+        )
+
+    def _reservations(self, data_dir: Path, *, now: float) -> Reading:
+        """The reserved-project index, read once for the document like every other source.
+
+        One small file, read with the rest rather than per sprint, and refused rather than answered
+        `{}`: for the write guard "nothing proven reserved" is the safe answer, and for a read that
+        reports which reservations a close released it is the opposite of one.
+        """
+        path = data_dir / "sprints" / "active-repositories.json"
+        try:
+            index = require_active_sprint_projects(data_dir)
+        except _SOURCE_FAILURES as exc:
+            return Reading(
+                SOURCE_RESERVATIONS,
+                sources.unavailable(
+                    f"the reserved-project index could not be read: {_reason(exc)}",
+                    now=now,
+                    evidence=path,
+                ),
+                None,
+            )
+        return Reading(SOURCE_RESERVATIONS, sources.available(now), index)
 
     def _production(self, data_dir: Path, *, now: float) -> Reading:
         """The dispatcher's durable production state, read and classified once for the document.
@@ -1583,6 +1799,57 @@ def _unsettled_reason(read: SourceSet, refusal: str | None) -> str:
         f"{current} stands in {state.replace('_', ' ')}, which is not on its own evidence that "
         f"anything is running on it, and {refused}"
     )
+
+
+#: What the close section says when nothing established it: every claim field at the value that
+#: claims nothing. Declared once because three branches answer with it -- the journal's own "no such
+#: close", a journal nobody could read, and the section's blank -- and a branch that spelled one of
+#: them differently would be claiming something none of them establishes.
+_CLOSE_BLANK: dict[str, Any] = {
+    "id": None,
+    "state": CLOSE_UNKNOWN,
+    "occurred_at": None,
+    "closed_by": None,
+    "closing_reason": None,
+    "issue_decisions": None,
+    "closed_issues": None,
+    "card_dispositions": None,
+    "archived_tasks": None,
+    "disposed_tasks": None,
+    "closeout": None,
+    "reason": None,
+}
+
+
+def _close_event(
+    events: list[dict[str, Any]], reference: str, event_id: str
+) -> dict[str, Any] | None:
+    """The committed close event of this sprint under this identifier, or nothing.
+
+    All three match, for the reason `_comment_event` matches all three: an event id alone would let
+    a caller ask about one sprint's close and be answered about another sprint's write.
+    """
+    if not event_id:
+        return None
+    for event in events:
+        if (
+            str(event.get("event_id") or "") == event_id
+            and str(event.get("ref") or "") == reference
+            and str(event.get("kind") or "") == SPRINT_CLOSED
+        ):
+            return event
+    return None
+
+
+def _closeout_of(plan: Any) -> dict[str, Any] | None:
+    """The closeout a close recorded, as the answer carries it, or `None` when it wrote none."""
+    if not isinstance(plan, dict) or not plan.get("document"):
+        return None
+    return {
+        "document": str(plan.get("document") or ""),
+        "commit": str(plan.get("commit") or "") or None,
+        "written": bool(plan.get("written")),
+    }
 
 
 def _comment_event(

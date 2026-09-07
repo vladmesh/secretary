@@ -54,3 +54,34 @@ def settle_dispatcher_work(data_dir: Any, references: list[str]) -> None:
             for field in ("workspace", "handle", "review_handle", "review_leaf"):
                 record.pop(field, None)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+#: The account of the outcome a close writes into `state/knowledge`. Tests whose subject is
+#: something else pass this; the close tests write their own, because what is in it is their point.
+CLOSEOUT_BODY = (
+    "The sprint delivered its first two cards. The third was superseded and dropped, and the "
+    "findings it raised are deferred rather than fixed. The owner decided to close here rather "
+    "than extend the sprint.\n"
+)
+
+
+def init_state_repo(instance: Any) -> Any:
+    """Make a fixture instance directory the git repository `state/knowledge` needs.
+
+    The knowledge writer commits into the instance repo, so a close that writes its closeout needs
+    one. A fixture that never writes a closeout needs none, which is why this is called by the tests
+    that do rather than by every sprint fixture.
+    """
+    import subprocess
+    from pathlib import Path
+
+    instance = Path(str(instance))
+    for command in (
+        ["init", "--quiet", "--initial-branch", "main"],
+        ["config", "user.name", "operator"],
+        ["config", "user.email", "operator@example.invalid"],
+        ["add", "instance.yaml"],
+        ["commit", "--quiet", "-m", "config"],
+    ):
+        subprocess.run(["git", "-C", str(instance), *command], check=True, capture_output=True)
+    return instance

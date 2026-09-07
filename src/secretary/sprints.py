@@ -97,6 +97,10 @@ _ADMISSION_LOCK = "sprints/admission.lock"
 SPRINT_CREATED = "created"
 SPRINT_REOPENED = "reopened"
 SPRINT_CLOSED = "closed"
+#: The step of a close that writes the sprint's knowledge closeout. Its own audit kind, because it
+#: is its own step: the committed event under the derived request id is the only proof the document
+#: was written, and a retry of the close reads it rather than the repository.
+SPRINT_CLOSEOUT = "closeout_written"
 SPRINT_STATUSES = {"open", "closed", "stopped"}
 # Terminal sprint states reject semantic writes, so their resume freshness is stable.
 SPRINT_TERMINAL_STATUSES = {"closed", "stopped"}
@@ -129,6 +133,25 @@ def _read_guard_index(path: Path) -> dict[str, list[str]] | None:
 
 def sprint_guard_index_initialized(data_dir: str | Path) -> bool:
     return _read_guard_index(Path(data_dir) / _GUARD_INDEX) is not None
+
+
+def require_active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]:
+    """The reserved-project index, or a refusal naming the file that could not answer.
+
+    :func:`active_sprint_projects` answers `{}` for an index that is missing, unreadable or of
+    another version, which is the right answer for the write guard -- nothing is reserved that
+    cannot be proven reserved. A *read* that reports which reservations a close released cannot use
+    it: "this sprint holds no project any more" and "nobody could read the index" are the opposite
+    answers, so this one refuses instead of flattening them together.
+    """
+    index = _read_guard_index(Path(data_dir) / _GUARD_INDEX)
+    if index is None:
+        raise TaskError(
+            "backend_error",
+            f"the reserved-project index {_GUARD_INDEX} is missing, unreadable or of another version",
+            1,
+        )
+    return index
 
 
 def refresh_active_sprint_projects(data_dir: str | Path, reader: Any) -> None:
@@ -1862,12 +1885,26 @@ class SprintWriter:
         reference: str,
         decisions: dict[str, list[dict[str, str]]] | None = None,
         request_id: str | None = None,
+        reason: str = "",
+        closeout: str = "",
     ) -> dict[str, Any]:
         """Close a sprint on decisions its caller states, not on decisions inferred here.
 
         What became of every declared issue and every card still in a working state are both stated by
         the caller and checked before the transaction opens; a close short of a decision writes nothing
         and names what is missing.
+
+        `reason` is why the owner is closing this sprint, and `closeout` is the account of what became
+        of the work that this close writes into `state/knowledge` as a step of its own terminal phase.
+        Neither is inferred: the closeout's prose is the closing PO's, and what this writer owns is the
+        document's path, its link to this sprint and the fact that it is written exactly once. A close
+        made with no closeout writes none -- the operation
+        (:meth:`secretary.webproto.sprint_ops.SprintOperationLayer.sprint_close`) is where a closing
+        PO is required to state one, so that the many callers that merely need a closed sprint are not
+        made to invent an account of one.
+
+        Neither field makes a close a completed Definition of Done. See
+        :data:`secretary.sprint_close.CLOSE_NOT_DONE`.
 
         The whole close runs under the admission gate every opening of a sprint takes, and that is the
         invariant it exists for: between the moment this sprint is published `closed` and the moment its
@@ -1889,9 +1926,13 @@ class SprintWriter:
                     intent=intent,
                 )
                 if committed is not None:
+                    self._check_completed_close(
+                        committed, decisions, reason=reason, closeout=closeout
+                    )
                     return self._close_result(committed)
                 if document is not None:
                     self._check_staged_decisions(document, decisions)
+                    self._check_staged_closeout(document, reason=reason, closeout=closeout)
                 if document is None:
                     from secretary.sprint_close import plan_close_decisions
 
@@ -1914,6 +1955,10 @@ class SprintWriter:
                         request_id,
                         {
                             "intent": intent,
+                            "reason": str(reason or ""),
+                            "closeout": self._plan_closeout(
+                                sprint, plan, actor=actor, reason=reason, closeout=closeout
+                            ),
                             "targets": targets,
                             "archived_tasks": [],
                             "remaining_tasks": list(targets["remaining"]),
@@ -2091,10 +2136,144 @@ class SprintWriter:
         payload["conflicts"] = [item for item in (payload.get("conflicts") or []) if item not in amended]
         self.transactions.save(document)
 
+    def _check_completed_close(
+        self,
+        committed: dict[str, Any],
+        decisions: dict[str, list[dict[str, str]]] | None,
+        *,
+        reason: str,
+        closeout: str,
+    ) -> None:
+        """A repeat of a *finished* close carries what that close was made with, or it is refused.
+
+        The same rule the staged retry is held to, at the other end of the transaction: a request id
+        is the key of one close, and a repeat naming other decisions, another reason or another
+        account of the outcome is a new close and never a second answer about this one. Repeating the
+        id with nothing is the ordinary idempotent repeat and is answered from the record.
+        """
+        payload = committed.get("payload") if isinstance(committed.get("payload"), dict) else {}
+        staged = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
+        if decisions is not None:
+            sections = ("issues", "cards")
+            offered = {
+                section: sorted(decisions.get(section) or [], key=lambda entry: entry.get("ref", ""))
+                for section in sections
+            }
+            if offered != {section: list(staged.get(section) or []) for section in sections}:
+                self._refuse_restated_decisions()
+        self._check_staged_closeout({"event": committed}, reason=reason, closeout=closeout)
+
     def _refuse_restated_decisions(self) -> None:
         raise TaskError(
             "validation",
             "this request id was staged with other decisions; retry it with the same file",
+            2,
+        )
+
+    def _plan_closeout(
+        self,
+        sprint: dict[str, Any],
+        plan: dict[str, list[dict[str, str]]],
+        *,
+        actor: str,
+        reason: str,
+        closeout: str,
+    ) -> dict[str, Any] | None:
+        """Freeze the closeout this close will write, before the transaction opens.
+
+        Frozen and not composed per attempt: the document's path carries the day the close was
+        staged, so a retry tomorrow writes the same document rather than a second one beside it, and
+        the text is the one the decisions were staged with. What the caller supplies is the account
+        of what became of the work; what this composes around it is what only the close knows -- the
+        sprint, the reason it was closed, and every verdict and disposition of the plan.
+
+        A close made with no closeout writes none. Requiring one belongs to the operation, where a
+        closing PO is the caller; requiring it here would make every caller that merely needs a
+        closed sprint invent an account of one.
+        """
+        if not str(closeout or "").strip():
+            return None
+        from secretary.sprint_close import closeout_document, closeout_path
+
+        reference = str(sprint["ref"])
+        document = closeout_path(reference, day=_now()[:10])
+        text = closeout_document(
+            reference=reference,
+            goal=str(sprint.get("goal") or ""),
+            actor=actor,
+            reason=str(reason or ""),
+            body=str(closeout),
+            decisions=plan,
+        )
+        self._check_closeout_is_writable(document, text, actor=actor)
+        return {
+            "document": document,
+            "text": text,
+            # The digest of the body the caller supplied, and what a retry is compared against. The
+            # composed text is not that comparison: the body sits inside it, so a *substring* of the
+            # staged prose -- an edited, shortened closeout -- would pass a containment test and the
+            # caller would be told the close succeeded with prose no document ever carried. The
+            # digest is the shape `SprintWriter.comment` already uses for the same question.
+            "body_sha256": _digest(str(closeout)),
+            "written": False,
+            "commit": "",
+        }
+
+    def _check_closeout_is_writable(self, document: str, text: str, *, actor: str) -> None:
+        """Refuse a closeout this installation cannot write, before anything is written.
+
+        Asked here it names what is missing and leaves the sprint open; asked in the terminal phase,
+        the same refusal would be a transaction to repair. The rules are the knowledge writer's own
+        -- `check_knowledge_document` is its preflight, not a second copy of it.
+        """
+        from secretary.knowledge_write import KnowledgeError, check_knowledge_document
+        from secretary.state_repo import StateRepoError
+
+        if self.instance is None:
+            raise TaskError(
+                "validation",
+                "writing the sprint's closeout needs the instance directory; pass --instance",
+                2,
+            )
+        try:
+            check_knowledge_document(self._instance_dir(), document=document, actor=actor, text=text)
+        except (KnowledgeError, StateRepoError) as exc:
+            raise TaskError("validation", f"sprint close cannot write its closeout: {exc}", 2) from None
+
+    def _instance_dir(self) -> Path:
+        """The installation directory the closeout is written into, however the caller named it."""
+        instance = Path(str(self.instance))
+        return instance.parent if instance.is_file() else instance
+
+    def _check_staged_closeout(self, document: dict[str, Any], *, reason: str, closeout: str) -> None:
+        """A retry of a staged close carries the closeout that close was staged with.
+
+        The ordinary recovery call states neither -- it repeats the request id and nothing else --
+        and it is the retry this exists for. What is refused is a repeat that reuses the id over a
+        *different* account of what became of the work, exactly as a repeat over different decisions
+        is refused: a request id is the key of one close, not a way to rewrite the record of one.
+        """
+        payload = (document.get("event") or {}).get("payload") or {}
+        # A close staged by a release that had neither field is retried, not refused: it carries no
+        # reason and no closeout to compare against, and it finishes as the close it was begun as.
+        if "closeout" not in payload and "reason" not in payload:
+            return
+        staged = payload.get("closeout")
+        body = str(closeout or "").strip()
+        if str(reason or "") and str(reason) != str(payload.get("reason") or ""):
+            self._refuse_restated_closeout()
+        if not body:
+            return
+        # Exactly, and never by containment: the supplied body against the digest of the body this
+        # close was staged with. A staged plan carrying no digest cannot answer the question, and
+        # the safe answer to "is this the same closeout" that nothing can establish is no.
+        if not isinstance(staged, dict) or staged.get("body_sha256") != _digest(str(closeout)):
+            self._refuse_restated_closeout()
+
+    def _refuse_restated_closeout(self) -> None:
+        raise TaskError(
+            "validation",
+            "this request id was staged with another closeout or reason; retry it with the same one",
             2,
         )
 
@@ -2176,6 +2355,7 @@ class SprintWriter:
                     self.transactions.save(document)
             # Publish closed last so unfinished closes retain project reservations.
             self._dispose_remaining_cards(document, event, payload, decisions or {})
+            self._write_closeout(document, event, payload)
             sprint = self.reader.show(str(event["ref"]), include_cards=False)
             typed_request_id = str(document["request_id"]) + ":typed-close"
             typed_pending = self.audit.pending_event(typed_request_id)
@@ -2386,7 +2566,76 @@ class SprintWriter:
                 disposed.append(reference)
                 self.transactions.save(document)
 
+    def _write_closeout(
+        self, document: dict[str, Any], event: dict[str, Any], payload: dict[str, Any]
+    ) -> None:
+        """Write this close's knowledge closeout, once, as a step of its terminal phase.
+
+        A step exactly like the issue verdicts and the dispositions beside it: it runs under its own
+        request id derived from the close's, that id's committed event is the only proof it happened,
+        and a retry of the close drives the same id rather than writing a second document. The write
+        itself is :func:`secretary.knowledge_write.write_knowledge_document` -- the one writer of
+        `state/knowledge` -- and this adds no second one.
+
+        It runs before the status is published, so the order the close already holds is unchanged: an
+        interrupted close still leaves the sprint open and still holds its reservations, and a sprint
+        that reads `closed` has its closeout written.
+
+        The document says what became of the work. It does not say the Definition of Done was
+        reached: :data:`secretary.sprint_close.CLOSE_NOT_DONE` is written into it.
+        """
+        plan = payload.get("closeout")
+        if not isinstance(plan, dict) or not plan.get("document"):
+            return
+        reference = str(event["ref"])
+        step_request_id = _close_step_request_id(str(document["request_id"]), "closeout", reference)
+        if self._close_step_status(step_request_id) == "done":
+            return
+        from secretary.knowledge_write import KnowledgeError, write_knowledge_document
+
+        actor = str(document["intent"]["actor"])
+        self._check_closeout_is_writable(str(plan["document"]), str(plan["text"]), actor=actor)
+        # Durable before the write, as the marker is before the first issue write: from here on a
+        # refusal is `audit_pending` with the staged plan retained, never a discarded close.
+        document.setdefault("progress", {})["closeout_started"] = True
+        self.transactions.save(document)
+        step = self._event(
+            SPRINT_CLOSEOUT,
+            str(document["intent"]["role"]),
+            actor,
+            reference,
+            step_request_id,
+            {
+                "close_request_id": str(document["request_id"]),
+                "document": str(plan["document"]),
+                "commit": "",
+            },
+            self.reader.show(reference, include_cards=False),
+        )
+        self.audit.stage(step_request_id, step)
+        try:
+            written = write_knowledge_document(
+                self._instance_dir(),
+                document=str(plan["document"]),
+                actor=actor,
+                text=str(plan["text"]),
+            )
+        except KnowledgeError as exc:
+            raise TaskError("backend_error", f"sprint close could not write its closeout: {exc}", 1) from None
+        step["payload"]["commit"] = written.commit
+        # Whether *this* attempt added the document to the history. A retry of a close whose write
+        # landed and whose journal write did not finds the same content on disk and commits nothing.
+        step["payload"]["changed"] = bool(written.changed)
+        self.audit.stage(step_request_id, step)
+        self.audit.append(step_request_id, step)
+        self._require_close_step_settled(step_request_id)
+        plan["written"] = True
+        plan["commit"] = written.commit
+        self.transactions.save(document)
+
     def _close_result(self, event: dict[str, Any]) -> dict[str, Any]:
+        from secretary.sprint_close import CLOSE_NOT_DONE
+
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         decisions = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
         return {
@@ -2399,6 +2648,11 @@ class SprintWriter:
             "closed_issues": list(payload.get("closed_issues") or []),
             "card_dispositions": list(decisions.get("cards") or []),
             "disposed_tasks": list(payload.get("disposed_tasks") or []),
+            "reason": str(payload.get("reason") or ""),
+            "closeout": _closeout_result(payload.get("closeout")),
+            # Said on the answer and not only in the documentation: a caller reading this result is
+            # exactly the reader who might otherwise take `closed` for `done`.
+            "definition_of_done": {"satisfied": False, "reason": CLOSE_NOT_DONE},
         }
 
     def reopen(
@@ -2708,8 +2962,19 @@ class SprintWriter:
                 )
             return self._pending(kind, pending)
         sprint = self.reader.show(reference)
+        # A closed or stopped sprint takes no further *semantic* work: no current card is set on it
+        # and no observer resume is recorded against it, because both are statements about work in
+        # progress under a contract that has ended.
+        #
+        # A comment is not that, and it is admitted (issue:9eee1d8ee505bc4ecdc2). Adding the outcome
+        # to a sprint after it closed is what a PO does, and refusing it here is what sent one
+        # reaching past this protocol into the board's own `createComment` more than once. It
+        # changes nothing else: the status is untouched, the sprint is not reopened, `closed` is not
+        # an open sprint's status so `update_active_sprint_projects` restores no reservation, and
+        # the tick has already stopped the observer of a sprint that is no longer open -- so there
+        # is no head to wake and no delivery batch that can carry it. `sprint_comment_delivery` says
+        # exactly that rather than implying a delivery that cannot happen.
         if sprint["status"] in {"closed", "stopped"} and kind in {
-            "commented",
             "current_task_set",
             "resume_recorded",
         }:
@@ -2828,6 +3093,22 @@ def _close_progressed(document: dict[str, Any], payload: dict[str, Any]) -> bool
     if document.get("progress"):
         return True
     return any(payload.get(step) for step in _CLOSE_PROGRESS_STEPS)
+
+
+def _closeout_result(plan: Any) -> dict[str, Any] | None:
+    """What a close answers with about its closeout: where it is, and that it was written once.
+
+    `None` is a close made with no closeout at all, and it is never spelled the same way as a
+    closeout that was written: "this close wrote no document" and "this document is the record of
+    this close" are different facts about the sprint.
+    """
+    if not isinstance(plan, dict) or not plan.get("document"):
+        return None
+    return {
+        "document": str(plan.get("document") or ""),
+        "commit": str(plan.get("commit") or ""),
+        "written": bool(plan.get("written")),
+    }
 
 
 def _close_step_request_id(request_id: str, step: str, reference: str) -> str:

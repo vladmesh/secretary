@@ -763,9 +763,9 @@ for a retry — a second run with no id is a second comment. A repeat that reuse
 *different* body, sprint, role or actor is refused with `validation` and exit `2`, deliberately:
 answering it with the first comment's result would tell you a comment was saved that was not.
 
-A closed or stopped sprint refuses a comment: exit `3` with `owner_conflict`, the status this
-command has always given it. That refusal is unchanged, and commenting after a close is a separate
-scenario.
+A closed or stopped sprint takes a comment too: exit `0`, saved and audited, and nothing else about
+the sprint moves. That is how the outcome is added after the fact — see
+[Commenting after the close](#commenting-after-the-close).
 
 ### Reading what happened to that comment
 
@@ -789,6 +789,7 @@ Three parts of the document, and they answer three different questions:
    | `waiting` | a batch carrying it is held for a busy head, or was sent and is not acknowledged | wait; `batch.stage` says which |
    | `handed_over` | the batch carrying it was acknowledged by the observer head | nothing — but read the limit below |
    | `error` | that batch failed and is deferred for retry; `delivery.reason` carries the recorded failure | the dispatcher retries it; investigate the head if the counts in `batch` keep climbing |
+   | `not_deliverable` | the sprint is closed or stopped, so no batch will ever carry it | nothing; the comment is saved and there is no head to deliver to |
    | `unknown` | the production state could not be read, holds no observer record for this sprint, or holds a cursor the audit cannot place | find out which from `delivery.source` and `delivery.reason` before concluding anything |
 
    `unknown` is never one of the other four. "Nobody could say where this comment is" and "it is
@@ -811,6 +812,86 @@ yourself.
 One more limit worth knowing: only a `po` comment on the entity is a semantic wake. A comment written
 by another role is carried when a later significant event moves the cursor past it, and this command
 reports that relation truthfully rather than pretending a batch was raised for it.
+
+## Closing a sprint
+
+One command ends a sprint, and it is the same protocol operation everything else in this chapter goes
+through. Before running it, write two files.
+
+**The decisions file** states what became of every issue the sprint declared and every card it still
+holds outside Done. Neither follows from the close, and a close short of one is refused before anything
+is written, naming what is missing. Its shape and its whole vocabulary are in
+[Protocols](PROTOCOLS.md#the-decisions-a-close-carries).
+
+```yaml
+issues:
+  - ref: issue:1445748c5a2508769ef5
+    verdict: resolved
+    reason: the sprint's own cards landed it
+  - ref: issue:9eee1d8ee505bc4ecdc2
+    verdict: open
+    reason: not reached before the sprint ended
+cards:
+  - ref: secretary-1573
+    verdict: drop
+    reason: superseded by secretary-1577
+```
+
+**The closeout file** is the account of what became of the work: what was achieved, what is left
+unfinished, and the decision you made about the remainder. The close writes it into `state/knowledge`
+and links it to the sprint. It is prose, and it is yours — nothing generates it, and the operation
+adds only the sprint, your reason, and every verdict and disposition around it.
+
+```bash
+python3 -P -m secretary sprint close --role po --actor <actor> --ref sprint:1431   --request-id close-2026-09-07-1431   --reason "the goal is reached far enough to cut the next sprint; the rest is deferred"   --decisions-file DECISIONS.yaml --closeout-file CLOSEOUT.md
+```
+
+What comes back is one JSON document. `result.close` carries the verdict on each declared issue and
+which of them were closed, the disposition of each card and which were archived, and the closeout's
+path and commit; `result.reservations` says which of the sprint's projects the installation still holds
+for it (`released` is what a successor sprint may now take, `held` should be empty); `result.sprint`
+carries the new status; and `event_id` is the identifier to keep.
+
+**A close is not a completed Definition of Done.** The document says so in `definition_of_done`, and the
+closeout says so in its first paragraph. Closing states what became of the work; whether the goal was
+reached is what your decisions and your closeout say, and a closed sprint is not on its own a satisfied
+contract.
+
+**`--request-id` is the retry handle, and here it matters more than anywhere else.** A close is a
+transaction with several steps, and if it stops halfway the answer is exit `4` with an action telling
+you to repeat *this* request id. Do that — the same command, unchanged. The retry resumes the same
+close: it repeats no step whose own event is already committed, writes no second closeout, and finishes
+what is left. A new request id would start a second close beside the half-finished one. A repeat that
+states other decisions, another reason or another closeout is refused with `validation` and exit `2`.
+
+The other refusals, and what each one wants from you:
+
+| exit | code | what happened | what to do |
+| --- | --- | --- | --- |
+| `2` | `validation` | a decision is missing, a ref is unknown, a decision contradicts what the issue or card actually is, or the closeout cannot be written into `state/knowledge` | fix the file the message names and run the same command again |
+| `3` | `owner_conflict` (`live_work`) | a card you are disposing of still has a head running on it | settle that head, then repeat the close |
+| `3` | `owner_conflict` (`close_conflict`) | somebody else closed an issue or moved a card while this close ran | amend exactly those entries to the confirmation of what happened (`already_closed` / `already_moved`, naming the fact in `actual`) and repeat the same request id |
+| `4` | pending | the close is part-done and durably repairable | repeat the same request id |
+
+**What the close does about the observer: nothing.** It releases the reservations and stops no head.
+The observer of a sprint that is no longer open is ended by the production tick, which reconciles its
+observer records against the sprint board and stops the head and drops the record. So after a close,
+let one tick run and confirm with `secretary sprint status --ref sprint:ID` that the observer reads
+`ended`. Its workspace terminals go with the head.
+
+Read the result back at any time:
+
+```bash
+python3 -P -m secretary sprint close-result --ref sprint:1431 --event-id evt_<...>
+```
+
+### Commenting after the close
+
+`secretary sprint comment` works on a closed or stopped sprint, and that is the supported way to add
+the outcome after the fact. It saves and audits the comment and does nothing else: the status is
+unchanged, the sprint is not reopened, no reservation comes back, and no head is woken or launched —
+there is none, because the tick stopped it. `sprint comment-delivery` answers `not_deliverable` for
+such a comment rather than `saved`, because `saved` would suggest a delivery that is still coming.
 
 ## The two-sprint pilot
 
@@ -937,8 +1018,9 @@ whole restore with `restored open sprints are not admissible on this installatio
 
 So the procedure is:
 
-1. close the second sprint first: `python3 -P -m secretary sprint close --role po --ref sprint:ID
-   --decisions-file DECISIONS.yaml`, whose decisions cover every issue that sprint declared and every
+1. close the second sprint first, as [Closing a sprint](#closing-a-sprint) describes: `python3 -P -m
+   secretary sprint close --role po --ref sprint:ID --reason ... --decisions-file DECISIONS.yaml
+   --closeout-file CLOSEOUT.md`, whose decisions cover every issue that sprint declared and every
    card of it outside Done. Its terminal Done cards are archived, each disposed card is taken into the
    end its disposition names, and its reservations are released.
 2. confirm with `python3 -P -m secretary sprint list --status open` that exactly one sprint is open.
