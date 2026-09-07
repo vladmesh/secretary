@@ -62,6 +62,12 @@ def add_restore_subcommands(subparsers) -> None:
     )
     migrate_assessment.add_argument("--instance", required=True)
     migrate_assessment.set_defaults(handler=run_board_migrate_assessment)
+    # `secretary board` is one group, and the PostgreSQL store's import belongs in it rather
+    # than in a second top-level command with the same word.  It is registered from its own
+    # module so this one keeps knowing nothing about the store.
+    from secretary.board.import_commands import add_board_store_subcommands
+
+    add_board_store_subcommands(live_board_subcommands)
     live_board.set_defaults(handler=_board_subcommand_required)
 
     reconcile = subparsers.add_parser("restore-reconcile", help="verify live managed reconcile after restore")
