@@ -25,6 +25,7 @@ from secretary.backup_policy import (
     should_skip_data_entry,
 )
 from secretary.backup_verify import _verify_plain_tar
+from secretary.board.backend import CARD, SPRINT, board_client, entity_number
 from secretary.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
 from secretary.config import DataDirError, instance_data_dir, validate_instance
 from secretary.data import init_layout
@@ -83,6 +84,19 @@ _PRODUCT_ISSUE_METADATA = (
 )
 
 
+def _entity_number(kind: str, identity: object) -> int:
+    """A restored row's backend number, read through the one identity parser.
+
+    `board/backend.py` mints `<kind>_<backend>_<n>` and reads it back; restore used to strip one
+    literal prefix and hand whatever remained to `int()`, which raised `ValueError` rather than a
+    restore refusal on any identity it did not recognise.
+    """
+    number = entity_number(kind, identity)
+    if number is None:
+        raise RestoreError(f"restored row carries no usable {kind} identity: {identity!r}")
+    return number
+
+
 def restore_state(data_dir: Path) -> dict[str, Any]:
     """Read the derived restore progress record without treating it as canon."""
     try:
@@ -113,7 +127,9 @@ def import_normalized_board(
             if client is None:
                 if instance is None:
                     raise RestoreError("restore requires the target instance to bind its board")
-                client = KanboardClient.for_instance(instance)
+                # Restore drives cards and sprints through one client, so it asks the switch
+                # for both: a backend that holds only cards cannot carry this operation.
+                client = board_client(instance, serves=(CARD, SPRINT))
             reader = TaskReader(client)
             writer = TaskWriter(client, data_dir=data_dir)
             _, unresolved = writer.reconcile(defer_restore_comments=True, defer_bulk_restore=True)
@@ -273,7 +289,7 @@ def _restore_card_comments_batched(
         current = live.get(reference)
         if current is None:
             raise RestoreError(f"restored card disappeared before comment recovery: {reference}")
-        task_id = int(str(current["id"]).removeprefix("task_kanboard_"))
+        task_id = _entity_number("task", current["id"])
         occurrences: dict[str, int] = {}
         for index, body in enumerate(_restore_comments(card)):
             occurrence = occurrences.get(body, 0)
@@ -414,7 +430,7 @@ def _restore_sprint_comments_batched(
         current = live.get(reference)
         if current is None:
             raise RestoreError(f"restored sprint disappeared before comment recovery: {reference}")
-        task_id = int(str(current["id"]).removeprefix("sprint_kanboard_"))
+        task_id = _entity_number("sprint", current["id"])
         occurrences: dict[str, int] = {}
         for index, body in enumerate(str(entry["text"]) for entry in sprint["comments"]):
             occurrence = occurrences.get(body, 0)

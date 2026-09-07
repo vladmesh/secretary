@@ -10,6 +10,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
+from secretary.board.backend import KANBOARD, entity_id
 from secretary.tasks import (
     _STATE_BY_COLUMN,
     ACTIVE_STATES,
@@ -275,7 +276,7 @@ def apply_reference_repair(
                     "actor": {"role": "po", "id": actor},
                     "kind": REPAIR_KIND,
                     "outcome": "success",
-                    "task_id": f"task_kanboard_{task_id}",
+                    "task_id": entity_id("task", KANBOARD, task_id),
                     "ref": item["new_reference"],
                     "backend": {"kind": "kanboard", "task_id": task_id, "revision": "pending"},
                     "request_id": rid,

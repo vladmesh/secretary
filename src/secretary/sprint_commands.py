@@ -24,11 +24,12 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from secretary.board.backend import SPRINT, board_client
 from secretary.config import ConfigError, load_config
 from secretary.sprint_observer import observer_choice
 from secretary.sprints import BUDGET_RECORDED_EVENT_TYPES, SprintReader, SprintWriter
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
-from secretary.tasks import KanboardClient, TaskError
+from secretary.tasks import TaskError
 from secretary.webproto.commands import (
     _EXIT_BY_CODE,
     _RUN_EXIT_BY_CODE,
@@ -205,7 +206,9 @@ def _read(
 ) -> int:
     try:
         result = operation(
-            SprintReader(KanboardClient.for_instance(args.instance), data_dir=data_dir, thresholds=thresholds)
+            SprintReader(
+                board_client(args.instance, serves=(SPRINT,)), data_dir=data_dir, thresholds=thresholds
+            )
         )
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
@@ -218,7 +221,7 @@ def _write(args: argparse.Namespace, operation: Callable[[SprintWriter], object]
     try:
         result = operation(
             SprintWriter(
-                KanboardClient.for_instance(args.instance),
+                board_client(args.instance, serves=(SPRINT,)),
                 data_dir=resolve_data_dir(args),
                 thresholds=_thresholds(args),
                 instance=getattr(args, "instance", None) or None,

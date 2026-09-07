@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.store import BoardStoreCredentials
+from secretary.tasks import TaskError
 
 #: The seven columns of the Pipeline board, in board order.  Their ids are this module's, not
 #: Kanboard's: nothing outside the client may depend on the number, only on the title.
@@ -106,8 +107,52 @@ _METADATA_TIMESTAMP = ("quota_snapshot_at", "quota_snapshot_at")
 _METADATA_LINKS = ("retry_heads", "blocked_by", "supersedes")
 
 
-class SqlCardError(RuntimeError):
-    """The store cannot answer this board question without guessing."""
+class SqlCardError(TaskError):
+    """The store cannot answer this board question without guessing.
+
+    A `TaskError`, not a bare `RuntimeError`: every command above this client renders that one
+    vocabulary as a named refusal with an exit status (`task_commands.run_task_command`), and a
+    `RuntimeError` reaching a CLI handler is a traceback with a connection string somewhere up
+    the stack.  The code is the one Kanboard's own malformed-reply refusals already use.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__("backend_error", message, 1)
+
+
+def _driver_error(action: str, exc: BaseException) -> TaskError:
+    """One driver failure, in the refusal vocabulary the CLI already prints.
+
+    Three classes and each keeps its own name.  A driver that is not installed at all, and a
+    server that will not accept or keep a connection, are `backend_unavailable` — the code the
+    Kanboard transport already uses for exactly that, and the one `board/kanboard.py` treats as
+    "the effect may or may not have landed".  Everything else psycopg raises — a constraint, a
+    type, a statement the schema refuses — is `backend_error`.  What PostgreSQL said is carried
+    through, and only that: psycopg's diagnostics do not contain the connection string, so an
+    operator gets the reason without the credentials.
+    """
+    if isinstance(exc, ModuleNotFoundError):
+        return TaskError("backend_unavailable", f"the board store driver is not installed: {exc}", 1)
+    import psycopg
+
+    if isinstance(exc, psycopg.OperationalError):
+        return TaskError(
+            "backend_unavailable", f"the board store is unreachable while it must {action}: {exc}", 1
+        )
+    return TaskError("backend_error", f"the board store refused to {action}: {exc}", 1)
+
+
+@contextlib.contextmanager
+def _translated(action: str) -> Iterator[None]:
+    """`_driver_error`, applied to everything the driver raises inside the block."""
+    try:
+        import psycopg
+    except ModuleNotFoundError as exc:
+        raise _driver_error(action, exc) from None
+    try:
+        yield
+    except psycopg.Error as exc:
+        raise _driver_error(action, exc) from None
 
 
 def _text(value: Any) -> str:
@@ -175,14 +220,16 @@ class SqlCardClient:
     @property
     def connection(self) -> Any:
         if self._connection is None:
-            import psycopg
+            with _translated("open a connection"):
+                import psycopg
 
-            self._connection = psycopg.connect(self.credentials.conninfo(), autocommit=False)
+                self._connection = psycopg.connect(self.credentials.conninfo(), autocommit=False)
         return self._connection
 
     def close(self) -> None:
         if self._connection is not None:
-            self._connection.close()
+            with _translated("close its connection"):
+                self._connection.close()
             self._connection = None
 
     @contextlib.contextmanager
@@ -204,25 +251,32 @@ class SqlCardClient:
         self._depth = 1
         try:
             yield
-        except BaseException:
-            self.connection.rollback()
+        except BaseException as failure:
+            # A rollback that itself fails must not hide what it was rolling back, so the
+            # original failure stays the cause of the refusal the caller sees.
+            try:
+                self.connection.rollback()
+            except Exception as exc:  # noqa: BLE001 - every driver failure becomes one refusal.
+                raise _driver_error("roll back", exc) from failure
             raise
         else:
-            self.connection.commit()
+            with _translated("commit"):
+                self.connection.commit()
         finally:
             self._depth = 0
 
     def _commit_unless_nested(self) -> None:
         if not self._depth:
-            self.connection.commit()
+            with _translated("commit"):
+                self.connection.commit()
 
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
-        with self.connection.cursor() as cursor:
+        with _translated("answer a read"), self.connection.cursor() as cursor:
             cursor.execute(sql, params)
             return cursor.fetchall()
 
     def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> int:
-        with self.connection.cursor() as cursor:
+        with _translated("apply a write"), self.connection.cursor() as cursor:
             cursor.execute(sql, params)
             return cursor.rowcount
 

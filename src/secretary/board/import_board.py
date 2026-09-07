@@ -358,7 +358,13 @@ def read_transaction_documents(data_dir: Path | None) -> list[dict[str, Any]]:
 
 
 def read_source(instance: str | Path, *, data_dir: str | Path | None = None) -> BoardSource:
-    """One read of everything, so a dry run and a real run describe the same board."""
+    """One read of everything, so a dry run and a real run describe the same board.
+
+    The client is Kanboard-only **by statement, not by default**: the importer's whole subject is
+    the Kanboard board it copies *into* the store, so consulting `SECRETARY_CARD_BACKEND`
+    (`board/backend.py`) here would ask the destination to be the source.  An import run under a
+    `postgres` switch still reads Kanboard, and that is correct rather than an oversight.
+    """
     instance_path = Path(instance).expanduser()
     client = KanboardClient.for_instance(instance_path)
     pipeline, columns, swimlanes = _board_rows(client, PIPELINE_BOARD_NAME)

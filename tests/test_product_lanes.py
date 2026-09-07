@@ -358,7 +358,7 @@ class ProductLaneReconcileTests(unittest.TestCase):
 
     def test_the_command_plans_by_default_and_writes_only_with_apply(self) -> None:
         with mock.patch(
-            "secretary.product_issue_commands.KanboardClient.for_instance", return_value=self.client
+            "secretary.tasks.KanboardClient.for_instance", return_value=self.client
         ):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):

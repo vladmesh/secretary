@@ -9,6 +9,8 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
 
+from secretary.board.backend import KANBOARD, entity_id, entity_number
+
 
 @dataclass(frozen=True)
 class RestoreCommentOccurrence:
@@ -33,6 +35,13 @@ class RestoreCardObligation:
     swimlane_id: int
     identity: dict[str, Any]
 
+
+def _entity_number(kind: str, identity: object) -> int:
+    """A live row's backend number, read through `board/backend.py`'s one identity parser."""
+    number = entity_number(kind, identity)
+    if number is None:
+        raise RuntimeError(f"restored row carries no usable {kind} identity: {identity!r}")
+    return number
 
 def _set_restore_phase(client: Any, phase: str) -> None:
     """Expose restore phase boundaries to an optional benchmark observer."""
@@ -308,7 +317,7 @@ def restore_cards_batched(
             )
         event = writer.audit.pending_event(item.request_id)
         if event is not None:
-            event["task_id"] = f"task_kanboard_{task_id}"
+            event["task_id"] = entity_id("task", KANBOARD, task_id)
             event["backend"]["task_id"] = task_id
             event["backend"]["revision"] = "initialized"
             writer.audit.stage(item.request_id, event)
@@ -328,7 +337,7 @@ def close_restored_cards_batched(
     for card in cards:
         row = live[str(card["reference"])]
         if card.get("closed") and not row.get("closed"):
-            task_id = int(str(row["id"]).removeprefix("task_kanboard_"))
+            task_id = _entity_number("task", row["id"])
             entries.append((card, "closeTask", {"task_id": task_id}))
     if not entries:
         return
@@ -356,7 +365,7 @@ def close_restored_cards_batched(
         reference = next(
             str(card["reference"])
             for card in cards
-            if int(str(live[str(card["reference"])]["id"]).removeprefix("task_kanboard_")) == incomplete[0]
+            if _entity_number("task", live[str(card["reference"])]["id"]) == incomplete[0]
         )
         if definite_failure:
             raise TaskError("backend_error", f"Kanboard rejected restored-card closure for {reference}", 1)
@@ -380,8 +389,8 @@ def commit_restored_cards(
         event = writer.audit.pending_event(request_id)
         if event is None or event.get("kind") != "restored_bulk":
             raise RuntimeError(f"restored card has no durable obligation: {reference}")
-        task_id = int(str(live[reference]["id"]).removeprefix("task_kanboard_"))
-        event["task_id"] = f"task_kanboard_{task_id}"
+        task_id = _entity_number("task", live[reference]["id"])
+        event["task_id"] = entity_id("task", KANBOARD, task_id)
         event["backend"]["task_id"] = task_id
         event["backend"]["revision"] = "initialized:" + str(event["payload"]["content_sha256"])
         writer.audit.stage(request_id, event)
@@ -624,7 +633,7 @@ def _restore_comment_event(writer: Any, item: RestoreCommentOccurrence, now: Any
         if body is not None and body != item.body:
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
         return pending
-    prefix = "sprint_kanboard_" if item.entity == "sprint" else "task_kanboard_"
+    kind = "sprint" if item.entity == "sprint" else "task"
     return {
         "event_id": "evt_" + uuid.uuid4().hex,
         "schema_version": 1,
@@ -632,7 +641,7 @@ def _restore_comment_event(writer: Any, item: RestoreCommentOccurrence, now: Any
         "actor": {"role": "steward", "id": "restore"},
         "kind": "restored_comment",
         "outcome": "success",
-        "task_id": f"{prefix}{item.task_id}",
+        "task_id": entity_id(kind, KANBOARD, item.task_id),
         "ref": item.reference,
         "backend": {"kind": "kanboard", "task_id": item.task_id, "revision": "pending"},
         "request_id": item.request_id,
@@ -784,7 +793,7 @@ def reconcile_restore_order(
             "actor": {"role": "steward", "id": "restore"},
             "kind": "restored_order",
             "outcome": "success",
-            "task_id": f"task_kanboard_{task_id}",
+            "task_id": entity_id("task", KANBOARD, task_id),
             "ref": references[0],
             "backend": {"kind": "kanboard", "task_id": task_id, "revision": "pending"},
             "request_id": request_id,

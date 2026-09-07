@@ -102,7 +102,26 @@ def card_backend_status() -> dict[str, object]:
     }
 
 
-def card_client(instance_dir: object, *, role: str = "app"):
+#: What a caller asks the switch to serve.  Only `CARD` has a second implementation today; the
+#: other two are Kanboard boards until their own card builds them, and a `postgres` switch says
+#: so rather than handing back a Kanboard client as if the switch had not been read.
+CARD = "card"
+SPRINT = "sprint"
+PRODUCT_ISSUE = "product/issue"
+
+#: Which of those the PostgreSQL implementation answers.  A caller that needs anything else is
+#: refused by name, because a silent Kanboard client under a `postgres` switch is the same
+#: "decided by default" defect the switch exists to remove.
+POSTGRES_SERVES = frozenset({CARD})
+
+
+def board_client(
+    instance_dir: object,
+    *,
+    serves: tuple[str, ...] = (CARD,),
+    role: str = "app",
+    transport: object | None = None,
+):
     """The board client this process's switch names, built for one installation.
 
     This is the single construction path the two implementations share, and the only place the
@@ -110,27 +129,125 @@ def card_client(instance_dir: object, *, role: str = "app"):
     audit owner, host adapter — follows the client that comes back.  Nothing here probes for
     `board-store.env`; a `postgres` switch with no store configuration refuses with the store's
     own reason, which is the diagnosis an operator needs rather than a silent Kanboard fallback.
+
+    `serves` is what the call site needs from the client it is asking for, and it is the whole of
+    why this function takes an argument at all.  A site that reads sprints, or Product/Issue, or —
+    like `restore.py` — cards *and* sprints through one client cannot be served by a backend that
+    holds only cards, so under `postgres` it is refused by name here instead of being handed a
+    Kanboard client that contradicts the switch.  `transport` is for the one caller that has
+    already built the Kanboard transport it wants probed; every other caller leaves it unset.
     """
-    from secretary.tasks import KanboardClient
+    from secretary.tasks import KanboardClient, TaskError
 
-    if card_backend() == KANBOARD:
+    # The refusals leave here as `TaskError`, the one vocabulary every command above this
+    # function already renders as a named failure with an exit status.  `parse_card_backend`
+    # keeps `BoardBackendError` for `card_backend_status`, which reports rather than refuses.
+    try:
+        backend = card_backend()
+    except BoardBackendError as exc:
+        raise TaskError("backend_error", str(exc), 1) from None
+    if backend == KANBOARD:
+        if transport is not None:
+            return KanboardClient(transport, instance_dir)
         return KanboardClient.for_instance(instance_dir)
+    unknown = tuple(entity for entity in serves if entity not in POSTGRES_SERVES)
+    if unknown:
+        raise TaskError(
+            "backend_error",
+            f"{CARD_BACKEND_ENV}={backend} serves {', '.join(sorted(POSTGRES_SERVES))} only; "
+            f"{', '.join(unknown)} is a Kanboard board on this build",
+            1,
+        )
     from secretary.board.sql_cards import SqlCardClient
-    from secretary.board.store import resolve_role
+    from secretary.board.store import BoardStoreError, resolve_role
 
-    return SqlCardClient(resolve_role(instance_dir, role), instance_dir)
+    try:
+        credentials = resolve_role(instance_dir, role)
+    except BoardStoreError as exc:
+        raise _store_refusal(exc) from None
+    return SqlCardClient(credentials, instance_dir)
+
+
+def card_client(instance_dir: object, *, role: str = "app"):
+    """`board_client` for the one entity the PostgreSQL implementation serves."""
+    return board_client(instance_dir, serves=(CARD,), role=role)
+
+
+def _store_refusal(exc: Exception):
+    """A store refusal, in the vocabulary `run_task_command` already prints (`TaskError`).
+
+    `BoardStoreError` is a `RuntimeError`, and a `RuntimeError` reaching a CLI handler is a
+    traceback.  Every command that reads or writes cards already renders `TaskError` as a named
+    refusal with an exit status, so a `board-store.env` that is missing, malformed or tracked by
+    git leaves here as `backend_unavailable` carrying the store's own sentence.
+    """
+    from secretary.tasks import TaskError
+
+    return TaskError("backend_unavailable", f"board store is not usable: {exc}", 1)
+
+
+ENTITY_KINDS = ("task", "sprint")
+
+
+def entity_id(kind: str, backend: str, number: int) -> str:
+    """Mint `<kind>_<backend>_<n>`: the one identity a normalized row carries.
+
+    The convention has three parts and each is load-bearing.  `kind` says whether the row is a
+    card or a sprint, `backend` says which of the two implementations answered, and `number` is
+    that backend's own number for the row — Kanboard's task id, or `tasks.task_number` in the
+    store.  It is minted here and nowhere else, which is what makes `entity_number` able to read
+    every value the product can produce: the two functions are one convention, not two.
+    """
+    if kind not in ENTITY_KINDS:
+        raise BoardBackendError(f"an entity identity names one of {', '.join(ENTITY_KINDS)}, not {kind!r}")
+    if backend not in CARD_BACKENDS:
+        raise BoardBackendError(
+            f"an entity identity names one of {', '.join(CARD_BACKENDS)}, not {backend!r}"
+        )
+    return f"{kind}_{backend}_{int(number)}"
+
+
+def entity_number(kind: str, value: object) -> int | None:
+    """Read the number back out of an identity `entity_id` minted, for **either** backend.
+
+    `None` means the value is not an identity of this kind, and every caller turns that into its
+    own refusal.  The whole vocabulary is tried rather than one literal prefix: a parser that
+    knew only `task_kanboard_` answered `None` for every card the PostgreSQL backend produced,
+    which is how `report`, `verdict` and `decide` failed there while the reader worked.  A bare
+    number is still accepted, because the file journal holds records written before the identity
+    carried a backend at all.
+    """
+    if kind not in ENTITY_KINDS:
+        raise BoardBackendError(f"an entity identity names one of {', '.join(ENTITY_KINDS)}, not {kind!r}")
+    text = "" if value is None else str(value).strip()
+    for backend in CARD_BACKENDS:
+        prefix = f"{kind}_{backend}_"
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+            break
+    if not text.isdigit():
+        return None
+    number = int(text)
+    return number if number > 0 else None
 
 
 __all__ = [
+    "CARD",
     "CARD_BACKENDS",
     "CARD_BACKEND_ENV",
     "DEFAULT_CARD_BACKEND",
+    "ENTITY_KINDS",
     "KANBOARD",
     "POSTGRES",
+    "PRODUCT_ISSUE",
+    "SPRINT",
     "BoardBackendError",
+    "board_client",
     "card_backend",
     "card_backend_status",
     "card_client",
+    "entity_id",
+    "entity_number",
     "parse_card_backend",
     "reset_card_backend",
 ]

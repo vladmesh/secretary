@@ -4,6 +4,14 @@ The checkpoint deliberately does not carry these services or their transport
 configuration. They are reproducible host state: this module installs the
 pinned transports, creates the deterministic local board configuration, and
 builds the small Kanboard schema that the task protocol requires.
+
+Every `KanboardClient` below is Kanboard-only **by statement, not by default**.  This module
+creates the Pipeline board, renames its columns, adds `Assessment` to a populated one and waits
+for the container to answer `getVersion`: all four are operations on the Kanboard service itself,
+which the PostgreSQL board store does not have and never will (`docs/BOARD_STORE.md` §2, §6).
+Reading `SECRETARY_CARD_BACKEND` here would therefore be a switch with one branch.  A `postgres`
+installation still bootstraps Kanboard, because the store is populated by importing that board
+(`board/import_board.py`), which is the other place this paragraph applies to.
 """
 
 from __future__ import annotations

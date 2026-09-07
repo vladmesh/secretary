@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary import _proc, head_registry
-from secretary.board.backend import card_backend_status
+from secretary.board.backend import SPRINT, board_client, card_backend_status
 from secretary.board_transport import findings as board_transport_findings
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatch.headless import headless_cards, headless_worker
@@ -181,7 +181,7 @@ def _sprints(
     """Read the sprint entity and live board without consulting observer context."""
     try:
         reader = SprintReader(
-            client if client is not None else KanboardClient.for_instance(instance_dir),
+            client if client is not None else board_client(instance_dir, serves=(SPRINT,)),
             data_dir=data_dir,
             thresholds=budget_thresholds(instance),
         )

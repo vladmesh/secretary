@@ -23,7 +23,9 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 from secretary.board import backend
 from secretary.tasks import TaskReader, TaskWriter
@@ -223,6 +225,87 @@ class SqlTaskWriterTests(SqlBoardCase):
             )
         self.assertEqual(raised.exception.code, "validation")
         self.assertIn("another operation or payload", str(raised.exception))
+
+    def _create(self, *, request_id: str, title: str = "A created card") -> dict:
+        """A create against an open sprint the *store* holds, not only the sprint reader.
+
+        `tasks.sprint_ref` is a foreign key here (§3.3), so the row a Kanboard fake can invent by
+        mocking `SprintReader.show` has to exist for the card to be storable at all.  Sprints on
+        this backend are a later card; this is the one row that card's absence makes necessary.
+        """
+        now = datetime.now(UTC)
+        with self.client.transaction():
+            self.client._execute(
+                "INSERT INTO sprints (ref, goal, definition_of_done, status, created_at, updated_at) "
+                "VALUES (%s, %s, %s, 'open', %s, %s) ON CONFLICT (ref) DO NOTHING",
+                ("sprint:test", "a goal", "a definition", now, now),
+            )
+        with (
+            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            kanboard_cases.open_sprint() as sprint,
+        ):
+            return self.writer.create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title=title,
+                request_id=request_id,
+                sprint=sprint,
+            )
+
+    def test_a_created_card_names_its_reference_in_its_own_request_row(self) -> None:
+        """§3.9's `requests.ref`, written by the transaction that chose the reference.
+
+        A create claims its request id before the reference exists — the reference comes from the
+        board's high-water mark inside the mutation — so the claim wrote `ref = NULL` and the
+        statement that finally named it only replaced `intent`.  The column stayed NULL for the
+        life of every created card, which made the record's own subject index answer nothing.
+        """
+        result = self._create(request_id="rq-create-1")
+
+        reference = result["task"]["ref"]
+        self.assertEqual(
+            self.client._query(
+                "SELECT status, operation, ref FROM requests WHERE request_id = %s", ("rq-create-1",)
+            ),
+            [("committed", "created", reference)],
+        )
+
+    def test_a_create_that_fails_after_its_claim_leaves_no_row_of_any_kind(self) -> None:
+        """The boundary the same defect sat on: one transaction from the claim to the record.
+
+        The claim used to commit on its own, before the card was written and long before the
+        record was, so a failure in between left a staged `requests` row and, on the Kanboard
+        journal, a pending file to reconcile.  §7.3 says that class of half-applied write does not
+        exist on this backend; it only actually did not once the whole create became one
+        transaction.
+        """
+        from secretary.tasks import TaskError
+
+        with (
+            mock.patch.object(
+                type(self.client),
+                "_rpc_saveTaskMetadata",
+                side_effect=TaskError("backend_error", "metadata refused", 1),
+            ),
+            self.assertRaises(TaskError) as raised,
+        ):
+            self._create(request_id="rq-create-2", title="A card that must not survive")
+
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM requests WHERE request_id = %s", ("rq-create-2",)
+            ),
+            [(0,)],
+        )
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM tasks WHERE title = %s", ("A card that must not survive",)
+            ),
+            [(0,)],
+        )
 
     def test_a_failed_mutation_leaves_neither_effect_nor_claim(self) -> None:
         from secretary.tasks import TaskError

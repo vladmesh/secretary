@@ -187,6 +187,44 @@ satellites, and `board/sql_audit.py` is `TaskAudit`'s contract over `requests` a
 (§7.3).  `SprintReader`/`SprintWriter` and `ProductIssueStore` are not switched by that name and
 remain Kanboard-only; their card is the next one.
 
+**Where the switch is acted on.**  `board/backend.py:board_client` is the only function in
+`secretary` that constructs a board client, and every entry point in the two tables below reaches
+its client through it.  It takes `serves` — what the call site needs from the client, out of
+`card`, `sprint` and `product/issue` — because the second implementation holds only cards.  Three
+things follow, and each is a property the switch would not have if a consumer named a backend for
+itself:
+
+* an unknown `SECRETARY_CARD_BACKEND` refuses at **every** entry point, not only at the ones
+  somebody remembered to check;
+* under `postgres`, a site that needs sprints or Product/Issue — `sprint_commands.py`,
+  `product_issue_commands.py`, `webproto/sprint_reads.py`, `webproto/sprint_ops.py`,
+  `webproto/pause_reads.py`, `status.py`, `data.py:export_sprint_entities`, and `restore.py`,
+  which drives cards *and* sprints through one client — is refused by name instead of being
+  handed a Kanboard client that contradicts the switch;
+* the refusals leave as `TaskError`, the vocabulary every command already renders as a named
+  failure with an exit status, so a missing or malformed `board-store.env` (`BoardStoreError`) and
+  an unreachable server (`psycopg`) are diagnoses rather than tracebacks.
+
+Exactly two modules still name Kanboard directly, and they say so in their own source rather than
+by default.  `bootstrap.py` creates the Kanboard service's own board, columns and swimlanes and
+waits for the container to answer `getVersion`: the store has no equivalent to create, so reading
+the switch there would be a switch with one branch.  `board/import_board.py` reads the Kanboard
+board it copies *into* the store, so consulting the switch would ask the destination to be the
+source.  `tests/test_architecture.py` holds that list and its reasons executably: a third module
+that builds a client for itself fails the unit suite.
+
+**The identity a normalized row carries.**  `<kind>_<backend>_<n>` — `task_kanboard_12`,
+`task_postgres_468`, `sprint_kanboard_9` — is one convention, minted by `board/backend.py:
+entity_id` and read back by `entity_number`, and by nothing else.  `kind` is the entity, `backend`
+is the implementation that answered, and `n` is that implementation's own number for the row:
+Kanboard's task id, or `tasks.task_number` in the store (§9 keeps the reference as the stable
+identifier, so the store has no column for Kanboard's integer).  One function each way is not
+tidiness.  Every consumer that stripped a single literal prefix answered "invalid" for every row
+the other backend produced, which is how `report`, `verdict` and `decide` refused on the
+PostgreSQL backend — through `BoardHost.marker_comment`'s card lookup — while the reader that had
+just minted the identity worked; `sprints.py`'s sprint lookup carried the same defect with
+`sprint_kanboard_`.
+
 
 `KanboardClient` (`src/secretary/tasks.py:469`) is a generic JSON-RPC client with `call`,
 `call_batch` (chunked, `_BATCH_CHUNK = 200`) and byte-size preflight. It is constructed from
@@ -1784,6 +1822,13 @@ in this table: it is `SECRETARY_CARD_BACKEND` (§2.2), one value per process, `k
 operator says otherwise.  The rows below describe the store once cards are served from it; the
 switch is what makes reaching that state reversible, since returning the value to `kanboard`
 restores today's behaviour with no data migration in either direction.
+
+For the same reason the identity a normalized row carries — `<kind>_<backend>_<n>` (§2.2) — is not
+canonical either, and is not a column here.  It names which implementation answered *this* read;
+it is not the row's identity, which is the reference (§9).  A record written while Kanboard served
+the cards keeps `task_kanboard_<n>` for ever, and after a cutover the same card reads as
+`task_postgres_<n>`; both are read by the same function, so no consumer has to know which era its
+input came from.
 
 
 | Data | Writer after cutover |

@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.board.backend import entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
@@ -973,7 +974,7 @@ class TaskReader:
         ref = _text(card.get("reference"))
         kind = getattr(self.client, "backend_kind", "kanboard")
         result: dict[str, Any] = {
-            "id": f"task_{kind}_{task_id}",
+            "id": entity_id("task", kind, task_id),
             "ref": ref,
             "title": _text(card.get("title")),
             "description": _text(card.get("description")),
@@ -1984,48 +1985,57 @@ class TaskWriter:
             "request_id": request_id,
             "payload": payload,
         }
-        self.audit.stage(request_id, event)
-        try:
-            created_ref = self._create_backend(
-                project=project,
-                task_type=task_type,
-                title=title,
-                description=description,
-                target=target,
-                reference=reference,
-                blocked_by=blocked_by,
-                head=head,
-                review_head=review_head,
-                slug=slug,
-                base_branch=base_branch,
-                seed_ref=seed_ref,
-                supersedes=supersedes,
-                complexity=complexity,
-                family_preference=family_preference,
-                codex_launch_mode=codex_launch_mode,
-                sprint=sprint,
-                steward_report=steward_report,
-                event=event,
-                request_id=request_id,
-            )
-        except _CommittedWriteError:
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        except Exception:
-            self.audit.discard(request_id)
-            raise
-        try:
-            task = self.reader.show(created_ref)
-        except Exception:  # noqa: BLE001 - any post-create read failure is an ambiguous commit.
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        event["task_id"] = task["id"]
-        event["ref"] = created_ref
-        event["backend"]["revision"] = _revision(task)
-        self.audit.stage(request_id, event)
-        try:
-            event_id = self.audit.append(request_id, event)
-        except OSError:
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        return {"action": "created", "task": task, "event_id": event_id, "replayed": False}
+        # One transaction from the claim to the committed record, where the backend has
+        # transactions (§7.1).  The claim used to be committed on its own before the card was
+        # written and the record committed after it, so the reference this create allocates was
+        # named by a *later* transaction than the one that claimed the request id: on
+        # PostgreSQL `requests.ref` stayed NULL for the whole life of the row.  Under one
+        # transaction the claim, the card effect and the event stand or fall together, which is
+        # what `docs/BOARD_STORE.md` §7.3 already says this backend does.  On Kanboard
+        # `_mutation` is nothing at all, so the behaviour there is unchanged.
+        with self._mutation():
+            self.audit.stage(request_id, event)
+            try:
+                created_ref = self._create_backend(
+                    project=project,
+                    task_type=task_type,
+                    title=title,
+                    description=description,
+                    target=target,
+                    reference=reference,
+                    blocked_by=blocked_by,
+                    head=head,
+                    review_head=review_head,
+                    slug=slug,
+                    base_branch=base_branch,
+                    seed_ref=seed_ref,
+                    supersedes=supersedes,
+                    complexity=complexity,
+                    family_preference=family_preference,
+                    codex_launch_mode=codex_launch_mode,
+                    sprint=sprint,
+                    steward_report=steward_report,
+                    event=event,
+                    request_id=request_id,
+                )
+            except _CommittedWriteError:
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            except Exception:
+                self.audit.discard(request_id)
+                raise
+            try:
+                task = self.reader.show(created_ref)
+            except Exception:  # noqa: BLE001 - any post-create read failure is an ambiguous commit.
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            event["task_id"] = task["id"]
+            event["ref"] = created_ref
+            event["backend"]["revision"] = _revision(task)
+            self.audit.stage(request_id, event)
+            try:
+                event_id = self.audit.append(request_id, event)
+            except OSError:
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            return {"action": "created", "task": task, "event_id": event_id, "replayed": False}
 
     def create_steward_report(
         self,
@@ -2113,7 +2123,7 @@ class TaskWriter:
             )
             if task_id is None:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
-            event["task_id"] = f"task_{self.backend_kind}_{task_id}"
+            event["task_id"] = entity_id("task", self.backend_kind, task_id)
             event["backend"]["task_id"] = task_id
             try:
                 self.audit.stage(request_id, event)
@@ -3854,7 +3864,7 @@ class TaskWriter:
             "actor": {"role": "retro", "id": actor},
             "kind": "retired",
             "outcome": "success",
-            "task_id": f"task_{self.backend_kind}_{task_id}",
+            "task_id": entity_id("task", self.backend_kind, task_id),
             "ref": reference,
             "backend": {"kind": self.backend_kind, "task_id": task_id, "revision": "pending"},
             "request_id": request_id,
@@ -4691,10 +4701,8 @@ def _dispatcher_record_has_live_work(record: dict[str, Any]) -> bool:
 
 
 def _task_number(task: dict[str, Any]) -> int:
-    raw = str(task.get("id", ""))
-    for prefix in ("task_kanboard_", "task_postgres_"):
-        raw = raw.removeprefix(prefix)
-    value = _positive_int(raw)
+    """The backend's own number for a normalized card, read through the one identity parser."""
+    value = entity_number("task", task.get("id"))
     if value is None:
         raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
     return value

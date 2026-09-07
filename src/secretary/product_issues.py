@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from secretary.board.backend import KANBOARD, entity_id
 from secretary.tasks import (
     KanboardClient,
     TaskAudit,
@@ -567,7 +568,7 @@ class ProductIssueStore:
             "actor": {"role": role, "id": actor},
             "kind": kind,
             "outcome": "success",
-            "task_id": f"task_kanboard_{task_id}" if task_id is not None else "",
+            "task_id": entity_id("task", KANBOARD, task_id) if task_id is not None else "",
             "ref": reference,
             "backend": {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"},
             "request_id": request_id,
@@ -699,7 +700,7 @@ class ProductIssueStore:
     @staticmethod
     def _remember_task_id(document: dict[str, Any], task_id: int) -> int:
         event = document["event"]
-        event["task_id"] = f"task_kanboard_{task_id}"
+        event["task_id"] = entity_id("task", KANBOARD, task_id)
         event["backend"] = {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}
         document.setdefault("progress", {})["task_id"] = task_id
         return task_id

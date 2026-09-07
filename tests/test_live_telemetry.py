@@ -823,7 +823,7 @@ class EnvDataDirConflictTests(unittest.TestCase):
     def writer_state_path(self) -> Path:
         """Where the packaged unit's own command line lands, parsed by the real CLI parser."""
         args = build_parser().parse_args(["dispatcher", "production-tick", "--instance", str(self.instance)])
-        with mock.patch("secretary.dispatcher.KanboardClient"):
+        with mock.patch("secretary.tasks.KanboardClient"):
             runtime = runtime_from_args(
                 args.instance,
                 args.data_dir,

@@ -42,6 +42,7 @@ from secretary._fsutil import (
     write_text_atomic,
 )
 from secretary.automations import OrcaAutomationClient, workspaces_root
+from secretary.board.backend import CARD, POSTGRES, board_client, card_backend_status
 from secretary.board_transport import (
     BoardTransport,
     BoardTransportError,
@@ -84,7 +85,7 @@ from secretary.secret_store import (
     normalize_phrase,
 )
 from secretary.state_repo import StateRepoError
-from secretary.tasks import KanboardClient, TaskError, TaskReader
+from secretary.tasks import TaskError, TaskReader
 from secretary.upgrade import (
     STEPS,
     GitError,
@@ -847,10 +848,16 @@ def check_prerequisites(
         _run(["runuser", "--user", installation_user, "--", "orca", "--version"], label="inspect Orca")
     else:
         _run(["orca", "--version"], label="inspect Orca")
+    # The prerequisite is the board this installation will actually serve cards from, so the
+    # switch names it (board/backend.py).  The Kanboard transport is still handed over, and
+    # still used, when the switch says `kanboard`; under `postgres` the store answers instead.
+    # `card_backend_status` reports rather than refuses, so naming the board in the message
+    # cannot itself be the thing that fails; an unusable switch value is refused by the call.
+    label = "PostgreSQL" if card_backend_status().get("backend") == POSTGRES else "Kanboard"
     try:
-        TaskReader(KanboardClient(transport, instance_dir)).list()
+        TaskReader(board_client(instance_dir, serves=(CARD,), transport=transport)).list()
     except TaskError as exc:
-        raise InstallError(f"Kanboard prerequisite failed: {exc.message}") from None
+        raise InstallError(f"{label} prerequisite failed: {exc.message}") from None
 
 
 def _valid_existing_layout(data_dir: Path) -> bool:

@@ -37,9 +37,10 @@ from secretary._fsutil import (
 from secretary._fsutil import (
     write_ndjson as _write_ndjson,
 )
+from secretary.board.backend import CARD, SPRINT, board_client
 from secretary.config import validate
 from secretary.memory_journal import export_memory_snapshot
-from secretary.tasks import KanboardClient, TaskAudit, TaskError, TaskReader
+from secretary.tasks import TaskAudit, TaskError, TaskReader
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
 KANBOARD_DATA_PATH = "/var/www/app/data"
@@ -190,7 +191,9 @@ def export_board(
         )
 
     try:
-        task_reader = reader if reader is not None else TaskReader(KanboardClient.for_instance(instance_dir))
+        task_reader = (
+            reader if reader is not None else TaskReader(board_client(instance_dir, serves=(CARD,)))
+        )
         cards = task_reader.export()
     except TaskError as exc:
         raise RuntimeError(f"secretary task export failed: {exc.message}") from None
@@ -296,11 +299,11 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
 def export_sprint_entities(instance_dir: Path, client: Any = None) -> list[dict[str, Any]]:
     """Read the sprint board into deterministic checkpoint records."""
     from secretary.sprints import SprintReader
-    from secretary.tasks import KanboardClient, TaskError
+    from secretary.tasks import TaskError
 
     try:
-        board_client = client if client is not None else KanboardClient.for_instance(instance_dir)
-        reader = SprintReader(board_client)
+        sprint_board = client if client is not None else board_client(instance_dir, serves=(SPRINT,))
+        reader = SprintReader(sprint_board)
         return [normalize_sprint_entity(sprint) for sprint in reader.export()]
     except TaskError as exc:
         raise RuntimeError(f"sprint export failed: {exc.message}") from None

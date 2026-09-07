@@ -106,6 +106,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from secretary.board.backend import PRODUCT_ISSUE, SPRINT, board_client
 from secretary.config import InstanceReport, validate_instance
 from secretary.dispatch.headless import headless_cards
 from secretary.dispatcher_observer import (
@@ -137,7 +138,7 @@ from secretary.sprints import (
     require_active_sprint_projects,
     sprint_guard_index_initialized,
 )
-from secretary.tasks import KanboardClient, TaskAudit
+from secretary.tasks import TaskAudit
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import InstallationUnavailable, TaskNotFound, ValidationRefused
@@ -1601,7 +1602,10 @@ class SprintReadLayer(ProtocolBoundary):
     # -- plumbing --------------------------------------------------------------------------
 
     def _client(self) -> Any:
-        return self._board_client or KanboardClient.for_instance(self._instance_dir())
+        """One client for both boards this layer reads: sprints and Product/Issue."""
+        return self._board_client or board_client(
+            self._instance_dir(), serves=(SPRINT, PRODUCT_ISSUE)
+        )
 
     def _instance_dir(self) -> Path:
         return self.instance.parent if self.instance.is_file() else self.instance

@@ -197,14 +197,24 @@ class SqlTaskAudit:
         raise AssertionError("unreachable")
 
     def _claim_row(self, request_id: str, event: dict[str, Any], *, status: str) -> None:
-        """§7.1 step 1: claim the id in the one global namespace, then own it."""
+        """§7.1 step 1: claim the id in the one global namespace, then own it.
+
+        `ref` is written on the replacement as well as on the insert, and that is the whole of
+        the repair this row needed.  A create claims its request id before it knows the reference
+        it will allocate — the reference is chosen from the board's high-water mark inside the
+        same mutation — so the first statement writes `ref = NULL` and the second, which names it,
+        used to update `intent` and leave the column behind.  `requests.ref` then stayed NULL for
+        the life of every created card, and the column §3.9 makes the record's own subject index
+        answered nothing.  `TaskWriter._create` now runs both statements in one transaction, so
+        the column and the record it belongs to become visible together or not at all.
+        """
         ref = str(event.get("ref") or "")
         self._execute(
             "INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, "
             "ref, created_at, settled_at) VALUES (%s, %s, %s::jsonb, %s, %s, 'card', %s, %s, %s) "
             "ON CONFLICT (request_id) DO UPDATE SET intent = EXCLUDED.intent, "
             "status = EXCLUDED.status, settled_at = EXCLUDED.settled_at, "
-            "protocol = EXCLUDED.protocol, operation = EXCLUDED.operation",
+            "protocol = EXCLUDED.protocol, operation = EXCLUDED.operation, ref = EXCLUDED.ref",
             (
                 request_id,
                 str(event.get("kind") or ""),

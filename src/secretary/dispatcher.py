@@ -10,12 +10,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from secretary.board.backend import CARD, board_client
+from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
 from secretary.board.terminal_taxonomy import (
     TerminalTaxonomy,
     TerminalTaxonomyValidationError,
     normalize_terminal_taxonomy,
 )
-from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.codex_provider_events import (
     CodexProviderSourceError,
@@ -163,7 +164,6 @@ from secretary.dispatcher_launch import (
 )
 from secretary.dispatcher_launch import (
     confirm_launch_intent as _confirm_launch_intent,
-    launch_delivery_receipt as _launch_delivery_receipt,
 )
 from secretary.dispatcher_launch import (
     forget_role_head as _forget_role_head,
@@ -179,6 +179,9 @@ from secretary.dispatcher_launch import (
 )
 from secretary.dispatcher_launch import (
     launch_deferred as _launch_deferred,
+)
+from secretary.dispatcher_launch import (
+    launch_delivery_receipt as _launch_delivery_receipt,
 )
 from secretary.dispatcher_launch import (
     launch_intent as _launch_intent,
@@ -369,12 +372,11 @@ from secretary.routing_journal import (
 )
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.tasks import (
-    _event_payload,
-    KanboardClient,
     TaskAudit,
     TaskError,
     TaskReader,
     TaskWriter,
+    _event_payload,
     assessment_resolution,
     specification_revision,
 )
@@ -7128,7 +7130,9 @@ def runtime_from_args(
 ) -> DispatcherRuntime:
     instance_path = Path(instance)
     data = Path(data_dir).expanduser() if data_dir else default_data_dir(instance_path)
-    client = KanboardClient.for_instance(instance_path)
+    # The dispatcher reads and writes cards, and nothing else, through this client, so it is
+    # built by the switch (board/backend.py) rather than by naming one backend here.
+    client = board_client(instance_path, serves=(CARD,))
     catalog = InstanceCatalog(instance_path)
     return DispatcherRuntime(
         TaskReader(client),
