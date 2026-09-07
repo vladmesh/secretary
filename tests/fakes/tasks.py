@@ -90,6 +90,12 @@ class FakeKanboard(BatchedCalls):
             return self.metadata[int(params["task_id"])]
         if method == "getAllComments":
             return [{"date_creation": 1720000020, "comment": "[report:done]\nReady for review"}]
+        if method == "closeTask":
+            # Archiving is a board fact, not a writer's privilege: a reader fixture that has to
+            # show an archived card asks the board for one instead of assigning into these rows.
+            task = next(task for task in self.tasks if int(task["id"]) == int(params["task_id"]))
+            task["is_active"] = 0
+            return True
         raise AssertionError(method)
 
     def call_batch(self, calls):
@@ -105,11 +111,11 @@ class WriteKanboard(FakeKanboard):
     fail_move = False
     fail_update = False
     fail_close = False
-    # Two faults that can only happen after a column move has already been applied: the transport
-    # dropping the very next round trip, and another writer moving the card onward before anyone
-    # reads it back.  Both are what a live JSON-RPC board does and the in-memory client cannot.
+    # A fault that can only happen after a column move has already been applied: the transport
+    # dropping the very next round trip.  `tests/test_restore.py` arms it; the card tests reach
+    # the same fault through `BoardFixture.board_drops_the_call_after`, which is written against
+    # the client interface and therefore says the same thing on either backend.
     fail_read_after_move = False
-    race_column_after_move: int | None = None
 
     def __init__(self) -> None:
         super().__init__()
@@ -199,7 +205,10 @@ class WriteKanboard(FakeKanboard):
                 (
                     candidate
                     for candidate in self.tasks
-                    if candidate["column_id"] == column_id and candidate["swimlane_id"] == swimlane_id
+                    # A board row need not carry a swimlane at all, and a fixture that had to
+                    # add one before moving anything was reaching into these rows to do it.
+                    if candidate["column_id"] == column_id
+                    and candidate.get("swimlane_id") == swimlane_id
                 ),
                 key=lambda candidate: int(candidate.get("position") or 0),
             )
@@ -213,8 +222,6 @@ class WriteKanboard(FakeKanboard):
             task["date_modification"] = "1720000100"
             # The move is applied and its reply is on the wire.  Whatever happens next happens
             # to a card that has already changed column.
-            if self.race_column_after_move is not None:
-                task["column_id"] = self.race_column_after_move
             if self.fail_read_after_move:
                 self._unavailable_next_call = True
             return True

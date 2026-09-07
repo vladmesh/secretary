@@ -11,6 +11,12 @@ fakes' own board as their starting state (`tests/sql_backend_fixtures.py`) so th
 asked the same questions about the same cards rather than about two boards that happen to look
 alike.
 
+The writer's cases reach the board the same way: since secretary-1590 they arrange it through
+the card client's own protocol (`BoardFixture` in tests/test_tasks.py) and read it back through
+`TaskReader`, rather than assigning into the Kanboard fake's rows and metadata map.  That is why
+`KANBOARD_ONLY` below is now the whole list of omissions and "the fixture looks inside the fake"
+is no longer one of its reasons.
+
 Where an expectation genuinely cannot be shared, the difference is stated here rather than
 softened: the card's identity.  §9 makes a card's reference its stable identifier and the store
 holds no Kanboard integer, so `tasks.task_number` is the number this backend answers with and the
@@ -20,6 +26,7 @@ different value for the same card, and a test that asserted one spelling cannot 
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 import unittest
@@ -327,17 +334,20 @@ if __name__ == "__main__":  # pragma: no cover
 #: The cases of `tests/test_tasks.py` that cannot be asked of this backend, and why each one
 #: cannot.  They are listed rather than quietly dropped: a case absent from a run is a hole, and a
 #: hole nobody named is the failure the card's fourth criterion is about.  None of them is
-#: excluded for being inconvenient — each is either a Kanboard *transport* fact (JSON-RPC batching,
-#: a malformed row on the wire) or a board state the store's constraints make unrepresentable.
+#: excluded for being inconvenient, and none for how its fixture is written: since
+#: secretary-1590 the writer cases arrange the board through the card client's own protocol and
+#: read it back through `TaskReader`, so "the test looks inside the Kanboard fake" is no longer a
+#: reason anything is here.  What is left is exactly three kinds of reason, and each entry says
+#: which one it is:
+#:
+#: * a Kanboard *transport* fact with no equivalent here (a malformed row on the wire, two
+#:   threads on one connection);
+#: * a board state the store's constraints make unrepresentable (§9's primary key and task
+#:   number, §3.5's CHECKs);
+#: * a half-applied write, which §7.3 says this backend does not have: the effect and the record
+#:   are statements of one transaction (§7.1), so there is no "the board moved, the journal did
+#:   not" for recovery to repair.  `SqlTaskWriterTests` proves that property directly.
 KANBOARD_ONLY = {
-    "test_a_released_pending_claim_id_replays_through_its_released_path": (
-        "its fixture (`_released_pending_claim`) assigns into the Kanboard fake's metadata map "
-        "to stage a released pending claim; see KANBOARD_FIXTURE_ONLY for the category"
-    ),
-    "test_a_released_pending_claim_is_still_finished_by_reconcile": (
-        "the same fixture, and `reconcile` has nothing to finish on this backend: §7.3 makes the "
-        "effect and the record one transaction, so no half-applied write survives to repair"
-    ),
     "test_duplicate_reference_retry_reallocates_a_stolen_pending_target": (
         "two cards under one reference again; `tasks.task_ref` is the primary key (§9)"
     ),
@@ -360,15 +370,6 @@ KANBOARD_ONLY = {
         "`requests WHERE status = 'staged'`; `export_board` is a group-(c) consumer and is "
         "explicitly out of this card's scope, so the gate is still blind to a staged row here"
     ),
-    "test_export_includes_archived_cards_in_one_metadata_comments_batch": (
-        "asserts the JSON-RPC batch the export posts (`client.batch_calls`).  The store answers "
-        "the same reads in one connection and posts no batch, so there is no equivalent fact"
-    ),
-    "test_steward_signal_cards_are_bounded_normalized_and_filtered": (
-        "same: its bound is the number of JSON-RPC batches.  The projection it also asserts is "
-        "covered on this backend by SqlTaskReaderTests.test_steward_signal_cards_report_the_"
-        "bounded_view"
-    ),
     "test_steward_signal_cards_reject_invalid_backend_shapes": (
         "injects a metadata value that is not a map and a task list that is not a list.  Both are "
         "malformed JSON-RPC replies; `tasks.state`'s CHECK and the column types make neither "
@@ -387,109 +388,86 @@ KANBOARD_ONLY = {
         "id.  Reading an archived card is covered here by "
         "SqlTaskReaderTests.test_restore_snapshot_returns_every_card_by_reference"
     ),
-}
-
-
-#: The writer cases of `tests/test_tasks.py` that are written against the Kanboard *fake's*
-#: internals rather than against `TaskWriter`'s contract: they assign into `client.metadata`,
-#: append rows to `client.tasks`, read the RPC log in `client.calls`, or arm one of the fake's
-#: post-effect transport faults (`fail_metadata`, `lose_comment_reply`, `race_column_after_move`).
-#: Eighty-two of the ninety do, which is why they are one named category and not eighty-two
-#: reasons.  Two things follow, and both are findings for the report rather than repairs made here:
-#:
-#: * the fixture half is re-authorable — a store-backed double exposing the same three collections
-#:   would let those cases run on both backends — and that is a change to the suite's fixture
-#:   layer, not a local repair of this card;
-#: * the fault half is not.  `fail_metadata`, `lose_comment_reply`, `fail_read_after_move` and
-#:   `race_column_after_move` each describe a board write that landed while its record did not,
-#:   and §7.3 of docs/BOARD_STORE.md says that class of failure does not exist on this backend:
-#:   the effect and the record are one transaction (§7.1).  There is no SQL equivalent to assert.
-#:
-#: `SqlTaskWriterTests` above covers the contract those cases surround — one transaction per
-#: mutation, the request-id replay, the request-id refusal, and a failed mutation leaving nothing.
-KANBOARD_FIXTURE_ONLY = {
-    "test_a_card_already_carrying_exec_reads_as_carrying_no_mode",
-    "test_a_claim_on_a_held_card_is_refused_even_when_it_names_the_same_worker",
-    "test_a_claim_whose_metadata_write_fails_keeps_its_pending_event",
-    "test_a_failed_claim_move_leaves_neither_a_typed_event_nor_a_claim",
-    "test_a_refused_card_edge_stages_no_typed_event",
-    "test_a_released_generic_move_id_still_replays_after_the_migration",
-    "test_a_released_pending_generic_move_is_finished_by_its_released_cleanup",
-    "test_a_retry_after_a_failed_claim_move_records_the_head_it_asks_for",
-    "test_a_retry_after_a_failed_claim_move_still_meets_every_admission_guard",
-    "test_a_state_race_after_the_move_keeps_the_typed_pending_record",
-    "test_a_transport_failure_after_the_move_keeps_the_typed_pending_record",
-    "test_an_allocated_reference_clears_the_archived_rows_too",
-    "test_an_allocated_reference_that_is_claimed_is_refused_not_written",
-    "test_archive_closes_card_and_writes_audit",
-    "test_archive_is_po_only_and_requires_reason",
-    "test_archive_reconcile_without_missing_reason_does_not_close",
-    "test_archive_refuses_a_parked_card",
-    "test_archive_refuses_dispatcher_record_after_claim_was_cleared",
-    "test_archive_refuses_live_work_or_active_claim",
-    "test_archive_retry_after_failed_comment_recreates_reason_before_close",
-    "test_archive_retry_after_lost_close_reply_does_not_close_twice",
-    "test_auto_reference_enumeration_failure_writes_no_card",
-    "test_auto_reference_refuses_null_or_false_enumeration",
-    "test_auto_reference_uses_board_wide_project_high_water_mark",
-    "test_backend_failure_removes_uncommitted_pending_record",
-    "test_backend_ignoring_atomic_reference_leaves_pending_create_unrepaired",
-    "test_claim_counts_a_parked_card_as_an_active_code_task",
-    "test_claim_rejects_project_code_capacity_without_write",
-    "test_comment_scrubs_runtime_secret_before_board_and_audit",
-    "test_completed_ready_replay_does_not_reset_metadata_again",
-    "test_create_passes_reference_to_atomic_backend_write",
-    "test_create_rejects_invalid_codex_launch_mode_without_write",
-    "test_create_rejects_the_retired_exec_launch_mode_without_write",
-    "test_create_stores_codex_launch_mode_and_audits",
-    "test_custom_catalog_value_is_scrubbed_before_a_board_comment",
-    "test_dispatcher_claim_stamps_metadata_moves_and_audits",
-    "test_duplicate_reference_preview_and_apply_use_exact_producer_evidence",
-    "test_duplicate_reference_preview_refuses_unrecognized_active_column",
-    "test_duplicate_reference_repair_refuses_missing_evidence_and_dependent_state",
-    "test_duplicate_reference_repair_refuses_missing_metadata",
-    "test_duplicate_reference_repair_resumes_after_reference_write",
-    "test_edit_is_po_only_and_requires_a_change",
-    "test_edit_refuses_active_states",
-    "test_edit_retry_does_not_repeat_backend_write",
-    "test_edit_updates_spec_and_routing_and_writes_audit",
-    "test_explicit_reference_collision_is_still_refused",
-    "test_forbidden_role_does_not_write",
-    "test_generic_create_keeps_in_progress_closed_to_steward_reports",
-    "test_generic_pending_contender_cannot_be_published_as_a_typed_transition",
-    "test_kanboard_host_executes_every_declared_card_edge_through_the_typed_canon",
-    "test_ordinary_long_text_is_preserved_for_board_protocol_text",
-    "test_partial_move_failure_keeps_pending_until_reconcile",
-    "test_pending_atomic_create_without_recorded_id_stays_unresolved",
-    "test_pending_create_does_not_repair_a_different_task_with_its_reference",
-    "test_pending_create_repairs_legacy_orphaned_reference_by_recorded_id",
-    "test_pending_create_replay_restores_metadata_before_audit",
-    "test_pending_is_visible_and_reconciles_without_backend_retry",
-    "test_pending_ready_replay_finishes_cleanup_before_success_audit",
-    "test_ready_reset_preserves_codex_launch_mode",
-    "test_reconcile_completes_stale_ready_cleanup_before_closing_pending",
-    "test_reconcile_finishes_pending_restore_before_auditing_success",
-    "test_reconcile_has_nothing_to_repeat_after_a_failed_claim_move",
-    "test_reconcile_publishes_a_proven_start_and_leaves_the_claim_to_the_dispatcher",
-    "test_reconcile_publishes_a_typed_pending_transition_whose_board_work_is_done",
-    "test_recovery_refuses_a_typed_pending_transition_the_board_contradicts",
-    "test_recovery_refuses_a_typed_pending_transition_whose_card_vanished",
-    "test_restore_comment_retry_after_lost_reply_does_not_duplicate_history",
-    "test_restore_comment_retry_uses_digest_occurrence_not_history_index",
-    "test_restore_move_failure_keeps_pending_audit",
-    "test_restore_placement_uses_live_duplicate_reference",
-    "test_retry_does_not_repeat_backend_write_or_event",
-    "test_reviewer_verdict_uses_review_marker",
-    "test_sigint_before_atomic_create_does_not_adopt_same_identity_later_reference",
-    "test_stale_transition_does_not_write",
-    "test_steward_can_close_its_in_progress_report",
-    "test_steward_cannot_close_an_ordinary_in_progress_card",
-    "test_steward_report_create_is_audited_directly_in_progress_and_replays",
-    "test_steward_report_pending_metadata_recovers_without_duplicate_create",
-    "test_the_typed_event_is_staged_exactly_once_before_the_column_effect",
-    "test_typed_pending_transition_recovers_only_after_proving_the_live_target",
-    "test_validate_to_in_progress_rework_is_dispatcher_only",
-    "test_worker_create_ready_is_forbidden_without_backend_write"
+    # --- §9: one reference, one card.  `tasks.task_ref` is the primary key, so every fixture
+    # that puts two cards under one reference builds a board this store cannot hold.
+    "test_duplicate_reference_preview_and_apply_use_exact_producer_evidence": (
+        "the duplicate-reference fixture: four rows under two references (§9)"
+    ),
+    "test_duplicate_reference_repair_refuses_missing_evidence_and_dependent_state": (
+        "the same fixture"
+    ),
+    "test_duplicate_reference_repair_refuses_missing_metadata": ("the same fixture"),
+    "test_duplicate_reference_preview_refuses_unrecognized_active_column": (
+        "the same fixture, plus a column id no board has; §3.5's CHECK on `tasks.state` admits "
+        "exactly the seven states"
+    ),
+    "test_duplicate_reference_repair_resumes_after_reference_write": ("the same fixture"),
+    "test_restore_placement_uses_live_duplicate_reference": (
+        "an archived and a live card under `secretary-468`, which the primary key forbids (§9)"
+    ),
+    # --- §9 again, from the other side: a reference the store cannot number, or none at all.
+    "test_pending_create_repairs_legacy_orphaned_reference_by_recorded_id": (
+        "it creates `secretary-restore` and then blanks that row's reference.  "
+        "`tasks.task_number` is NOT NULL and has no value for a reference that does not end in "
+        "-<number>, and `task_ref` is the primary key, so neither state is storable"
+    ),
+    "test_pending_create_does_not_repair_a_different_task_with_its_reference": (
+        "the same two shapes: `secretary-interrupted`, and a row whose reference is cleared"
+    ),
+    "test_auto_reference_uses_board_wide_project_high_water_mark": (
+        "it seeds `secretary-nope` so the allocator has a malformed reference to skip.  "
+        "`tasks.task_number` cannot hold one, which is the refusal `board/import_board.py` "
+        "already records for the same shape"
+    ),
+    "test_backend_ignoring_atomic_reference_leaves_pending_create_unrepaired": (
+        "it drops the reference from `createTask`.  `SqlCardClient` refuses that write outright "
+        "(§9: the store identifies a card by its reference), so the card it repairs never exists"
+    ),
+    # --- §3.5: a value the schema's CHECK does not admit.
+    "test_a_card_already_carrying_exec_reads_as_carrying_no_mode": (
+        "it stamps the retired `codex_launch_mode = exec` on a card to prove the reader ignores "
+        "it.  `tasks_codex_launch_mode_check` refuses that value, so the legacy row this reads "
+        "cannot be written here.  A finding about the importer's treatment of legacy `exec` "
+        "rows, not a licence to widen the CHECK"
+    ),
+    # --- §7.3: the effect and the record are one transaction (§7.1), so the state each of these
+    # recovers from — a board write that landed while its record did not — does not exist here.
+    # The refusal itself is proved on this backend by `SqlTaskWriterTests`.
+    "test_pending_is_visible_and_reconciles_without_backend_retry": (
+        "the comment lands and the journal append fails; here both roll back, so there is no "
+        "pending record to see or reconcile (§7.3)"
+    ),
+    "test_archive_retry_after_lost_close_reply_does_not_close_twice": (
+        "the close lands and its reply is lost; the transaction rolls the close back with it"
+    ),
+    "test_archive_reconcile_without_missing_reason_does_not_close": (
+        "the same half-applied archive, from the reconcile side"
+    ),
+    "test_restore_move_failure_keeps_pending_audit": (
+        "a refused move leaves nothing staged here, because the claim rolls back with it"
+    ),
+    "test_reconcile_finishes_pending_restore_before_auditing_success": (
+        "the same, from the reconcile side: there is no owed board work to finish"
+    ),
+    "test_restore_comment_retry_after_lost_reply_does_not_duplicate_history": (
+        "the comment lands and its reply is lost; the comment rolls back, so the retry is a "
+        "first write rather than a replay"
+    ),
+    "test_pending_atomic_create_without_recorded_id_stays_unresolved": (
+        "the card is created and the staging that records its id fails; here the card is not "
+        "created either, so there is no unresolved half to leave"
+    ),
+    "test_pending_create_replay_restores_metadata_before_audit": (
+        "the same create, failing at the metadata write instead"
+    ),
+    "test_steward_report_pending_metadata_recovers_without_duplicate_create": (
+        "the same, for a steward report: nothing survives the failure to recover from, so the "
+        "retry creates rather than replays"
+    ),
+    "test_sigint_before_atomic_create_does_not_adopt_same_identity_later_reference": (
+        "a SIGINT inside the create.  The interrupt rolls the transaction back, leaving no "
+        "staged record for a later card to be wrongly adopted into"
+    ),
 }
 
 
@@ -500,11 +478,6 @@ class KanboardFixtureCase(SqlBoardCase):
         reason = KANBOARD_ONLY.get(self._testMethodName)
         if reason is not None:
             self.skipTest(f"Kanboard-only: {reason}")
-        if self._testMethodName in KANBOARD_FIXTURE_ONLY:
-            self.skipTest(
-                "Kanboard-only: the case drives the Kanboard fake's rows, metadata, RPC log or "
-                "post-effect transport faults directly; see KANBOARD_FIXTURE_ONLY"
-            )
         super().setUp()
 
 
@@ -529,6 +502,31 @@ class SqlTaskWriterParityTests(KanboardFixtureCase, kanboard_cases.TaskWriterTes
 
     def board_client(self):
         return self.client_for(WriteKanboard())
+
+    @contextlib.contextmanager
+    def open_sprint(self, ref: str = "sprint:test", project: str = "secretary"):
+        """The same open sprint, plus the row `tasks.sprint_ref` refers to (§3.3).
+
+        Sprints on this backend are a later card; this is the one row that card's absence makes
+        necessary, and it is stated here so no create case has to know which backend it runs on.
+        """
+        now = datetime.now(UTC)
+        with self.client.transaction():
+            self.client._execute(
+                "INSERT INTO sprints (ref, goal, definition_of_done, status, created_at, "
+                "updated_at) VALUES (%s, %s, %s, 'open', %s, %s) ON CONFLICT (ref) DO NOTHING",
+                (ref, "a goal", "a definition", now, now),
+            )
+        with (
+            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            kanboard_cases.open_sprint(ref, project) as sprint,
+        ):
+            yield sprint
+
+    def remove_card(self, reference: str) -> None:
+        """The one fixture verb the card protocol does not carry (see `BoardFixture`)."""
+        with self.client.transaction():
+            self.client._execute("DELETE FROM tasks WHERE task_ref = %s", (reference,))
 
     def tearDown(self) -> None:
         pass
