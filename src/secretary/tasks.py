@@ -3156,28 +3156,41 @@ class TaskWriter:
 
         The sprint the card belongs to is not passed here: the adapter reads the live card to authorize
         the edge anyway. `finish` carries this writer's remaining board work into the same transaction.
+
+        `_mutation()` is that transaction, and this is the single place both edges cross it: `move`
+        and `claim` reach the adapter only through here, so the staged request row, the column
+        effect, the caller's `finish` work and the committed event are one transaction wherever the
+        backend has transactions (§7.1).  On Kanboard `_mutation()` is nothing at all and every
+        half-applied state below stays exactly as it is, with its `recover_*` entry point; on
+        PostgreSQL a failure after the move rolls the move back with the claim, which is why §7.3
+        lists that class of state as one this backend does not have.
         """
         try:
-            return self.board_host.transition(
-                TransitionRequest(
-                    EntityKind.CARD,
-                    reference,
-                    target,
-                    Actor(role, actor),
-                    reason,
-                    RelatedRefs(()),
-                    request_id,
-                    data={
-                        **({"attempt_outcome_owed": dict(outcome_owed)} if outcome_owed is not None else {}),
-                        **(
-                            {"terminal_taxonomy": dict(terminal_taxonomy)}
-                            if terminal_taxonomy is not None
-                            else {}
-                        ),
-                    },
-                ),
-                finish=finish,
-            )
+            with self._mutation():
+                return self.board_host.transition(
+                    TransitionRequest(
+                        EntityKind.CARD,
+                        reference,
+                        target,
+                        Actor(role, actor),
+                        reason,
+                        RelatedRefs(()),
+                        request_id,
+                        data={
+                            **(
+                                {"attempt_outcome_owed": dict(outcome_owed)}
+                                if outcome_owed is not None
+                                else {}
+                            ),
+                            **(
+                                {"terminal_taxonomy": dict(terminal_taxonomy)}
+                                if terminal_taxonomy is not None
+                                else {}
+                            ),
+                        },
+                    ),
+                    finish=finish,
+                )
         except BoardEventPending:
             raise TaskError(
                 "audit_pending",

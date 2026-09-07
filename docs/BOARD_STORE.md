@@ -2027,6 +2027,21 @@ same *scope* for that refusal — one id, one owner, whatever kind of operation 
 disappears is the class of failure where the effect landed and the record did not — the reason
 `recover_*` exists at all.
 
+That sentence includes the Card state edge, and it is worth naming the three states it removes,
+because they are the ones the Kanboard journal has recovery paths for. A transition is
+`TaskWriter._transition_card`, and it runs inside `TaskWriter._mutation()`: on PostgreSQL the
+staged `requests` row, the `moveTaskPosition` that changes `tasks.state`, the caller's own board
+work for the same edge (`finish` — the claim's metadata write, the Ready reset, the reason
+comment) and the committed `board_events` row are statements of one transaction. So on this
+backend there is no In progress card whose claim metadata was never written, no Ready card whose
+routing was never reset, and no moved card beside a `requests` row still `staged`: a failure at
+any of those points rolls the column effect back together with the record, and the caller is told
+the mutation did not happen rather than that a repair is owed. `recover_transition` and the
+pending typed record it settles therefore have nothing to do here, which is what the
+`BoardEventPending` row of the table above already says. On Kanboard all three states remain real
+and so do their recovery paths; that is a difference between the two backends, not a difference in
+what a caller may ask for.
+
 The namespace is the part most easily lost by accident, so it is worth saying plainly what would
 have gone wrong without §3.9's `requests` table. Had each table owned its own `request_id UNIQUE`,
 a caller could have used one id for a task comment, the same id for a sprint comment, and the same
