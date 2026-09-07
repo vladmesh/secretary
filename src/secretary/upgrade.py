@@ -32,6 +32,8 @@ from secretary.automations import (
     load_specs,
     workspaces_root,
 )
+from secretary.board.migrate import migrate_instance
+from secretary.board.store import BoardStoreError, ensure_ignored, store_path
 from secretary.board_transport import (
     BoardTransportError,
     ensure_from_runtime_values,
@@ -878,6 +880,47 @@ def step_board_transport(context: UpgradeContext) -> StepResult:
     )
 
 
+def step_board_store(context: UpgradeContext) -> StepResult:
+    """Bring a configured board store to the schema this build ships (§7.4).
+
+    Three outcomes, and the first of them is the one that matters today. An installation with no
+    `board-store.env` has no store to migrate — that is every installation until the card that
+    provisions one lands — so the step is an explicit no-op and the upgrade proceeds exactly as it
+    did before this step existed. It is not a warning and it never stops the run.
+
+    With a complete file it reconciles the file's git exclusion, connects as `secretary_owner` and
+    applies what Alembic owes, naming both. With a file that is present but partial, unreadable,
+    unreachable or **tracked by the instance repository** it fails with that reason: a store that
+    is configured and broken is not something an upgrade may walk past, because the next step it
+    would walk to is a service restart.
+
+    The exclusion is reconciled here and enforced in `board_store.resolve`, so this step is where
+    an operator *sees* it and not the only place it happens.
+
+    It runs after `step_dependencies` because SQLAlchemy, Alembic and the driver have to be
+    installed before it can connect, which is exactly where §7.4 places it.
+    """
+    path = store_path(context.instance_path)
+    if not path.exists() and not path.is_symlink():
+        return StepResult("board-store", "skipped", "no board-store.env; the board store is not configured")
+    try:
+        lifecycle = ensure_ignored(context.instance_path, dry_run=context.dry_run)
+        revisions = migrate_instance(context.instance_path, dry_run=context.dry_run)
+    except BoardStoreError as exc:
+        return StepResult("board-store", "failed", str(exc))
+    prefix = f"{lifecycle.render(dry_run=context.dry_run)}; " if lifecycle.changed else ""
+    if not revisions:
+        return StepResult(
+            "board-store",
+            "would-change" if lifecycle.changed and context.dry_run else "changed" if lifecycle.changed else "unchanged",
+            f"{prefix}board store schema is already current",
+        )
+    listed = ", ".join(revisions)
+    if context.dry_run:
+        return StepResult("board-store", "would-change", f"{prefix}would apply board store migrations {listed}")
+    return StepResult("board-store", "changed", f"{prefix}applied board store migrations {listed}")
+
+
 # Validate registries before any mutating materialization step.
 STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
@@ -885,6 +928,7 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_memory_pack,
     step_board_transport,
     step_dependencies,
+    step_board_store,
     step_memory_clients,
     step_head_registry,
     step_publish_head_registry,
