@@ -1525,7 +1525,7 @@ instead of 3000) becomes one indexed join.
 format, not where a dump sits in an archive, not the restore order, not how roles come back on a
 clean host. A later card in `sprint:1432` owns it, and owns it *together with the code it needs*.
 
-What is settled here is only why it cannot be settled here, as three facts about the existing
+What is settled here is only why it cannot be settled here, as four facts about the existing
 chain. They are written down so nobody re-derives them, and so the later card starts from them
 rather than from a first reading of `backup_policy.py`:
 
@@ -1545,14 +1545,26 @@ rather than from a first reading of `backup_policy.py`:
    `secretary_app` and `secretary_read` therefore do not exist — while the restored
    `schema_migrations` row already asserts that the migration which creates them has run
    (§5.5, §7.4). Restore leaves the database claiming a state its cluster does not have.
+4. **After cutover, backup does not run at all until that code changes.** `backup.py:117` calls
+   `raw_kanboard_dump(data_dir)` unconditionally, before the loop over the requested kinds, so it
+   runs for a `core`-only backup exactly as it does for a `full` one. That function shells
+   `docker cp` from the hard-coded Kanboard container with `check=True` and turns any failure into
+   a `RuntimeError` (`data.py:116-160`). Separately, `FULL_POLICY` requires the `raw_board`
+   component (`backup_policy.py:90-98`), so `full` cannot simply stop producing the artefact
+   either. The consequence is concrete: with the Kanboard container gone, `secretary backup` fails
+   outright; with it left running, a `full` archive still carries a raw Kanboard dump that says
+   nothing about the new store. Post-cutover backup is therefore **broken until the later card
+   changes this code**, not merely unmodernized.
 
-**The conclusion this document is obliged to state.** Each of the three is a property of code, not
+**The conclusion this document is obliged to state.** Each of the four is a property of code, not
 of prose. Carrying a PostgreSQL dump in the existing archive requires changing
 `backup.py`, `backup_policy.py` and `backup_verify.py` — a new component with its own policy and
 its own verifier, or an exemption in `should_skip_data_entry`, plus a role-bootstrap step outside
-the dump. That is a code change, so it belongs to a card that ships the code and the test, not to a
-design document. Anything this document decided about it would be decided without the one check
-that has actually caught defects here: executing it.
+the dump; and fact 4 says the unconditional raw dump has to go in the same change, or nothing
+backs up at all. That is a code change, so it belongs to a card that ships the code and the test,
+not to a design document. Anything this document decided about it would be decided without the one
+check that has actually caught defects here: executing it. Fact 4 also fixes the ordering: that
+card lands **before or with** cutover, not after it.
 
 **What is unchanged and needs no card.** The normalized export stays the recovery canon. It is
 generated from PostgreSQL instead of from Kanboard; `export_board` swaps its reader while the file
@@ -1562,14 +1574,19 @@ and "Source of truth" stay true word for word — only the identity of the live 
 `board/analytics.py` keeps working on a copied `state/board` directory. A `core` archive keeps
 carrying exactly that normalized, engine-independent set, and `restore_capability`
 (`normalized-core`, `full-snapshot`) keeps its meanings. The open question is the engine-specific
-artefact, not the portable one.
+artefact, not the portable one. Read that as a statement about what an archive *holds*, not as a
+claim that the command *runs*: fact 4 is why nothing is archived at all until the later card
+changes `backup.py`.
 
 **The open question, for the later card.** Does the `full` archive carry a PostgreSQL dump at all —
-and if it does, in which component, verified by what, and with roles restored how? Until that card
-answers it with code, a `full` archive after cutover carries the normalized export and no
-engine-specific board artefact. Nothing else in this document depends on the answer: §5.1 puts the
-client tools in the container and §5.2 keeps the data directory out of `<data>` so that a
-file-level backup cannot copy it mid-write, and both hold whichever way the question is decided.
+and if it does, in which component, verified by what, with roles restored how, and what replaces the
+unconditional `raw_kanboard_dump` call fact 4 names? This document deliberately makes no prediction
+about what an archive contains in the window before that card lands, because fact 4 says there is no
+such window in which backup works.
+
+Nothing else in this document depends on the answer: §5.1 puts the client tools in the container and
+§5.2 keeps the data directory out of `<data>` so that a file-level backup cannot copy it mid-write,
+and both hold whichever way the question is decided.
 
 ### 5.8 The Python driver as a new core dependency
 
@@ -2065,6 +2082,7 @@ The procedure, which is the document's own order:
 | 1 | `docker run postgres:16` with the §5.2 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | — |
 | 2 | the §5.5 `CREATE ROLE` and `GRANT` fence | `secretary_owner` |
 | 3 | every §3 `CREATE` fence, then every §3 `ALTER` fence, in §3.13's two steps | `secretary_owner` |
+| 3c | §4's restatement of §3.6's partial unique index, compared byte-for-byte with the original instead of created twice | — |
 | 4 | prerequisite rows a sprint create references: a product, its repositories, its issue | `secretary_owner` |
 | 5 | the §7.1 canonical sprint-create transaction, verbatim, binds substituted | `secretary_app` |
 | 6 | the §3.1 registry-projection upserts, run twice, to show the projection is idempotent and that a removed binding sets `registry_present = false` rather than deleting a row | `secretary_app` |
@@ -2079,14 +2097,33 @@ index forbids a second live reservation; only executing the second insert shows 
 actually reachable, correctly predicated and attached to the right column.
 
 The statements are extracted from this file rather than retyped, so what runs is what is published.
-Fenced blocks are classified by their first keyword: `CREATE` fences are step-3a, `ALTER` fences are
-step-3b, and the `BEGIN;` fence is step 5. That is also why §7.1 spells its inserts out instead of
-eliding them as `(...)`: a placeholder cannot be executed, and an example nobody executes is exactly
-where the previous two defects lived.
+A fence is assigned to a step by its section first and its first keyword second: in §3, a `CREATE`
+fence is step 3a and an `ALTER` fence is step 3b; §5.5's fence is step 2; §7.1's `BEGIN;` fence is
+step 5; §3.1's projection fence is step 6; §3.9's three lifecycle fences and §4's release `UPDATE`
+are step 7; §4's repeated index is step 3c. Section before keyword, because §5.5's fence also
+begins with `CREATE` and is not part of §3's DDL. That ordering
+is also why §7.1 spells its inserts out instead of eliding them as `(...)`: a placeholder cannot be
+executed, and an example nobody executes is exactly where the previous two defects lived.
 
-The run behind this revision executed 22 of this document's 23 SQL fences, in that order. The
-twenty-third is §4's restatement of §3.6's partial unique index; it was compared byte-for-byte with
-the original rather than created a second time, which is the check that statement actually needs.
+**The fence accounting, so a later card can check it rather than trust it.** This document contains
+**23** fenced SQL blocks. Twenty-two of them open at column 0 and one — §3.1's registry-projection
+fence, line 504 of this revision — is indented three spaces because it sits inside a numbered list
+item. A count
+that anchors the fence to the start of the line therefore returns 22 and silently misses that one:
+
+```bash
+grep -c '^```sql'            docs/BOARD_STORE.md   # 22 -- misses the indented fence
+grep -cE '^[[:space:]]*```sql' docs/BOARD_STORE.md  # 23 -- the real total
+```
+
+Of those 23, **22 were executed** and exactly **one deliberately was not**: §4's restatement of
+§3.6's `sprint_projects_one_live_reservation` index. It is a repetition, not a second statement, so
+running it would only raise "already exists"; the check it actually needs is that the two spellings
+have not drifted apart, and the run does that by comparing them byte for byte. No other fence is
+illustrative: every remaining one, including §3.9's three lifecycle fences and §4's release
+`UPDATE`, was run verbatim with its `:name` binds supplied. That is 22 executed + 1 compared = 23, and the
+transcript quoted in this round's report has a line for each.
+
 The result was a database of 22 tables carrying 34 `CHECK`, 36 foreign-key, 22 primary-key and 12
 unique constraints and 4 partial unique indexes. All 18 negative probes were refused, each by the
 constraint or the privilege it names; all 10 positive probes were accepted.
