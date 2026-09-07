@@ -133,6 +133,32 @@ and the existing refusal to change mode while paused is preserved and surfaces a
 **The reads write nothing.** No flag, no lock, no head, no wake -- pinned by a snapshot of the data
 plane taken around the call.
 
+**And the command half, added by secretary-1579, is the layer over what has already been done.** The
+reads above answer what a thing *is*; nothing answered what was *commanded*. So beside them are two
+reads with the same properties and no others:
+
+* :meth:`~secretary.webproto.command_reads.CommandReadLayer.command_history` -- a page of the last
+  commands across every entity, each carrying the initiator, the action, the target entity and the
+  result, newest first;
+* :meth:`~secretary.webproto.command_reads.CommandReadLayer.command_request` -- what became of one
+  `request_id`: not found, pending with what is already done and how to continue safely, committed
+  with its result -- or unknown.
+
+Three properties are the point of that half, and each has a test:
+
+**They open no second store, index, scheduler or registry of operations.** The history is
+`TaskAudit.events`, the released cross-entity traversal; the request answer is `committed_event` and
+`pending_event`, the pair the sprint writer itself consults; the paging is this layer's own cursor.
+Every one of them existed before the card.
+
+**A read that repairs is not a read.** `command_request` never performs, retries, resumes or repairs
+the operation it reports on -- it describes the safe continuation and leaves it to whoever owns the
+operation -- and neither read writes a byte of the data plane.
+
+**`unknown` is never folded into another answer.** An audit that could not be read is an unavailable
+source, never an empty history and never `not_found`, and a page that ended is told from one the
+limit cut short.
+
 `secretary web-read` and `secretary web-run` (:mod:`secretary.webproto.commands`) are the operator's
 way to call the first six without a web transport existing at all. They are callers of this layer,
 not a part of it, and so are `secretary pause`, `secretary resume`, `secretary pause-status` and
@@ -143,6 +169,7 @@ from __future__ import annotations
 
 from secretary.webproto.agents import AGENT_STATES, LIVENESS_INVARIANT
 from secretary.webproto.boundary import IMPLEMENTATION_FAILURES, ProtocolBoundary
+from secretary.webproto.command_reads import OPERATION_IDENTITY, CommandReadLayer
 from secretary.webproto.cursor import Cursor
 from secretary.webproto.errors import (
     InstallationUnavailable,
@@ -171,7 +198,9 @@ __all__ = [
     "IMPLEMENTATION_FAILURES",
     "LIVENESS_INVARIANT",
     "MAX_LIMIT",
+    "OPERATION_IDENTITY",
     "SCHEMA_VERSION",
+    "CommandReadLayer",
     "Cursor",
     "InstallationUnavailable",
     "InvalidCursor",

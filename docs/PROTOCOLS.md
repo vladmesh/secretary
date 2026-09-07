@@ -3691,6 +3691,111 @@ re-decides a refusal:
 | `audit_pending` | `OperationPending` | `backend_unavailable` | the create, the comment or the close is part-done and repairable with the same request id (above); a repeated close continues the same terminal phase and writes no second closeout; the `data` action names which operation |
 | `backend_error`, anything else | `RuntimeUnavailable` | `backend_unavailable` | a durable source of this installation refused |
 
+## What has been commanded, and what became of a request
+
+An operator standing in front of a running installation asks two questions the reads above could not
+answer. *What were the last commands, who ran them, on what, and how did they end?* -- `task_events`
+is one card's slice, and there was no cross-entity answer short of opening the journal. *What became
+of the request id I sent?* -- the only answer was to re-send the operation and read the repeat's
+reply, which is safe but is a mutation performed to satisfy a question, and is unavailable to anyone
+who is not the original caller.
+
+So `secretary.webproto.command_reads` adds exactly two reads, and no machinery:
+
+```bash
+python3 -P -m secretary web-read commands --instance INSTANCE [--cursor C] [--limit N] [--json]
+python3 -P -m secretary web-read request  --instance INSTANCE --request-id ID [--json]
+```
+
+Both documents validate against the packaged `web-command` schema and carry `schema_version`, a
+`kind` of `command_history` or `command_request`, and `observed_at`.
+
+**`command_history(cursor, limit)`** -- a page of the last commands across every entity of the
+installation, newest first. Each row is the four fields a history is made of, and every one of them
+is already on the committed audit: `actor` (who initiated it), `action` (what was done), `entity`
+(the reference it was done to, with the entity kind where the record carries one), and `result` (the
+`reason` a typed protocol event's writer gave, or the `outcome` of a released generic audit record --
+never one renamed into the other). It is `TaskAudit.events()`, the released cross-entity traversal,
+paged; there is no second store, index, cache or scheduler behind it.
+
+**`command_request(request_id)`** -- what became of one request id, in four states and no fewer:
+
+| state | what it means |
+| --- | --- |
+| `committed` | the operation finished. Its action, entity, actor, result and event id are on the answer, and `staged` says whether an uncleared staged record still stands beside it (an owed audit repair) |
+| `pending` | a staged record exists and no committed one does. What it did is durably recorded and may be part-done; `continuation` names the safe move -- repeat this same request id |
+| `not_found` | the audit answered and holds neither a committed nor a staged record under this id |
+| `unknown` | the audit could not be read, so nothing is established. Never folded into `not_found`: "this installation never saw that request" and "nobody could say" are opposite answers |
+
+It reads `TaskAudit.committed_event` and `TaskAudit.pending_event` -- the pair `SprintWriter._write`
+itself consults to decide that a repeat is a no-op -- and re-decides nothing with them. **It never
+performs, retries, resumes or repairs the operation it reports on.** A read that repairs is not a
+read: a pending answer describes the continuation and leaves it to whoever owns the operation.
+
+Both reads write nothing at all, which is pinned by a byte snapshot of the whole data plane taken
+around each call, exactly as the pause reads are.
+
+### Paging and honesty
+
+The cursor is this layer's own (`secretary.webproto.cursor`), with one difference from a card's: it
+is a position in the traversal's append-ordered sequence rather than a byte offset into the file, and
+it is bound to no entity, so a card's cursor and a history cursor can never be honoured by the other's
+reader. `next_cursor` continues into older commands, and `has_more` is true **only** when the limit
+cut the page short -- so a page that reached the beginning of the history is distinguishable from one
+that was truncated. `DEFAULT_LIMIT` is 50 and `MAX_LIMIT` 500, as everywhere else in this layer.
+
+Newest first means the journal's append order reversed and deliberately not a sort by `occurred_at`:
+the writer stamps that field, two commands can share a second, and a clock can go backwards, so the
+append order is the only order that is a fact.
+
+An audit nobody could read is an unavailable source and never an empty history: `items` is `null`,
+the section names the reason, and that includes the case the released traversal answers `[]` for -- a
+journal file that is not there at all, which this read refuses rather than publishes. A record's
+entity kind is `null` when the record does not carry one, and is never inferred.
+
+### Operation identity, in one place
+
+Every mutation of this layer either takes a `request_id` or deliberately takes none. The table is
+published as a value (`secretary.webproto.command_reads.OPERATION_IDENTITY`), travels on every
+`command_request` answer, and is derived from the operation layers' own signatures by
+`tests/test_web_command_protocol.py`, which also holds this table to it.
+
+| operation | identity | what a repeat means, or why there is no key |
+| --- | --- | --- |
+| `run_start` | `request_id` | returns the same run; it raises no second head and cuts no second workspace |
+| `run_review` | `request_id` | returns the same reviewer run over the same worker result, and raises no second reviewer head |
+| `sprint_create` | `request_id` | resumes the sprint this request already opened, finishing whatever step was owed; a new id would open a second sprint beside the half-written one |
+| `sprint_comment` | `request_id` | returns the comment this request already saved, and never writes a second one |
+| `sprint_close` | `request_id` | resumes the staged close, keeps its plan and repeats no committed step; a new id would open a second close beside a half-finished one |
+| `pause_drain` | none | the pause is idempotent in its own mode by its own rule: a drain over a draining pipeline changes nothing and says so, and a drain over a freeze is refused as a conflict. A repeat needs no key, and adding one would put an operation-id ceremony on a command that completes in one call |
+| `pause_resume` | none | a resume over a pipeline that is not paused is a no-op that reports itself as one; its idempotence is the state of the flag, not a recorded request |
+
+And what the part-done failures promise about what is already done:
+
+* **`OperationPending`** (code `backend_unavailable`) -- the operation is durably part-done and
+  repairable. "It did not finish" is not "it did not happen": what it already did is staged, and the
+  safe move is to repeat *this* request id, which `data.action` carries beside `repeat_request`, the
+  operation's name and the reference where this layer knows it.
+* **`audit_pending`** (exit status `4`) -- the writer's own spelling of the same fact. The staged
+  record is kept, never discarded, and a repeat with the same request id resumes it.
+* **`close_conflict`** (exit status `3`) -- refused on the state of the world rather than on its
+  arguments; nothing was written, and this is not a part-done operation.
+* **`PauseCommandCompleted`** -- the pause or resume itself completed and only the report of it could
+  not be rendered, so the command answers with what it did rather than failing: a failure would
+  invite a retry of a command that already succeeded.
+
+### Errors
+
+Neither read has a code of its own. Both refuse a caller that names an installation which is not one,
+or that hands them an argument this layer did not issue, and everything else a durable source can do
+reaches the caller as `backend_unavailable` through `secretary.webproto.boundary`, as it does for
+every operation of this package.
+
+| read | code | when |
+| --- | --- | --- |
+| `command_history` | `validation` | the instance config does not validate, or the cursor is one this reader did not issue, belongs to a card, or is past the end of a journal that only grows |
+| `command_request` | `validation` | the instance config does not validate, or no request id was given |
+
 ## Serving the pipeline locally
 
 The web transport is the second caller of the two halves above, beside `web-read` and `web-run`,

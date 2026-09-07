@@ -20,6 +20,14 @@ cursor from another card an error rather than a plausible-looking wrong answer.
 Opaque, but not encrypted or signed: it names a position in a file the caller may already read, so
 there is nothing in it to protect. Tampering with one gets a client an
 :class:`~secretary.webproto.errors.InvalidCursor`, never another card's history.
+
+**One reader pages the same journal without seeking in it, and its position is a count.**
+:meth:`~secretary.webproto.command_reads.CommandReadLayer.command_history` is a cross-entity page
+built on `TaskAudit.events`, the traversal, rather than on a byte seek, so its ``offset`` is how
+many committed records stand before the row the next page continues at. Both spellings are
+positions in one append-only file and both are frozen for the same reason -- nothing before them
+can ever change -- and the ref binding keeps them apart with no second codec: a card's cursor names
+its card, and a cross-entity one names no entity at all.
 """
 
 from __future__ import annotations

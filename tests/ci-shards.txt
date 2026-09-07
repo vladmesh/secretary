@@ -104,6 +104,7 @@ unit tests/test_sprint_listing_budget.py
 unit tests/test_sprints.py
 unit tests/test_state_repo.py
 unit tests/test_status.py
+unit tests/test_web_command_protocol.py
 unit tests/test_web_pause_protocol.py
 unit tests/test_web_read_protocol.py
 unit tests/test_web_run_protocol.py
