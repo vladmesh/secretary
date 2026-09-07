@@ -103,9 +103,40 @@ operation returns instead is the launch state read off the dispatcher's own prod
 reaches the entity as a field that was never written -- never as an empty string and never as a
 default nobody chose.
 
+**And the pause half, added by secretary-1576, is the same layer over the switch that stops all of
+it.** A run is one head, a sprint is what decides which cards there are, and the pause is the one
+flag that stops the pipeline claiming any of them. So beside the rest there are two operations and
+two reads over the pause:
+
+* :meth:`~secretary.webproto.pause_ops.PauseOperationLayer.pause_drain` -- set the pipeline-wide
+  soft pause;
+* :meth:`~secretary.webproto.pause_ops.PauseOperationLayer.pause_resume` -- lift whatever pause is
+  set, and report what was actually put back;
+* :meth:`~secretary.webproto.pause_reads.PauseReadLayer.pause_state` -- whether the pipeline is
+  paused, in what mode, since when, and what is behind its cards;
+* :meth:`~secretary.webproto.pause_reads.PauseReadLayer.pause_scope` -- what a pause command would
+  reach, answered *before* it is issued: the flag it acts on, the open sprints and the cards inside
+  the pipeline-wide scope, and the heads that are running.
+
+Four properties are the point of that half, and each has a test:
+
+**The pause is pipeline-wide, and every document says so.** There is no per-sprint pause and no
+document of this layer that could be read as one: the extent is stated on every answer, including
+one where every source refused.
+
+**A drain stops no running head.** No field, name or sentence of these documents says otherwise, and
+the heads a drain leaves alone are listed as running.
+
+**A freeze is never reached implicitly.** There is no freeze operation, `pause_drain` takes no mode,
+and the existing refusal to change mode while paused is preserved and surfaces as `owner_conflict`.
+
+**The reads write nothing.** No flag, no lock, no head, no wake -- pinned by a snapshot of the data
+plane taken around the call.
+
 `secretary web-read` and `secretary web-run` (:mod:`secretary.webproto.commands`) are the operator's
 way to call the first six without a web transport existing at all. They are callers of this layer,
-not a part of it.
+not a part of it, and so are `secretary pause`, `secretary resume`, `secretary pause-status` and
+`secretary pause-scope`.
 """
 
 from __future__ import annotations
@@ -126,6 +157,8 @@ from secretary.webproto.errors import (
 )
 from secretary.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
 from secretary.webproto.ops import OperationLayer
+from secretary.webproto.pause_ops import PauseOperationLayer
+from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.reads import SCHEMA_VERSION, ReadLayer
 from secretary.webproto.runs import ProductRun, RunStore
 from secretary.webproto.sprint_ops import SprintOperationLayer
@@ -145,6 +178,8 @@ __all__ = [
     "OperationLayer",
     "OperationPending",
     "OwnerConflict",
+    "PauseOperationLayer",
+    "PauseReadLayer",
     "ProductRun",
     "ProtocolBoundary",
     "ReadError",

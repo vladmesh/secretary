@@ -1,0 +1,760 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "web-pause.schema.json",
+  "title": "Transport-independent pause operations and reads",
+  "description": "The documents secretary.webproto's pause layer returns: what the pipeline-wide pause is right now, what a pause command would reach before it is issued, and what one such command did. Every section carries the availability of the source that answered it and names that source, and no section is assembled anywhere but secretary.webproto.section. The pause is pipeline-wide and never per sprint; a drain stops no running head; a freeze is a different command and is never reached implicitly from here. No failure is a status number.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/pause_state"
+    },
+    {
+      "$ref": "#/$defs/pause_scope"
+    },
+    {
+      "$ref": "#/$defs/pause_command"
+    }
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "description": "Whether one source answered this section, and which source it was.",
+      "required": [
+        "state",
+        "reason",
+        "observed_at",
+        "data_age_seconds",
+        "name"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "available",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data_age_seconds": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "name": {
+          "enum": [
+            "installation",
+            "pause",
+            "liveness",
+            "sprints",
+            "cards"
+          ],
+          "description": "The source that answered: the installation config, the pause flag, the dispatcher's production state, the sprint board, or the Pipeline listing."
+        }
+      }
+    },
+    "mark": {
+      "type": "object",
+      "description": "One source's availability, said for the document as a whole and claiming nothing. Under `sources` rather than beside the sections, because two of these sources are named the same as the sections they feed.",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "description": "The availability of every source of the document, said once for the document.",
+      "additionalProperties": {
+        "$ref": "#/$defs/mark"
+      }
+    },
+    "extent": {
+      "type": "object",
+      "description": "That the pause is pipeline-wide, read from no source at all. It is not a fact about this installation but what the pause is in this product, so it is stated on every document -- including one where every source refused, which is when a reader most needs to know that what they are looking at is global.",
+      "required": [
+        "scope",
+        "per_sprint",
+        "statement"
+      ],
+      "properties": {
+        "scope": {
+          "const": "pipeline"
+        },
+        "per_sprint": {
+          "const": false
+        },
+        "statement": {
+          "type": "string"
+        }
+      }
+    },
+    "modes": {
+      "type": "object",
+      "description": "What each mode does, stated rather than left to be inferred from a head list. `drain.does_not_stop` is the promise a soft pause makes; `freeze.operation` is null because this layer exposes no freeze operation and a freeze is never an implicit upgrade of a drain.",
+      "required": [
+        "drain",
+        "freeze"
+      ],
+      "properties": {
+        "drain": {
+          "type": "object",
+          "required": [
+            "mode",
+            "operation",
+            "stops",
+            "does_not_stop",
+            "statement"
+          ],
+          "properties": {
+            "mode": {
+              "const": "drain"
+            },
+            "operation": {
+              "const": "pause_drain"
+            },
+            "stops": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "does_not_stop": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "statement": {
+              "type": "string"
+            }
+          }
+        },
+        "freeze": {
+          "type": "object",
+          "required": [
+            "mode",
+            "operation",
+            "stops",
+            "statement"
+          ],
+          "properties": {
+            "mode": {
+              "const": "freeze"
+            },
+            "operation": {
+              "type": "null"
+            },
+            "stops": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "statement": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "description": "Which dispatcher's flag a pause command would write, and where it lives. Sourced `installation`: these are locations of the data plane and not readings of the flag, so they answer even when the flag cannot be read.",
+      "required": [
+        "source",
+        "dispatcher",
+        "pause_file",
+        "state_file",
+        "legacy_mirror_file"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "dispatcher": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pause_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legacy_mirror_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "dispatcher": {
+      "type": "object",
+      "description": "The dispatcher that would be paused, as its own durable state describes it. Sourced `liveness`.",
+      "required": [
+        "source",
+        "kind",
+        "phase",
+        "owner",
+        "tracked_cards"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tracked_cards": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "flag": {
+      "type": "object",
+      "description": "Whether the pipeline is paused and everything the flag itself says about it. Sourced `pause`. Every field is null when the flag could not be read -- `paused` included, because a flag nobody could read establishes neither that the pipeline is paused nor that it is running, and the source's reason says what the tick does about it instead.",
+      "required": [
+        "source",
+        "paused",
+        "mode",
+        "since",
+        "actor",
+        "pause_reason",
+        "stopped_worker",
+        "stopped_reviewer",
+        "stopped_observer",
+        "excluded_worker",
+        "on_resume",
+        "auto_resume",
+        "legacy_mirror"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "paused": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "drain",
+            "freeze",
+            null
+          ]
+        },
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pause_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why the pipeline was paused, as the flag records it. Named `pause_reason` and not `reason` so it is never confused with the `reason` a refused source carries."
+        },
+        "stopped_worker": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "The worker heads a freeze stopped and a resume would put back. A drain fills none of these lists, because a drain stops no head."
+        },
+        "stopped_reviewer": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "stopped_observer": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded_worker": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "on_resume": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auto_resume": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "legacy_mirror": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "heads": {
+      "type": "object",
+      "description": "The heads the dispatcher holds right now, per card and per sprint observer. Sourced `liveness`. A drain stops none of these; `null` and never an empty list when the state could not be read.",
+      "required": [
+        "source",
+        "cards",
+        "observers"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "cards": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "required": [
+              "ref",
+              "state",
+              "worker",
+              "reviewer",
+              "workspace"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "worker": {
+                "enum": [
+                  "running",
+                  "stopped-by-pause",
+                  "not-running"
+                ]
+              },
+              "reviewer": {
+                "enum": [
+                  "running",
+                  "stopped-by-pause",
+                  "not-running"
+                ]
+              },
+              "workspace": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "observers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "sprints": {
+      "type": "object",
+      "description": "The open sprints inside the scope. Sourced `sprints`. `items` is null and never an empty list when the board did not answer: an empty list is the claim that no sprint is inside a pipeline-wide pause.",
+      "required": [
+        "source",
+        "items",
+        "other_sprints"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "items": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "required": [
+              "ref",
+              "goal",
+              "status",
+              "current_task"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string"
+              },
+              "goal": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "current_task": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "other_sprints": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "How many sprints of this installation are not open, so a reader can tell a short list from a small board."
+        }
+      }
+    },
+    "cards": {
+      "type": "object",
+      "description": "Every card on the Pipeline board, with the sprint that holds it where one does, from the one Pipeline listing. Sourced `cards`. The whole board and not the open sprints' cards, because the whole board is the scope: a drain stops the dispatcher claiming a Ready card whether or not a sprint holds it. Product and Issue records are not listed -- the board's own rule is that such a record never takes a claim or a task transition, so a pause reaches none of them. `items` is null and never an empty list when the listing could not be read.",
+      "required": [
+        "source",
+        "items"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "items": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "required": [
+              "ref",
+              "sprint",
+              "state"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string"
+              },
+              "sprint": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The sprint that holds this card, or null for a card no sprint holds. Never the empty string, and never omitted."
+              },
+              "state": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "restored": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "What a resume put back, from the lists the resume itself produced. Null on a pause command, which puts nothing back. `resumed_mode` is null when the pipeline was not paused at all. A list is null when the resume completed but its own report could not be read back -- that is \"nobody read what it put back\", which is not the empty list's claim that it put nothing back.",
+      "required": [
+        "resumed_mode",
+        "relaunched",
+        "parked",
+        "skipped",
+        "observers_resumed",
+        "statement"
+      ],
+      "properties": {
+        "resumed_mode": {
+          "enum": [
+            "drain",
+            "freeze",
+            null
+          ]
+        },
+        "relaunched": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "parked": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "skipped": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "observers_resumed": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "statement": {
+          "type": "string"
+        }
+      }
+    },
+    "pause_state": {
+      "type": "object",
+      "description": "Whether the pipeline is paused, in what mode, since when, and what is behind its cards. The read `secretary pause-status` answers with.",
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "extent",
+        "target",
+        "dispatcher",
+        "state",
+        "heads",
+        "modes",
+        "sources"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "pause_state"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "extent": {
+          "$ref": "#/$defs/extent"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "dispatcher": {
+          "$ref": "#/$defs/dispatcher"
+        },
+        "state": {
+          "$ref": "#/$defs/flag"
+        },
+        "heads": {
+          "$ref": "#/$defs/heads"
+        },
+        "modes": {
+          "$ref": "#/$defs/modes"
+        },
+        "sources": {
+          "$ref": "#/$defs/sources"
+        }
+      }
+    },
+    "pause_scope": {
+      "type": "object",
+      "description": "What a pause command would reach, answered before it is issued: the flag it acts on, the open sprints and their cards inside the pipeline-wide scope, and the heads that are running now. It writes nothing and starts, stops or wakes nothing.",
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "extent",
+        "target",
+        "dispatcher",
+        "state",
+        "sprints",
+        "cards",
+        "heads",
+        "modes",
+        "sources"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "pause_scope"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "extent": {
+          "$ref": "#/$defs/extent"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "dispatcher": {
+          "$ref": "#/$defs/dispatcher"
+        },
+        "state": {
+          "$ref": "#/$defs/flag"
+        },
+        "sprints": {
+          "$ref": "#/$defs/sprints"
+        },
+        "cards": {
+          "$ref": "#/$defs/cards"
+        },
+        "heads": {
+          "$ref": "#/$defs/heads"
+        },
+        "modes": {
+          "$ref": "#/$defs/modes"
+        },
+        "sources": {
+          "$ref": "#/$defs/sources"
+        }
+      }
+    },
+    "pause_command": {
+      "type": "object",
+      "description": "What one pause command did. `action` is the answer the dispatcher's own pause gave: `paused` set the flag, `noop` is a repeat in the same mode that changed nothing, `resumed` lifted one. A refusal is not an action and never reaches this document. A command whose action landed but whose pipeline state could not be rendered afterwards is still this document: the action it performed, the refusal under `warnings`, and the source that did not answer marked unavailable on `state`.",
+      "required": [
+        "schema_version",
+        "kind",
+        "observed_at",
+        "operation",
+        "actor",
+        "action",
+        "changed",
+        "restored",
+        "warnings",
+        "extent",
+        "modes",
+        "state"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "kind": {
+          "const": "pause_command"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "pause_drain",
+            "pause_resume"
+          ]
+        },
+        "actor": {
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "paused",
+            "noop",
+            "resumed"
+          ]
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "restored": {
+          "$ref": "#/$defs/restored"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extent": {
+          "$ref": "#/$defs/extent"
+        },
+        "modes": {
+          "$ref": "#/$defs/modes"
+        },
+        "state": {
+          "$ref": "#/$defs/pause_state"
+        }
+      }
+    }
+  }
+}

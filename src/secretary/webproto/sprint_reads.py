@@ -109,7 +109,7 @@ from secretary.dispatcher_observer import (
     delivery_evidence_summary,
     observer_snapshot,
 )
-from secretary.head_registry import HeadRegistryConfigError, installed_heads
+from secretary.head_registry import installed_heads
 from secretary.product_issues import ProductIssueStore, registered_projects
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
@@ -129,7 +129,7 @@ from secretary.sprints import (
     audit_traversal,
     sprint_guard_index_initialized,
 )
-from secretary.tasks import KanboardClient, TaskAudit, TaskError
+from secretary.tasks import KanboardClient, TaskAudit
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import InstallationUnavailable, TaskNotFound, ValidationRefused
@@ -279,15 +279,12 @@ ACCEPTANCE_NOTICE = (
 
 #: Failures a source read may answer with instead of a value, caught per section exactly as the
 #: card reads catch theirs.
-_SOURCE_FAILURES = (
-    TaskError,
-    HeadRegistryConfigError,
-    ObserverMetadataError,
-    OSError,
-    ValueError,
-    KeyError,
-    TypeError,
-)
+#:
+#: The tuple itself now lives in :data:`secretary.webproto.sources.SOURCE_FAILURES`, because the
+#: pause reads have to catch exactly the same set and two hand-kept lists of "what a refused source
+#: can raise" drift the first time one of them reads a new durable document (secretary-1576). The
+#: name is kept here: it is what this module's own reads and their tests refer to.
+_SOURCE_FAILURES = sources.SOURCE_FAILURES
 
 
 @dataclass(frozen=True, slots=True)

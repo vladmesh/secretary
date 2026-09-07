@@ -1389,7 +1389,7 @@ State from outside, without reading a transcript:
 ```bash
 secretary status --json --instance INSTANCE                    # .dispatcher.observers
 secretary dispatcher production-observe --instance INSTANCE    # .observers
-secretary pause-status --instance INSTANCE                     # .observers, .stopped_observer
+secretary pause-status --instance INSTANCE                     # .heads.observers, .state.stopped_observer
 ```
 
 An observer row carries the sprint, the head profile, the state (`running`, `waiting`, `idle-grace`, `wake-deferred`,
@@ -1715,6 +1715,7 @@ still reaches done, but the branch stays unmerged and needs a manual merge. The 
 An emergency stop is one product CLI command with two modes:
 
 ```bash
+python3 -P -m secretary pause-scope  --instance INSTANCE                  # what a pause would reach
 python3 -P -m secretary pause drain  --instance INSTANCE --reason "why"
 python3 -P -m secretary pause freeze --instance INSTANCE --reason "why"
 python3 -P -m secretary resume       --instance INSTANCE
@@ -1750,10 +1751,88 @@ The flag lives in the live data plane, next to the state of the dispatcher that 
 flag in the pipeline workspace, so the pause additionally writes a mirror there and `resume` removes it — but only
 if the pause put it there. A foreign legacy flag is neither overwritten nor deleted.
 
+### Read the scope first, then decide
+
+Before issuing a pause, ask what it would reach:
+
+```bash
+python3 -P -m secretary pause-scope --instance INSTANCE
+```
+
+It answers, in one document and without changing anything:
+
+- **that the pause is pipeline-wide** (`extent`). There is no per-sprint pause. If you are looking at
+  one sprint and reach for a pause, this is the field that tells you the other open sprints stop
+  claiming too;
+- **which dispatcher and which files** a command would write (`target`): the flag
+  `<data_dir>/dispatcher/pause.json`, the production state beside it, and the legacy mirror the
+  background roles read;
+- **which sprints are open** (`sprints`), plus how many sprints of the installation are not open;
+- **which cards are on the board** (`cards`) — every one of them, each with the sprint that holds it
+  or `null` where none does. A drain stops the dispatcher claiming a Ready card whether or not a
+  sprint holds it, so the list is the board and not the sprints' share of it. Product and Issue
+  records are not listed: such a record never takes a claim, so a pause reaches none of them;
+- **which heads are running right now** (`heads`), per card and per sprint observer;
+- **what a drain does not stop, and what a freeze would** (`modes`). These are two different
+  commands, side by side, so the choice is made with both in view.
+
+The scope read writes nothing: no flag, no lock, no head, no wake. It is safe to run against a live
+installation at any time, and safe to run twice.
+
+Then decide, and read the result:
+
+```bash
+python3 -P -m secretary pause drain --instance INSTANCE --reason "why"
+python3 -P -m secretary pause-status --instance INSTANCE
+```
+
+The pause and the resume answer with what they did — `action` is `paused`, `noop` or `resumed`, and
+`changed` is that as a boolean — and carry the pause state read inside the same document, so there
+is nothing to run afterwards to find out where you are. A repeat of the same drain is a `noop` that
+writes nothing and leaves the original actor and reason on the flag. Asking for a drain while the
+pipeline is frozen is refused with exit status 3 and changes nothing: resume first, then pause in
+the other mode.
+
+**What a drain does not do.** It stops no running head. The worker that is writing right now keeps
+writing, the reviewer that is judging keeps judging, a green branch still merges, and the sprint
+observers stay up. What stops is claiming Ready cards, dispatching background roles, and raising an
+observer for a sprint opened during the pause. So a drain is what you use to stop the *inflow* and
+let the work in flight land — and if you need the host free right now, that is `pause freeze`, a
+different command you type deliberately. Nothing about the drain path turns into a freeze on its
+own: `pause-status` after a drain shows every `stopped_*` list empty and every live head still
+`running`, and that is the difference between the two written down.
+
+`resume` says what it actually put back. After a freeze that is the heads it relaunched, the ones it
+left to the next tick, and the ones it did not bring back; after a drain it is nothing, and it says
+so — a drain stopped no head, so an empty list there is not a resume that failed.
+
+**If the pipeline state is broken, the command still tells you what it did.** The dispatcher writes
+the flag and then renders the status, and that last step reads every dispatcher record — so a
+`production-state.json` that is corrupt, half-written or left in a shape an upgrade no longer stores
+would otherwise make a pause that *did* take answer like one that failed. It does not: the command
+answers with its `action`, the dispatcher's complaint under `warnings`, and the state read inside it
+showing the section nobody could answer as `unavailable`. Read the flag itself
+(`<data_dir>/dispatcher/pause.json`) if you want the pipeline's own copy of the answer, and repair
+the production state before expecting `pause-status` to describe the heads again. The reverse case is
+just as plain: if the command really failed, it exits non-zero and the flag is untouched — a drain
+that was refused is not a drain that half-happened. For a resume of a freeze in that state,
+`restored`'s lists are `null` rather than empty: what it put back could not be read, which is not the
+same as putting nothing back.
+
+That `action` is the one the dispatcher decided while it held the tick lock, so it stays right when
+two operators act at once: a `pause drain` that reaches the lock just after somebody else's `resume`
+reports `paused` because it really did set the pause the pipeline now holds, and a `pause drain` that
+found the drain already there reports `noop` — even though the flag reads `drain` on both sides of
+either one. Do not read a pause's `action` off `pause-status` before and after: those two reads say
+what the pipeline is, not which command made it so.
+
 ### Pause or breakage
 
-`pause-status` shows the product dispatcher's state: the mode, who set it and when, the path to the flag file, and
-a line per card describing its heads:
+`pause-status` shows the product dispatcher's state as the protocol document of the pause layer: `state` carries
+the mode, who set it and when, `target` the path to the flag file, and `heads.cards` a line per card describing
+its heads (`heads.observers` does the same for the sprint observers). Each of those is a section carrying the
+source that answered it, so a flag or a production state that could not be read is said as such and never as a
+pipeline that is running:
 
 - `running` — the head is alive;
 - `stopped-by-pause` — the pause stopped the head, the workspace is intact, `resume` will bring it back;
@@ -1777,7 +1856,7 @@ would, bringing heads back up with fresh watchdog windows. Without that, a `secr
 its cleanup would leave the dispatcher frozen forever. A freeze from a person (any other actor) never expires: the
 maintenance window is lifted by whoever opened it. Setting the TTL to zero disables auto-resume entirely.
 
-`pause-status` answers in its `auto_resume` field whether the pause will lift itself: `fresh` (it will, the TTL has
+`pause-status` answers in its `state.auto_resume` field whether the pause will lift itself: `fresh` (it will, the TTL has
 not expired), `manual-or-unknown-actor` (it will not, a person is holding it), `disabled` (auto-resume is off). The
 response of a tick that lifted a pause by TTL carries the pause's age and the lists of heads it brought back, so a
 TTL lift is confused with neither a manual resume nor a break.

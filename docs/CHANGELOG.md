@@ -4,6 +4,93 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-07 — a pause command reports the action it decided under the lock (secretary-1577, sprint:1431)
+
+**No behaviour of a pause or a resume changed; what a command reports about itself did.** When the
+status render after a `pause_drain` or `pause_resume` refuses — a `production-state.json` this
+release cannot convert — the document's `action` is now the one `secretary.dispatcher_pause_ops`
+decided inside the production tick lock and carried out of it on the new
+`PauseCommandCompleted`, instead of being inferred from the pause flag read before and after the
+call. That inference could be wrong under concurrency: with the pipeline already drained, a second
+`pause_drain` that ran after somebody else's `resume` observed `drain` on both sides and was reported
+as `noop` over a flag carrying its own actor and reason. `pause_drain` and `pause_resume` documents
+are unchanged in shape, and `secretary pause freeze`, `secretary resume` and the tick's auto-resume
+answer exactly as before. See [PROTOCOLS](PROTOCOLS.md#the-pause-as-protocol-operations) and
+[OPERATIONS](OPERATIONS.md#read-the-scope-first-then-decide).
+
+## 2026-09-06 — the pause is reachable as a protocol operation, and its scope is readable first (secretary-1576, sprint:1431)
+
+**Two new protocol operations and two new reads.** `pause_drain(actor, reason)` sets the pipeline-wide
+soft pause; `pause_resume(actor)` lifts whatever pause is set and reports what it put back;
+`pause_state()` is the pause state read; `pause_scope()` answers what a pause command would reach
+*before* it is issued. Documents are `kind: pause_command`, `pause_state` and `pause_scope`, published
+as the `web-pause` schema. Every rule stays in `secretary.dispatcher_pause_ops` — the tick lock, the
+same-mode no-op, the `pause_conflict` refusal, the head stop and relaunch, the legacy mirror and the
+auto-resume TTL — and no second flag, lock or store was added. See
+[PROTOCOLS](PROTOCOLS.md#the-pause-as-protocol-operations) and
+[OPERATIONS](OPERATIONS.md#read-the-scope-first-then-decide).
+
+**New command.** `secretary pause-scope --instance INSTANCE` prints the scope read: that the pause is
+pipeline-wide, which dispatcher and which files a command would write, which sprints are open, every
+card on the Pipeline board with the sprint that holds it (`null` where none does), which heads are
+running, and — separately — what a drain does not stop versus what a freeze would. It is a read: no
+flag, no lock, no head, no wake, no write. Product and Issue records are not listed as cards: such a
+record never takes a claim, so a pause reaches none of them.
+
+**`secretary pause-status` output has changed shape.** It is now a client of `pause_state` and prints
+that document. The fields moved into sections that each name the source that answered them: `paused`,
+`mode`, `since`, `actor`, `stopped_worker`/`stopped_reviewer`/`stopped_observer`, `on_resume` and
+`auto_resume` are under `state`; the per-card head lines are `heads.cards` and the sprint observers
+are `heads.observers`; the flag path is `target.pause_file`. The pause's own reason is `state.pause_reason`,
+so it is never confused with the `reason` a refused source carries. `secretary backup create` reads the
+new shape and treats a pause state it could not establish as paused.
+
+**`secretary pause drain` and `secretary resume` output has changed shape too.** They print the
+`pause_command` document: what the command did (`action` is `paused`, `noop` or `resumed`, with
+`changed` as the boolean), the `restored` lists for a resume, any warnings, and the pause state read
+inside the same answer. Exit statuses are unchanged: a `pause_conflict` is `owner_conflict` and still
+exits `3`, a validation refusal `2`, an unavailable backend `1`.
+
+**`secretary pause freeze` is untouched.** There is deliberately no freeze operation in the layer:
+`pause_drain` takes no mode, and no default, fallback, retry or convenience path turns a request for a
+soft pause into a freeze. The freeze command keeps the implementation and the output it had, and the
+existing refusal to change mode while paused is preserved.
+
+**A config that does not validate keeps exiting 2.** The pause commands reached the dispatcher
+through `runtime_from_args`, whose `invalid_instance` exits 2, so the layer's typed code for it is
+`validation` and the status is unchanged on all four commands. In the other direction: with an
+explicit `--data-dir`, `pause-status` and `pause-scope` now answer from the flag and the dispatcher
+state and report `installation` as an unavailable source, where the old path refused — a caller that
+supplied the missing information gains an answer, and no refusal changed its status.
+
+**A pause that took is reported as one even when the pipeline cannot be described afterwards.** The
+dispatcher writes the flag and then renders the status, and that status read converts every
+dispatcher record — so a semantically corrupt `production-state.json` made a completed drain or
+resume answer `backend_unavailable` with no `action`, which reads as "the pause did not take" on a
+safety control that silently did. `pause_drain` and `pause_resume` now read the flag back when the
+dispatcher call fails: a flag holding exactly what the command intended is reported as the action it
+performed, in the ordinary `pause_command` document, with the dispatcher's refusal under `warnings`
+and the embedded `state` read marking the source that could not answer as unavailable. A resume of a
+freeze whose own report was lost carries `relaunched`, `parked`, `skipped` and `observers_resumed` as
+`null` — nobody read what it put back, which is not the empty list's claim that it put nothing back —
+and the `web-pause` schema admits `null` there. Nothing else moved: a command whose flag did not
+reach the intended state still fails with its own refusal, a `pause_conflict` is still
+`owner_conflict` with exit 3, and what a pause or resume *does* is unchanged.
+
+**A durable file that parses but cannot be converted is an unavailable source, not an exception.** A
+pause flag whose `stopped_worker` is a number, a production record whose `attempt_round` is not an
+integer, or one whose shape this release no longer stores (a `DispatcherError` from
+`DispatcherRecord.from_json`) marks its source unavailable and leaves every other section standing.
+What counts as "this source could not answer" is the span of the source read rather than a list of
+exception types: the pause layer's source reads catch everything raised while reading and converting
+one durable document, and enumerate nothing. Assembly outside that span is unchanged — a defect there
+still travels as itself.
+
+**Nothing says a soft pause stops a head, or that a pause is per sprint.** Every document carries an
+`extent` object stating that the pause is one pipeline-wide flag with no per-sprint form — including a
+document where every source refused — and a `modes` object stating what a drain does not stop and what
+a freeze would. A drain leaves the `stopped_*` lists empty and the running heads reported as running.
+
 ## 2026-09-06 — a PO comment is saved, identified, and honestly reported as delivered (secretary-1575, sprint:1431)
 
 **Two new protocol operations.** `sprint_comment(request_id, actor, reference, body, role)` puts one

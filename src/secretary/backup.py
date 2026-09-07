@@ -311,10 +311,38 @@ def _pipeline_status(
         reason = (exc.stderr or exc.stdout or "pipeline command failed").strip().splitlines()
         raise RuntimeError(reason[-1] if reason else "pipeline command failed") from None
     try:
-        status = json.loads(result.stdout) if result.stdout.strip() else {}
+        document = json.loads(result.stdout) if result.stdout.strip() else {}
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"pipeline command returned invalid JSON: {exc}") from None
-    return status if isinstance(status, dict) else {}
+    return _pause_summary(document if isinstance(document, dict) else {})
+
+
+def _pause_summary(document: dict[str, Any]) -> dict[str, Any]:
+    """The compact pause facts a backup decides on, out of the pause protocol document.
+
+    `secretary pause-status` answers with the layer's `pause_state` document (secretary-1576): the
+    flag is one section of it, and every field of that section is null when the flag could not be
+    read at all. That case is deliberately reported here as paused rather than as running. A backup
+    must own the freeze it takes, and "nobody could read the pause flag" is not evidence that the
+    pipeline is free -- the production tick reads an unreadable flag as a freeze, and a backup that
+    read it as "not paused" would freeze on top of a state it cannot see.
+    """
+    state = document.get("state")
+    state = state if isinstance(state, dict) else {}
+    paused = state.get("paused")
+    if not isinstance(paused, bool):
+        return {
+            "paused": True,
+            "mode": None,
+            "actor": None,
+            "reason": "the pause state could not be established",
+        }
+    return {
+        "paused": paused,
+        "mode": state.get("mode"),
+        "actor": state.get("actor"),
+        "reason": state.get("pause_reason"),
+    }
 
 
 def _pause_owned_by_backup(status: dict[str, Any]) -> bool:
