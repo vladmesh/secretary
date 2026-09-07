@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from secretary.board.backend import entity_number
 from secretary.board.card_transitions import card_transition
 from secretary.board.events import (
     BoardEventCanon,
@@ -746,7 +747,7 @@ class KanboardBoardHost:
 
     def _sprint_task_id(self, ref: str) -> int:
         record = SprintReader(self.client, data_dir=self.data_dir).show(ref, include_cards=False)
-        task_id = _positive_int(str(record.get("id") or "").removeprefix("sprint_kanboard_"))
+        task_id = entity_number("sprint", record.get("id"))
         if task_id is None:
             raise BoardProtocolError("Kanboard returned an invalid Sprint")
         return task_id
@@ -1074,8 +1075,14 @@ class KanboardBoardHost:
             raise BoardProtocolError("Kanboard rejected the Card transition")
 
     def _card_task_id(self, ref: str) -> int:
+        """The card's number, read through the one identity parser rather than one prefix.
+
+        A literal `task_kanboard_` here answered `None` for every card the PostgreSQL backend
+        normalizes, so `report`, `verdict` and `decide` refused on that backend while the
+        reader that produced the identity worked (`board/backend.py`).
+        """
         task = TaskReader(self.client).show(ref)
-        task_id = _positive_int(str(task.get("id") or "").removeprefix("task_kanboard_"))
+        task_id = entity_number("task", task.get("id"))
         if task_id is None:
             raise BoardProtocolError("Kanboard returned an invalid Card")
         return task_id

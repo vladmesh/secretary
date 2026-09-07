@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.board.backend import KANBOARD, entity_id, entity_number
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     KIND_HEAD,
@@ -619,7 +620,7 @@ class SprintReader:
         repositories = _json_list(meta.get("sprint_repositories"))
         budget = _budget(meta.get("sprint_budget"), self.thresholds, meta.get(BUDGET_UNCHARGED_FIELD))
         result: dict[str, Any] = {
-            "id": f"sprint_kanboard_{task_id}",
+            "id": entity_id("sprint", KANBOARD, task_id),
             "ref": _text(raw.get("reference")),
             "goal": meta.get("sprint_goal", ""),
             "definition_of_done": meta.get("sprint_definition_of_done", ""),
@@ -1268,7 +1269,7 @@ class SprintWriter:
         task_id = _positive_int(row.get("id"))
         if task_id is None:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
-        event.update({"ref": created_ref, "task_id": f"sprint_kanboard_{task_id}"})
+        event.update({"ref": created_ref, "task_id": entity_id("sprint", KANBOARD, task_id)})
         event["backend"]["task_id"] = task_id
         progress["task_id"] = task_id
         self.transactions.save(document)
@@ -3051,7 +3052,13 @@ class SprintWriter:
 
 
 def _sprint_number(sprint: dict[str, Any] | None) -> int:
-    number = _positive_int(str((sprint or {}).get("id", "")).removeprefix("sprint_kanboard_"))
+    """The sprint's number, read through the same parser a card's number is read through.
+
+    It carried the same one-prefix defect `_card_task_id` did: `sprint_kanboard_` is one
+    spelling of `<kind>_<backend>_<n>`, and the convention is minted and parsed in
+    `board/backend.py` so that no consumer has to know which backend answered.
+    """
+    number = entity_number("sprint", (sprint or {}).get("id"))
     if number is None:
         raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
     return number

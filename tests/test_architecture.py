@@ -91,5 +91,63 @@ class SourceLayoutTests(unittest.TestCase):
             self.assertEqual(env.positive_int("COUNT", 3), 7)
 
 
+# Every place in `secretary` that builds a board client, other than the switch itself, and the
+# reason each one is allowed to name Kanboard directly (`docs/BOARD_STORE.md` §2, §6).  A new
+# entry here is a new consumer that decided its backend by default instead of by the switch, so
+# it is added deliberately with its reason or it is a defect.
+KANBOARD_ONLY_CONSTRUCTIONS = {
+    "bootstrap.py": (
+        "it creates the Kanboard service's own board, columns and swimlanes and waits for the "
+        "container to answer; the store has no equivalent to create"
+    ),
+    "board/import_board.py": (
+        "the importer's subject is the Kanboard board it copies into the store, so the switch "
+        "would ask the destination to be the source"
+    ),
+    "board/backend.py": "the switch itself, which is where the choice is made",
+}
+
+
+class CardBackendSwitchTests(unittest.TestCase):
+    """The switch is acted on in one place, and every consumer goes through it."""
+
+    def _constructions(self) -> dict[str, list[int]]:
+        """Every `KanboardClient(...)` call in `src/secretary`, by module and line."""
+        found: dict[str, list[int]] = {}
+        for path in sorted((ROOT / "src" / "secretary").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                target = node.func
+                if isinstance(target, ast.Attribute) and target.attr == "for_instance":
+                    target = target.value
+                if isinstance(target, ast.Name) and target.id == "KanboardClient":
+                    key = str(path.relative_to(ROOT / "src" / "secretary"))
+                    found.setdefault(key, []).append(node.lineno)
+        return found
+
+    def test_only_the_named_kanboard_only_modules_build_a_kanboard_client(self) -> None:
+        """Anything else names one backend where the installation names two."""
+        offenders = sorted(set(self._constructions()) - set(KANBOARD_ONLY_CONSTRUCTIONS))
+        self.assertEqual(
+            offenders,
+            [],
+            "these modules build a Kanboard client directly instead of asking "
+            "secretary.board.backend.board_client for the installation's own backend",
+        )
+
+    def test_every_named_kanboard_only_module_still_builds_one(self) -> None:
+        """The allowance is a statement about live code, not a list that outlives its reasons."""
+        built = self._constructions()
+        self.assertEqual(sorted(built), sorted(KANBOARD_ONLY_CONSTRUCTIONS))
+
+    def test_the_two_kanboard_only_consumers_say_so_in_their_own_source(self) -> None:
+        """`bootstrap` and the importer are Kanboard-only by statement, not by default."""
+        for module in ("bootstrap.py", "board/import_board.py"):
+            source = (ROOT / "src" / "secretary" / module).read_text(encoding="utf-8")
+            self.assertIn("Kanboard-only", source, module)
+
+
 if __name__ == "__main__":
     unittest.main()

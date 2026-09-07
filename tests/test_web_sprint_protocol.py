@@ -1142,7 +1142,7 @@ class SprintReadCommandTests(SprintProtocolFixture):
         output, errors = io.StringIO(), io.StringIO()
         with (
             mock.patch(
-                "secretary.webproto.sprint_reads.KanboardClient.for_instance",
+                "secretary.tasks.KanboardClient.for_instance",
                 return_value=self.board,
             ),
             contextlib.redirect_stdout(output),
@@ -1704,10 +1704,10 @@ class CommentCommandTests(CommentFixture):
         output, errors = io.StringIO(), io.StringIO()
         with (
             mock.patch(
-                "secretary.webproto.sprint_reads.KanboardClient.for_instance", return_value=self.board
+                "secretary.tasks.KanboardClient.for_instance", return_value=self.board
             ),
             mock.patch(
-                "secretary.webproto.sprint_ops.KanboardClient.for_instance", return_value=self.board
+                "secretary.tasks.KanboardClient.for_instance", return_value=self.board
             ),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
@@ -3000,10 +3000,10 @@ class CloseCommandTests(CloseFixture):
         output, errors = io.StringIO(), io.StringIO()
         with (
             mock.patch(
-                "secretary.webproto.sprint_reads.KanboardClient.for_instance", return_value=self.board
+                "secretary.tasks.KanboardClient.for_instance", return_value=self.board
             ),
             mock.patch(
-                "secretary.webproto.sprint_ops.KanboardClient.for_instance", return_value=self.board
+                "secretary.tasks.KanboardClient.for_instance", return_value=self.board
             ),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),

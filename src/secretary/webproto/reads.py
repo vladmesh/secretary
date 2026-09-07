@@ -25,11 +25,12 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+from secretary.board.backend import CARD, board_client
 from secretary.config import InstanceReport, validate_instance
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_types import HostError
 from secretary.status import collect_status
-from secretary.tasks import KanboardClient, TaskError, TaskReader
+from secretary.tasks import TaskError, TaskReader
 from secretary.webproto import agents as agent_reads
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
@@ -111,8 +112,9 @@ class ReadLayer(ProtocolBoundary):
         return report.data_dir
 
     def _client(self) -> Any:
-        return self._board_client or KanboardClient.for_instance(
-            self.instance.parent if self.instance.is_file() else self.instance
+        """The board client of this installation: an injected one, or the switch's (§2.2)."""
+        return self._board_client or board_client(
+            self.instance.parent if self.instance.is_file() else self.instance, serves=(CARD,)
         )
 
     def _production_path(self, data_dir: Path) -> Path:

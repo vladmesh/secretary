@@ -62,8 +62,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from secretary.board.backend import CARD, board_client
 from secretary.config import InstanceReport, validate_instance
-from secretary.tasks import KanboardClient, TaskAudit
+from secretary.tasks import TaskAudit
 from secretary.webproto import run_events, sources
 from secretary.webproto import run_state as run_state_reads
 from secretary.webproto.admission import Admission, admit
@@ -215,8 +216,9 @@ class OperationLayer(ProtocolBoundary):
         return RunStore(data_dir if data_dir is not None else self.data_dir())
 
     def _client(self) -> Any:
-        return self._board_client or KanboardClient.for_instance(
-            self.instance.parent if self.instance.is_file() else self.instance
+        """The board client of this installation: an injected one, or the switch's (§2.2)."""
+        return self._board_client or board_client(
+            self.instance.parent if self.instance.is_file() else self.instance, serves=(CARD,)
         )
 
     def _registry_table(self) -> Any:

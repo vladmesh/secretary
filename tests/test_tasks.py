@@ -94,8 +94,15 @@ class FakeSprintReader:
 
 
 class TaskReaderTests(unittest.TestCase):
+    """The reader's contract.  The board under it is whatever ``board_client`` returns, so the
+    same cases run on both backends (``tests/test_tasks_sql_backend.py``) rather than being
+    written twice."""
+
+    def board_client(self):
+        return FakeKanboard()
+
     def setUp(self) -> None:
-        self.client = FakeKanboard()
+        self.client = self.board_client()
         self.reader = TaskReader(self.client)  # type: ignore[arg-type]
 
     def test_list_normalizes_and_filters_deterministically(self) -> None:
@@ -103,13 +110,25 @@ class TaskReaderTests(unittest.TestCase):
 
         self.assertEqual([task["ref"] for task in result], ["secretary-468"])
         task = result[0]
-        self.assertEqual(task["id"], "task_kanboard_12")
         self.assertEqual(task["claim"], {"worker": "codex-terra", "claimed_at": None})
         self.assertEqual(task["retry"], {"same": 2, "switched": 0, "heads": ["codex-terra", "claude-opus"]})
         self.assertEqual(task["routing"]["complexity"], "standard")
         self.assertEqual(task["routing"]["codex_launch_mode"], "tui")
         self.assertEqual(task["extensions"]["kanboard"], {"steward_report": "1", "swimlane": "Secretary"})
         self.assertNotIn("comments", task)
+
+    def test_list_names_the_card_identity_of_its_backend(self) -> None:
+        """The one normalized field the two backends cannot spell alike.
+
+        §9 of docs/BOARD_STORE.md makes a card's reference its stable identifier, and the store
+        keeps no column for Kanboard's integer, so the PostgreSQL backend answers with
+        `tasks.task_number` (`task_postgres_468`) where Kanboard answers with its row id
+        (`task_kanboard_12`).  Every other assertion of the case above is shared; this one is
+        overridden by the backend that spells it differently, rather than softened for both.
+        """
+        task = self.reader.list(states={"ready"}, project="secretary")[0]
+        self.assertEqual(task["id"], "task_kanboard_12")
+        self.assertEqual(task["audit"]["backend"]["kind"], "kanboard")
 
     def test_show_preserves_comments_and_legacy_defaults(self) -> None:
         task = self.reader.show("old-1")
@@ -430,7 +449,7 @@ class TaskCliTests(unittest.TestCase):
             client.metadata[12]["claim"] = ""
             output, errors = io.StringIO(), io.StringIO()
             with (
-                mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=client),
+                mock.patch("secretary.task_commands.card_client", return_value=client),
                 contextlib.redirect_stdout(output),
                 contextlib.redirect_stderr(errors),
             ):
@@ -474,8 +493,13 @@ class KanboardClientTests(unittest.TestCase):
 
 
 class TaskWriterTests(unittest.TestCase):
+    """The writer's contract, over whatever board ``board_client`` returns (see TaskReaderTests)."""
+
+    def board_client(self):
+        return WriteKanboard()
+
     def setUp(self) -> None:
-        self.client = WriteKanboard()
+        self.client = self.board_client()
         self.tmpdir = tempfile.TemporaryDirectory()
         self.client.instance_dir = Path(self.tmpdir.name)
         self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
@@ -725,7 +749,7 @@ class TaskWriterTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
 
         with (
-            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            mock.patch("secretary.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -3479,7 +3503,7 @@ class AssessmentStateTests(unittest.TestCase):
         reason.write_text("repair the local implementation\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            mock.patch("secretary.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -3514,7 +3538,7 @@ class AssessmentStateTests(unittest.TestCase):
         body.write_text("looks good\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            mock.patch("secretary.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -4133,7 +4157,7 @@ class AssessmentStateTests(unittest.TestCase):
     def _move_cli(self, *arguments: str) -> tuple[int, str, str]:
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            mock.patch("secretary.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -4186,7 +4210,7 @@ class AssessmentStateTests(unittest.TestCase):
         reason.write_text("ship it", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            mock.patch("secretary.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -4790,7 +4814,7 @@ class BlockedContractTests(unittest.TestCase):
         body.write_text("the upstream API is down\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            mock.patch("secretary.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -4822,7 +4846,7 @@ class BlockedContractTests(unittest.TestCase):
         body.write_text("the card contradicts itself\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            mock.patch("secretary.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -5179,7 +5203,7 @@ class RequestIdOwnershipTests(unittest.TestCase):
         ]
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            mock.patch("secretary.task_commands.card_client", return_value=self.client),
             mock.patch("secretary.tasks.workspace_dirt", return_value=[]),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),

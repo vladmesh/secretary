@@ -163,7 +163,7 @@ class SprintExecutorPinTests(SprintFixture):
         def create(reference: str, *pins: str) -> dict:
             output, errors = io.StringIO(), io.StringIO()
             with (
-                mock.patch("secretary.sprint_commands.KanboardClient.for_instance", return_value=self.client),
+                mock.patch("secretary.tasks.KanboardClient.for_instance", return_value=self.client),
                 contextlib.redirect_stdout(output),
                 contextlib.redirect_stderr(errors),
             ):

@@ -6,10 +6,10 @@ import argparse
 import json
 import os
 
+from secretary.board.backend import PRODUCT_ISSUE, board_client
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.product_issues import ProductIssueStore
 from secretary.task_commands import resolve_data_dir, run_task_command
-from secretary.tasks import KanboardClient
 
 
 def _common(parser: argparse.ArgumentParser, *, write: bool = False) -> None:
@@ -114,7 +114,7 @@ def _missing(message: str):
 
 def _store(args: argparse.Namespace) -> ProductIssueStore:
     return ProductIssueStore(
-        KanboardClient.for_instance(args.instance),
+        board_client(args.instance, serves=(PRODUCT_ISSUE,)),
         data_dir=resolve_data_dir(args),
         instance=args.instance,
     )

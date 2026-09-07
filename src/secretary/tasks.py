@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.board.backend import entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
@@ -468,6 +469,11 @@ def _rpc_request(identifier: int, method: str, params: dict[str, Any]) -> dict[s
 
 class KanboardClient:
     """Small JSON-RPC client using local board transport configuration."""
+
+    #: Which of the two card backends this client is (board/backend.py).  It is a property of the
+    #: client rather than a per-call lookup so a reader and the writer above it can never disagree
+    #: about which store the card in their hands came from.
+    backend_kind = "kanboard"
 
     def __init__(self, transport: BoardTransport, instance_dir: Path) -> None:
         self.instance_dir = normalize_instance_dir(instance_dir).resolve()
@@ -966,8 +972,9 @@ class TaskReader:
         if task_id is None or column not in _STATE_BY_COLUMN:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
         ref = _text(card.get("reference"))
+        kind = getattr(self.client, "backend_kind", "kanboard")
         result: dict[str, Any] = {
-            "id": f"task_kanboard_{task_id}",
+            "id": entity_id("task", kind, task_id),
             "ref": ref,
             "title": _text(card.get("title")),
             "description": _text(card.get("description")),
@@ -1009,7 +1016,7 @@ class TaskReader:
             "audit": {
                 "created_at": _rfc3339(card.get("date_creation")),
                 "updated_at": _rfc3339(card.get("date_modification")),
-                "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": self.board_name},
+                "backend": {"kind": kind, f"{kind}_task_id": task_id, "board": self.board_name},
             },
         }
         extensions = {key: value for key, value in meta.items() if key not in _KNOWN_METADATA}
@@ -1617,7 +1624,17 @@ class TaskWriter:
         self.reader = TaskReader(client)
         self.data_dir = Path(data_dir)
         self.instance_dir = Path(client.instance_dir).expanduser().resolve()
-        self.audit = TaskAudit(data_dir)
+        # Which backend serves this writer is the client's own answer, not a second lookup: the
+        # switch is read once where the client is built (board/backend.py), and everything below
+        # follows the client it produced.  A file journal belongs to the Kanboard backend and the
+        # `requests`/`board_events` tables to the PostgreSQL one (docs/BOARD_STORE.md §7.3).
+        self.backend_kind = getattr(client, "backend_kind", "kanboard")
+        if self.backend_kind == "postgres":
+            from secretary.board.sql_audit import SqlTaskAudit
+
+            self.audit = SqlTaskAudit(client)
+        else:
+            self.audit = TaskAudit(data_dir)
         # Importing the concrete adapter here keeps the protocol leaves usable
         # by the legacy task reader while giving migrated writes the same audit
         # owner as generic control-plane operations.
@@ -1960,7 +1977,7 @@ class TaskWriter:
             "task_id": "",
             "ref": reference,
             "backend": {
-                "kind": "kanboard",
+                "kind": self.backend_kind,
                 "task_id": None,
                 "revision": "pending",
                 "reference_assignment": "atomic",
@@ -1968,48 +1985,57 @@ class TaskWriter:
             "request_id": request_id,
             "payload": payload,
         }
-        self.audit.stage(request_id, event)
-        try:
-            created_ref = self._create_backend(
-                project=project,
-                task_type=task_type,
-                title=title,
-                description=description,
-                target=target,
-                reference=reference,
-                blocked_by=blocked_by,
-                head=head,
-                review_head=review_head,
-                slug=slug,
-                base_branch=base_branch,
-                seed_ref=seed_ref,
-                supersedes=supersedes,
-                complexity=complexity,
-                family_preference=family_preference,
-                codex_launch_mode=codex_launch_mode,
-                sprint=sprint,
-                steward_report=steward_report,
-                event=event,
-                request_id=request_id,
-            )
-        except _CommittedWriteError:
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        except Exception:
-            self.audit.discard(request_id)
-            raise
-        try:
-            task = self.reader.show(created_ref)
-        except Exception:  # noqa: BLE001 - any post-create read failure is an ambiguous commit.
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        event["task_id"] = task["id"]
-        event["ref"] = created_ref
-        event["backend"]["revision"] = _revision(task)
-        self.audit.stage(request_id, event)
-        try:
-            event_id = self.audit.append(request_id, event)
-        except OSError:
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-        return {"action": "created", "task": task, "event_id": event_id, "replayed": False}
+        # One transaction from the claim to the committed record, where the backend has
+        # transactions (§7.1).  The claim used to be committed on its own before the card was
+        # written and the record committed after it, so the reference this create allocates was
+        # named by a *later* transaction than the one that claimed the request id: on
+        # PostgreSQL `requests.ref` stayed NULL for the whole life of the row.  Under one
+        # transaction the claim, the card effect and the event stand or fall together, which is
+        # what `docs/BOARD_STORE.md` §7.3 already says this backend does.  On Kanboard
+        # `_mutation` is nothing at all, so the behaviour there is unchanged.
+        with self._mutation():
+            self.audit.stage(request_id, event)
+            try:
+                created_ref = self._create_backend(
+                    project=project,
+                    task_type=task_type,
+                    title=title,
+                    description=description,
+                    target=target,
+                    reference=reference,
+                    blocked_by=blocked_by,
+                    head=head,
+                    review_head=review_head,
+                    slug=slug,
+                    base_branch=base_branch,
+                    seed_ref=seed_ref,
+                    supersedes=supersedes,
+                    complexity=complexity,
+                    family_preference=family_preference,
+                    codex_launch_mode=codex_launch_mode,
+                    sprint=sprint,
+                    steward_report=steward_report,
+                    event=event,
+                    request_id=request_id,
+                )
+            except _CommittedWriteError:
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            except Exception:
+                self.audit.discard(request_id)
+                raise
+            try:
+                task = self.reader.show(created_ref)
+            except Exception:  # noqa: BLE001 - any post-create read failure is an ambiguous commit.
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            event["task_id"] = task["id"]
+            event["ref"] = created_ref
+            event["backend"]["revision"] = _revision(task)
+            self.audit.stage(request_id, event)
+            try:
+                event_id = self.audit.append(request_id, event)
+            except OSError:
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            return {"action": "created", "task": task, "event_id": event_id, "replayed": False}
 
     def create_steward_report(
         self,
@@ -2067,7 +2093,7 @@ class TaskWriter:
     ) -> str:
         # The board accepts duplicate references, so holding this lock from the high-water
         # read through createTask prevents two local task-create processes assigning one ref.
-        with reference_allocation_lock(self.data_dir):
+        with reference_allocation_lock(self.data_dir), self._mutation():
             board_id, columns, swimlanes = self.reader._board()
             created_ref = reference or next_project_reference(self.client, board_id, project)
             # One question for both paths. A caller-supplied reference may name a card that
@@ -2097,7 +2123,7 @@ class TaskWriter:
             )
             if task_id is None:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
-            event["task_id"] = f"task_kanboard_{task_id}"
+            event["task_id"] = entity_id("task", self.backend_kind, task_id)
             event["backend"]["task_id"] = task_id
             try:
                 self.audit.stage(request_id, event)
@@ -3615,7 +3641,7 @@ class TaskWriter:
             "outcome": "granted",
             "task_id": "",
             "ref": reference,
-            "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
+            "backend": {"kind": self.backend_kind, "task_id": None, "revision": "not_written"},
             "request_id": override_request_id,
             "payload": {
                 "project": project,
@@ -3659,7 +3685,7 @@ class TaskWriter:
                 "outcome": "denied",
                 "task_id": "",
                 "ref": reference,
-                "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
+                "backend": {"kind": self.backend_kind, "task_id": None, "revision": "not_written"},
                 "request_id": denial_request_id,
                 "payload": {
                     "code": code,
@@ -3838,9 +3864,9 @@ class TaskWriter:
             "actor": {"role": "retro", "id": actor},
             "kind": "retired",
             "outcome": "success",
-            "task_id": f"task_kanboard_{task_id}",
+            "task_id": entity_id("task", self.backend_kind, task_id),
             "ref": reference,
-            "backend": {"kind": "kanboard", "task_id": task_id, "revision": "pending"},
+            "backend": {"kind": self.backend_kind, "task_id": task_id, "revision": "pending"},
             "request_id": request_id,
             "payload": identity,
         }
@@ -3972,17 +3998,18 @@ class TaskWriter:
                     "transition_forbidden", "a decision is only recorded on a card in Assessment", 3
                 )
         try:
-            result = self.board_host.marker_comment(
-                MarkerComment(
-                    reference,
-                    event_kind,
-                    Actor(role, actor),
-                    reason,
-                    data,
-                    request_id=request_id,
-                    fresh_admission=fresh_admission,
+            with self._mutation():
+                result = self.board_host.marker_comment(
+                    MarkerComment(
+                        reference,
+                        event_kind,
+                        Actor(role, actor),
+                        reason,
+                        data,
+                        request_id=request_id,
+                        fresh_admission=fresh_admission,
+                    )
                 )
-            )
         except BoardEventPending:
             raise TaskError(
                 "audit_pending",
@@ -4053,6 +4080,39 @@ class TaskWriter:
                 "event_id": event_id,
                 "replayed": True,
             }
+        with self._mutation():
+            return self._write_effect(
+                kind, role, actor, reference, request_id, payload, mutation, identity=identity
+            )
+
+    @contextlib.contextmanager
+    def _mutation(self) -> Iterator[None]:
+        """One transaction per protocol mutation, where the backend has transactions (§7.1).
+
+        On Kanboard this is nothing at all and the behaviour is exactly today's: stage a record,
+        apply one effect, confirm it, commit the record.  On PostgreSQL the claim, the card effect
+        and the event are statements of one transaction, which is why `BoardEventPending` and the
+        `recover_*` entry points have nothing to do there (§7.3).
+        """
+        scope = getattr(self.client, "transaction", None)
+        if scope is None:
+            yield
+            return
+        with scope():
+            yield
+
+    def _write_effect(
+        self,
+        kind: str,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str,
+        payload: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
+        mutation: Any,
+        *,
+        identity: dict[str, Any],
+    ) -> dict[str, Any]:
         task = self.reader.show(reference)
         event_payload = payload(task) if callable(payload) else payload
         event = {
@@ -4064,7 +4124,11 @@ class TaskWriter:
             "outcome": "success",
             "task_id": task["id"],
             "ref": reference,
-            "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)},
+            "backend": {
+                "kind": self.backend_kind,
+                "task_id": _task_number(task),
+                "revision": _revision(task),
+            },
             "request_id": request_id,
             "payload": event_payload,
         }
@@ -4637,7 +4701,8 @@ def _dispatcher_record_has_live_work(record: dict[str, Any]) -> bool:
 
 
 def _task_number(task: dict[str, Any]) -> int:
-    value = _positive_int(str(task.get("id", "")).removeprefix("task_kanboard_"))
+    """The backend's own number for a normalized card, read through the one identity parser."""
+    value = entity_number("task", task.get("id"))
     if value is None:
         raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
     return value

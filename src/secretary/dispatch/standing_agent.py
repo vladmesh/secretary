@@ -11,10 +11,11 @@ import os
 import sys
 from pathlib import Path
 
+from secretary.board.backend import card_client
 from secretary.board.done_retention import DoneRetentionBoard
 from secretary.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from secretary.config import instance_data_dir
-from secretary.tasks import KanboardClient, TaskError, TaskReader, TaskWriter
+from secretary.tasks import TaskError, TaskReader, TaskWriter
 from triggered_agents import __main__ as triggered_main
 from triggered_agents.agents.retro import cli as retro_cli
 from triggered_agents.agents.steward import cli as steward_cli
@@ -39,7 +40,7 @@ def _data_dir(instance: Path) -> Path:
 def _canonical_reader() -> TaskReader:
     """Build a reader only when a signal command actually reads the board."""
     try:
-        return TaskReader(KanboardClient.for_instance(_instance_path()))
+        return TaskReader(card_client(_instance_path()))
     except TaskError as exc:
         if exc.code == "backend_unavailable":
             # Precheck already distinguishes this historical "board is not
@@ -61,7 +62,7 @@ def _signal_board() -> StewardSignalBoard:
 def _report_board() -> StewardReportBoard:
     def build() -> tuple[TaskReader, TaskWriter]:
         instance = _instance_path()
-        client = KanboardClient.for_instance(instance)
+        client = card_client(instance)
         return TaskReader(client), TaskWriter(client, data_dir=_data_dir(instance))
 
     return StewardReportBoard(board_factory=build)
@@ -72,7 +73,7 @@ def _done_retention_board() -> DoneRetentionBoard:
 
     def build() -> tuple[TaskReader, TaskWriter]:
         instance = _instance_path()
-        client = KanboardClient.for_instance(instance)
+        client = card_client(instance)
         return TaskReader(client), TaskWriter(client, data_dir=_data_dir(instance))
 
     return DoneRetentionBoard(board_factory=build, error_mapper=_map_signal_error)

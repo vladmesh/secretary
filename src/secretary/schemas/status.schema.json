@@ -9,7 +9,7 @@
   "snapshot": {
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "installation", "host", "dispatcher", "checkpoint", "memory", "secret_store", "board_transport", "recovery"],
+  "required": ["schema_version", "installation", "host", "dispatcher", "checkpoint", "memory", "secret_store", "board_transport", "card_backend", "recovery"],
   "properties": {
     "schema_version": {"const": 1},
     "installation": {
@@ -56,6 +56,7 @@
     "memory": {"type": "object", "required": ["fact_count", "last_reindex_at", "index_present"]},
     "secret_store": {"type": "object", "required": ["initialized", "secret_count", "last_modified_at", "installation_key", "materialize"], "properties": {"installation_key": {"type": "object", "required": ["present", "usable"]}, "materialize": {"type": "array", "items": {"type": "object", "required": ["target", "path", "count"]}}}},
     "board_transport": {"type": "object", "required": ["findings"], "properties": {"findings": {"type": "array", "items": {"type": "string"}}}},
+    "card_backend": {"type": "object", "required": ["backend", "source", "default", "findings"], "properties": {"backend": {"type": ["string", "null"], "enum": ["kanboard", "postgres", null]}, "source": {"type": "string"}, "default": {"type": "string"}, "findings": {"type": "array", "items": {"type": "string"}}}},
     "recovery": {
       "type": "object",
       "required": ["resources", "credential_consumers", "paths", "materializations", "bypasses", "catalog_envelope_divergences", "registry_error"],

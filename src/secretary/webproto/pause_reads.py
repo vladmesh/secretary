@@ -62,6 +62,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from secretary.board.backend import SPRINT, board_client
 from secretary.config import InstanceReport, validate_instance
 from secretary.dispatcher_observer import observer_snapshot
 from secretary.dispatcher_pause import (
@@ -74,7 +75,7 @@ from secretary.dispatcher_pause import (
 from secretary.dispatcher_pause_ops import head_lines
 from secretary.dispatcher_production import ProductionState
 from secretary.sprints import SprintReader
-from secretary.tasks import _TYPED_RECORD_TYPES, KanboardClient
+from secretary.tasks import _TYPED_RECORD_TYPES
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import ValidationRefused
@@ -707,7 +708,8 @@ class PauseReadLayer(ProtocolBoundary):
         return {key: read.mark(key) for key in keys}
 
     def _client(self) -> Any:
-        return self._board_client or KanboardClient.for_instance(self._instance_dir())
+        """The sprint board of this installation, named through the switch (board/backend.py)."""
+        return self._board_client or board_client(self._instance_dir(), serves=(SPRINT,))
 
     def _instance_dir(self) -> Path:
         return self.instance.parent if self.instance.is_file() else self.instance
