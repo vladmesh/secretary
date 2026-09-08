@@ -114,6 +114,11 @@ KANBOARD_ONLY: Final[dict[str, str]] = {
         "asserts that an unheld card omits a specific Kanboard sprint-board lookup",
     ),
     **_cases(
+        "tests.test_sprints.SprintSingleWriterGuardTests",
+        ("test_observer_can_write_when_another_open_sprint_shares_the_repository",),
+        "constructs two open Sprints sharing one live project reservation, a state SQL forbids",
+    ),
+    **_cases(
         "tests.test_sprints.SprintCloseDecisionTests",
         (
             "test_an_interrupted_close_continues_without_repeating_what_it_did",
@@ -127,6 +132,11 @@ KANBOARD_ONLY: Final[dict[str, str]] = {
             "test_every_step_of_the_terminal_phase_is_retried_where_it_stopped",
         ),
         "exercises Kanboard's staged multi-step close repair; SQL must prove one transaction atomic",
+    ),
+    **_cases(
+        "tests.test_sprints.SprintCloseDecisionTests",
+        ("test_a_retry_that_states_other_decisions_is_refused",),
+        "requires a failed Kanboard effect to retain its request claim; SQL rolls the claim back",
     ),
     **_cases(
         "tests.test_sprint_executors.SprintExecutorPinTests",

@@ -11,6 +11,7 @@ from unittest import mock
 
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.board.sql_cards import SqlCardClient
+from secretary.board.sql_sprints import sprint_key
 from secretary.sprint_observer import head_choice
 from secretary.sprints import SprintReader, SprintWriter
 from secretary.tasks import TaskError, TaskReader, TaskWriter
@@ -168,7 +169,7 @@ class SqlSprintSingleWriterGuardTests(SqlSprintFixture, shared.SprintSingleWrite
         shared.SprintSingleWriterGuardTests.setUp(self)
         self._bind_audit()
 
-    def test_observer_can_write_when_another_open_sprint_shares_the_repository(self) -> None:
+    def test_sql_unique_live_reservation_rolls_back_an_unrepresentable_overlap(self) -> None:
         """SQL rejects the impossible duplicate reservation without a partial restore."""
         other_ref = self.sprints.restore_create(
             reference="sprint:overlap",
@@ -207,7 +208,7 @@ class SqlSprintCloseDecisionTests(SqlSprintFixture, shared.SprintCloseDecisionTe
 
         self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)
 
-    def test_a_retry_that_states_other_decisions_is_refused(self) -> None:
+    def test_sql_rolled_back_claim_allows_a_changed_intent_as_a_new_request(self) -> None:
         """A SQL failure erases the claim, so the retry may state a new complete intent."""
         ref = self._open(issues=["issue:open"])
         card = self._card(ref, "disposed once", "restated-card")
@@ -265,40 +266,7 @@ class SqlSprintExecutorRecoveryTests(SqlSprintFixture, executors.SprintExecutorR
 
 class SqlSprintRestoreTests(SqlSprintFixture, restore.SprintRestoreTests):
     def setUp(self) -> None:
-        # The shared recovery fixture owns its source/target directory layout.
         restore.SprintRestoreTests.setUp(self)
-        # The shared fake deliberately exports a cursor to secretary-13 beside a canned
-        # secretary-12 card. SQL keeps the scoped current-task FK, so its checkpoint is complete.
-        self._align_checkpoint()
-
-    def _align_checkpoint(self) -> None:
-        cards_path = self.target_data / "board" / "cards.json"
-        cards_payload = json.loads(cards_path.read_text(encoding="utf-8"))
-        cards = cards_payload.get("cards", [])
-        card_refs = {str(card["reference"]) for card in cards}
-        for card in cards:
-            if card["reference"] == "secretary-12":
-                card.setdefault("metadata", {})["sprint_ref"] = "sprint:entity"
-        cards_path.write_text(json.dumps(cards_payload, sort_keys=True) + "\n", encoding="utf-8")
-
-        path = self.target_data / "board" / "sprints.json"
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        for sprint in payload["sprints"]:
-            sprint["current_task"] = (
-                "secretary-12"
-                if sprint["reference"] == "sprint:entity" and "secretary-12" in card_refs
-                else ""
-            )
-            sprint["audit"] = {
-                **sprint["audit"],
-                "created_at": "2000-01-01T00:00:00Z",
-                "updated_at": "2000-01-01T00:00:00Z",
-            }
-        path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-
-    def _restore(self, client: object | None = None) -> tuple[object, int]:
-        self._align_checkpoint()
-        return restore.SprintRestoreTests._restore(self, client)
 
     def make_target_client(self) -> SqlCardClient:
         return self.make_ownership_client()
@@ -308,11 +276,16 @@ class SqlSprintRestoreTests(SqlSprintFixture, restore.SprintRestoreTests):
             client._query("SELECT count(*) FROM sprints")[0][0]
         )
 
-    def test_export_carries_the_sprint_set_next_to_the_cards(self) -> None:
-        exported = self._exported_sprint()
-        self.assertEqual(exported["current_task"], "secretary-12")
-        self.assertEqual(exported["budget"]["by_type"]["red_ci"], 1)
-        self.assertEqual(exported["resume"]["selected_step"], restore.RESUME["selected_step"])
+    def test_sql_restore_refuses_an_unlinked_current_task_before_writes(self) -> None:
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"][0]["current_task"] = "secretary:not-in-export"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        client = self.make_target_client()
+
+        with self.assertRaisesRegex(restore.RestoreError, "not an included Card already linked"):
+            restore.import_normalized_board(self.target_data, client=client, instance=self.instance)
+        self.assertEqual(self.persisted_record_count(client), 0)
 
 
 class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
@@ -357,6 +330,15 @@ class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
 
         return fail
 
+    @staticmethod
+    def _resume_entry() -> dict[str, str]:
+        return {
+            "selected_step": "continue", "selected_why": "safe",
+            "rejected_alternatives": "none", "current_task": "none",
+            "dod_state": "pending", "next_safe_step": "run tests",
+            "recorded_at": "2026-09-08T00:00:00Z",
+        }
+
     def test_create_rolls_back_after_request_claim_and_retries_once(self) -> None:
         with (
             mock.patch.object(
@@ -400,14 +382,25 @@ class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
         )
         self.assertEqual(self.client._query("SELECT count(*) FROM sprint_comments"), [(1,)])
 
+    def test_comment_rolls_back_after_claim_before_body_and_retries(self) -> None:
+        self._create()
+        with mock.patch.object(
+            self.client.sprints, "create_comment", side_effect=RuntimeError("after claim")
+        ), self.assertRaises(TaskError):
+            self.writer.comment(
+                role="po", actor="operator", reference="sprint:atomic",
+                body="one body", request_id="atomic-comment-claim",
+            )
+        self._assert_no_request("atomic-comment-claim")
+        self.writer.comment(
+            role="po", actor="operator", reference="sprint:atomic",
+            body="one body", request_id="atomic-comment-claim",
+        )
+        self.assertEqual(self.client._query("SELECT count(*) FROM sprint_comments"), [(1,)])
+
     def test_resume_rolls_back_resume_comment_claim_and_event(self) -> None:
         self._create()
-        entry = {
-            "selected_step": "continue", "selected_why": "safe",
-            "rejected_alternatives": "none", "current_task": "none",
-            "dod_state": "pending", "next_safe_step": "run tests",
-            "recorded_at": "2026-09-08T00:00:00Z",
-        }
+        entry = self._resume_entry()
         original = self.client.sprints.create_comment
         with mock.patch.object(
             self.client.sprints, "create_comment", side_effect=self._after(original)
@@ -422,6 +415,22 @@ class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
         self.writer.resume(
             role="po", actor="operator", reference="sprint:atomic",
             entry=entry, request_id="atomic-resume",
+        )
+        self.assertEqual(self.client._query("SELECT count(*) FROM sprint_resumes"), [(1,)])
+
+    def test_resume_rolls_back_after_claim_before_relations_and_retries(self) -> None:
+        self._create()
+        with mock.patch.object(
+            self.client.sprints, "_apply", side_effect=RuntimeError("after claim")
+        ), self.assertRaises(TaskError):
+            self.writer.resume(
+                role="po", actor="operator", reference="sprint:atomic",
+                entry=self._resume_entry(), request_id="atomic-resume-claim",
+            )
+        self._assert_no_request("atomic-resume-claim")
+        self.writer.resume(
+            role="po", actor="operator", reference="sprint:atomic",
+            entry=self._resume_entry(), request_id="atomic-resume-claim",
         )
         self.assertEqual(self.client._query("SELECT count(*) FROM sprint_resumes"), [(1,)])
 
@@ -441,6 +450,22 @@ class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
         self.writer.record_budget(
             role="po", actor="operator", reference="sprint:atomic",
             event_type="red_ci", request_id="atomic-budget",
+        )
+        self.assertEqual(self.client._query("SELECT count(*) FROM sprint_budget_events"), [(1,)])
+
+    def test_budget_rolls_back_after_claim_before_occurrence_and_retries(self) -> None:
+        self._create()
+        with mock.patch.object(
+            self.client.sprints, "_apply", side_effect=RuntimeError("after claim")
+        ), self.assertRaises(TaskError):
+            self.writer.record_budget(
+                role="po", actor="operator", reference="sprint:atomic",
+                event_type="red_ci", request_id="atomic-budget-claim",
+            )
+        self._assert_no_request("atomic-budget-claim")
+        self.writer.record_budget(
+            role="po", actor="operator", reference="sprint:atomic",
+            event_type="red_ci", request_id="atomic-budget-claim",
         )
         self.assertEqual(self.client._query("SELECT count(*) FROM sprint_budget_events"), [(1,)])
 
@@ -467,6 +492,185 @@ class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
             decisions=decisions, request_id="atomic-close",
         )
         self.assertEqual(self.client._query("SELECT status FROM sprints"), [("closed",)])
+
+    def test_close_rolls_back_after_claim_before_decisions_and_retries(self) -> None:
+        self._create()
+        decisions = close_decisions(self.writer, "sprint:atomic")
+        with mock.patch.object(
+            self.client.sprints, "save_close", side_effect=RuntimeError("after claim")
+        ), self.assertRaises(TaskError):
+            self.writer.close(
+                role="po", actor="operator", reference="sprint:atomic",
+                decisions=decisions, request_id="atomic-close-claim",
+            )
+        self._assert_no_request("atomic-close-claim")
+        self.writer.close(
+            role="po", actor="operator", reference="sprint:atomic",
+            decisions=decisions, request_id="atomic-close-claim",
+        )
+        self.assertEqual(self.client._query("SELECT status FROM sprints"), [("closed",)])
+
+    def test_reservation_rolls_back_at_both_boundaries_and_retries(self) -> None:
+        self.writer.restore_create(
+            reference="sprint:atomic", goal="reservation target", request_id="seed-reservation"
+        )
+        for suffix, side_effect in (
+            ("claim", RuntimeError("after claim")),
+            ("relations", self._after(self.client.sprints._replace_relations)),
+        ):
+            with self.subTest(boundary=suffix):
+                request_id = f"atomic-reservation-{suffix}"
+                with mock.patch.object(
+                    self.client.sprints, "_replace_relations", side_effect=side_effect
+                ), self.assertRaises(TaskError):
+                    self.writer.restore(
+                        reference="sprint:atomic",
+                        values={"sprint_reservations": json.dumps(["secretary"])},
+                        request_id=request_id,
+                    )
+                self._assert_no_request(request_id)
+                self.writer.restore(
+                    reference="sprint:atomic",
+                    values={"sprint_reservations": json.dumps(["secretary"])},
+                    request_id=request_id,
+                )
+                self.assertEqual(
+                    self.client._query("SELECT count(*) FROM sprint_projects WHERE reserved"), [(1,)]
+                )
+                self.client._execute("DELETE FROM sprint_projects")
+                self.client.connection.commit()
+
+    def test_restore_create_rolls_back_at_both_boundaries_and_retries(self) -> None:
+        for suffix in ("claim", "relations"):
+            with self.subTest(boundary=suffix):
+                reference = f"sprint:restore-{suffix}"
+                request_id = f"atomic-restore-create-{suffix}"
+                target = "create" if suffix == "claim" else "_replace_relations"
+                original = getattr(self.client.sprints, target)
+                effect = RuntimeError("after claim") if suffix == "claim" else self._after(original)
+                with mock.patch.object(
+                    self.client.sprints, target, side_effect=effect
+                ), self.assertRaises(TaskError):
+                    self.writer.restore_create(
+                        reference=reference, goal="restored", repositories=["/repo"],
+                        request_id=request_id,
+                    )
+                self._assert_no_request(request_id)
+                self.assertEqual(
+                    self.client._query("SELECT count(*) FROM sprints WHERE ref=%s", (reference,)), [(0,)]
+                )
+                self.writer.restore_create(
+                    reference=reference, goal="restored", repositories=["/repo"],
+                    request_id=request_id,
+                )
+                self.assertEqual(
+                    self.client._query("SELECT count(*) FROM sprints WHERE ref=%s", (reference,)), [(1,)]
+                )
+
+    def test_reopen_rolls_back_at_both_boundaries_and_retries(self) -> None:
+        for suffix in ("claim", "entity"):
+            with self.subTest(boundary=suffix):
+                client = self.make_ownership_client()
+                writer = SprintWriter(client, data_dir=self.tmp.name, instance=self.instance)
+                ref = writer.create(
+                    role="po", actor="operator", goal="reopen", repositories=["/repo"],
+                    product="secretary", issues=["issue:open"], projects=["secretary"],
+                    observer=head_choice("codex-observer"), reference=f"sprint:reopen-{suffix}",
+                    request_id=f"seed-reopen-{suffix}",
+                )["sprint"]["ref"]
+                writer.close(
+                    role="po", actor="operator", reference=ref,
+                    decisions=close_decisions(writer, ref), request_id=f"close-reopen-{suffix}",
+                )
+                original = writer._transition_host
+                effect = RuntimeError("after claim") if suffix == "claim" else self._after(original)
+                request_id = f"atomic-reopen-{suffix}"
+                with mock.patch.object(
+                    writer, "_transition_host", side_effect=effect
+                ), self.assertRaises(TaskError):
+                    writer.reopen(
+                        role="po", actor="operator", reference=ref,
+                        observer=head_choice("codex-observer"), request_id=request_id,
+                    )
+                self.assertEqual(
+                    client._query("SELECT count(*) FROM requests WHERE request_id=%s", (request_id,)), [(0,)]
+                )
+                self.assertEqual(client._query("SELECT status FROM sprints WHERE ref=%s", (ref,)), [("closed",)])
+                writer.reopen(
+                    role="po", actor="operator", reference=ref,
+                    observer=head_choice("codex-observer"), request_id=request_id,
+                )
+                self.assertEqual(client._query("SELECT status FROM sprints WHERE ref=%s", (ref,)), [("open",)])
+
+
+class SqlTransportNamespaceTests(SqlSprintFixture, shared.unittest.TestCase):
+    def test_secretary_5_and_sprint_5_never_cross_dispatch(self) -> None:
+        self.client = self.make_ownership_client()
+        self.client.call(
+            "createTask", project_id=1, title="card five", reference="secretary-5", column_id=2
+        )
+        self.client.call(
+            "saveTaskMetadata", task_id=5,
+            values={"project": "secretary", "task_type": "code", "worker_profile": "codex-high"},
+        )
+        self.client.call("createComment", task_id=5, content="card comment")
+        writer = SprintWriter(self.client, data_dir=self.tmp.name)
+        writer.restore_create(
+            reference="sprint:5", goal="goal", definition_of_done="dod",
+            request_id="transport-sprint-create",
+        )
+
+        key = sprint_key("sprint:5")
+        self.assertNotEqual(key, 5)
+        self.assertEqual(self.client.call("getTaskMetadata", task_id=5)["worker_profile"], "codex-high")
+        self.assertEqual(
+            [row["comment"] for row in self.client.call("getAllComments", task_id=5)],
+            ["card comment"],
+        )
+        self.assertEqual(self.client.call("getTaskMetadata", task_id=key)["sprint_goal"], "goal")
+
+        self.client.call("saveTaskMetadata", task_id=5, values={"worker_profile": "claude-opus"})
+        self.client.call("createComment", task_id=5, content="second card comment")
+        self.client.call("updateTask", id=5, title="card five edited")
+        self.client.call("closeTask", task_id=5)
+
+        self.assertEqual(
+            self.client._query("SELECT title, archived FROM tasks WHERE task_ref='secretary-5'"),
+            [("card five edited", True)],
+        )
+        self.assertEqual(
+            self.client._query("SELECT body FROM task_comments WHERE task_ref='secretary-5' ORDER BY comment_id"),
+            [("card comment",), ("second card comment",)],
+        )
+        self.assertEqual(self.client._query("SELECT count(*) FROM sprint_comments"), [(0,)])
+        self.assertEqual(self.client._query("SELECT status FROM sprints WHERE ref='sprint:5'"), [("open",)])
+
+    def test_restore_current_task_never_attaches_or_reparents_a_card(self) -> None:
+        self.client = self.make_sprint_client()
+        writer = SprintWriter(self.client, data_dir=self.tmp.name)
+        writer.restore_create(
+            reference="sprint:900", goal="cursor target", request_id="cursor-create"
+        )
+
+        with self.assertRaises(TaskError):
+            writer.restore(
+                reference="sprint:900",
+                values={"sprint_current_task": "secretary-12"},
+                request_id="cursor-restore",
+            )
+
+        self.assertEqual(
+            self.client._query("SELECT sprint_ref FROM tasks WHERE task_ref='secretary-12'"),
+            [(None,)],
+        )
+        self.assertEqual(
+            self.client._query("SELECT current_task_ref FROM sprints WHERE ref='sprint:900'"),
+            [(None,)],
+        )
+        self.assertEqual(
+            self.client._query("SELECT count(*) FROM requests WHERE request_id='cursor-restore'"),
+            [(0,)],
+        )
 
 
 class SqlSprintListingBudgetTests(SqlSprintFixture, listing_budget.SprintListingBudgetTests):

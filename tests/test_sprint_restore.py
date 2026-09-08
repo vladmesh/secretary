@@ -48,8 +48,8 @@ def _root(name: str) -> str:
 
 
 CARD_EXPORT = {
-    "id": 12,
-    "reference": "secretary-12",
+    "id": 13,
+    "reference": "secretary-13",
     "title": "Linked card",
     "description": "card body",
     "column": "Ready",
@@ -61,6 +61,7 @@ CARD_EXPORT = {
         "record_type": "task",
         "complexity": "standard",
         "family_preference": "auto",
+        "sprint_ref": "sprint:entity",
     },
     "comments": [],
 }
@@ -360,7 +361,10 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         path = self.target_data / "board" / "sprints.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["sprints"][0]["status"] = "open"
-        second = dict(payload["sprints"][0]) | {"reference": "sprint:collision"} | overrides
+        second = dict(payload["sprints"][0]) | {
+            "reference": "sprint:collision",
+            "current_task": "",
+        } | overrides
         payload["sprints"].append(second)
         path.write_text(json.dumps(payload), encoding="utf-8")
         return payload
@@ -521,6 +525,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         legacy = dict(payload["sprints"][0]) | {
             "reference": "sprint:z-legacy",
             "repositories": ["separate-repository"],
+            "current_task": "",
         }
         for field in ("product", "issues", "reservations"):
             legacy.pop(field, None)
@@ -718,8 +723,8 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         client, cards = self._restore()
 
         self.assertEqual(cards, 1)
-        self.assertEqual(self.persisted_reference_count(client, "secretary-12"), 1)
-        self.assertEqual(TaskReader(client).show("secretary-12")["ref"], "secretary-12")  # type: ignore[arg-type]
+        self.assertEqual(self.persisted_reference_count(client, "secretary-13"), 1)
+        self.assertEqual(TaskReader(client).show("secretary-13")["ref"], "secretary-13")  # type: ignore[arg-type]
         self.assertEqual(restore_state(self.target_data)["board_parity"], "complete")
 
     def test_repeated_restore_creates_one_entity_and_no_duplicate_records(self) -> None:
@@ -741,9 +746,9 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
     def test_second_disaster_restores_from_the_checkpoint_of_the_first_recovery(self) -> None:
         """A recovered instance is itself recoverable.
 
-        The restore audit is durable, so the next checkpoint ships it as canon. Meeting
-        those request ids again on a backend that holds nothing used to short-circuit
-        every write as already committed and fail reading the entity nobody created.
+        The copied restore state may carry a namespace whose old events are foreign to this target,
+        or no target-local events at all. In either case request ownership on the new backend cannot
+        short-circuit the writes.
         """
         first, _ = self._restore()
         # The checkpoint of the recovered instance: its own export, its own audit.
@@ -759,10 +764,6 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         second = self.make_target_client()
         self.assertEqual(import_normalized_board(second_data, client=second), 1)  # type: ignore[arg-type]
 
-        self.assertNotEqual(
-            restore_state(second_data)["restore_namespace"],
-            restore_state(self.target_data)["restore_namespace"],
-        )
         live = SprintReader(second, data_dir=second_data).show(self.ref)  # type: ignore[arg-type]
         exported = self._exported_sprint()
         self.assertEqual(live["goal"], exported["goal"])
@@ -826,6 +827,10 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         (self.target_data / "board" / "cards.json").write_text(
             json.dumps({"version": 1, "cards": []}), encoding="utf-8"
         )
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["sprints"][0]["current_task"] = ""
+        path.write_text(json.dumps(payload), encoding="utf-8")
         client = self.make_target_client()
         SprintWriter(client, data_dir=self.target_data).restore_create(  # type: ignore[arg-type]
             goal="someone else's sprint",

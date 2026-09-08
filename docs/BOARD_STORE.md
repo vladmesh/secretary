@@ -1,6 +1,6 @@
 # The board store: read/write inventory and the PostgreSQL schema
 
-Status: implemented through revision `0005_sprint_sql` for Cards, Product/Issue and Sprint.
+Status: implemented through revision `0006_sprint_transport_key` for Cards, Product/Issue and Sprint.
 Provisioning, live import and cutover remain separate work; the default backend is still Kanboard.
 
 **The engine is given.** The owner chose PostgreSQL on 2026-09-07 (`sprint:1432`, PO comments of
@@ -649,6 +649,7 @@ CREATE TABLE sprints (
     -- `sprint:canary-terra-20260813` and `sprint:canary-terra-final-20260813`, which an integer
     -- key cannot hold.  `sprint_number` stays for §9's numbering rule, as a nullable unique column.
     ref                text PRIMARY KEY,              -- "sprint:1037", "sprint:canary-terra-20260813"
+    board_key          bigint NOT NULL UNIQUE,        -- disjoint board-client transport namespace
     sprint_number      integer UNIQUE,                -- N in sprint:N, NULL when the ref has none
     goal               text NOT NULL,
     definition_of_done text NOT NULL,
@@ -720,6 +721,12 @@ that can hold every reference the board has. The reference that is still **not**
 *duplicate* one: `sprint:1037` names two rows on today's board, a live one and an archived one, and
 a primary key holds one of them. §9 records that.
 
+The board-client integer namespace is central and disjoint: Card task numbers are below
+`2000000000`; numbered Sprints occupy `[2000000000,2500000000)`, custom Sprint references occupy
+`[2500000000,3000000000)`, Products `[3000000000,4000000000)`, and Issues
+`[4000000000,5000000000)`. `sprints.board_key` makes dispatch an indexed equality lookup. No
+metadata, comment, update or close path enumerates Sprint rows to guess an integer's owner.
+
 `RESUME_FIELDS` in `sprints.py` is a fixed six-field tuple, so the resume is columns, not a blob.
 Resume *freshness* is derived (`_resume_freshness`) and is not stored, exactly as
 `docs/RECOVERY.md` already requires of the checkpoint.
@@ -760,8 +767,10 @@ Three properties make this work, and each is load-bearing:
   That is exactly right here — a sprint with no current task (`current_task_ref IS NULL`) and a
   sprint before its first resume are both legal, and `ref` is the primary key and never NULL, so
   the check fires precisely when a cursor is set.
-- `DEFERRABLE INITIALLY DEFERRED` because a sprint row and the card or resume it points at are
-  inserted in one transaction (§7.1), in an order the writer should not have to think about.
+- `DEFERRABLE INITIALLY DEFERRED` is needed by normalized restore's cyclic order: Cards name their
+  Sprint before that Sprint row exists, and the Sprint later names one of those Cards. Commit-time
+  validation permits that transaction order, not an invalid committed state; the schema test commits
+  a cross-Sprint cursor and proves PostgreSQL refuses it.
 
 Moving a card between sprints now has a defined consequence rather than a silent one: the
 `UPDATE tasks SET sprint_ref = …` fails while a sprint still names that card as its current
@@ -1428,6 +1437,7 @@ reading:
 | `0003_task_type_optional` (2026-09-07, the last card that import could not write) | 23 | 37 | 38 | 23 | 13 | 4 |
 | `0004_product_issue_sql` (2026-09-08, Product/Issue and Done retention) | 24 | 37 | 40 | 24 | 16 | 4 |
 | `0005_sprint_sql` (2026-09-08, Sprint runtime and ordered evidence) | 24 | 37 | 40 | 24 | 15 | 4 |
+| `0006_sprint_transport_key` (2026-09-08, disjoint indexed Sprint transport keys) | 24 | 38 | 40 | 24 | 16 | 4 |
 
 The last table and the last primary key are Alembic's `alembic_version` in both rows. The deltas
 are the whole of `0002`: one table (`issue_comments`) with its primary key, its `UNIQUE

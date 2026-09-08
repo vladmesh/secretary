@@ -45,7 +45,7 @@ from typing import Any
 
 from secretary.board.backend import record_key_kind
 from secretary.board.sql_product_issues import ProductIssueRecords
-from secretary.board.sql_sprints import SqlSprintRecords, sprint_key
+from secretary.board.sql_sprints import SqlSprintRecords
 from secretary.board.store import BoardStoreCredentials
 from secretary.tasks import TaskError
 
@@ -540,14 +540,12 @@ class SqlCardClient:
         return int(rows[0][0])
 
     def _rpc_updateTask(self, *, id: int, **fields: Any) -> bool:
-        if any(key == int(id) for key in self.sprints.staged) or any(
-            sprint_key(str(ref)) == int(id)
-            for (ref,) in self._query("SELECT ref FROM sprints")
-        ):
+        kind = record_key_kind(id)
+        if kind == "sprint":
             result = self.sprints.update(int(id), fields)
             self._commit_unless_nested()
             return result
-        if record_key_kind(id) is not None:
+        if kind is not None:
             result = self.records.update(int(id), fields)
             self._commit_unless_nested()
             return result
@@ -575,8 +573,7 @@ class SqlCardClient:
     ) -> bool:
         if record_key_kind(task_id) is not None:
             raise SqlCardError(
-                "a Product or Issue is a row of its own table and has no column to move to: "
-                "both live in Issues (docs/BOARD_STORE.md §8.1)"
+                "a Sprint, Product or Issue has no Pipeline card column to move to"
             )
         ref = self._ref_of(task_id)
         state = _STATE_BY_COLUMN_ID[int(column_id)]
@@ -593,13 +590,11 @@ class SqlCardClient:
         return True
 
     def _rpc_closeTask(self, *, task_id: int) -> bool:
-        if any(key == int(task_id) for key in self.sprints.staged) or any(
-            sprint_key(str(ref)) == int(task_id)
-            for (ref,) in self._query("SELECT ref FROM sprints")
-        ):
+        kind = record_key_kind(task_id)
+        if kind == "sprint":
             # Sprint terminal state is a typed column, not archive state.
             return True
-        if record_key_kind(task_id) is not None:
+        if kind is not None:
             result = self.records.close(int(task_id))
             self._commit_unless_nested()
             return result
@@ -613,12 +608,10 @@ class SqlCardClient:
     # --- metadata --------------------------------------------------------------------
 
     def _rpc_getTaskMetadata(self, *, task_id: int) -> dict[str, str]:
-        if int(task_id) in self.sprints.staged or any(
-            sprint_key(str(ref)) == int(task_id)
-            for (ref,) in self._query("SELECT ref FROM sprints")
-        ):
+        kind = record_key_kind(task_id)
+        if kind == "sprint":
             return self.sprints.metadata(int(task_id))
-        if record_key_kind(task_id) is not None:
+        if kind is not None:
             return self.records.metadata(int(task_id))
         ref = self._ref_of(task_id)
         rows = self._query(
@@ -677,14 +670,12 @@ class SqlCardClient:
         return meta
 
     def _rpc_saveTaskMetadata(self, *, task_id: int, values: dict[str, Any]) -> bool:
-        if int(task_id) in self.sprints.staged or any(
-            sprint_key(str(ref)) == int(task_id)
-            for (ref,) in self._query("SELECT ref FROM sprints")
-        ):
+        kind = record_key_kind(task_id)
+        if kind == "sprint":
             result = self.sprints.save_metadata(int(task_id), values)
             self._commit_unless_nested()
             return result
-        if record_key_kind(task_id) is not None:
+        if kind is not None:
             result = self.records.save_metadata(int(task_id), values)
             self._commit_unless_nested()
             return result
@@ -777,12 +768,10 @@ class SqlCardClient:
     # --- comments --------------------------------------------------------------------
 
     def _rpc_getAllComments(self, *, task_id: int) -> list[dict[str, Any]]:
-        if int(task_id) in self.sprints.staged or any(
-            sprint_key(str(ref)) == int(task_id)
-            for (ref,) in self._query("SELECT ref FROM sprints")
-        ):
+        kind = record_key_kind(task_id)
+        if kind == "sprint":
             return self.sprints.comments(int(task_id))
-        if record_key_kind(task_id) is not None:
+        if kind is not None:
             return self.records.comments(int(task_id))
         ref = self._ref_of(task_id)
         return [
@@ -797,14 +786,12 @@ class SqlCardClient:
     def _rpc_createComment(
         self, *, task_id: int, content: str, user_id: int = 0, created_at: Any = None
     ) -> Any:
-        if int(task_id) in self.sprints.staged or any(
-            sprint_key(str(ref)) == int(task_id)
-            for (ref,) in self._query("SELECT ref FROM sprints")
-        ):
+        kind = record_key_kind(task_id)
+        if kind == "sprint":
             comment_id = self.sprints.create_comment(int(task_id), content, created_at=created_at)
             self._commit_unless_nested()
             return comment_id
-        if record_key_kind(task_id) is not None:
+        if kind is not None:
             comment_id = self.records.create_comment(int(task_id), content)
             self._commit_unless_nested()
             return comment_id

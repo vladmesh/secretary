@@ -211,7 +211,7 @@ class SprintFixtureGuards(unittest.TestCase):
         portable = set(methods) - set(KANBOARD_ONLY)
         self.assertFalse(portable & set(KANBOARD_ONLY))
         self.assertEqual(len(portable) + len(KANBOARD_ONLY), 204)
-        self.assertEqual((len(portable), len(KANBOARD_ONLY)), (149, 55))
+        self.assertEqual((len(portable), len(KANBOARD_ONLY)), (147, 57))
         self.assertTrue(all(reason.strip() for reason in KANBOARD_ONLY.values()))
 
     def test_saved_before_inventory_is_reproducible(self) -> None:
@@ -257,6 +257,27 @@ class SprintFixtureGuards(unittest.TestCase):
 
     def test_kanboard_only_locations_are_exactly_the_named_inventory(self) -> None:
         self.assertEqual(ALLOWED_KANBOARD_ONLY_LOCATIONS, frozenset(KANBOARD_ONLY))
+
+    def test_sql_subclasses_do_not_override_portable_test_bodies(self) -> None:
+        from tests import test_sprints_sql_backend as sql
+
+        violations: list[str] = []
+        for owner in vars(sql).values():
+            if not inspect.isclass(owner) or owner.__module__ != sql.__name__:
+                continue
+            inherited = owner.__mro__[1:]
+            for name, method in owner.__dict__.items():
+                if not name.startswith("test_") or not callable(method):
+                    continue
+                original = next(
+                    (base.__dict__[name] for base in inherited if name in base.__dict__), None
+                )
+                if original is None:
+                    continue
+                qualified = f"{original.__module__}.{original.__qualname__}"
+                if qualified not in KANBOARD_ONLY:
+                    violations.append(f"{owner.__name__}.{name} overrides portable {qualified}")
+        self.assertEqual(violations, [])
 
     def test_portable_fixture_helpers_do_not_reach_into_fake_storage(self) -> None:
         allowed = {"make_sprint_client", "_sprint_rows", "_transactions"}

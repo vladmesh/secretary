@@ -7,12 +7,13 @@ normalized Sprint tables and every statement uses ``SqlCardClient``'s connection
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import re
 import tempfile
 from datetime import UTC, datetime
 from typing import Any
+
+from secretary.board.backend import record_key
 
 _NUMBERED = re.compile(r"^sprint:([0-9]+)$")
 
@@ -31,11 +32,7 @@ def _rfc3339(value: datetime | None) -> str:
 
 def sprint_key(reference: str) -> int:
     """A stable positive transport handle; it is not the Sprint identity."""
-    match = _NUMBERED.fullmatch(reference)
-    if match:
-        return int(match.group(1))
-    digest = hashlib.sha256(reference.encode()).digest()
-    return 2_000_000_000 + int.from_bytes(digest[:8], "big") % 900_000_000
+    return record_key("sprint", reference)
 
 
 class SqlSprintRecords:
@@ -49,11 +46,9 @@ class SqlSprintRecords:
         return SqlCardError(message)
 
     def _reference(self, task_id: int) -> str:
-        matches = [
-            str(ref)
-            for (ref,) in self.client._query("SELECT ref FROM sprints")
-            if sprint_key(str(ref)) == int(task_id)
-        ]
+        matches = [str(ref) for (ref,) in self.client._query(
+            "SELECT ref FROM sprints WHERE board_key = %s", (int(task_id),)
+        )]
         matches += [row["reference"] for key, row in self.staged.items() if key == int(task_id)]
         if len(matches) != 1:
             raise self._error(f"no unique Sprint carries transport key {task_id}")
@@ -61,7 +56,7 @@ class SqlSprintRecords:
 
     def rows(self) -> list[dict[str, Any]]:
         rows = [self._row(values) for values in self.client._query(
-            "SELECT ref, goal, created_at, updated_at FROM sprints ORDER BY ref"
+            "SELECT ref, board_key, goal, created_at, updated_at FROM sprints ORDER BY ref"
         )]
         rows.extend(self._staged_row(key, value) for key, value in sorted(self.staged.items()))
         keys: dict[int, str] = {}
@@ -75,9 +70,9 @@ class SqlSprintRecords:
 
     @staticmethod
     def _row(values: tuple[Any, ...]) -> dict[str, Any]:
-        reference, goal, created, updated = values
+        reference, board_key, goal, created, updated = values
         return {
-            "id": sprint_key(str(reference)), "reference": str(reference), "title": str(goal),
+            "id": int(board_key), "reference": str(reference), "title": str(goal),
             "description": "", "column_id": 1, "position": 0, "swimlane_id": 0,
             "date_creation": _epoch(created), "date_modification": _epoch(updated), "is_active": 1,
         }
@@ -97,7 +92,8 @@ class SqlSprintRecords:
         if key in self.staged and self.staged[key]["reference"] == reference:
             return self._staged_row(key, self.staged[key])
         rows = self.client._query(
-            "SELECT ref, goal, created_at, updated_at FROM sprints WHERE ref = %s", (reference,)
+            "SELECT ref, board_key, goal, created_at, updated_at FROM sprints WHERE ref = %s",
+            (reference,),
         )
         return self._row(rows[0]) if rows else None
 
@@ -231,10 +227,10 @@ class SqlSprintRecords:
         reviewer = self._pin(meta.get("sprint_reviewer"))
         status = meta.get("sprint_status", "open")
         self.client._execute(
-            "INSERT INTO sprints (ref, sprint_number, goal, definition_of_done, product_id, status, "
+            "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, status, "
             "observer, worker_pin, reviewer_pin, current_task_ref, source_audit, created_at, updated_at, closed_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s,%s)",
-            (reference, int(match.group(1)) if match else None, meta["sprint_goal"],
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s,%s)",
+            (reference, sprint_key(reference), int(match.group(1)) if match else None, meta["sprint_goal"],
              meta["sprint_definition_of_done"], meta.get("sprint_product") or None, status,
              json.dumps(observer) if observer is not None else None, worker, reviewer,
              meta.get("sprint_source_audit") or None, now, now, None if status == "open" else now),
@@ -304,11 +300,6 @@ class SqlSprintRecords:
         }
         for key, column in scalar.items():
             if key in values:
-                if key == "sprint_current_task" and str(values[key]):
-                    self.client._execute(
-                        "UPDATE tasks SET sprint_ref=%s WHERE task_ref=%s AND sprint_ref IS NULL",
-                        (reference, str(values[key])),
-                    )
                 assignments.append(f"{column} = %s")
                 text = str(values[key])
                 params.append(

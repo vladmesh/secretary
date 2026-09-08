@@ -179,6 +179,7 @@ class Sprint(Base):
     # here whatever it spells.  `sprint_number` stays for §9's allocator and for the numbering
     # rule, as a nullable unique column rather than as the key.
     ref = sa.Column(sa.Text, primary_key=True)  # "sprint:1037", "sprint:canary-terra-20260813"
+    board_key = sa.Column(sa.BigInteger, nullable=False, unique=True)
     sprint_number = sa.Column(sa.Integer, autoincrement=False)  # N in sprint:N, NULL when unnumbered
     goal = sa.Column(sa.Text, nullable=False)
     definition_of_done = sa.Column(sa.Text, nullable=False)
@@ -381,6 +382,7 @@ class Task(Base):
         sa.CheckConstraint("codex_launch_mode IN ('tui')"),
         sa.CheckConstraint("retry_same >= 0"),
         sa.CheckConstraint("retry_switch >= 0"),
+        sa.CheckConstraint("task_number < 2000000000", name="task_number_is_in_card_key_range"),
         sa.UniqueConstraint("project_id", "task_number"),
         # The target the sprint's scoped cursor and decision keys need (§3.3, §3.8).
         # Redundant with the primary key by design.

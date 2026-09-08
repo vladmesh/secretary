@@ -8,7 +8,7 @@ run produced. Four revisions ship now, and §3.13 records the numbers of each: `
 34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique constraints and 4 partial unique indexes;
 `0002_board_gaps`, which closes the gaps the first import of real data found, makes that 23, 37,
 38, 23, 13 and 4; `0003_task_type_optional` leaves every one of those six numbers alone; and
-`0005_sprint_sql` makes the head counts 24, 37, 40, 24, 15 and 4. The last table and
+`0006_sprint_transport_key` makes the head counts 24, 38, 40, 24, 16 and 4. The last table and
 the last primary key are Alembic's `alembic_version`, which since the owner's decision of
 2026-09-07 stands where §7.4's `schema_migrations` stood.
 
@@ -70,7 +70,7 @@ SELECT
 #: What the same schema makes of a `postgres:16` at the head revision, and what §3.13 records
 #: beside `0001`'s own numbers. A disagreement here is a defect of the transcription into models,
 #: not of the document. Unchanged by `0003`, which trades one `CHECK` for one `CHECK`.
-DOCUMENTED_COUNTS = (24, 37, 40, 24, 15, 4)
+DOCUMENTED_COUNTS = (24, 38, 40, 24, 16, 4)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -79,6 +79,7 @@ REVISIONS = (
     "0003_task_type_optional",
     "0004_product_issue_sql",
     "0005_sprint_sql",
+    "0006_sprint_transport_key",
 )
 
 
@@ -363,9 +364,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
     def sprint(self, connection, ref: str, number: int | None) -> None:
         connection.exec_driver_sql(
-            "INSERT INTO sprints (ref, sprint_number, goal, definition_of_done, created_at, "
-            "updated_at) VALUES (%s, %s, 'g', 'd', now(), now())",
-            (ref, number),
+            "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, created_at, "
+            "updated_at) VALUES (%s, %s, %s, 'g', 'd', now(), now())",
+            (ref, record_key("sprint", ref), number),
         )
 
     def card(

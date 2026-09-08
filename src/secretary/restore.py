@@ -135,6 +135,8 @@ def _import_normalized_board(
             )
             sprints = _normalized_sprints(data_dir)
             # Validate both sets before the first backend write.
+            if getattr(client, "backend_kind", "kanboard") == "postgres":
+                _check_sql_sprint_current_tasks(cards, sprints)
             _check_restored_observers(sprints, instance)
             _check_restored_executors(sprints)
             _check_restored_admission(sprints, instance)
@@ -855,6 +857,29 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
     return sorted(sprints, key=lambda sprint: str(sprint["reference"]))
 
 
+def _check_sql_sprint_current_tasks(
+    cards: list[dict[str, Any]], sprints: list[dict[str, Any]]
+) -> None:
+    """Refuse a normalized cursor that the scoped SQL relation cannot represent.
+
+    A cursor is a pointer, never an instruction to attach or reparent a Card.  Checking the two
+    exported sets here keeps an invalid archive from writing even its first Pipeline row and gives
+    the operator a stable restore error instead of a commit-time foreign-key diagnostic.
+    """
+    linked = {
+        (str(card["reference"]), str(card.get("metadata", {}).get("sprint_ref") or ""))
+        for card in cards
+    }
+    for sprint in sprints:
+        current = str(sprint.get("current_task") or "")
+        reference = str(sprint["reference"])
+        if current and (current, reference) not in linked:
+            raise RestoreError(
+                f"normalized sprint export current_task {current!r} is not an included Card "
+                f"already linked to {reference}"
+            )
+
+
 def _restore_request_prefix(data_dir: Path, audit: TaskAudit, live_refs: set[str]) -> str:
     """Return the request-id namespace this recovery writes its audit under.
 
@@ -880,7 +905,7 @@ def _namespace_is_local(audit: TaskAudit, token: str, live_refs: set[str]) -> bo
         for event in audit.events()
         if str(event.get("request_id") or "").startswith(prefix)
     ]
-    return bool(events) and all(
+    return all(
         str(event.get("ref") or "") in live_refs
         for event in events
     )

@@ -116,27 +116,38 @@ PRODUCT_ISSUE = "product/issue"
 POSTGRES_SERVES = frozenset({CARD, PRODUCT_ISSUE, SPRINT})
 
 
-# Product and Issue share Kanboard's integer-addressed card vocabulary even though their
-# canonical identities are strings.  PostgreSQL stores this deterministic key beside the row
-# and indexes it; ranges above PostgreSQL int4 cannot be confused with card numbers.
-RECORD_KINDS = ("product", "issue")
-RECORD_KEY_BASES = {"product": 3_000_000_000, "issue": 4_000_000_000}
+# Every normalized entity shares the integer-addressed board-client vocabulary.  These ranges
+# are its one namespace: Cards retain their positive int4 task number, while Sprint, Product and
+# Issue keys are stored and indexed beside their string identity.  Sprint reserves two disjoint
+# half-ranges so numbered references are reversible without colliding with custom references.
+RECORD_KINDS = ("sprint", "product", "issue")
+RECORD_KEY_BASES = {"sprint": 2_000_000_000, "product": 3_000_000_000, "issue": 4_000_000_000}
 RECORD_KEY_SPAN = 1_000_000_000
+SPRINT_NUMBER_KEY_SPAN = RECORD_KEY_SPAN // 2
 
 
 def record_key(kind: str, identifier: str) -> int:
-    """Return the stable SQL board key for one string Product/Issue identity."""
+    """Return the stable SQL transport key for one normalized non-Card identity."""
     if kind not in RECORD_KINDS:
         raise BoardBackendError(f"a board record names one of {', '.join(RECORD_KINDS)}, not {kind!r}")
     text = str(identifier).strip()
     if not text:
         raise BoardBackendError(f"a {kind} key needs an identifier")
+    if kind == "sprint" and text.startswith("sprint:") and text[7:].isdigit():
+        number = int(text[7:])
+        if number >= SPRINT_NUMBER_KEY_SPAN:
+            raise BoardBackendError(
+                f"a numbered Sprint must be below {SPRINT_NUMBER_KEY_SPAN}, not {number}"
+            )
+        return RECORD_KEY_BASES[kind] + number
     digest = hashlib.sha256(f"{kind}:{text}".encode()).digest()
-    return RECORD_KEY_BASES[kind] + int.from_bytes(digest[:8], "big") % RECORD_KEY_SPAN
+    offset = SPRINT_NUMBER_KEY_SPAN if kind == "sprint" else 0
+    span = SPRINT_NUMBER_KEY_SPAN if kind == "sprint" else RECORD_KEY_SPAN
+    return RECORD_KEY_BASES[kind] + offset + int.from_bytes(digest[:8], "big") % span
 
 
 def record_key_kind(value: object) -> str | None:
-    """Return the Product/Issue kind for a synthetic key, or None for a card key."""
+    """Return the normalized non-Card kind for a transport key, or None for a Card key."""
     try:
         number = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):

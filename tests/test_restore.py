@@ -135,6 +135,10 @@ def _seed_legacy_facts(data_dir: Path) -> Path:
 
 
 class RestoreTests(unittest.TestCase):
+    def test_an_empty_restore_namespace_is_still_local(self) -> None:
+        audit = mock.Mock(events=mock.Mock(return_value=[]))
+        self.assertTrue(restore_module._namespace_is_local(audit, "recorded", set()))
+
     @staticmethod
     def _product_card(*, projects: str = '["secretary"]') -> dict[str, object]:
         card = _restore_card(reference="product:secretary", title="Secretary", column="Issues", position=1)

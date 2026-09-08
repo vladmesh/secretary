@@ -360,10 +360,15 @@ class SqlBackendProductIssueSwitchTests(unittest.TestCase):
         self.assertIn(backend.SPRINT, backend.POSTGRES_SERVES)
 
     def test_record_keys_are_stable_disjoint_and_not_card_numbers(self) -> None:
+        numbered_sprint = backend.record_key("sprint", "sprint:1596")
+        custom_sprint = backend.record_key("sprint", "sprint:canary")
         product = backend.record_key("product", "secretary")
         issue = backend.record_key("issue", "secretary")
         self.assertEqual(product, backend.record_key("product", "secretary"))
         self.assertEqual(backend.record_key_kind(product), "product")
         self.assertEqual(backend.record_key_kind(issue), "issue")
+        self.assertEqual(backend.record_key_kind(numbered_sprint), "sprint")
+        self.assertEqual(backend.record_key_kind(custom_sprint), "sprint")
+        self.assertEqual(len({1596, numbered_sprint, custom_sprint, product, issue}), 5)
         self.assertIsNone(backend.record_key_kind(1596))
         self.assertNotEqual(product, issue)
