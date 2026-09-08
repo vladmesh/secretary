@@ -18,9 +18,24 @@ def _fixture(root: Path, marker: str) -> None:
     package = root / "secretary"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(f"MARKER = {marker!r}\n", encoding="utf-8")
-    (root / "setup.py").write_text(
-        "from setuptools import setup\n"
-        "setup(name='secretary', version='0.1', packages=['secretary'], extras_require={'dev': []})\n",
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = []\nbuild-backend = 'fixture_backend'\nbackend-path = ['.']\n",
+        encoding="utf-8",
+    )
+    (root / "fixture_backend.py").write_text(
+        "from pathlib import Path\n"
+        "from zipfile import ZIP_DEFLATED, ZipFile\n\n"
+        "def build_editable(wheel_directory, config_settings=None, metadata_directory=None):\n"
+        "    name = 'secretary-0.1-py3-none-any.whl'\n"
+        "    dist = 'secretary-0.1.dist-info/'\n"
+        "    with ZipFile(Path(wheel_directory) / name, 'w', ZIP_DEFLATED) as wheel:\n"
+        "        wheel.writestr('__editable__.secretary-0.1.pth', str(Path.cwd()) + '\\n')\n"
+        "        wheel.writestr(dist + 'METADATA', "
+        "'Metadata-Version: 2.1\\nName: secretary\\nVersion: 0.1\\nProvides-Extra: dev\\n')\n"
+        "        wheel.writestr(dist + 'WHEEL', "
+        "'Wheel-Version: 1.0\\nGenerator: fixture\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n')\n"
+        "        wheel.writestr(dist + 'RECORD', '')\n"
+        "    return name\n",
         encoding="utf-8",
     )
 
@@ -43,7 +58,6 @@ def _install(python: Path, checkout: Path) -> None:
             "pip",
             "install",
             "--no-index",
-            "--no-build-isolation",
             "-e",
             ".[dev]",
         ],
@@ -97,7 +111,7 @@ class ProductionRuntimeTests(unittest.TestCase):
             subprocess.run(
                 ["python3", "-m", "pip", "install", "-e", ".[dev]"],
                 cwd=task,
-                env={**env, "PIP_NO_INDEX": "1", "PIP_NO_BUILD_ISOLATION": "1"},
+                env={**env, "PIP_NO_INDEX": "1"},
                 check=True,
                 capture_output=True,
                 text=True,

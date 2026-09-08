@@ -2957,6 +2957,8 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         self.workspaces = self.data_dir / "workspaces"
         self.binding_name: str | None = "codegen_orchestrator"
         self.host = CommandHostRuntime(self.catalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        self.host._prepare_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
+        self.host._require_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
         self.json_calls: list[list[str]] = []
         # What Orca answers `worktree show` with, keyed by path. The create call writes into it.
         self.registered: dict[str, dict[str, Any]] = {}
@@ -3243,6 +3245,7 @@ class HostLaunchContourTests(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.data_dir = Path(self.tmpdir.name)
         self.host = CommandHostRuntime(FakeCatalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        self.host._require_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
         self.host.preflight_codex_run = _transport_only_preflight  # type: ignore[method-assign]
         self.json_calls: list[list[str]] = []
 
@@ -4124,6 +4127,7 @@ class WorkerPathReachesOnlyTheSessionHostTests(unittest.TestCase):
         self.session = self.WorkingPane()
         self.runner = self.NoRunner()
         self.host = CommandHostRuntime(self.Catalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        self.host._require_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
         self.host.preflight_codex_run = _transport_only_preflight  # type: ignore[method-assign]
         # Both halves of the runtime's own access to Orca: the JSON runner every `orca terminal`
         # call goes through, and the process runner underneath it.

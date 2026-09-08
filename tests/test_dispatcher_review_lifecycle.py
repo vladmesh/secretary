@@ -1219,6 +1219,10 @@ class ScriptedWaitHost(CommandHostRuntime):
     def _run(self, args: list[str], label: str, *, cwd: Path | None = None):
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
+    def _require_workspace_environment(self, workspace: str) -> None:
+        """Readiness fixtures exercise terminal transport and run no candidate command."""
+        return None
+
 
 class LaunchPaneReadinessTests(unittest.TestCase):
     """secretary-1163: a bring-up classifies the pane that would not take its launch prompt.

@@ -1051,6 +1051,10 @@ class RecordingTuiHost(CommandHostRuntime):
         self.waits = list(waits or [])
         self.fail_ops = fail_ops or set()
 
+    def _require_workspace_environment(self, workspace: str) -> None:
+        """TUI transport fixtures exercise delivery and run no candidate command."""
+        return None
+
     def _next(self, answers: list[dict], default: dict) -> dict:
         if not answers:
             return default
@@ -1986,4 +1990,3 @@ class PreDeliveryDeliveryTests(TuiDeliveryStageTests):
         self.assertEqual(record["delivery_receipt"], DELIVERY_RECEIPT_ACCEPTED)
         self.assertFalse(record["provider_bound"], "the caller's own criterion never fired")
         self.assertTrue(record["turn_confirmed"], "the pane's own evidence did")
-
