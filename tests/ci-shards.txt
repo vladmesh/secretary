@@ -85,6 +85,7 @@ integration-board tests/test_pipeline_paths.py
 packaging tests/test_portable_upgrade.py
 unit tests/test_product_issue_catalogue.py
 unit tests/test_product_issues.py
+unit tests/test_product_issue_fixture_guards.py
 unit tests/test_product_lanes.py
 unit tests/test_protocol_artifacts.py
 unit tests/test_project_contract.py
