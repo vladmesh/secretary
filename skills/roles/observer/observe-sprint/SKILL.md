@@ -57,8 +57,12 @@ an explicit `--sprint-override` with a reason.
 ## Channel: the board only
 
 Instructions, answers, reversed decisions and "add this urgent thing" all arrive as entries on the
-sprint entity. Read the comments in `sprint show` between steps: before choosing the next step and
-after every terminal state of a card. A direct message to the head is not a way to change the work.
+sprint entity. Before `task create`, before `task decide`, and before the post-Done next-cut or close
+decision, run live `sprint show` and read its complete comments list in board order. Do not use a
+timestamp cutoff: a PO/owner decision may have arrived between an earlier read and a delivery
+acknowledgement. Apply every applicable owner decision before the saved resume or `next_safe_step`;
+when one changes the plan, reflect it in the resume written for this turn. A direct message to the
+head is not a way to change the work.
 
 You write to nobody directly and expect no direct messages. Do not answer status requests: status is
 served from data (`sprint status`, `task list --sprint`) without you.

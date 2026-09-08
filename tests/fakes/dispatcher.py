@@ -824,6 +824,7 @@ class FakeHost:
         # The sprint binding each bring-up handed the head, in launch order.
         self.observer_identities: list[dict[str, str]] = []
         self.observer_nudges: list[str] = []
+        self.observer_wake_contexts: list[tuple[dict, str]] = []
         self.stopped_observers: list[str] = []
         # workspace -> live terminal handle, the inventory Orca answers `terminal list` from.
         self.observer_terminals: dict[str, str] = {}
@@ -1207,11 +1208,12 @@ class FakeHost:
             return dict(self.observer_status_result)
         return {"last_activity": time.time(), "idle": False}
 
-    def nudge_observer(self, record) -> str:
+    def nudge_observer(self, record, *, sprint: dict, change: str = "linked-card") -> str:
         self.calls.append("nudge_observer")
         if self.fail_observer_reason:
             raise HostError(self.fail_observer_reason)
         self.observer_nudges.append(str(record.sprint))
+        self.observer_wake_contexts.append((sprint, change))
         # Like the real host, this confirms terminal acceptance only. The later durable resume
         # closes the observer delivery during normal reconciliation.
         return "accepted"

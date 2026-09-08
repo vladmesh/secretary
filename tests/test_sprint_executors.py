@@ -216,7 +216,7 @@ class ObserverPromptExecutorTests(unittest.TestCase):
     """What the launch document tells the observer about who runs the cards."""
 
     def test_an_unpinned_role_reads_as_the_observer_s_choice(self) -> None:
-        document = render_observer_prompt({"ref": "sprint:1", "executors": UNSET_BOTH})
+        document = render_observer_prompt({"ref": "sprint:1", "executors": UNSET_BOTH, "comments": []})
         self.assertIn("## Executors", document)
         for role in ("worker", "reviewer"):
             self.assertIn(f"- {role}: not pinned.", document)
@@ -232,14 +232,15 @@ class ObserverPromptExecutorTests(unittest.TestCase):
                     "worker": executor_pinned("codex-observer"),
                     "reviewer": executor_unset(),
                 },
+                "comments": [],
             }
         )
         self.assertIn("- worker: pinned to head profile `codex-observer`.", document)
         self.assertIn("- reviewer: not pinned.", document)
 
     def test_a_sprint_dict_that_carries_no_executors_still_prints_both_roles(self) -> None:
-        """A caller holding an older shape gets the honest reading of it, not a crash."""
-        document = render_observer_prompt({"ref": "sprint:1"})
+        """A loaded empty context may carry an older executor shape without hiding either role."""
+        document = render_observer_prompt({"ref": "sprint:1", "comments": []})
         self.assertIn("- worker: not pinned.", document)
         self.assertIn("- reviewer: not pinned.", document)
 
