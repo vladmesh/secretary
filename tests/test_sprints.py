@@ -49,7 +49,7 @@ from secretary.sprints import (
     sprint_admission_lock,
 )
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
-from tests.fakes.sprints import SprintFixture, SprintKanboard
+from tests.fakes.sprints import SprintBackendFixture, SprintFixture
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 from tests.sprint_close_fixtures import (
     CLOSEOUT_BODY,
@@ -81,12 +81,7 @@ class SprintOwnershipTests(SprintFixture):
 
     def _assert_nothing_was_written(self) -> None:
         self.assertEqual(self._events(), [])
-        self.assertFalse(
-            any(
-                method in {"createTask", "saveTaskMetadata", "createProject"}
-                for method, _params in self.client.calls
-            )
-        )
+        self.assertEqual(self.sprint_record_count(), 0)
 
     def test_create_requires_product_issue_and_reservation_before_any_write(self) -> None:
         for kwargs, message in (
@@ -97,7 +92,6 @@ class SprintOwnershipTests(SprintFixture):
             ({"issues": ["issue:missing"]}, "was not found"),
             ({"projects": ["unregistered"]}, "unknown registered project"),
         ):
-            self.client.calls.clear()
             with self.assertRaisesRegex(TaskError, message):
                 self._create(goal="rejected", **kwargs)
             self._assert_nothing_was_written()
@@ -391,25 +385,8 @@ class SprintOwnershipTests(SprintFixture):
         Live on 2026-08-06 that handed a new sprint `sprint:804`, taken by a sprint closed in July,
         and `show` then resolved the new reference to the old row.
         """
-        board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
-        for task_id, reference, closed in ((80, "sprint:804", True), (81, "sprint:1153", False)):
-            self.client.tasks.append(
-                {
-                    "id": task_id,
-                    "project_id": board,
-                    "reference": reference,
-                    "title": "historical",
-                    "description": "",
-                    "column_id": board * 10,
-                    "position": task_id,
-                    "swimlane_id": 0,
-                    "is_active": 0 if closed else 1,
-                    "date_creation": "1720000000",
-                    "date_modification": "1720000000",
-                }
-            )
-            self.client.metadata[task_id] = {"sprint_status": "closed"}
-            self.client.comments[task_id] = []
+        self.arrange_historical_sprint("sprint:804")
+        self.arrange_historical_sprint("sprint:1153")
 
         created = self._create(goal="numbered above every reference")["sprint"]
 
@@ -458,7 +435,8 @@ class SprintOwnershipTests(SprintFixture):
             reference="sprint:900",
             request_id="held",
         )["sprint"]
-        rows_before = [dict(row) for row in self._sprint_rows()]
+        sprint_before = self.sprint("sprint:900")
+        records_before = self.sprint_record_count()
 
         with self.assertRaisesRegex(TaskError, "must name its own reference") as raised:
             self.writer.restore_create(
@@ -468,10 +446,11 @@ class SprintOwnershipTests(SprintFixture):
             )
 
         self.assertEqual(raised.exception.code, "validation")
-        self.assertEqual(self._sprint_rows(), rows_before)
+        self.assertEqual(self.sprint("sprint:900"), sprint_before)
+        self.assertEqual(self.sprint_record_count(), records_before)
         self.assertEqual(SprintReader(self.client).show("sprint:900")["goal"], held["goal"])  # type: ignore[arg-type]
         self.assertEqual([event["request_id"] for event in self._events()], ["held"])
-        self.assertEqual(self._transactions(), [])
+        self.assertEqual(self.transaction_state(), {"ok": True, "pending": 0})
 
     def test_a_refused_create_whose_row_survives_is_answered_as_repairable(self) -> None:
         """A refusal is only an answer when the request is left holding nothing.
@@ -527,13 +506,13 @@ class SprintOwnershipTests(SprintFixture):
 
     def test_a_repeat_with_another_payload_is_refused_before_any_side_effect(self) -> None:
         self._create(goal="original", reference="sprint:original", request_id="claimed")
-        self.client.calls.clear()
+        before = (self.sprint_record_count(), list(self._events()))
 
         with self.assertRaisesRegex(TaskError, "request id belongs to another operation") as raised:
             self._create(goal="different", reference="sprint:other", request_id="claimed")
 
         self.assertEqual(raised.exception.code, "validation")
-        self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
+        self.assertEqual((self.sprint_record_count(), self._events()), before)
         self.assertEqual([event["kind"] for event in self._events()], ["created"])
 
     def test_concurrent_creates_admit_exactly_one_open_sprint(self) -> None:
@@ -726,7 +705,7 @@ class SprintOwnershipTests(SprintFixture):
         self.writer.close(
             role="po", actor="operator", reference=ref, request_id="reused-id", decisions=KEEP_THE_ISSUE_OPEN
         )
-        self.client.calls.clear()
+        before = (self.sprint(ref), list(self._events()))
 
         with self.assertRaisesRegex(TaskError, "request id belongs to another operation") as raised:
             self.writer.reopen(
@@ -738,7 +717,7 @@ class SprintOwnershipTests(SprintFixture):
             )
 
         self.assertEqual(raised.exception.code, "validation")
-        self.assertFalse(any(method == "saveTaskMetadata" for method, _params in self.client.calls))
+        self.assertEqual((self.sprint(ref), self._events()), before)
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
         self.assertEqual([event["kind"] for event in self._events()], ["created", "sprint.closed", "closed"])
 
@@ -963,9 +942,7 @@ class SprintOwnershipTests(SprintFixture):
     def test_reopen_is_refused_when_its_only_issue_has_been_closed(self) -> None:
         ref = self._create(goal="issue closed later", reference="sprint:stale")["sprint"]["ref"]
         self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
-        issue = next(task for task in self.client.tasks if task["reference"] == "issue:open")
-        issue["is_active"] = 0
-        self.client.metadata[issue["id"]]["issue_closed_reason"] = "resolved"
+        self.arrange_issue_closed()
 
         with self.assertRaisesRegex(TaskError, "is closed"):
             self.writer.reopen(
@@ -2159,18 +2136,9 @@ class SprintTests(SprintFixture):
     def test_a_sprint_stored_without_uncharged_counts_reads_them_as_zero(self) -> None:
         """A sprint written before this quantity existed reads back, and reads back as zero."""
         ref = self._create(goal="stored before")["sprint"]["ref"]
-        stored = self.writer.reader.show(ref, include_cards=False)
-        task_id = int(str(stored["id"]).removeprefix("sprint_kanboard_"))
-        self.client.call(
-            "saveTaskMetadata",
-            task_id=task_id,
-            values={
-                "sprint_budget": json.dumps({"by_type": {"blocked": 2, "red_ci": 1}}),
-            },
-        )
-        self.assertNotIn(
-            "sprint_budget_uncharged",
-            self.client.call("getTaskMetadata", task_id=task_id),
+        self.arrange_metadata(
+            ref,
+            sprint_budget=json.dumps({"by_type": {"blocked": 2, "red_ci": 1}}),
         )
 
         budget = self._budget_of(ref)
@@ -2797,7 +2765,10 @@ class SprintTests(SprintFixture):
             ({"sprint": ref, "project": "other"}, "sprint_project_unreserved"),
             ({"sprint": ref, "priority": "P1"}, "validation"),
         ):
-            before = len(self.client.calls)
+            before = (
+                self.sprint(ref),
+                TaskReader(self.client).list(project="secretary"),  # type: ignore[arg-type]
+            )
             arguments = {
                 "role": "po",
                 "actor": "operator",
@@ -2810,11 +2781,12 @@ class SprintTests(SprintFixture):
             with self.assertRaises(TaskError) as raised:
                 writer.create(**arguments)
             self.assertEqual(raised.exception.code, code)
-            self.assertFalse(
-                any(
-                    method in {"createTask", "updateTask", "saveTaskMetadata"}
-                    for method, _params in self.client.calls[before:]
-                )
+            self.assertEqual(
+                (
+                    self.sprint(ref),
+                    TaskReader(self.client).list(project="secretary"),  # type: ignore[arg-type]
+                ),
+                before,
             )
 
     def test_close_archives_only_its_done_tasks_and_leaves_issues_and_unlinked_cards(self) -> None:
@@ -2863,10 +2835,9 @@ class SprintTests(SprintFixture):
             reason="",
             request_id="close-done-move",
         )
-        done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
         self.assertIsNone(TaskReader(self.client).show(done["ref"])["claim"]["worker"])  # type: ignore[arg-type]
         # Even malformed metadata cannot turn an Issue into a close target.
-        self.client.metadata[22]["sprint_ref"] = ref
+        self.arrange_pipeline_metadata("issue:open", sprint_ref=ref)
 
         decisions = drop_cards(open_task["ref"])
         first = self.writer.close(
@@ -2883,23 +2854,10 @@ class SprintTests(SprintFixture):
         # cards of no sprint are untouched by a close.
         self.assertEqual(first["disposed_tasks"], [open_task["ref"]])
         self.assertEqual(first["event_id"], second["event_id"])
-        self.assertEqual(
-            next(task for task in self.client.tasks if task["reference"] == done["ref"])["is_active"], 0
-        )
-        open_row = next(task for task in self.client.tasks if task["reference"] == open_task["ref"])
-        self.assertEqual(open_row["is_active"], 0)
-        self.assertNotEqual(
-            next(task for task in self.client.tasks if task["reference"] == "secretary-12").get(
-                "is_active", 1
-            ),
-            0,
-        )
-        self.assertNotEqual(
-            next(task for task in self.client.tasks if task["reference"] == "issue:open").get("is_active", 1),
-            0,
-        )
-        close_calls = [params["task_id"] for method, params in self.client.calls if method == "closeTask"]
-        self.assertEqual(close_calls, [done_row["id"], open_row["id"]])
+        self.assertFalse(self.record_is_active(done["ref"]))
+        self.assertFalse(self.record_is_active(open_task["ref"]))
+        self.assertTrue(self.record_is_active("secretary-12"))
+        self.assertTrue(self.record_is_active("issue:open"))
         self.assertEqual(
             len(
                 [
@@ -3003,8 +2961,18 @@ class SprintTests(SprintFixture):
             sprint=ref,
             request_id="terminal-done",
         )["task"]
-        done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
-        done_row["column_id"] = 6
+        writer.claim(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], worker="worker",
+            request_id="terminal-claim",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="validate",
+            reason="", request_id="terminal-validate",
+        )
+        writer.move(
+            role="dispatcher", actor="dispatcher", reference=done["ref"], target="done",
+            reason="", request_id="terminal-done-move",
+        )
 
         with mock.patch.object(TaskWriter, "archive", side_effect=TaskError("live_work", "live worker", 3)):
             with self.assertRaises(TaskError) as raised:
@@ -3162,8 +3130,7 @@ class SprintTests(SprintFixture):
         with self.assertRaisesRegex(TaskError, "must include a timezone"):
             self.writer.resume(role="observer", actor="observer", reference=ref, entry=entry)
 
-        sprint = next(item for item in self.client.tasks if item["reference"] == ref)
-        self.client.metadata[int(sprint["id"])]["sprint_resume"] = json.dumps(entry)
+        self.arrange_metadata(ref, sprint_resume=json.dumps(entry))
         task = TaskWriter(self.client, data_dir=self.tmp.name).create(
             role="observer",
             actor="observer",
@@ -3460,32 +3427,20 @@ class SprintAuditTraversalTests(SprintFixture):
         `close`, hard-budget stop and restore transitions are traced separately, over rows this
         fixture's writer produces itself.
         """
-        board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
-        task_id = max(int(task["id"]) for task in self.client.tasks) + 1
-        self.client.tasks.append(
-            {
-                "id": task_id,
-                "project_id": board,
-                "reference": reference,
-                "title": reference,
-                "description": "",
-                "column_id": self.client.columns[board][0]["id"],
-                "position": task_id,
-                "swimlane_id": 0,
-                "is_active": 1,
-                "date_creation": "1720000000",
-                "date_modification": "1720000000",
-            }
+        self.writer.restore_create(
+            reference=reference,
+            goal="seeded",
+            definition_of_done="done",
+            repositories=["secretary"],
+            observer=head_choice("codex-observer"),
+            status=status,
+            request_id=f"fixture-{reference}",
         )
-        self.client.metadata[task_id] = {
-            "sprint_goal": "seeded",
-            "sprint_definition_of_done": "done",
-            "sprint_repositories": json.dumps(["secretary"]),
-            "sprint_status": status,
-            "sprint_current_task": "",
-            "sprint_resume": json.dumps(self._entry(recorded_at)),
-        }
-        self.client.comments[task_id] = []
+        self.arrange_metadata(
+            reference,
+            sprint_current_task="",
+            sprint_resume=json.dumps(self._entry(recorded_at)),
+        )
         return reference
 
     def _sprint_event(self, reference: str, request_id: str, occurred_at: str) -> None:
@@ -3857,9 +3812,10 @@ class SprintAuditTraversalTests(SprintFixture):
         self.assertFalse(summary["resume_freshness"]["fresh"])
 
 
-class SprintSingleWriterGuardTests(unittest.TestCase):
+class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
     def setUp(self) -> None:
-        self.client = SprintKanboard()
+        self.skip_kanboard_only()
+        self.client = self.make_sprint_client()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.sprints = SprintWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
@@ -3872,8 +3828,11 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
             repositories=["secretary", "other"],
             request_id="seed-guard-sprint",
         )["sprint"]["ref"]
-        sprint = next(task for task in self.client.tasks if task["reference"] == self.ref)
-        self.client.metadata[int(sprint["id"])]["sprint_reservations"] = json.dumps(["secretary", "other"])
+        self.sprints.restore(
+            reference=self.ref,
+            values={"sprint_reservations": json.dumps(["secretary", "other"])},
+            request_id="seed-guard-reservations",
+        )
         # The reservations landed on the board behind the writer's back, so the index is
         # re-seeded from it the way a live installation seeds it.
         refresh_active_sprint_projects(self.tmp.name, SprintReader(self.client))  # type: ignore[arg-type]
@@ -4327,8 +4286,11 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
             repositories=["secretary"],
             request_id="seed-overlap-sprint",
         )["sprint"]["ref"]
-        other = next(task for task in self.client.tasks if task["reference"] == other_ref)
-        self.client.metadata[int(other["id"])]["sprint_reservations"] = json.dumps(["secretary"])
+        self.sprints.restore(
+            reference=other_ref,
+            values={"sprint_reservations": json.dumps(["secretary"])},
+            request_id="seed-overlap-reservation",
+        )
         # The second sprint's own head, bound to it: the write is about its card, not about the
         # sprint this fixture opened.
         with as_observer(other_ref):
@@ -4344,7 +4306,7 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         self.assertEqual(card["sprint"], other_ref)
 
 
-class SprintReservedProjectGuardTests(unittest.TestCase):
+class SprintReservedProjectGuardTests(SprintBackendFixture, unittest.TestCase):
     """The guards compare a card's project against reservations, not repository paths.
 
     A live sprint's `repositories` are filesystem paths and its `reservations` are project
@@ -4352,7 +4314,8 @@ class SprintReservedProjectGuardTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.client = SprintKanboard()
+        self.skip_kanboard_only()
+        self.client = self.make_sprint_client()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.sprints = SprintWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
@@ -4363,8 +4326,11 @@ class SprintReservedProjectGuardTests(unittest.TestCase):
             repositories=["/home/dev/secretary"],
             request_id="seed-reserved-sprint",
         )["sprint"]["ref"]
-        sprint = next(task for task in self.client.tasks if task["reference"] == self.ref)
-        self.client.metadata[int(sprint["id"])]["sprint_reservations"] = json.dumps(["secretary"])
+        self.sprints.restore(
+            reference=self.ref,
+            values={"sprint_reservations": json.dumps(["secretary"])},
+            request_id="seed-reserved-project",
+        )
         refresh_active_sprint_projects(self.tmp.name, SprintReader(self.client))  # type: ignore[arg-type]
         bind_observer(self, self.ref)
 
@@ -4537,10 +4503,18 @@ class SprintCloseDecisionTests(SprintFixture):
             }
         ]
 
+    def _contract_state(self, reference: str) -> dict[str, object]:
+        store = self._store()
+        return {
+            "sprint": self.sprint(reference),
+            "issues": store.list_issues(product="secretary", include_closed=True),
+            "events": list(self._events()),
+            "transactions": self.transaction_state(),
+        }
+
     def test_a_close_short_of_an_issue_verdict_refuses_and_writes_nothing(self) -> None:
         ref = self._open()
-        before = len(self.client.calls)
-        events = len(self._events())
+        before = self._contract_state(ref)
 
         with self.assertRaises(TaskError) as raised:
             self.writer.close(
@@ -4553,14 +4527,13 @@ class SprintCloseDecisionTests(SprintFixture):
         self.assertEqual(raised.exception.code, "validation")
         self.assertIn("issue:second", raised.exception.message)
         self.assertNotIn("issue:open,", raised.exception.message)
-        self.assertEqual(self._writes(before), [])
-        self.assertEqual(len(self._events()), events)
+        self.assertEqual(self._contract_state(ref), before)
         self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")  # type: ignore[arg-type]
 
     def test_a_verdict_for_an_issue_the_sprint_never_declared_is_refused(self) -> None:
         ref = self._open(issues=["issue:open"])
-        before = len(self.client.calls)
+        before = self._contract_state(ref)
 
         with self.assertRaisesRegex(TaskError, "did not declare"):
             self.writer.close(
@@ -4575,7 +4548,7 @@ class SprintCloseDecisionTests(SprintFixture):
                 },
             )
 
-        self.assertEqual(self._writes(before), [])
+        self.assertEqual(self._contract_state(ref), before)
 
     def test_a_closing_verdict_closes_the_issue_and_a_kept_one_stays_open_with_its_basis(self) -> None:
         ref = self._open()
@@ -4635,7 +4608,7 @@ class SprintCloseDecisionTests(SprintFixture):
                 reason="waiting on an answer",
                 request_id="undisposed-block",
             )
-        before = len(self.client.calls)
+        before = self._contract_state(ref)
 
         with self.assertRaises(TaskError) as raised:
             self.writer.close(
@@ -4648,7 +4621,7 @@ class SprintCloseDecisionTests(SprintFixture):
         self.assertEqual(raised.exception.code, "validation")
         self.assertIn(f"{ready} (ready)", raised.exception.message)
         self.assertIn(f"{blocked} (blocked)", raised.exception.message)
-        self.assertEqual(self._writes(before), [])
+        self.assertEqual(self._contract_state(ref), before)
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")  # type: ignore[arg-type]
 
     def test_dispositions_take_every_card_into_a_recorded_end(self) -> None:
@@ -4674,21 +4647,19 @@ class SprintCloseDecisionTests(SprintFixture):
         # No card of the sprint is left in a working state on the closed contract.
         self.assertEqual(TaskReader(self.client).list(sprint=ref), [])  # type: ignore[arg-type]
         for reference in (landed, dropped):
-            row = next(task for task in self.client.tasks if task["reference"] == reference)
-            self.assertEqual(row["is_active"], 0)
-        landed_row = next(task for task in self.client.tasks if task["reference"] == landed)
+            self.assertFalse(self.record_is_active(reference))
         self.assertIn(
             f"[po]\ndone when sprint {ref} closed: merged in the last hour of the sprint",
-            [comment["comment"] for comment in self.client.comments[landed_row["id"]]],
+            self.record_comments(landed),
         )
         self.assertIn(
             f"archived when sprint {ref} closed: merged in the last hour of the sprint",
-            "\n".join(comment["comment"] for comment in self.client.comments[landed_row["id"]]),
+            "\n".join(self.record_comments(landed)),
         )
 
     def test_a_disposition_for_a_card_that_is_not_open_work_is_refused(self) -> None:
         ref = self._open(issues=["issue:open"])
-        before = len(self.client.calls)
+        before = self._contract_state(ref)
 
         with self.assertRaisesRegex(TaskError, "not open work of this sprint"):
             self.writer.close(
@@ -4701,13 +4672,13 @@ class SprintCloseDecisionTests(SprintFixture):
                 },
             )
 
-        self.assertEqual(self._writes(before), [])
+        self.assertEqual(self._contract_state(ref), before)
 
     def test_no_verdict_makes_a_product_or_issue_record_a_close_target(self) -> None:
         ref = self._open(issues=["issue:open"])
         # Even malformed metadata cannot enrol a typed record in the close.
-        self.client.metadata[20]["sprint_ref"] = ref
-        self.client.metadata[22]["sprint_ref"] = ref
+        self.arrange_pipeline_metadata("product:secretary", sprint_ref=ref)
+        self.arrange_pipeline_metadata("issue:open", sprint_ref=ref)
 
         result = self.writer.close(
             role="po",
@@ -4721,8 +4692,7 @@ class SprintCloseDecisionTests(SprintFixture):
         self.assertEqual(result["archived_tasks"], [])
         self.assertEqual(result["remaining_tasks"], [])
         for reference in ("product:secretary", "issue:open"):
-            row = next(task for task in self.client.tasks if task["reference"] == reference)
-            self.assertNotEqual(row.get("is_active", 1), 0)
+            self.assertTrue(self.record_is_active(reference))
 
     def test_an_interrupted_close_continues_without_repeating_what_it_did(self) -> None:
         ref = self._open()

@@ -32,7 +32,7 @@ from secretary.sprints import (
     sprint_admission_lock,
 )
 from secretary.tasks import TaskWriter
-from tests.fakes.sprints import ProductSprintKanboard, _write_project_registry
+from tests.fakes.sprints import SprintBackendFixture, _write_project_registry
 from tests.observer_identity import as_observer
 from tests.restore_fixtures import _EmptyBoardsKanboard
 from tests.sprint_close_fixtures import close_decisions
@@ -75,8 +75,30 @@ RESUME = {
 }
 
 
-class SprintRestoreTests(unittest.TestCase):
+class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
+    """Reusable export/restore contract with one backend factory boundary."""
+
+    def make_target_client(self) -> _EmptyBoardsKanboard:
+        return _EmptyBoardsKanboard()
+
+    def persisted_record_count(self, client: object) -> int:
+        """Observe all target records through its public client boundary."""
+        projects = ["Pipeline", "Secretary sprints"]
+        total = 0
+        for name in projects:
+            project = client.call("getProjectByName", name=name)  # type: ignore[attr-defined]
+            if not isinstance(project, dict) or not project.get("id"):
+                continue
+            for status_id in (1, 0):
+                total += len(
+                    client.call(  # type: ignore[attr-defined]
+                        "getAllTasks", project_id=int(project["id"]), status_id=status_id
+                    )
+                )
+        return total
+
     def setUp(self) -> None:
+        self.skip_kanboard_only()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -84,7 +106,7 @@ class SprintRestoreTests(unittest.TestCase):
         self.target_data = self.root / "target-data"
         init_layout(self.source_data)
         init_layout(self.target_data)
-        self.source = ProductSprintKanboard()
+        self.source = self.make_sprint_client()
         self.instance = _write_project_registry(self.root, "secretary", "secretary-instance")
         self.ref = self._seed_closed_sprint()
         self._export()
@@ -166,7 +188,7 @@ class SprintRestoreTests(unittest.TestCase):
         return payload["sprints"][0]
 
     def _restore(self, client: object | None = None) -> tuple[object, int]:
-        client = client or _EmptyBoardsKanboard()
+        client = client or self.make_target_client()
         return client, import_normalized_board(
             self.target_data,
             client=client,
@@ -242,19 +264,13 @@ class SprintRestoreTests(unittest.TestCase):
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0]["observer"] = {"kind": "default"}
         (self.target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
 
         with self.assertRaisesRegex(RestoreError, "not one of the tagged forms"):
             import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
 
-        board = ensure_sprint_board(client)  # type: ignore[arg-type]
-        self.assertEqual([task for task in client.tasks if task["project_id"] == board], [])
         # The Pipeline card of the same export is untouched too: nothing of either set was written.
-        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
-        self.assertEqual(
-            [method for method, _ in client.calls if method in {"createTask", "saveTaskMetadata"}],  # type: ignore[attr-defined]
-            [],
-        )
+        self.assertEqual(self.persisted_record_count(client), 0)
 
     def test_an_export_missing_an_observer_is_refused(self) -> None:
         """A row without the field is refused, and the refusal names both ways it happens.
@@ -266,7 +282,7 @@ class SprintRestoreTests(unittest.TestCase):
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0].pop("observer")
         (self.target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
 
         with self.assertRaises(RestoreError) as caught:
             import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
@@ -283,7 +299,7 @@ class SprintRestoreTests(unittest.TestCase):
         payload["sprints"][0]["status"] = "open"
         payload["sprints"][0]["observer"] = {"kind": "head", "profile": "retired-observer"}
         (self.target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
 
         with self.assertRaisesRegex(RestoreError, "not a profile of this installation"):
             import_normalized_board(  # type: ignore[arg-type]
@@ -306,7 +322,7 @@ class SprintRestoreTests(unittest.TestCase):
         second_data = self.root / "second-recovery"
         shutil.copytree(self.target_data, second_data)
 
-        second = _EmptyBoardsKanboard()
+        second = self.make_target_client()
         import_normalized_board(second_data, client=second)  # type: ignore[arg-type]
 
         live = SprintReader(second, data_dir=second_data).show(self.ref)  # type: ignore[arg-type]
@@ -349,7 +365,7 @@ class SprintRestoreTests(unittest.TestCase):
         refuse to create them.
         """
         self._two_open_rows()
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
 
         with self.assertRaisesRegex(RestoreError, "not admissible"):
             import_normalized_board(
@@ -358,11 +374,7 @@ class SprintRestoreTests(unittest.TestCase):
                 instance=self.instance,  # type: ignore[arg-type]
             )
 
-        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
-        self.assertEqual(
-            [method for method, _ in client.calls if method in {"createTask", "saveTaskMetadata"}],  # type: ignore[attr-defined]
-            [],
-        )
+        self.assertEqual(self.persisted_record_count(client), 0)
 
     def test_restore_at_the_pilot_limit_judges_the_open_set_by_the_same_rules(self) -> None:
         """Two open rows come back only when they satisfy every rule `create` enforces."""
@@ -398,7 +410,7 @@ class SprintRestoreTests(unittest.TestCase):
                 self.setUp()
                 self._set_open_sprint_limit(2)
                 self._two_open_rows(**overrides)
-                client = _EmptyBoardsKanboard()
+                client = self.make_target_client()
 
                 with self.assertRaisesRegex(RestoreError, message):
                     import_normalized_board(
@@ -441,7 +453,7 @@ class SprintRestoreTests(unittest.TestCase):
             repositories=["../elsewhere"],
             observer=none_choice(),
         )
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
 
         with self.assertRaisesRegex(
             RestoreError,
@@ -468,7 +480,7 @@ class SprintRestoreTests(unittest.TestCase):
         payload["sprints"][0]["status"] = "open"
         payload["sprints"][0]["repositories"] = ["."]
         path.write_text(json.dumps(payload), encoding="utf-8")
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
 
         with self.assertRaisesRegex(
             RestoreError,
@@ -511,7 +523,7 @@ class SprintRestoreTests(unittest.TestCase):
         """
         self._set_open_sprint_limit(2)
         self._legacy_open_row_beside_the_seeded_one()
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
 
         with self.assertRaisesRegex(RestoreError, "sprint:z-legacy: this sprint declares no product"):
             import_normalized_board(
@@ -665,7 +677,7 @@ class SprintRestoreTests(unittest.TestCase):
         (self.target_data / "board" / "sprints.json").write_text(
             json.dumps({"version": 1, "sprints": [legacy]}), encoding="utf-8"
         )
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
         original = client.call
 
         def gains_empty_ownership(method: str, **params: object) -> object:
@@ -732,7 +744,7 @@ class SprintRestoreTests(unittest.TestCase):
         second_data = self.root / "second-data"
         shutil.copytree(self.target_data, second_data)
 
-        second = _EmptyBoardsKanboard()
+        second = self.make_target_client()
         self.assertEqual(import_normalized_board(second_data, client=second), 1)  # type: ignore[arg-type]
 
         self.assertNotEqual(
@@ -759,7 +771,7 @@ class SprintRestoreTests(unittest.TestCase):
         )
 
     def test_parity_failure_leaves_recovery_incomplete_with_a_named_error(self) -> None:
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
         original = client.call
 
         def lossy(method: str, **params: object) -> object:
@@ -793,7 +805,7 @@ class SprintRestoreTests(unittest.TestCase):
             mock.patch("secretary.restore._import_sprints", side_effect=RestoreError("stopped")),
             self.assertRaisesRegex(RestoreError, "stopped"),
         ):
-            import_normalized_board(self.target_data, client=_EmptyBoardsKanboard())  # type: ignore[arg-type]
+            import_normalized_board(self.target_data, client=self.make_target_client())  # type: ignore[arg-type]
 
         self.assertEqual(restore_state(self.target_data)["sprints"], "pending")
         self.assertIn("sprint restore is incomplete", restore_findings(self.target_data))
@@ -802,7 +814,7 @@ class SprintRestoreTests(unittest.TestCase):
         (self.target_data / "board" / "cards.json").write_text(
             json.dumps({"version": 1, "cards": []}), encoding="utf-8"
         )
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
         SprintWriter(client, data_dir=self.target_data).restore_create(  # type: ignore[arg-type]
             goal="someone else's sprint",
             reference="sprint:foreign",
@@ -817,24 +829,19 @@ class SprintRestoreTests(unittest.TestCase):
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["sprints"][0]["status"] = "archived"
         path.write_text(json.dumps(payload), encoding="utf-8")
-        client = _EmptyBoardsKanboard()
+        client = self.make_target_client()
 
         with self.assertRaisesRegex(RestoreError, "invalid status"):
             import_normalized_board(self.target_data, client=client)  # type: ignore[arg-type]
 
-        self.assertEqual(client.tasks, [])
+        self.assertEqual(self.persisted_record_count(client), 0)
 
     def test_export_without_a_sprint_board_leaves_the_target_untouched(self) -> None:
         (self.target_data / "board" / "sprints.json").unlink()
         client, cards = self._restore()
 
         self.assertEqual(cards, 1)
-        self.assertFalse(
-            any(
-                method == "createProject" and params.get("name") == "Secretary sprints"
-                for method, params in client.calls  # type: ignore[attr-defined]
-            )
-        )
+        self.assertEqual(SprintReader(client).list(create=False), [])  # type: ignore[arg-type]
         self.assertEqual(restore_state(self.target_data)["sprint_count"], 0)
 
 
