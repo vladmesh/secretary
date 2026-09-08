@@ -29,8 +29,10 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
+from secretary import dispatcher as dispatcher_module
 from secretary import (
     dispatcher_launcher,
     dispatcher_observer,
@@ -38,7 +40,6 @@ from secretary import (
     dispatcher_review,
     upgrade,
 )
-from secretary import dispatcher as dispatcher_module
 from secretary import role_env as head_role_env
 from secretary import (
     tasks as tasks_module,
@@ -841,9 +842,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             workspace_python = self.root / ".secretary-task-env" / "venv" / "bin" / "python3"
             workspace_python.parent.mkdir(parents=True)
             workspace_python.symlink_to(sys.executable)
-            command = wrap_role_command(
-                "worker", "printenv TA_SECRETARY_REPO", workspace=str(self.root)
-            )
+            command = wrap_role_command("worker", "printenv TA_SECRETARY_REPO", workspace=str(self.root))
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
@@ -875,9 +874,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             workspace_python = self.root / ".secretary-task-env" / "venv" / "bin" / "python3"
             workspace_python.parent.mkdir(parents=True)
             workspace_python.symlink_to(sys.executable)
-            command = wrap_role_command(
-                "worker", "printenv SECRETARY_INSTANCE", workspace=str(self.root)
-            )
+            command = wrap_role_command("worker", "printenv SECRETARY_INSTANCE", workspace=str(self.root))
 
         # The role wrapper starts in a worktree.  A package there must not shadow the selected
         # control plane merely because Python's default path would put the cwd first.
@@ -964,7 +961,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 class CodexIsInteractiveOnlyTests(unittest.TestCase):
     """Every Codex head the product can launch is one interactive session (secretary-1173)."""
 
-    RESOURCES = {"openai-sub": {"account": "openai-subscription", "probe": "true"}}
+    RESOURCES: ClassVar = {"openai-sub": {"account": "openai-subscription", "probe": "true"}}
 
     def test_the_portable_registry_states_the_mode_on_every_codex_profile(self) -> None:
         """Stated, not defaulted: the generated installation snapshot is a copy of these tables,
@@ -1257,7 +1254,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
     tick reads it back from, and the published `heads.yaml` a live installation actually runs off.
     """
 
-    RESOURCES = {"acct": {"account": "acct", "probe": "true"}}
+    RESOURCES: ClassVar = {"acct": {"account": "acct", "probe": "true"}}
 
     def _profiles(self, **profile: object) -> dict:
         return {"head": {"resource": "acct", **profile}}

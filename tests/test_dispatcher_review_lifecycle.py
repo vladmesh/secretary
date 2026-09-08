@@ -409,8 +409,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         return {
             str(path.relative_to(self.workspace)): path.read_bytes()
             for path in sorted(self.workspace.rglob("*"))
-            if path.is_file()
-            and not path.relative_to(self.workspace).is_relative_to(".secretary-task-env")
+            if path.is_file() and not path.relative_to(self.workspace).is_relative_to(".secretary-task-env")
         }
 
     def test_the_pane_receives_a_bounded_pointer_and_never_the_review(self) -> None:

@@ -787,9 +787,7 @@ class CommandHostRuntime:
         self.mode = mode
         # Fixed once for this dispatcher process. Every lifecycle fence asks this same value rather
         # than independently guessing an interpreter, checkout or workspace namespace.
-        self.production_runtime = production_runtime or ProductionRuntime.current(
-            configured_product_root()
-        )
+        self.production_runtime = production_runtime or ProductionRuntime.current(configured_product_root())
         # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
         # save. Its durable-state owner installs this only while it holds the record's file: this
         # host has a record, not that file. Unset, a run reaches disk with the tick's records.
@@ -2915,9 +2913,7 @@ class CommandHostRuntime:
             observed = json.loads(owner.read_text(encoding="utf-8"))
             inside = namespace.resolve(strict=True).is_relative_to(root)
         except (OSError, RuntimeError, UnicodeError, ValueError):
-            raise HostError(
-                f"workspace Python environment ownership is unavailable at {namespace}"
-            ) from None
+            raise HostError(f"workspace Python environment ownership is unavailable at {namespace}") from None
         if observed != expected or not inside:
             raise HostError(f"workspace Python environment ownership is invalid at {namespace}")
         return "dispatcher"

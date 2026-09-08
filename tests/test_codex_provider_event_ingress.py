@@ -1290,9 +1290,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
-        workspace_python = (
-            self.workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
-        )
+        workspace_python = self.workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
         workspace_python.parent.mkdir(parents=True)
         workspace_python.symlink_to(sys.executable)
         (self.workspace / ".secretary-task-env" / "owner.json").write_text(
@@ -1307,9 +1305,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (self.workspace / ".secretary-task-env" / "ready").write_text(
-            "ready\n", encoding="utf-8"
-        )
+        (self.workspace / ".secretary-task-env" / "ready").write_text("ready\n", encoding="utf-8")
         self.repo = self.root / "repo"
         (self.repo / ".git").mkdir(parents=True)
         self.binary = self.root / "codex"

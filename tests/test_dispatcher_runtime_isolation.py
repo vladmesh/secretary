@@ -162,9 +162,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
 
             dispatcher_python = workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched\n")
-            self.assertFalse(
-                any(adapter_environment.rglob("_secretary_production_dependencies.pth"))
-            )
+            self.assertFalse(any(adapter_environment.rglob("_secretary_production_dependencies.pth")))
             imported = subprocess.run(
                 [str(dispatcher_python), "-I", "-c", "import secretary"],
                 cwd=tmp,
@@ -251,12 +249,8 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             ):
                 host._prepare_workspace_environment(str(workspace), project="secretary")
 
-            candidate_python = str(
-                workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
-            )
-            self.assertIn(
-                [candidate_python, "-m", "pip", "install", "-e", ".[dev]"], commands
-            )
+            candidate_python = str(workspace / ".secretary-task-env" / "venv" / "bin" / "python3")
+            self.assertIn([candidate_python, "-m", "pip", "install", "-e", ".[dev]"], commands)
 
     def test_rework_prepares_a_missing_pre_upgrade_environment_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

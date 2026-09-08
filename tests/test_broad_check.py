@@ -310,9 +310,11 @@ class ReceiptIntegrityTests(BroadCheckTestCase):
                 raise OSError("disk full")
             return real_replace(source, target, *args, **kwargs)
 
-        with mock.patch("secretary._fsutil.os.replace", side_effect=refuse):
-            with self.assertRaises(BroadCheckError) as caught:
-                self._run("echo first; exit 0")
+        with (
+            mock.patch("secretary._fsutil.os.replace", side_effect=refuse),
+            self.assertRaises(BroadCheckError) as caught,
+        ):
+            self._run("echo first; exit 0")
         self.assertEqual(caught.exception.code, "receipt_unwritable")
 
         # The reader still sees the whole previous receipt, never a partial new one, and no
@@ -335,6 +337,7 @@ class ReceiptIntegrityTests(BroadCheckTestCase):
             ["git", "-C", str(repo_root), "check-ignore", "-q", str(target)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            check=False,
         )
 
         self.assertEqual(result.returncode, 0, f"{target} must stay git-ignored")
@@ -436,6 +439,7 @@ class ResultInvariantTests(BroadCheckTestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            check=False,
         )
 
         self.assertEqual(completed.returncode, 2)
@@ -455,6 +459,7 @@ class ResultInvariantTests(BroadCheckTestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            check=False,
         )
 
         self.assertEqual(completed.returncode, 2)
@@ -1178,8 +1183,7 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
             ],
             cwd=source_root,
             env={**os.environ, "PYTHONPATH": str(source_root / "src")},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             check=False,
         )

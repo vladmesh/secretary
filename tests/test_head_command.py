@@ -234,8 +234,7 @@ class RoleEnvWrapperTests(unittest.TestCase):
                 "python3 -P -m secretary.role_env exec --role worker --workspace /worktree -- "
                 "/bin/sh -lc "
                 + shlex.quote(
-                    "PATH=/worktree/.secretary-task-env/venv/bin${PATH:+:$PATH}; export PATH; "
-                    + CLAUDE_BASE
+                    "PATH=/worktree/.secretary-task-env/venv/bin${PATH:+:$PATH}; export PATH; " + CLAUDE_BASE
                 ),
             )
 

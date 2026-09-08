@@ -49,7 +49,7 @@ def _fixture(root: Path, marker: str) -> None:
 
 def _venv(root: Path) -> Path:
     subprocess.run(
-        [os.sys.executable, "-m", "venv", "--system-site-packages", str(root)],
+        [os.sys.executable, "-m", "venv", str(root)],
         check=True,
         capture_output=True,
         text=True,
