@@ -585,6 +585,9 @@ class RecordingReviewHost(CommandHostRuntime):
 
     def _run(self, args: list[str], label: str, *, cwd: Path | None = None):
         self.calls.append(args)
+        if label == "workspace Git exclude":
+            exclude = self.data_dir / "fixture-git" / "info" / "exclude"
+            return subprocess.CompletedProcess(args, 0, stdout=f"{exclude}\n", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="deadbeefcafe0000\n", stderr="")
 
     def ops(self) -> list[str]:
