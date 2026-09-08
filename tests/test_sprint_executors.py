@@ -33,7 +33,7 @@ from secretary.sprints import SprintReader, SprintWriter
 from secretary.tasks import TaskAudit, TaskError, TaskWriter
 from tests.fakes.sprints import (
     KEEP_THE_ISSUE_OPEN,
-    ProductSprintKanboard,
+    SprintBackendFixture,
     SprintFixture,
     _write_project_registry,
 )
@@ -70,7 +70,7 @@ class SprintExecutorPinTests(SprintFixture):
 
     def _assert_nothing_was_written(self) -> None:
         self.assertEqual(self._events(), [])
-        self.assertEqual(self._sprint_rows(), [])
+        self.assertEqual(self.sprint_record_count(), 0)
 
     def test_a_sprint_that_pins_neither_role_says_so_and_writes_no_field(self) -> None:
         created = self._create(goal="unpinned", reference="sprint:unpinned")
@@ -341,13 +341,30 @@ class SprintCardExecutorTests(SprintFixture):
         )
 
 
-class SprintExecutorRecoveryTests(unittest.TestCase):
+class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
     """The pins through the entity's own recovery path: export, parity, restore.
 
     A durable field that a checkpoint drops is not durable. The window this closes is the one
     between the export and the restore, where a pin the owner set came back as "the observer
     chooses" — the substitution the whole contract is written against.
     """
+
+    def make_empty_sprint_client(self) -> _EmptyBoardsKanboard:
+        return _EmptyBoardsKanboard()
+
+    def persisted_record_count(self, client: object) -> int:
+        total = 0
+        for name in ("Pipeline", "Secretary sprints"):
+            project = client.call("getProjectByName", name=name)  # type: ignore[attr-defined]
+            if not isinstance(project, dict) or not project.get("id"):
+                continue
+            for status_id in (1, 0):
+                total += len(
+                    client.call(  # type: ignore[attr-defined]
+                        "getAllTasks", project_id=int(project["id"]), status_id=status_id
+                    )
+                )
+        return total
 
     def _round_trip(self, **pins: str) -> tuple[dict, dict, Path, Path]:
         """Seed one closed sprint with these pins, export it, restore it into an empty backend."""
@@ -357,7 +374,7 @@ class SprintExecutorRecoveryTests(unittest.TestCase):
         source_data, target_data = root / "source-data", root / "target-data"
         init_layout(source_data)
         init_layout(target_data)
-        source = ProductSprintKanboard()
+        source = self.make_sprint_client()
         instance = _write_project_registry(root, "secretary")
         writer = SprintWriter(source, data_dir=source_data, instance=instance)  # type: ignore[arg-type]
         reference = writer.create(
@@ -399,7 +416,7 @@ class SprintExecutorRecoveryTests(unittest.TestCase):
         for name in ("cards.json", "sprints.json"):
             shutil.copy(source_data / "board" / name, target_data / "board" / name)
         exported = json.loads((target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
-        client = _EmptyBoardsKanboard()
+        client = self.make_empty_sprint_client()
         import_normalized_board(target_data, client=client, instance=instance)  # type: ignore[arg-type]
         restored = SprintReader(client, data_dir=target_data).show(reference)  # type: ignore[arg-type]
         return exported["sprints"][0], restored, target_data, instance
@@ -445,12 +462,12 @@ class SprintExecutorRecoveryTests(unittest.TestCase):
         record, _, target_data, instance = self._round_trip(worker="codex-observer")
         payload = {"version": 1, "sprints": [{**record, "worker": ""}]}
         (target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
-        client = _EmptyBoardsKanboard()
+        client = self.make_empty_sprint_client()
 
         with self.assertRaisesRegex(RestoreError, "worker pin is not a head profile name"):
             import_normalized_board(target_data, client=client, instance=instance)  # type: ignore[arg-type]
         # Nothing of either set was written: the refusal is the preflight, not the sprint step.
-        self.assertEqual(client.tasks, [])
+        self.assertEqual(self.persisted_record_count(client), 0)
 
 
 class CardEditExecutorTests(SprintFixture):

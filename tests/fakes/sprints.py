@@ -1,22 +1,29 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, ClassVar
 
+from secretary.product_issues import ProductIssueStore
 from secretary.sprint_observer import (
     head_choice,
 )
 from secretary.sprints import (
+    SPRINT_BOARD_NAME,
+    SprintReader,
     SprintWriter,
     ensure_sprint_board,
 )
-from secretary.tasks import TaskAudit
+from secretary.tasks import TaskAudit, TaskReader
 from tests.fakes.board import BatchedCalls
 from tests.head_registry import write_installed_pair
 from tests.observer_identity import bind_observer
 from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON
+from tests.sprint_contract import KANBOARD_ONLY as SPRINT_KANBOARD_ONLY
 
 # A close states a verdict on every issue its sprint declared, and every sprint this fixture
 # opens declares `issue:open`. The tests below are about the rest of the close, so they give
@@ -50,6 +57,7 @@ class SprintKanboard(BatchedCalls):
                 {"id": 6, "title": "Done"},
             ]
         }
+        self.swimlanes: dict[int, list[dict[str, object]]] = {7: []}
         self.tasks = [
             {
                 "id": 12,
@@ -76,11 +84,22 @@ class SprintKanboard(BatchedCalls):
             project_id = max(self.projects.values()) + 1
             self.projects[str(params["name"])] = project_id
             self.columns[project_id] = [{"id": project_id * 10, "title": "Backlog"}]
+            self.swimlanes[project_id] = []
             return project_id
         if method == "getColumns":
             return self.columns[int(params["project_id"])]
         if method == "getActiveSwimlanes":
-            return []
+            return list(self.swimlanes[int(params["project_id"])])
+        if method == "addSwimlane":
+            project_id = int(params["project_id"])
+            lane_id = max(
+                (int(lane["id"]) for lanes in self.swimlanes.values() for lane in lanes),
+                default=0,
+            ) + 1
+            self.swimlanes[project_id].append(
+                {"id": lane_id, "name": str(params["name"]), "position": len(self.swimlanes[project_id]) + 1}
+            )
+            return lane_id
         if method == "getAllTasks":
             status = params.get("status_id")
             if status not in {0, 1}:
@@ -265,8 +284,7 @@ def _write_project_registry(root: Path, *projects: str) -> Path:
         repo = root / "project-repos" / project
         repo.mkdir(parents=True, exist_ok=True)
         (instance / "projects" / f"{project}.yaml").write_text(
-            f"id: {project}\nrepo: {repo}\nenabled: true\nadapter: secretary\n"
-            "default_branch: main\n",
+            f"id: {project}\nrepo: {repo}\nenabled: true\nadapter: secretary\ndefault_branch: main\n",
             encoding="utf-8",
         )
     # A config that validates, because the reads of this installation are reached through
@@ -293,11 +311,36 @@ def _write_head_registry(instance: Path) -> Path:
     return write_installed_pair(instance, HEAD_SNAPSHOT)
 
 
-class SprintFixture(unittest.TestCase):
-    """One Product/Issue Pipeline, one sprint board and a real project registry."""
+class SprintBackendFixture:
+    """One factory and exclusion policy shared by every portable sprint suite."""
+
+    BACKEND = "kanboard"
+    KANBOARD_ONLY: ClassVar[dict[str, str]] = SPRINT_KANBOARD_ONLY
+
+    def make_sprint_client(self) -> ProductSprintKanboard:
+        return ProductSprintKanboard()
+
+    def skip_kanboard_only(self) -> None:
+        method = getattr(type(self), self._testMethodName)  # type: ignore[attr-defined]
+        qualified = f"{method.__module__}.{method.__qualname__}"
+        reason = self.KANBOARD_ONLY.get(qualified)
+        if reason and self.BACKEND != "kanboard":
+            self.skipTest(f"Kanboard-only: {reason}")  # type: ignore[attr-defined]
+
+
+class SprintFixture(SprintBackendFixture, unittest.TestCase):
+    """Backend-neutral fixture boundary for the shared sprint contract.
+
+    The Kanboard fake is an implementation detail of ``make_sprint_client``.  A future SQL
+    contract class overrides that factory and, where necessary, the small arrangement and
+    observation methods below.  Shared test bodies speak only through SprintReader,
+    SprintWriter, TaskReader/TaskWriter, or these helpers.  They never need the fake's row,
+    metadata, comment, RPC-log, or transaction-file representation.
+    """
 
     def setUp(self) -> None:
-        self.client = ProductSprintKanboard()
+        self.skip_kanboard_only()
+        self.client = self.make_sprint_client()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.instance = _write_project_registry(
@@ -311,6 +354,177 @@ class SprintFixture(unittest.TestCase):
             data_dir=self.tmp.name,
             instance=self.instance,
         )
+
+    def sprint_reader(self) -> SprintReader:
+        return SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+
+    def sprint(self, reference: str, *, include_cards: bool = False) -> dict[str, Any]:
+        return self.sprint_reader().show(reference, include_cards=include_cards)
+
+    def sprints(self) -> list[dict[str, Any]]:
+        return self.sprint_reader().list()
+
+    def ensure_backend_ready(self) -> None:
+        """Prepare the sprint store before concurrent writers enter the backend."""
+        self.sprint_reader().list()
+
+    def sprint_record_count(self, reference: str | None = None) -> int:
+        """Count persisted sprint records through the client boundary, active and archived."""
+        project = self.client.call("getProjectByName", name=SPRINT_BOARD_NAME)
+        if not isinstance(project, dict) or not project.get("id"):
+            return 0
+        rows = [
+            row
+            for status_id in (1, 0)
+            for row in self.client.call("getAllTasks", project_id=int(project["id"]), status_id=status_id)
+        ]
+        if reference is None:
+            return len(rows)
+        return sum(row.get("reference") == reference for row in rows)
+
+    def transaction_state(self) -> dict[str, int | bool]:
+        """Observe recovery ownership without knowing the Kanboard journal's filenames."""
+        return self.writer.transactions.status()
+
+    def arrange_metadata(self, reference: str, **values: object) -> None:
+        """Arrange legacy/corrupt persisted values at the public client boundary."""
+        project = self.client.call("getProjectByName", name=SPRINT_BOARD_NAME)
+        if not isinstance(project, dict) or not project.get("id"):
+            self.fail(f"sprint board is not visible while arranging {reference}")
+        row = self.client.call("getTaskByReference", project_id=int(project["id"]), reference=reference)
+        if not isinstance(row, dict):
+            self.fail(f"sprint record is not visible while arranging {reference}")
+        result = self.client.call("saveTaskMetadata", task_id=int(row["id"]), values=values)
+        if result is not True:
+            self.fail(f"backend refused fixture metadata for {reference}")
+
+    def arrange_historical_sprint(self, reference: str, *, status: str = "closed") -> dict[str, Any]:
+        return self.writer.restore_create(
+            reference=reference,
+            goal="historical",
+            status=status,
+            request_id=f"fixture-{reference}",
+            observer=head_choice("codex-observer"),
+        )["sprint"]
+
+    def arrange_issue_closed(self, reference: str = "issue:open") -> None:
+        self.product_issue_store().close_issue(
+            reference=reference,
+            reason="resolved",
+            actor="fixture",
+            request_id=f"fixture-close-{reference}",
+        )
+
+    def product_issue_store(self) -> ProductIssueStore:
+        """The public ownership contract used to arrange Product and Issue records."""
+        return ProductIssueStore(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance
+        )
+
+    def arrange_product(self, product_id: str, *, projects: list[str]) -> dict[str, Any]:
+        """Arrange ownership through the public Product/Issue mutation contract."""
+        return self.product_issue_store().create_product(
+            product_id=product_id,
+            projects=projects,
+            title=product_id.title(),
+            description="",
+            actor="fixture",
+            request_id=f"fixture-product-{product_id}",
+        )
+
+    def arrange_issue(self, name: str, *, product: str) -> dict[str, Any]:
+        """Arrange an Issue and return its backend-independent normalized identity."""
+        return self.product_issue_store().create_issue(
+            product=product,
+            issue_kind="feature",
+            priority="P1",
+            title=name,
+            description="",
+            actor="fixture",
+            request_id=f"fixture-issue-{product}-{name}",
+        )
+
+    def arrange_record_active(self, reference: str, *, active: bool) -> None:
+        project = self.client.call("getProjectByName", name="Pipeline")
+        if not isinstance(project, dict) or not project.get("id"):
+            self.fail("Pipeline is not visible")
+        row = self.client.call("getTaskByReference", project_id=int(project["id"]), reference=reference)
+        if not isinstance(row, dict):
+            self.fail(f"record is not visible while arranging {reference}")
+        if not active:
+            result = self.client.call("closeTask", task_id=int(row["id"]))
+            if result is not True:
+                self.fail(f"backend refused fixture archive for {reference}")
+
+    def arrange_pipeline_metadata(self, reference: str, **values: object) -> None:
+        project = self.client.call("getProjectByName", name="Pipeline")
+        if not isinstance(project, dict) or not project.get("id"):
+            self.fail("Pipeline is not visible")
+        row = self.client.call("getTaskByReference", project_id=int(project["id"]), reference=reference)
+        if not isinstance(row, dict):
+            self.fail(f"record is not visible while arranging {reference}")
+        result = self.client.call("saveTaskMetadata", task_id=int(row["id"]), values=values)
+        if result is not True:
+            self.fail(f"backend refused fixture metadata for {reference}")
+
+    def task(self, reference: str) -> dict[str, Any]:
+        return TaskReader(self.client).show(reference)  # type: ignore[arg-type]
+
+    def record_is_active(self, reference: str) -> bool:
+        project = self.client.call("getProjectByName", name="Pipeline")
+        if not isinstance(project, dict) or not project.get("id"):
+            self.fail("Pipeline is not visible")
+        for status_id, active in ((1, True), (0, False)):
+            rows = self.client.call("getAllTasks", project_id=int(project["id"]), status_id=status_id)
+            if any(row.get("reference") == reference for row in rows):
+                return active
+        self.fail(f"record is not visible: {reference}")
+
+    def record_comments(self, reference: str) -> list[str]:
+        project = self.client.call("getProjectByName", name="Pipeline")
+        if not isinstance(project, dict) or not project.get("id"):
+            self.fail("Pipeline is not visible")
+        row = self.client.call("getTaskByReference", project_id=int(project["id"]), reference=reference)
+        if not isinstance(row, dict):
+            self.fail(f"record is not visible: {reference}")
+        comments = self.client.call("getAllComments", task_id=int(row["id"]))
+        return [str(comment["comment"]) for comment in comments]
+
+    @contextlib.contextmanager
+    def named_failure(
+        self,
+        boundary: str,
+        *,
+        result: object = False,
+        error: Exception | None = None,
+    ) -> Iterator[None]:
+        """Fail one semantic SprintWriter boundary without naming an RPC in a test body."""
+        methods = {
+            "record_create": "createTask",
+            "record_metadata": "saveTaskMetadata",
+            "record_reference": "updateTask",
+            "record_remove": "removeTask",
+            "record_comment": "createComment",
+            "record_archive": "closeTask",
+        }
+        method = methods[boundary]
+        original = self.client.call
+        armed = True
+
+        def call(method_name: str, **params: object) -> object:
+            nonlocal armed
+            if armed and method_name == method:
+                armed = False
+                if error is not None:
+                    raise error
+                return result
+            return original(method_name, **params)
+
+        self.client.call = call  # type: ignore[method-assign]
+        try:
+            yield
+        finally:
+            self.client.call = original  # type: ignore[method-assign]
 
     def _create(self, **kwargs) -> dict:
         """Open a sprint that owns the fixture's product, open issue and project."""
@@ -333,8 +547,13 @@ class SprintFixture(unittest.TestCase):
         return TaskAudit(self.tmp.name).events()
 
     def _sprint_rows(self) -> list[dict]:
+        """Kanboard-only raw-row observation retained for named recovery cases."""
         board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
-        return [task for task in self.client.tasks if task["project_id"] == board]
+        return [
+            row
+            for status_id in (1, 0)
+            for row in self.client.call("getAllTasks", project_id=board, status_id=status_id)
+        ]
 
     def _transactions(self) -> list[str]:
         directory = Path(self.tmp.name) / "board" / "product-issue-transactions"
