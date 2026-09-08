@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 from secretary.dispatcher import CommandHostRuntime, HostError
@@ -27,15 +28,15 @@ from secretary.dispatcher_tui import (
     SENDABILITY_UNESTABLISHED,
     TuiDeliveryError,
     bind_claude_provider_progress_source,
-    claude_project_dir_name,
     classify_pre_delivery,
+    claude_project_dir_name,
     deliver_interactive_prompt,
-    dialog_is_live,
     delivery_readiness_state,
     delivery_receipt_state,
+    dialog_is_live,
     latest_claude_user_turn_for,
-    live_screen,
     latest_user_turn_for,
+    live_screen,
     prepare_claude_provider_progress_source,
     provider_progress_for_run,
     provider_turn_started,
@@ -87,12 +88,9 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 # The selected path is fenced by its device/inode. A later same-workspace file
                 # cannot become this run's conversation while Claude finishes its own header.
                 foreign = transcript.with_name("foreign.jsonl")
-                foreign.write_text(
-                    '{"type":"assistant","sessionId":"foreign-session"}\n', encoding="utf-8"
-                )
+                foreign.write_text('{"type":"assistant","sessionId":"foreign-session"}\n', encoding="utf-8")
                 transcript.write_text(
-                    '{"type":"assistant"}\n'
-                    '{"type":"assistant","sessionId":"late-own-session"}\n',
+                    '{"type":"assistant"}\n{"type":"assistant","sessionId":"late-own-session"}\n',
                     encoding="utf-8",
                 )
                 run = bind_claude_provider_progress_source(run)
@@ -967,7 +965,7 @@ class ClaudeScreenHintTests(unittest.TestCase):
     2026-08-11, alternate-screen overlay and all.
     """
 
-    LIVE_STATUS_LINES = [
+    LIVE_STATUS_LINES: ClassVar = [
         "· Tempering…e /btw to ask a 9u ck side question without interrupting Claude's current work",
         "✽ Tempering…e /btw to ask a 5u ck side question without)interrupting Claude's current work",
         "● Tempering…e /btw5to ask a 6u ck side question without)interrupting Claude's current work",
@@ -1050,6 +1048,10 @@ class RecordingTuiHost(CommandHostRuntime):
         # calls ready, which is how a prompt that was not taken looks.
         self.waits = list(waits or [])
         self.fail_ops = fail_ops or set()
+
+    def _require_workspace_environment(self, workspace: str) -> None:
+        """TUI transport fixtures exercise delivery and run no candidate command."""
+        return None
 
     def _next(self, answers: list[dict], default: dict) -> dict:
         if not answers:
@@ -1162,9 +1164,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
             mock.patch("triggered_agents.runtime.tui_delivery.time.sleep", side_effect=advance_clock),
             mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0),
         ):
-            return deliver_interactive_prompt(
-                "term-observer", prompt, run_json=pane.run_json, **kwargs
-            )
+            return deliver_interactive_prompt("term-observer", prompt, run_json=pane.run_json, **kwargs)
 
     def test_a_confirmed_delivery_does_not_keep_the_previous_probes_refusal(self) -> None:
         """The receipt is derived from the last look taken, not from the one before it.
@@ -1513,7 +1513,9 @@ class TuiDeliveryStageTests(unittest.TestCase):
                 return {"send": {"accepted": "--enter" not in args, "bytesWritten": 7}}
             raise AssertionError(args)
 
-        with mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
+        with mock.patch(  # noqa: SIM117
+            "triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0
+        ):
             with self.assertRaises(TuiDeliveryError) as raised:
                 deliver_interactive_prompt(
                     "term-codex",
@@ -1963,7 +1965,9 @@ class PreDeliveryDeliveryTests(TuiDeliveryStageTests):
         """Answering forever is the failure mode this bound exists to prevent."""
         pane = ScriptedPane({0: UPDATE_MODAL_SCREEN})
 
-        with mock.patch("triggered_agents.runtime.tui_delivery.TUI_PRE_DELIVERY_POLL_S", 0):
+        with mock.patch(  # noqa: SIM117
+            "triggered_agents.runtime.tui_delivery.TUI_PRE_DELIVERY_POLL_S", 0
+        ):
             with self.assertRaises(TuiDeliveryError) as raised:
                 self.deliver(pane, ack_out_of_band=True)
 
@@ -1986,4 +1990,3 @@ class PreDeliveryDeliveryTests(TuiDeliveryStageTests):
         self.assertEqual(record["delivery_receipt"], DELIVERY_RECEIPT_ACCEPTED)
         self.assertFalse(record["provider_bound"], "the caller's own criterion never fired")
         self.assertTrue(record["turn_confirmed"], "the pane's own evidence did")
-

@@ -91,7 +91,7 @@
         "interpreter": {
           "type": "string",
           "minLength": 1,
-          "description": "Optional interpreter for module broad checks. A relative path is resolved from the candidate workspace, for example .venv/bin/python. Omitted, the check runs on the interpreter that runs the wrapper: since the check subprocess prepends the candidate's own import roots to sys.path, a shared installation interpreter still imports the candidate rather than production, and a project whose worktrees have no venv of their own needs no nonexistent workspace/.venv (issue:8b39e60e4df361c6138e)."
+          "description": "Optional adapter-owned interpreter for module broad checks. A relative path is resolved from the candidate workspace, for example .venv/bin/python; that .venv remains exclusively adapter-owned. Omitted, the check runs on the interpreter that runs the wrapper, which dispatcher-launched workers receive from .secretary-task-env/venv. The subprocess also prepends the candidate import roots and records the actual interpreter and import origin."
         },
         "import_package": {
           "type": "string",

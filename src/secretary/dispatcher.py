@@ -1647,9 +1647,7 @@ class DispatcherRuntime:
             record.outcome_terminal_path = OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT
             records[ref] = record
             self.save_records(payload, records)
-            self._capture_outcome_source(
-                task, record, phase="report", kind="card.reported", marker=marker
-            )
+            self._capture_outcome_source(task, record, phase="report", kind="card.reported", marker=marker)
         continuation = record.worker_continuation
         if continuation.delivery_pending:
             if marker in {"report:done", "report:blocked"}:
@@ -2507,14 +2505,10 @@ class DispatcherRuntime:
             return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
-            self._capture_outcome_source(
-                task, record, phase="verdict", kind="card.verdict", marker=marker
-            )
+            self._capture_outcome_source(task, record, phase="verdict", kind="card.verdict", marker=marker)
             return self._park_green_verdict(task, record, records, payload, attempt_id)
         if marker == "review:red":
-            self._capture_outcome_source(
-                task, record, phase="verdict", kind="card.verdict", marker=marker
-            )
+            self._capture_outcome_source(task, record, phase="verdict", kind="card.verdict", marker=marker)
             # Only the reviewer's lifecycle ends here: a full `stop` would take the worktree's
             # terminals down, and this checkout is about to be parked and is never re-created from
             # base. An unconfirmed stop ends the tick before the card moves. The commit is read
@@ -2649,7 +2643,7 @@ class DispatcherRuntime:
                 if kind == "review"
                 else self.host.worker_status(task, record)
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider status has no narrower exception contract.
             # Orca may be down or between reconnects. That is no evidence this head died, so do not
             # restart it; it also cannot prove progress, so the ordinary wait ceiling stays.
             status = {"known": False, "live": True, "reason": "runtime-unavailable"}
@@ -4796,7 +4790,7 @@ class DispatcherRuntime:
                     "reason": "host has no provider-progress probe",
                 },
             )(task, record, "worker")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - evidence must retain any host refusal.
             evidence = {
                 "state": "unavailable",
                 "reason": f"provider-progress probe failed: {scrub_host_output(str(exc))}",
@@ -4983,7 +4977,7 @@ class DispatcherRuntime:
                         "reason": "host has no provider/terminal-safe recovery capability",
                     },
                 )(task, record, liveness.to_json())
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - evidence must retain any host refusal.
                 result = {"state": "unavailable", "reason": scrub_host_output(str(exc))}
             valid_recovery = (
                 isinstance(result, dict)
@@ -5871,7 +5865,13 @@ class DispatcherRuntime:
                 pass
         if decision == "rework":
             return self._rework_parked(
-                task, record, records, payload, attempt_id, reason=reason, protocol_prerequisites=prerequisites
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                reason=reason,
+                protocol_prerequisites=prerequisites,
             )
         if decision == "reslice":
             return self._reslice_parked(task, record, records, payload, attempt_id, reason=reason)
@@ -5898,7 +5898,8 @@ class DispatcherRuntime:
         try:
             prerequisites = validate_rework_prerequisites(
                 declared,
-                specification_revision=specification_revision(events, str(task.get("description") or "")) or None,
+                specification_revision=specification_revision(events, str(task.get("description") or ""))
+                or None,
             )
         except (ValueError, ArtifactOwnershipViolation):
             # An invalid declaration is never a worker instruction. The writer rejects it before
@@ -6199,7 +6200,23 @@ class DispatcherRuntime:
                 step=step,
                 outcome="merge failed",
             )
-        self.host.teardown(record)
+        try:
+            self.host.teardown(record)
+        except HostError as exc:
+            # Cleanup is a provenance boundary, not best effort. A mismatch keeps the checkout and
+            # prevents Done so the next tick cannot repeatedly run an already-failed release path.
+            return self._block_merge_path(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                action="cleanup-provenance-blocked",
+                reason=f"release cleanup refused: {scrub_host_output(str(exc))}",
+                step=step,
+                outcome="release cleanup refused",
+                decision=decision,
+            )
         self.terminal_effect(
             task,
             record,
@@ -6392,10 +6409,18 @@ class DispatcherRuntime:
         attempt_id = str(worker_context.get("attempt_id") or record.attempt_id or "")
         attempt = worker_context.get("attempt", record.attempt_round)
         generation = worker_context.get("report_generation", record.report_generation)
-        if not attempt_id or not isinstance(attempt, int) or attempt < 1 or not isinstance(generation, int) or generation < 1:
+        if (
+            not attempt_id
+            or not isinstance(attempt, int)
+            or attempt < 1
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
             return None
         reviewed = bool(context.get("review")) or bool(record.review_run)
-        revision = context.get("report", {}).get("specification_revision", worker_context.get("specification_revision"))
+        revision = context.get("report", {}).get(
+            "specification_revision", worker_context.get("specification_revision")
+        )
         if revision is not None and not isinstance(revision, str):
             revision = None
         # Select requiredness before source lookup. The dispatcher persists
@@ -6575,7 +6600,10 @@ class DispatcherRuntime:
         if phase != "worker" and not freeze_source_revision and source_revision is None:
             revision = worker.get("specification_revision") if worker else None
         if phase == "worker":
-            revision = specification_revision(self.audit.events(reference), str(task.get("description") or "")) or None
+            revision = (
+                specification_revision(self.audit.events(reference), str(task.get("description") or ""))
+                or None
+            )
         self.writer.outcome_round_context(
             role="dispatcher",
             actor=self.owner,
@@ -6585,8 +6613,12 @@ class DispatcherRuntime:
                 "version": 2,
                 "phase": phase,
                 "round_id": round_id,
-                "attempt_id": worker.get("attempt_id", record.attempt_id) if phase != "worker" else record.attempt_id,
-                "attempt": worker.get("attempt", record.attempt_round) if phase != "worker" else record.attempt_round,
+                "attempt_id": worker.get("attempt_id", record.attempt_id)
+                if phase != "worker"
+                else record.attempt_id,
+                "attempt": worker.get("attempt", record.attempt_round)
+                if phase != "worker"
+                else record.attempt_round,
                 "report_generation": worker.get("report_generation", record.report_generation)
                 if phase != "worker"
                 else record.report_generation,
@@ -6660,8 +6692,16 @@ class DispatcherRuntime:
         """
         payloads: list[dict[str, Any]] = []
         for event in self.audit.events(reference, kind="outcome_round_context"):
-            payload = event.get("data") if event.get("record_type") == "board.protocol_event" else event.get("payload")
-            if isinstance(payload, dict) and payload.get("version") == 2 and isinstance(payload.get("round_id"), str):
+            payload = (
+                event.get("data")
+                if event.get("record_type") == "board.protocol_event"
+                else event.get("payload")
+            )
+            if (
+                isinstance(payload, dict)
+                and payload.get("version") == 2
+                and isinstance(payload.get("round_id"), str)
+            ):
                 payloads.append(payload)
         workers = [payload for payload in payloads if payload.get("phase") == "worker"]
         exact = [
@@ -6686,7 +6726,8 @@ class DispatcherRuntime:
             unsettled = [
                 payload
                 for payload in workers
-                if (payload.get("attempt_id"), payload.get("attempt"), payload.get("report_generation")) not in sealed
+                if (payload.get("attempt_id"), payload.get("attempt"), payload.get("report_generation"))
+                not in sealed
             ]
             if len(unsettled) != 1:
                 return {}
@@ -6730,7 +6771,9 @@ class DispatcherRuntime:
             source["effect"] = effect_event_id
             required = obligation.get("lineage_required")
             if not isinstance(required, dict):
-                raise ValueError("attempt_outcome_lineage_requiredness_missing")
+                raise ValueError(  # noqa: TRY004 - corrupt persisted state, not caller type input.
+                    "attempt_outcome_lineage_requiredness_missing"
+                )
             data = {
                 **{
                     key: value

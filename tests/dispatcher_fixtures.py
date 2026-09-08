@@ -509,6 +509,10 @@ class RecordingReviewHost(CommandHostRuntime):
         # pane ready for input.
         self.wait_answer: dict = {}
 
+    def _require_workspace_environment(self, workspace: str) -> None:
+        """Transport fixtures do not execute candidate Python tooling."""
+        return None
+
     def _transport_preflight(
         self,
         head: str,
@@ -581,6 +585,9 @@ class RecordingReviewHost(CommandHostRuntime):
 
     def _run(self, args: list[str], label: str, *, cwd: Path | None = None):
         self.calls.append(args)
+        if label == "workspace Git exclude":
+            exclude = self.data_dir / "fixture-git" / "info" / "exclude"
+            return subprocess.CompletedProcess(args, 0, stdout=f"{exclude}\n", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="deadbeefcafe0000\n", stderr="")
 
     def ops(self) -> list[str]:

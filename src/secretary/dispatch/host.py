@@ -32,6 +32,7 @@ from secretary.config import validate_instance
 from secretary.dispatch.head_vitality_episode import (
     VitalityVerdict as VitalityVerdict,
 )
+from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from secretary.dispatcher_gate import (
     GateResult,
 )
@@ -98,9 +99,6 @@ from secretary.dispatcher_observer import (
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
     ObserverLaunchAborted,
-)
-from secretary.dispatcher_observer import (
-    delivery_evidence_summary as _observer_delivery_evidence_summary,
 )
 from secretary.dispatcher_observer import (
     observer_launch_prompt as _observer_launch_prompt,
@@ -266,6 +264,7 @@ from triggered_agents.runtime.pane_host import (
 from triggered_agents.runtime.pane_host import (
     safe_command_label as _safe_command_label,
 )
+from triggered_agents.runtime.paths import configured_product_root
 from triggered_agents.runtime.prompt_document import (
     PromptDocumentError,
 )
@@ -275,9 +274,9 @@ from triggered_agents.runtime.prompt_document import (
 from triggered_agents.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
+from triggered_agents.runtime.role_env import WORKSPACE_ENV_DIR
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
-_CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
 
 OBSERVER_WORKSPACE_DIR = OBSERVER_REPO_NAME
 OBSERVER_REPO_BRANCH = "observers"
@@ -771,13 +770,23 @@ def _durable_head_run(subject: Any) -> head_ops.HeadRun | None:
 
 
 class CommandHostRuntime:
-    def __init__(self, catalog: InstanceCatalog, data_dir: Path, *, mode: str = "real") -> None:
+    def __init__(
+        self,
+        catalog: InstanceCatalog,
+        data_dir: Path,
+        *,
+        mode: str = "real",
+        production_runtime: ProductionRuntime | None = None,
+    ) -> None:
         self.catalog = catalog
         self.data_dir = data_dir
         # TASK.md is a durable projection, so its feedback selector reads the same audit journal
         # as the dispatcher rather than depending on a live record or wall-clock ordering.
         self.audit = TaskAudit(data_dir)
         self.mode = mode
+        # Fixed once for this dispatcher process. Every lifecycle fence asks this same value rather
+        # than independently guessing an interpreter, checkout or workspace namespace.
+        self.production_runtime = production_runtime or ProductionRuntime.current(configured_product_root())
         # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
         # save. Its durable-state owner installs this only while it holds the record's file: this
         # host has a record, not that file. Unset, a run reaches disk with the tick's records.
@@ -971,6 +980,7 @@ class CommandHostRuntime:
         failover: bool = False,
         heartbeat_run_id: str = "",
     ) -> dict[str, Any]:
+        self._require_production_runtime("worker-prepare")
         project = task["project"]
         self._require_project_available(project)
         base = self.catalog.integration_base(project, task.get("workspace", {}).get("base_branch"))
@@ -979,6 +989,10 @@ class CommandHostRuntime:
         reused = Path(workspace).exists()
         if reused:
             self._validate_resumable_workspace(task, workspace)
+            missing_environment = not self._workspace_environment_ready(workspace)
+            self._prepare_workspace_environment(workspace, project=project)
+            if missing_environment:
+                self._run_setup(project, workspace)
         else:
             if require_existing_workspace:
                 # The card was requeued onto the checkout its own last attempt preserved, and that
@@ -987,7 +1001,9 @@ class CommandHostRuntime:
                 raise HostError("resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
             workspace = self._create_workspace(project, worker_id, seed, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
+            self._prepare_workspace_environment(workspace, project=project)
             self._run_setup(project, workspace)
+        self._require_workspace_environment(workspace)
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id, generation)
@@ -1028,6 +1044,8 @@ class CommandHostRuntime:
             # Same family as the missing resume workspace above: the checkout this card's rework
             # continues in is not there, which is this card's own bring-up contract, not the host's.
             raise HostError("rework workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
+        self._prepare_workspace_environment(str(workspace), project=str(task["project"]))
+        self._require_workspace_environment(str(workspace))
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
@@ -1710,6 +1728,8 @@ class CommandHostRuntime:
             workspace.mkdir(parents=True, exist_ok=True)
         elif not workspace.is_dir():
             raise HostError("review workspace is missing")
+        self._prepare_workspace_environment(record.workspace, project=str(task["project"]))
+        self._require_workspace_environment(record.workspace)
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
         document, nudge = self._review_document(task, record)
         launched = self._launch(
@@ -1902,7 +1922,12 @@ class CommandHostRuntime:
         return True
 
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
-        return _gate_check(self, task, record)
+        self._require_production_runtime("candidate-gate-before")
+        if record.workspace:
+            self._decide_workspace_environment_ownership(record.workspace)
+        result = _gate_check(self, task, record)
+        self._require_production_runtime("candidate-gate-after")
+        return result
 
     def rerun_failed_ci(self, task: dict[str, Any], record: DispatcherRecord, result: GateResult) -> None:
         """The gate owns the GitHub Actions write needed to retry its classified failed run."""
@@ -2026,8 +2051,10 @@ class CommandHostRuntime:
         raise HostError(f"project {project!r} repo {repo} is not registered with orca")
 
     def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        self._require_production_runtime("release-before")
         if self.mode == "noop" or not record.workspace:
             return
+        self._decide_workspace_environment_ownership(record.workspace)
         if os.environ.get("SECRETARY_DISPATCHER_AUTOMERGE", "on").strip().lower() == "off":
             return
         branch = _legacy_worker_branch(task["ref"])
@@ -2036,10 +2063,12 @@ class CommandHostRuntime:
             if self._no_diff_research_delivery_is_complete(task, record):
                 return
             self._merge_github_pr(task, record, branch, base)
+            self._require_production_runtime("release-after")
             return
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         if _same_repo(repo, Path(self.catalog.instance_dir)):
             self._complete_green_instance_repo(record, branch, base, repo)
+            self._require_production_runtime("release-after")
             return
         # Publish onto the card's integration base (a non-fast-forward push is rejected, never
         # force-landed), then fast-forward the checkout: that is how a merged self-modification
@@ -2050,6 +2079,7 @@ class CommandHostRuntime:
         self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:{base}"], "merge push")
         self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
+        self._require_production_runtime("release-after")
 
     def _no_diff_research_delivery_is_complete(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         """Whether a dispatcher-dispatched research candidate has no delivery effect left.
@@ -2627,10 +2657,13 @@ class CommandHostRuntime:
         """
         if self.mode == "noop" or not record.workspace:
             return
+        self._require_production_runtime("cleanup-before-stop")
+        self._decide_workspace_environment_ownership(record.workspace)
         try:
             self.stop_workspace(record)
         except HostError:
             return
+        self._require_production_runtime("cleanup-before-worktree-remove")
         try:
             self._run_json(
                 ["orca", "worktree", "rm", "--worktree", f"path:{record.workspace}", "--force", "--json"]
@@ -2797,10 +2830,174 @@ class CommandHostRuntime:
             return
         adapter = self.catalog.adapter(project)
         for command in adapter.get("setup", {}).get("commands", []):
-            self._run_shell(str(command), Path(workspace), "setup command")
+            self._run_adapter_shell(str(command), Path(workspace), "setup command")
         smoke = adapter.get("smoke", {}).get("command")
         if smoke:
-            self._run_shell(str(smoke), Path(workspace), "smoke command")
+            self._run_adapter_shell(str(smoke), Path(workspace), "smoke command")
+
+    @staticmethod
+    def _workspace_environment(workspace: str | Path) -> Path:
+        """The reserved dispatcher-owned environment; adapter-owned ``.venv`` is disjoint."""
+        return Path(workspace) / WORKSPACE_ENV_DIR
+
+    @classmethod
+    def _workspace_environment_owner(cls, workspace: str | Path) -> Path:
+        return cls._workspace_environment(workspace).parent / "owner.json"
+
+    @classmethod
+    def _workspace_environment_ready_file(cls, workspace: str | Path) -> Path:
+        return cls._workspace_environment(workspace).parent / "ready"
+
+    @classmethod
+    def _workspace_environment_ready(cls, workspace: str | Path) -> bool:
+        return cls._workspace_environment_ready_file(workspace).is_file()
+
+    def _claim_workspace_environment(self, workspace: str) -> Path:
+        """Determine dispatcher ownership before creating or populating its reserved environment."""
+        root = Path(workspace).resolve(strict=True)
+        self._exclude_workspace_environment(root)
+        environment = self._workspace_environment(root)
+        owner = self._workspace_environment_owner(root)
+        expected = {"owner": "secretary-dispatcher", "schema_version": 1, "workspace": str(root)}
+        if self._decide_workspace_environment_ownership(workspace) == "dispatcher":
+            return environment
+        environment.parent.mkdir(parents=True)
+        try:
+            write_text_atomic(owner, json.dumps(expected, sort_keys=True) + "\n")
+        except RuntimeError as exc:
+            raise HostError(f"workspace Python environment ownership could not be written: {exc}") from None
+        return environment
+
+    def _exclude_workspace_environment(self, root: Path) -> None:
+        """Keep the reserved runtime namespace out of this repository's candidate content."""
+        located = self._run(
+            ["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
+            "workspace Git exclude",
+            cwd=root,
+        ).stdout.strip()
+        if not located:
+            raise HostError("workspace Git exclude path is unavailable")
+        exclude = Path(located)
+        if not exclude.is_absolute():
+            exclude = root / exclude
+        try:
+            current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        except (OSError, UnicodeError) as exc:
+            raise HostError(f"workspace Git exclude could not be read: {exc}") from None
+        pattern = f"{Path(WORKSPACE_ENV_DIR).parts[0]}/"
+        if pattern in {line.strip() for line in current.splitlines()}:
+            return
+        separator = "" if not current or current.endswith("\n") else "\n"
+        try:
+            write_text_atomic(exclude, f"{current}{separator}{pattern}\n")
+        except RuntimeError as exc:
+            raise HostError(f"workspace Git exclude could not be written: {exc}") from None
+
+    def _candidate_environment_install_required(self, project: str) -> bool:
+        """Use the adapter's existing default-interpreter choice, never a project-name heuristic."""
+        if not project:
+            return False
+        broad_check = self.catalog.adapter(project).get("broad_check")
+        return isinstance(broad_check, dict) and "interpreter" not in broad_check
+
+    def _prepare_workspace_environment(self, workspace: str, *, project: str = "") -> None:
+        """Create and populate only the environment the dispatcher has explicitly claimed."""
+        if self.mode == "noop":
+            return
+        root = Path(workspace)
+        environment = self._claim_workspace_environment(workspace)
+        if self._workspace_environment_ready(workspace):
+            self._require_workspace_environment(workspace)
+            return
+        self._run(
+            [self.production_runtime.interpreter, "-m", "venv", str(environment)],
+            "workspace Python environment",
+            cwd=root,
+        )
+        if self._candidate_environment_install_required(project) and (root / "pyproject.toml").is_file():
+            self._run(
+                [str(environment / "bin" / "python3"), "-m", "pip", "install", "-e", ".[dev]"],
+                "workspace candidate dependencies",
+                cwd=root,
+            )
+        try:
+            write_text_atomic(self._workspace_environment_ready_file(workspace), "ready\n")
+        except RuntimeError as exc:
+            raise HostError(f"workspace Python environment readiness could not be written: {exc}") from None
+        self._require_workspace_environment(workspace)
+
+    @staticmethod
+    def _workspace_python(workspace: str | Path) -> Path:
+        return Path(workspace) / WORKSPACE_ENV_DIR / "bin" / "python3"
+
+    def _decide_workspace_environment_ownership(self, workspace: str) -> str:
+        """Classify the reserved namespace without requiring a pre-upgrade environment."""
+        if self.mode == "noop":
+            return "absent"
+        root = Path(workspace).resolve(strict=False)
+        environment = self._workspace_environment(root)
+        namespace = environment.parent
+        if not namespace.exists():
+            return "absent"
+        owner = self._workspace_environment_owner(root)
+        expected = {"owner": "secretary-dispatcher", "schema_version": 1, "workspace": str(root)}
+        try:
+            observed = json.loads(owner.read_text(encoding="utf-8"))
+            inside = namespace.resolve(strict=True).is_relative_to(root)
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            raise HostError(f"workspace Python environment ownership is unavailable at {namespace}") from None
+        if observed != expected or not inside:
+            raise HostError(f"workspace Python environment ownership is invalid at {namespace}")
+        return "dispatcher"
+
+    def _require_workspace_environment(self, workspace: str) -> None:
+        if self.mode == "noop":
+            return
+        environment = self._workspace_environment(workspace)
+        python = self._workspace_python(workspace)
+        try:
+            root = Path(workspace).resolve(strict=True)
+            inside = environment.resolve(strict=True).is_relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            inside = False
+        if (
+            self._decide_workspace_environment_ownership(workspace) != "dispatcher"
+            or not inside
+            or not self._workspace_environment_ready(workspace)
+            or not os.access(python, os.X_OK)
+        ):
+            raise HostError(f"workspace Python environment is unavailable at {environment}")
+
+    def _run_adapter_shell(self, command: str, cwd: Path, label: str) -> None:
+        """Run adapter setup without lending it the production or dispatcher environment."""
+        production_bin = Path(self.production_runtime.interpreter).parent.resolve(strict=False)
+        safe_path = os.pathsep.join(
+            entry
+            for entry in os.environ.get("PATH", "").split(os.pathsep)
+            if entry and Path(entry).resolve(strict=False) != production_bin
+        )
+        prefix = f"PATH={shlex.quote(safe_path)}; unset VIRTUAL_ENV; export PATH; "
+        self._run_shell(prefix + command, cwd, label)
+
+    def production_runtime_provenance(self) -> RuntimeProvenance:
+        """Structured, secret-free observation used by every production runtime fence."""
+        return self.production_runtime.probe()
+
+    def _require_production_runtime(self, boundary: str) -> RuntimeProvenance:
+        if self.mode == "noop":
+            return RuntimeProvenance(
+                "valid",
+                self.production_runtime.interpreter,
+                self.production_runtime.product_root,
+                "noop",
+                (),
+            )
+        result = self.production_runtime_provenance()
+        if not result.valid:
+            error = HostError(result.refusal(boundary))
+            error.evidence = result.as_dict()
+            raise error
+        return result
 
     def _launch(
         self,
@@ -2819,6 +3016,9 @@ class CommandHostRuntime:
         heartbeat_run_id: str = "",
     ) -> LaunchedHead:
         """Bring one head up and hand back the pane together with the configuration it started with."""
+        if role in {WORKER_ROLE, REVIEW_ROLE, "reviewer"}:
+            self._require_production_runtime(f"{role}-launch")
+            self._require_workspace_environment(workspace)
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         task_ref = self._task_ref(task, role, prompt_document)
         run_id = heartbeat_run_id or head_ops.new_run_id()
@@ -3640,11 +3840,25 @@ class CommandHostRuntime:
         contract = verdict.contract if verdict.fit else None
         if contract is None or not contract.module:
             return "", ""
-        arguments = "".join(f" --module-arg {shlex.quote(argument)}" for argument in contract.args)
+        broad_arguments = ["check", "broad", "--reuse", "--module", contract.module]
+        show_arguments = ["check", "show", "--module", contract.module]
+        for argument in contract.args:
+            broad_arguments.extend(("--module-arg", argument))
+            show_arguments.extend(("--module-arg", argument))
+        if not contract.interpreter_declared:
+            candidate = str(Path(WORKSPACE_ENV_DIR) / "bin" / "python3")
+            broad_arguments.extend(("--default-interpreter", candidate))
+            show_arguments.extend(("--default-interpreter", candidate))
         return (
-            f"python3 -m secretary check broad --reuse --module {contract.module}{arguments}",
-            f"python3 -m secretary check show --module {contract.module}{arguments}",
+            self._control_plane_command(*broad_arguments),
+            self._control_plane_command(*show_arguments),
         )
+
+    def _control_plane_command(self, *arguments: str) -> str:
+        """Render one head-visible Secretary command on the production control-plane boundary."""
+        interpreter = shlex.quote(str(self.production_runtime.interpreter))
+        suffix = "".join(f" {shlex.quote(argument)}" for argument in arguments)
+        return f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary{suffix}"
 
     def _worker_task_doc(
         self,
@@ -3668,6 +3882,41 @@ class CommandHostRuntime:
             for classification in ("external_fact", "wrong_task_definition")
         }
         body_file = _body_file_path("report", task["ref"], generation)
+        report_commands = {
+            "done": self._control_plane_command(
+                "task",
+                "report",
+                "--ref",
+                task["ref"],
+                "--role",
+                "worker",
+                "--kind",
+                "done",
+                "--request-id",
+                request,
+                "--body-file",
+                body_file,
+            ),
+            **{
+                classification: self._control_plane_command(
+                    "task",
+                    "report",
+                    "--ref",
+                    task["ref"],
+                    "--role",
+                    "worker",
+                    "--kind",
+                    "blocked",
+                    "--classification",
+                    classification,
+                    "--request-id",
+                    blocked_requests[classification],
+                    "--body-file",
+                    body_file,
+                )
+                for classification in ("external_fact", "wrong_task_definition")
+            },
+        }
         sections = [
             f"# Task {task['ref']}",
             "",
@@ -3744,20 +3993,22 @@ class CommandHostRuntime:
             broad_invocation = [f"    {broad_command}", ""]
             show_invocation = f"`{show_command}` and quote its summary"
         else:
+            fallback_broad = self._control_plane_command(
+                "check", "broad", "--reuse", "--module", "<the suite module you chose>"
+            )
+            fallback_show = self._control_plane_command("check", "show", "--module", "<the same module>")
             broad_invocation = [
                 "This project's adapter declares no broad suite, so there is no exact command to",
                 "print here. Work out which suite this card's acceptance criteria require, run that",
                 "one through the wrapper by naming it yourself:",
                 "",
-                "    python3 -m secretary check broad --reuse --module <the suite module you chose>",
+                f"    {fallback_broad}",
                 "",
                 "and say in your report which module you ran and why that is the right suite. Do not",
                 "reach for repository-wide test discovery because it is the easiest thing to type.",
                 "",
             ]
-            show_invocation = (
-                "`python3 -m secretary check show --module <the same module>` and quote its summary"
-            )
+            show_invocation = f"`{fallback_show}` and quote its summary"
         sections += [
             "## Check-cost contract",
             "",
@@ -3865,9 +4116,9 @@ class CommandHostRuntime:
             "either way this round is left waiting. Copy the command from here, never from an",
             "earlier turn of this conversation.",
             *_body_file_instructions(body_file),
-            f"{_CONTROL_PLANE_TASK_COMMAND} report --ref {task['ref']} --role worker --kind done --request-id {request} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} report --ref {task['ref']} --role worker --kind blocked --classification external_fact --request-id {blocked_requests['external_fact']} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} report --ref {task['ref']} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_requests['wrong_task_definition']} --body-file {body_file}",
+            report_commands["done"],
+            report_commands["external_fact"],
+            report_commands["wrong_task_definition"],
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -4006,6 +4257,23 @@ class CommandHostRuntime:
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
         body_file = _body_file_path("verdict", task["ref"], review_round)
+        verdict_commands = {
+            kind: self._control_plane_command(
+                "task",
+                "verdict",
+                "--ref",
+                task["ref"],
+                "--role",
+                "reviewer",
+                "--kind",
+                kind,
+                "--request-id",
+                request,
+                "--body-file",
+                body_file,
+            )
+            for kind, request in (("green", green_request), ("red", red_request))
+        }
         current_sha = self.head_commit(record) if record else ""
         attestation = _gate_attestation_for_prompt(record, current_sha)
         sections = [
@@ -4042,8 +4310,8 @@ class CommandHostRuntime:
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --request-id {green_request} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --request-id {red_request} --body-file {body_file}",
+            verdict_commands["green"],
+            verdict_commands["red"],
             "",
         ]
         if attestation:

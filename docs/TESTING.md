@@ -146,8 +146,14 @@ dispatcher-owned exact-SHA GitHub gate, which remains the complete required suit
 
 ## Changed Python lint
 
-The product checkout's `.venv` supplies the same pinned Ruff that worker and reviewer role commands
-receive on `PATH`. Never lint the repository as a whole. Against the task base, build the non-deleted
+The task checkout's dispatcher-owned `.secretary-task-env/venv` installs a candidate's `.[dev]`
+contract when its adapter declares `broad_check` but omits `broad_check.interpreter`, and therefore
+supplies its tools to worker and reviewer `PATH`. With no `broad_check`, it intentionally stays bare.
+The outer receipt wrapper and all protocol/report/verdict commands still use the absolute production
+interpreter; only a fit contract's inner broad suite uses this candidate default.
+An adapter-owned `.venv` is separate and is used only when the adapter or its broad-check contract
+names it. The production virtualenv is not a lint or test tool boundary.
+Never lint the repository as a whole. Against the task base, build the non-deleted
 changed and untracked Python path set, then pass only that set explicitly to both checks:
 
 ```bash

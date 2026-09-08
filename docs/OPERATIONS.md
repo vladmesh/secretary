@@ -1107,6 +1107,51 @@ backend altered those strings on the way through by trimming, re-encoding or cha
 overlap check would be comparing something other than what was declared. Nothing observed says it does;
 it is untested against the real thing, and that is the state of the evidence.
 
+## Dispatcher task Python isolation
+
+Every newly prepared card workspace contains the dispatcher-owned
+`.secretary-task-env/venv`, claimed before creation and kept separate from the adapter-owned `.venv`.
+Before creating the namespace, the dispatcher adds `.secretary-task-env/` to Git's repository-local
+`info/exclude`; linked worktrees share this file. The idempotent entry intentionally remains after
+card cleanup and is redundant but harmless when the repository's tracked ignore already covers the
+namespace. Existing project reservation and dispatcher serialization permit only one card for the
+project at a time, so this hotfix adds no separate locking protocol around that append. The namespace
+remains absent from `git status` and from a blanket `git add -A`. When the adapter declares
+`broad_check` but omits `broad_check.interpreter`, the candidate's `.[dev]` contract is installed
+into this environment, so worker and reviewer tools and the inner broad suite resolve there. This
+editable install may need package-index access for build and development dependencies; an unavailable network or package index
+is a bring-up failure, not permission to install into the production virtualenv. An adapter may
+create and use its own `.venv`; the dispatcher never pre-creates, inspects, injects production
+packages into, or removes it separately. Adapter setup runs with neither virtualenv active and with
+the production venv removed from `PATH`. A retained pre-upgrade workspace gets the dispatcher environment on its next rework or
+review launch. Do not run candidate installs against `PRODUCT_ROOT/.venv`, and do not use
+`PYTHONPATH` to conceal or repair an editable install that points elsewhere.
+
+An adapter with no `broad_check` declaration has no candidate-install contract, so its reserved
+environment intentionally remains bare.
+
+Gate, release and cleanup make the same ownership decision without creating an environment: an
+absent namespace is a valid pre-upgrade state, while an existing unowned namespace fails closed.
+
+The owner record is written atomically before the environment is populated. After interruption, a
+valid dispatcher owner with no `ready` marker is resumable and the next prepare completes it. A
+namespace with no valid owner is deliberately not adopted. Inspect it first; if it contains no
+operator or adapter data, remove only that worktree's `.secretary-task-env/` and retry bring-up. If
+ownership or contents are uncertain, retain the worktree and escalate instead of manufacturing an
+owner record.
+
+At prepare, launch, gate, release and immediately before removal, the dispatcher probes the fixed
+production interpreter. A failure names one of `interpreter_unavailable`, `missing_import`,
+`wrong_root` or `workspace_targeted_editable`, blocks the card, and retains its workspace. Inspect the
+reported interpreter, registered root, import origin and metadata target. Recovery is an explicit
+operator action from the registered production checkout only:
+
+    PRODUCT_ROOT/.venv/bin/python3 -m pip install --no-deps -e PRODUCT_ROOT
+
+Substitute the exact absolute registered root for both `PRODUCT_ROOT` occurrences, then run the
+read-only provenance/dispatcher check appropriate to the incident. Do not restart or kill
+application heads, rewrite task metadata, or delete the retained checkout as part of this recovery.
+
 ## Sprint observer heads
 
 The same production tick, in the same reconciliation pass, keeps one observer head per open sprint on the
@@ -3257,6 +3302,16 @@ that suite with no flag at all (`secretary check broad --reuse`, `secretary chec
 explicit `--module` still overrides it, and a project that declares none and is given none is
 refused as `no_broad_check_module` rather than falling back to repository-wide discovery.
 
+One renderer makes every task-packet Secretary protocol, report, verdict, `check broad` and `check
+show` command use the registered production source, absolute production interpreter and `-P`. This
+includes recovery text for a missing, refused or module-less contract: the worker supplies the suite
+placeholder, but no command falls back to `python3` from `PATH` and no candidate interpreter is
+invented. An adapter that explicitly names an interpreter keeps that choice for the inner suite;
+when a fit contract omits the field,
+the dispatcher supplies `.secretary-task-env/venv/bin/python3` as the inner candidate interpreter.
+The receipt records that inner interpreter and its candidate import provenance. Report, verdict and
+other control-plane commands never use the candidate shell's `python3` from `PATH`.
+
 `check broad` streams the check's combined output to stderr while it runs, exits with the check's
 own status (a signal-killed check becomes the usual `128+N`), and writes one worker-local broad
 receipt under `state/checks/` in the workspace — an ignored path, never committed. The
@@ -3266,6 +3321,10 @@ counts where the runner prints them, and a bounded tail of the output. The verdi
 stream as it goes past, so a runner that prints `OK (skipped=8)` and then megabytes of cleanup output
 still has its counts recorded, without
 the receipt growing to hold the logs.
+The CLI reconstructs the recorded result before printing the receipt and refuses
+`receipt_status_mismatch` if its raw exit code differs from the subprocess result returned by the
+runner. Shell status is then derived from that one result, including `128+N` for a signal; the CLI
+never silently chooses the softer of two answers.
 
 Two check shapes are accepted, and they differ in one promise:
 

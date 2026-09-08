@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from secretary.checkpoint import CheckpointResult
@@ -751,6 +752,7 @@ class FakeHost:
         # The real host snapshots the head at bring-up and hands the record back; the fake goes
         # through the same catalog so the routing journal sees real configurations here too.
         self.catalog = catalog or FakeCatalog()
+        self.production_runtime = SimpleNamespace(interpreter=sys.executable)
         # Ordered log of every host call. The per-method lists below answer "did it happen"; this
         # answers "in what order", which some invariants depend on (complete_green must push from
         # the workspace before teardown removes it).
@@ -886,6 +888,7 @@ class FakeHost:
     _select_revision_bound_worker_feedback = CommandHostRuntime._select_revision_bound_worker_feedback
     _validated_worker_prerequisites = CommandHostRuntime._validated_worker_prerequisites
     _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)
+    _control_plane_command = CommandHostRuntime._control_plane_command
 
     def _broad_check_invocation(self, project: str) -> tuple[str, str]:
         """Borrowed from the real host, like the document builder that calls it.

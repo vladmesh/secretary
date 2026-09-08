@@ -211,6 +211,31 @@ Launch and cleanup still depend on Orca's specific API; a target session protoco
 milestone. Head-specific rendering and delivery are confined to adapters, but that contract is not
 yet a stable plugin API.
 
+The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` is always the
+project adapter's namespace. It claims its reserved environment with an owner record before creating
+or populating it, and first adds `.secretary-task-env/` to Git's repository-local `info/exclude` so
+a blanket `git add -A` cannot capture runtime files. Linked worktrees share that file; the idempotent
+entry intentionally outlives card cleanup and is redundant but harmless where tracked ignore already
+covers the namespace. Existing project reservation and dispatcher serialization admit one card per
+project, so this hotfix adds no second concurrency subsystem around that shared append. It never
+enables system site packages or writes production package paths into either environment. Projects
+whose adapter declares `broad_check` but omits its interpreter are installed there from their
+`.[dev]` declaration, while adapter setup runs outside both environments and may create its own
+`.venv`. Worker and reviewer login shells put the dispatcher environment ahead of their ordinary `PATH`; an adapter's
+declared broad-check interpreter may still select its own `.venv`. Rework and retained review prepare
+a missing dispatcher environment before launch, which upgrades old retained workspaces in place.
+Non-mutating gate, release and cleanup boundaries accept an absent pre-upgrade namespace, but if the
+reserved namespace exists they require the same dispatcher owner record before proceeding.
+An adapter that declares no `broad_check` gets an intentionally bare reserved environment because it
+declared no candidate-install contract. The production virtualenv is never a general tool source for
+those roles. One renderer makes every head-visible Secretary task, report, verdict, broad and show
+command name the absolute production interpreter, `-P`, and registered production source. For a fit
+adapter that omits its interpreter, the wrapper
+passes the reserved candidate interpreter to the inner broad suite, whose receipt attests it. The
+same immutable `ProductionRuntime` value binds the dispatcher interpreter, registered product root
+and observed `secretary` import at workspace creation, launch, gate, release and teardown. A mismatch
+preserves the worktree and blocks the card.
+
 Before launching a head its CLI's first-run questions are answered on its behalf. Otherwise an
 interactive head sits in a dialog instead of working: it never goes idle, the prompt is never
 delivered, and bring-up ends up deferred. Only the missing entries are appended, foreign ones are

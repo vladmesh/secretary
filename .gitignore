@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.secretary-task-env/
 build/
 dist/
 *.egg-info/

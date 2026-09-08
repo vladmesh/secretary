@@ -310,9 +310,11 @@ class ReceiptIntegrityTests(BroadCheckTestCase):
                 raise OSError("disk full")
             return real_replace(source, target, *args, **kwargs)
 
-        with mock.patch("secretary._fsutil.os.replace", side_effect=refuse):
-            with self.assertRaises(BroadCheckError) as caught:
-                self._run("echo first; exit 0")
+        with (
+            mock.patch("secretary._fsutil.os.replace", side_effect=refuse),
+            self.assertRaises(BroadCheckError) as caught,
+        ):
+            self._run("echo first; exit 0")
         self.assertEqual(caught.exception.code, "receipt_unwritable")
 
         # The reader still sees the whole previous receipt, never a partial new one, and no
@@ -335,6 +337,7 @@ class ReceiptIntegrityTests(BroadCheckTestCase):
             ["git", "-C", str(repo_root), "check-ignore", "-q", str(target)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            check=False,
         )
 
         self.assertEqual(result.returncode, 0, f"{target} must stay git-ignored")
@@ -436,6 +439,7 @@ class ResultInvariantTests(BroadCheckTestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            check=False,
         )
 
         self.assertEqual(completed.returncode, 2)
@@ -455,6 +459,7 @@ class ResultInvariantTests(BroadCheckTestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            check=False,
         )
 
         self.assertEqual(completed.returncode, 2)
@@ -1178,8 +1183,7 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
             ],
             cwd=source_root,
             env={**os.environ, "PYTHONPATH": str(source_root / "src")},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             check=False,
         )
@@ -1434,25 +1438,64 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self.assertEqual(payload["receipt"]["tail"], "ran --only fast lane")
         self.assertEqual(payload["module_contract"], {"source": "adapter"})
 
-    def test_a_declared_contract_with_no_interpreter_runs_on_the_wrappers_own(self) -> None:
-        """A supported contract must not require a `workspace/.venv` that does not exist.
-
-        The Secretary worktrees have no venv of their own. Since the check subprocess prepends the
-        candidate's own import roots to `sys.path`, the wrapper's interpreter imports the candidate,
-        so naming none is correct rather than merely convenient (issue:8b39e60e4df361c6138e).
-        """
+    def test_a_declared_contract_with_no_interpreter_accepts_the_dispatcher_candidate_runtime(
+        self,
+    ) -> None:
+        """The production wrapper may select a workspace runtime for the inner project suite."""
         self._suite_file("project_suite")
         instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        candidate = self.root / ".secretary-task-env" / "venv"
+        subprocess.run([sys.executable, "-m", "venv", str(candidate)], check=True)
 
-        payload = _run_main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+        payload = _run_main(
+            [
+                "check",
+                "broad",
+                "--root",
+                str(self.root),
+                "--instance",
+                str(instance),
+                "--default-interpreter",
+                ".secretary-task-env/venv/bin/python3",
+            ]
+        )
 
-        self.assertEqual(payload["receipt"]["check_set"]["interpreter"], sys.executable)
+        candidate_python = str(candidate / "bin" / "python3")
+        self.assertEqual(payload["receipt"]["check_set"]["interpreter"], candidate_python)
+        self.assertEqual(payload["receipt"]["project_provenance"]["python"], candidate_python)
         self.assertEqual(payload["receipt"]["check_set"]["module"], "project_suite")
         # And it really did import the candidate, not whatever this interpreter's environment holds.
         self.assertTrue(
             payload["receipt"]["project_provenance"]["inside_workspace"],
             payload["receipt"]["project_provenance"],
         )
+
+    def test_a_direct_check_with_no_interpreter_still_uses_the_callers_runtime(self) -> None:
+        self._suite_file("project_suite")
+        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+
+        payload = _run_main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+
+        self.assertEqual(payload["receipt"]["check_set"]["interpreter"], sys.executable)
+
+    def test_the_cli_refuses_a_subprocess_status_that_disagrees_with_its_receipt(self) -> None:
+        spec = self._suite("project_suite", "print('OK')\n")
+        _, receipt = self._run(spec)
+        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        stdout, stderr = StringIO(), StringIO()
+
+        with (
+            mock.patch("sys.stdout", stdout),
+            mock.patch("sys.stderr", stderr),
+            mock.patch("secretary.check_commands.run_broad_check", return_value=(7, receipt)),
+        ):
+            status = main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        error = json.loads(stderr.getvalue())["error"]
+        self.assertEqual(error["code"], "receipt_status_mismatch")
+        self.assertIn("exit code 7", error["message"])
 
     def test_check_show_reads_back_the_receipt_the_declared_suite_wrote(self) -> None:
         self._suite_file("project_suite")

@@ -49,12 +49,12 @@ class RuntimeEnvRoleTests(unittest.TestCase):
         )
         return dependency.removeprefix("ruff==")
 
-    def test_worker_and_reviewer_role_paths_expose_the_product_pinned_ruff(self) -> None:
+    def test_worker_and_reviewer_role_paths_expose_the_workspace_pinned_ruff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             expected = self._ruff_version(Path(__file__).resolve().parents[1])
             (root / "src").symlink_to(Path(__file__).resolve().parents[1] / "src", target_is_directory=True)
-            ruff = root / ".venv" / "bin" / "ruff"
+            ruff = root / role_env.WORKSPACE_ENV_DIR / "bin" / "ruff"
             ruff.parent.mkdir(parents=True)
             ruff.write_text(
                 "#!/bin/sh\n"
@@ -67,6 +67,8 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                 encoding="utf-8",
             )
             ruff.chmod(0o755)
+            python = root / role_env.WORKSPACE_ENV_DIR / "bin" / "python3"
+            python.symlink_to("/usr/bin/python3")
             ensure_board_transport(root, allow_default=True)
             base_env = {
                 "PATH": os.environ["PATH"],
@@ -77,11 +79,17 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             for role in ("worker", "reviewer"):
                 with self.subTest(role=role):
                     with mock.patch.dict(os.environ, base_env, clear=True):
-                        version_command = wrap_role_command(role, "ruff --version")
+                        version_command = wrap_role_command(role, "ruff --version", workspace=str(root))
                         lint_commands = (
-                            wrap_role_command(role, "printf '%s\\0' changed.py | xargs -0r ruff check"),
                             wrap_role_command(
-                                role, "printf '%s\\0' changed.py | xargs -0r ruff format --check"
+                                role,
+                                "printf '%s\\0' changed.py | xargs -0r ruff check",
+                                workspace=str(root),
+                            ),
+                            wrap_role_command(
+                                role,
+                                "printf '%s\\0' changed.py | xargs -0r ruff format --check",
+                                workspace=str(root),
                             ),
                         )
                     version = subprocess.run(

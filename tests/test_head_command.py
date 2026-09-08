@@ -228,10 +228,14 @@ class RoleEnvWrapperTests(unittest.TestCase):
                     {"adapter": "claude"},
                     role="worker",
                     binding=SECRETARY_ROLE_ENV,
+                    workspace="/worktree",
                 ).command,
                 f'{BINDING} PYTHONPATH=/opt/checkout/src"${{PYTHONPATH:+:$PYTHONPATH}}" '
-                "python3 -P -m secretary.role_env exec --role worker -- /bin/sh -lc "
-                + shlex.quote("PATH=/opt/checkout/.venv/bin${PATH:+:$PATH}; export PATH; " + CLAUDE_BASE),
+                "python3 -P -m secretary.role_env exec --role worker --workspace /worktree -- "
+                "/bin/sh -lc "
+                + shlex.quote(
+                    "PATH=/worktree/.secretary-task-env/venv/bin${PATH:+:$PATH}; export PATH; " + CLAUDE_BASE
+                ),
             )
 
     def test_the_runtime_entry_point_is_what_a_background_agent_is_launched_under(self) -> None:

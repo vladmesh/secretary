@@ -17,7 +17,7 @@ import tomllib
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
@@ -83,7 +83,6 @@ from secretary.dispatcher_launcher import (
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
 )
-from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
 from secretary.dispatcher_production import _budget_event_type, production_adopt_attempt_id
 from secretary.dispatcher_review import (
     start_review as start_reviewer,
@@ -101,6 +100,7 @@ from secretary.projects.contract import (
     ContractVerdict,
     ModuleContract,
 )
+from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
 from secretary.dispatcher_state import (
@@ -4655,7 +4655,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         def die_before_publishing(task: dict, record) -> None:
             raise OSError("the dispatcher died on its way into the merge")
 
-        with mock.patch.object(self.host, "complete_green", die_before_publishing):
+        with mock.patch.object(self.host, "complete_green", die_before_publishing):  # noqa: SIM117
             with self.assertRaises(OSError):
                 self.tick()
 
@@ -4776,7 +4776,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 raise OSError("dispatcher died after the park's board move")
             real_save(payload)
 
-        with mock.patch.object(self.runtime.production_state, "save", die_after_the_park):
+        with mock.patch.object(self.runtime.production_state, "save", die_after_the_park):  # noqa: SIM117
             with self.assertRaises(OSError):
                 self.tick()
 
@@ -9082,7 +9082,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self.tick()
         request_id = self._worker_report_request_id()
-        with mock.patch.object(self.writer.audit, "append", side_effect=OSError("audit is down")):
+        with mock.patch.object(  # noqa: SIM117
+            self.writer.audit, "append", side_effect=OSError("audit is down")
+        ):
             with self.assertRaises(TaskError) as pending:
                 self.writer.report(
                     role="worker",
@@ -10071,7 +10073,7 @@ class HeadPromptTests(unittest.TestCase):
             role="worker",
         )
 
-        with mock.patch.object(Path, "read_bytes", side_effect=OSError("read denied")):
+        with mock.patch.object(Path, "read_bytes", side_effect=OSError("read denied")):  # noqa: SIM117
             with self.assertRaisesRegex(HostError, "could not be captured"):
                 self.host._capture_launch_prompt_identity(run, role="worker", document=str(document))
 
@@ -10157,9 +10159,9 @@ class HeadPromptTests(unittest.TestCase):
         """
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("python3 -m secretary check broad --reuse --module", doc)
+        self.assertIn("python3 -P -m secretary check broad --reuse --module", doc)
         self.assertNotIn("python3 -m secretary check broad --module", doc)
-        self.assertIn("python3 -m secretary check show --module", doc)
+        self.assertIn("python3 -P -m secretary check show --module", doc)
         # The shell shape is offered, with the promise it cannot keep spelled out.
         self.assertIn("never reused in place of a run", doc)
         self.assertIn("state/checks/broad-<digest>.json", doc)
@@ -10188,11 +10190,9 @@ class HeadPromptTests(unittest.TestCase):
 
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn(
-            "    python3 -m secretary check broad --reuse --module tests.broad --module-arg -v",
-            doc,
-        )
-        self.assertIn("python3 -m secretary check show --module tests.broad --module-arg -v", doc)
+        self.assertIn("    PYTHONPATH=", doc)
+        self.assertIn("python3 -P -m secretary check broad --reuse --module tests.broad --module-arg -v", doc)
+        self.assertIn("python3 -P -m secretary check show --module tests.broad --module-arg -v", doc)
         self.assertNotIn("<this project's broad suite module>", doc)
         self.assertNotIn("<the same module>", doc)
 
@@ -10249,7 +10249,7 @@ class HeadPromptTests(unittest.TestCase):
 
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("python3 -m secretary check broad --reuse --module", doc)
+        self.assertIn("python3 -P -m secretary check broad --reuse --module", doc)
         self.assertIn("dispatcher-owned exact-SHA gate receipt", doc)
 
     def test_local_worker_keeps_the_reusable_broad_receipt_contract(self) -> None:
@@ -10257,7 +10257,7 @@ class HeadPromptTests(unittest.TestCase):
 
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("python3 -m secretary check broad --reuse --module", doc)
+        self.assertIn("python3 -P -m secretary check broad --reuse --module", doc)
 
     def test_worker_prompt_names_each_receipt_at_its_own_site(self) -> None:
         worker = self.host._worker_task_doc(self.task, "main", "attempt-1")
@@ -10750,7 +10750,9 @@ class HeadPromptTests(unittest.TestCase):
         stale = root / "secretary-verdict-secretary-510-pilot-3.md"
         stale.write_text("half-written verdict from the head that died", encoding="utf-8")
 
-        with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(root)}):
+        with mock.patch.dict(  # noqa: SIM117
+            os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(root)}
+        ):
             with mock.patch.object(
                 self.host, "_launch", return_value=LaunchedHead("term:review", "codex-reviewer")
             ):
@@ -10783,14 +10785,33 @@ class HeadPromptTests(unittest.TestCase):
         (package / "__main__.py").write_text(
             "raise SystemExit('SHADOW SECRETARY WAS IMPORTED')\n", encoding="utf-8"
         )
-        env = dict(os.environ, TA_SECRETARY_REPO=str(root))
+        bin_dir = shadow / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "python3").write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+        (bin_dir / "python3").chmod(0o755)
+        env = dict(
+            os.environ,
+            TA_SECRETARY_REPO=str(root),
+            PATH=f"{bin_dir}:/usr/local/bin:/usr/bin:/bin",
+        )
+        task = {**self.task, "project": "non-secretary-project"}
+        self.host.catalog.broad_check_state = ContractVerdict.as_fit(
+            ModuleContract(
+                sys.executable,
+                "non_secretary_project",
+                module="tests.broad",
+                interpreter_declared=False,
+            ),
+            "non-secretary-project",
+        )
 
         for doc in (
-            self.host._worker_task_doc(self.task, "main", "attempt-1"),
-            self.host._review_prompt(self.task, "attempt-1", 3),
+            self.host._worker_task_doc(task, "main", "attempt-1"),
+            self.host._review_prompt(task, "attempt-1", 3),
         ):
             for command in self._command_lines(doc):
                 with self.subTest(command=command):
+                    self.assertIn(f" {sys.executable} -P -m secretary task", command)
                     control_plane_help = command.split(" task ", 1)[0] + " task --help"
                     result = subprocess.run(
                         control_plane_help,
@@ -10799,9 +10820,77 @@ class HeadPromptTests(unittest.TestCase):
                         env=env,
                         text=True,
                         capture_output=True,
+                        check=False,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertNotIn("SHADOW SECRETARY WAS IMPORTED", result.stderr)
+
+        broad, show = self.host._broad_check_invocation("non-secretary-project")
+        for command in (broad, show):
+            self.assertIn(f" {sys.executable} -P -m secretary check", command)
+            self.assertIn("--default-interpreter .secretary-task-env/venv/bin/python3", command)
+
+    def test_every_contract_branch_uses_the_single_head_command_renderer(self) -> None:
+        cases = (
+            (
+                "fit",
+                ContractVerdict.as_fit(
+                    ModuleContract(
+                        sys.executable,
+                        "example",
+                        module="tests.broad",
+                        interpreter_declared=False,
+                    ),
+                    "example",
+                ),
+                True,
+            ),
+            (
+                "unfit",
+                ContractVerdict.as_refused(CANNOT_ATTEST_PROJECT, "example", "cannot attest"),
+                False,
+            ),
+            (
+                "absent-broad-check",
+                ContractVerdict.as_refused(BROAD_CHECK_NOT_DECLARED, "example", "broad check not declared"),
+                False,
+            ),
+            (
+                "empty-module",
+                ContractVerdict.as_fit(ModuleContract(sys.executable, "example"), "example"),
+                False,
+            ),
+        )
+        task = {**self.task, "project": "example"}
+        command_prefix = f" {sys.executable} -P -m secretary "
+
+        for name, verdict, has_candidate_default in cases:
+            with self.subTest(case=name):
+                self.host.catalog.broad_check_state = verdict
+                renderer = self.host._control_plane_command
+                with mock.patch.object(self.host, "_control_plane_command", wraps=renderer) as rendered:
+                    worker = self.host._worker_task_doc(task, "main", "attempt-1")
+                    reviewer = self.host._review_prompt(task, "attempt-1", 3)
+
+                commands = [
+                    line
+                    for document in (worker, reviewer)
+                    for line in document.splitlines()
+                    if " -m secretary " in line
+                ]
+                self.assertTrue(commands)
+                for command in commands:
+                    self.assertIn("PYTHONPATH=", command)
+                    self.assertIn(command_prefix, command)
+                    self.assertNotIn("python3 -m secretary", command)
+                calls = [call.args for call in rendered.call_args_list]
+                self.assertGreaterEqual(sum(call[:1] == ("task",) for call in calls), 5)
+                self.assertTrue(any(call[:2] == ("check", "broad") for call in calls))
+                self.assertTrue(any(call[:2] == ("check", "show") for call in calls))
+                self.assertEqual(
+                    "--default-interpreter .secretary-task-env/venv/bin/python3" in worker,
+                    has_candidate_default,
+                )
 
 
 class WorkerDurabilityTests(unittest.TestCase):
@@ -11086,7 +11175,9 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         """An unconfirmed send is the caller's failure to act on, never a prompt to assume landed."""
         refuse = mock.Mock(side_effect=TuiDeliveryError("the pane could not be probed"))
 
-        with mock.patch.object(dispatcher_host_module, "_deliver_tui_prompt", refuse):
+        with mock.patch.object(  # noqa: SIM117
+            dispatcher_host_module, "_deliver_tui_prompt", refuse
+        ):
             with self.assertRaisesRegex(HostError, "report prompt was not delivered"):
                 self.host.prompt_worker_report(self.task, self.record)
 
@@ -11255,7 +11346,7 @@ class WaitWatchdogTests(unittest.TestCase):
 class DispatcherLauncherTests(unittest.TestCase):
     # Which model a codex head runs on is installation configuration, not something the shipped
     # registry decides, so the model-pinning cases here run against a fixture registry of their own.
-    PINNED_REGISTRY = {
+    PINNED_REGISTRY: ClassVar = {
         "resources": {"openai-sub": {"account": "openai-subscription"}},
         "profiles": {
             "pinned-terra": {
@@ -11291,7 +11382,7 @@ class DispatcherLauncherTests(unittest.TestCase):
     # old Codex ids has been reused for a Claude profile. Profile ids are not reserved by adapter,
     # so this is valid input, and every persisted override naming `codex-terra` was written when
     # that id meant Codex.
-    COLLIDING_REGISTRY = {
+    COLLIDING_REGISTRY: ClassVar = {
         "resources": {"openai-sub": {"account": "openai-subscription"}},
         "profiles": {
             "codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
@@ -11299,7 +11390,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         },
         "role_defaults": {"new_card": "codex", "reviewer": "codex"},
     }
-    CLAUDE_ONLY_REGISTRY = {
+    CLAUDE_ONLY_REGISTRY: ClassVar = {
         "resources": {"openai-sub": {"account": "openai-subscription"}},
         "profiles": {
             "codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
@@ -11482,7 +11573,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             catalog._heads = canonical_heads(repo)  # type: ignore[attr-defined]
             card = {"routing": {"review_head_override": "claude-default"}}
             probe = (
-                "python3 -c 'import json,sys;"
+                f"PYTHONPATH={shlex.quote(str(repo / 'src'))} python3 -c 'import json,sys;"
                 "from secretary.dispatcher_launcher import claude_launch_model;"
                 'print(json.dumps(claude_launch_model({"adapter": "claude"}, workspace=sys.argv[1])))\' '
                 + shlex.quote(str(workspace))
@@ -11496,7 +11587,10 @@ class DispatcherLauncherTests(unittest.TestCase):
                 # The wrapper binds names out of the launcher's own environment, so it has to be
                 # rendered inside it: rendered outside, a live host's SECRETARY_RUNTIME_ENV_FILE
                 # would reach the launched process and the fixture's runtime.env never would.
-                wrapped = wrap_role_command("reviewer", probe)
+                candidate_python = workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
+                candidate_python.parent.mkdir(parents=True)
+                candidate_python.symlink_to("/usr/bin/python3")
+                wrapped = wrap_role_command("reviewer", probe, workspace=str(workspace))
 
             delivered = subprocess.run(
                 ["/bin/sh", "-c", wrapped],
@@ -11504,6 +11598,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 text=True,
                 env=env,
                 cwd=tmp,
+                check=False,
             )
 
         self.assertEqual(delivered.returncode, 0, delivered.stderr)
@@ -11812,7 +11907,9 @@ class DispatcherLauncherTests(unittest.TestCase):
             original = {"hasCompletedOnboarding": True, "projects": {"/old": {"keep": True}}}
             config.write_text(json.dumps(original), encoding="utf-8")
 
-            with mock.patch("secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")):
+            with mock.patch(  # noqa: SIM117
+                "secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")
+            ):
                 with self.assertRaisesRegex(RuntimeError, "cannot update Claude config"):
                     ensure_claude_workspace_ready("/ws/x", config)
 
@@ -11928,7 +12025,9 @@ class DispatcherLauncherTests(unittest.TestCase):
             original = 'model_reasoning_summary = "auto"\n'
             config.write_text(original, encoding="utf-8")
 
-            with mock.patch("secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")):
+            with mock.patch(  # noqa: SIM117
+                "secretary.dispatcher_launcher.os.replace", side_effect=OSError("boom")
+            ):
                 with self.assertRaisesRegex(RuntimeError, "cannot update codex config"):
                     ensure_codex_workspace_trusted({"adapter": "codex"}, str(workspace), config)
 
@@ -12721,7 +12820,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual(env["BOARD_ROLE"], "worker")
         self.assertNotIn("KANBOARD_API_TOKEN", env)
         self.assertNotIn("TA_CODEX_MODE", env)
-        self.assertEqual(env["PATH"], "/srv/secretary/.venv/bin:/usr/bin")
+        self.assertEqual(env["PATH"], "/usr/bin")
         self.assertNotIn("PANELMEM_KB_PAT", env)
         self.assertNotIn("GITHUB_TOKEN", env)
 
@@ -12915,7 +13014,9 @@ class WorkspaceResumeTests(unittest.TestCase):
                 "workspace": {"base_branch": "main"},
             }
 
-            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(workspace_root)}):
+            with mock.patch.dict(  # noqa: SIM117
+                os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(workspace_root)}
+            ):
                 with self.assertRaisesRegex(HostError, "resume workspace is missing"):
                     host.prepare_worker(
                         task,
@@ -12951,7 +13052,9 @@ class WorkspaceResumeTests(unittest.TestCase):
                 "project": "secretary",
                 "workspace": {"base_branch": "main"},
             }
-            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(workspace_root)}):
+            with mock.patch.dict(  # noqa: SIM117
+                os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(workspace_root)}
+            ):
                 with self.assertRaisesRegex(HostError, "resume workspace is on branch foreign-branch"):
                     host.prepare_worker(
                         task,
@@ -13516,7 +13619,7 @@ class DispatcherGateTests(unittest.TestCase):
                     )
                 return original(args, label, cwd=cwd)
 
-            with mock.patch.object(host, "run_capture", side_effect=forged):
+            with mock.patch.object(host, "run_capture", side_effect=forged):  # noqa: SIM117
                 with self.assertRaisesRegex(HostError, "candidate history could not be read"):
                     host.gate_check(self._task(), self._record(ws))
 
@@ -13551,7 +13654,7 @@ class DispatcherGateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
                 return original(args, label, cwd=cwd)
 
-            with mock.patch.object(host, "run_capture", side_effect=message_fails):
+            with mock.patch.object(host, "run_capture", side_effect=message_fails):  # noqa: SIM117
                 with self.assertRaisesRegex(HostError, "candidate history could not be read for"):
                     host.gate_check(self._task(), self._record(ws))
 
@@ -13566,7 +13669,7 @@ class DispatcherGateTests(unittest.TestCase):
                     raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
                 return original(args, label, cwd=cwd)
 
-            with mock.patch.object(host, "run_capture", side_effect=decoding_fails):
+            with mock.patch.object(host, "run_capture", side_effect=decoding_fails):  # noqa: SIM117
                 with self.assertRaisesRegex(HostError, "could not be decoded"):
                     host.gate_check(self._task(), self._record(ws))
 
@@ -13581,7 +13684,9 @@ class DispatcherGateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 128, "", "fatal: bad revision")
                 return original(args, label, cwd=cwd)
 
-            with mock.patch.object(host, "run_capture", side_effect=only_the_history_fails):
+            with mock.patch.object(  # noqa: SIM117
+                host, "run_capture", side_effect=only_the_history_fails
+            ):
                 with self.assertRaisesRegex(HostError, "candidate history could not be read"):
                     host.gate_check(self._task(), self._record(ws))
 
@@ -14593,7 +14698,7 @@ class DispatcherGateTests(unittest.TestCase):
         "net/http: TLS handshake timeout"
     )
 
-    GH_BACKEND_LABELS = {
+    GH_BACKEND_LABELS: ClassVar = {
         "gate repo view",
         "gate pr list",
         "gate pr create",
