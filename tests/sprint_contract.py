@@ -87,6 +87,11 @@ KANBOARD_ONLY: Final[dict[str, str]] = {
         "models a lost Kanboard closeTask reply and counts the transport retry",
     ),
     **_cases(
+        "tests.test_sprints.SprintTests",
+        ("test_close_archives_only_its_done_tasks_and_leaves_issues_and_unlinked_cards",),
+        "asserts the Kanboard closeTask ordering for done and disposed-open cards",
+    ),
+    **_cases(
         "tests.test_sprints.SprintAuditTraversalTests",
         (
             "test_mass_sprint_status_costs_the_same_board_round_trips_for_one_and_for_many",
@@ -163,5 +168,10 @@ KANBOARD_ONLY: Final[dict[str, str]] = {
         "tests.test_sprint_restore.SprintRestoreTests",
         ("test_parity_failure_leaves_recovery_incomplete_with_a_named_error",),
         "injects a lossy Kanboard saveTaskMetadata response during restore parity",
+    ),
+    **_cases(
+        "tests.test_sprint_restore.SprintRestoreTests",
+        ("test_export_without_a_sprint_board_leaves_the_target_untouched",),
+        "asserts restore omits the Kanboard createProject transport when sprints.json is absent",
     ),
 }

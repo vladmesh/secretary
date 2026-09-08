@@ -853,7 +853,12 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         client, cards = self._restore()
 
         self.assertEqual(cards, 1)
-        self.assertEqual(SprintReader(client).list(create=False), [])  # type: ignore[arg-type]
+        self.assertFalse(
+            any(
+                method == "createProject" and params.get("name") == "Secretary sprints"
+                for method, params in client.calls  # type: ignore[attr-defined]
+            )
+        )
         self.assertEqual(restore_state(self.target_data)["sprint_count"], 0)
 
 

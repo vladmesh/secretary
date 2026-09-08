@@ -151,7 +151,7 @@ class SprintOwnershipTests(SprintFixture):
         state, so neither could have seen the other's sprint. The repeat has to come
         back with the first event instead of colliding with the sprint it opened.
         """
-        ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        self.ensure_backend_ready()
         started = threading.Barrier(3)
         outcomes: dict[str, Any] = {}
         waiting_at_gate = threading.Event()
@@ -521,7 +521,7 @@ class SprintOwnershipTests(SprintFixture):
         The rules are reads of live state, so without a shared gate both would see an
         installation with no open sprint and both would create a row.
         """
-        ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        self.ensure_backend_ready()
         start = threading.Barrier(2)
         outcomes: dict[str, Any] = {}
 
@@ -1413,7 +1413,7 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
     def test_concurrent_creates_admit_at_most_the_limit(self) -> None:
         """Three disjoint creates at once still leave exactly two open sprints."""
         self._limit(2)
-        ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        self.ensure_backend_ready()
         start = threading.Barrier(3)
         outcomes: dict[str, Any] = {}
         candidates = {
@@ -2834,6 +2834,10 @@ class SprintTests(SprintFixture):
         self.assertFalse(self.record_is_active(open_task["ref"]))
         self.assertTrue(self.record_is_active("secretary-12"))
         self.assertTrue(self.record_is_active("issue:open"))
+        done_row = next(task for task in self.client.tasks if task["reference"] == done["ref"])
+        open_row = next(task for task in self.client.tasks if task["reference"] == open_task["ref"])
+        close_calls = [params["task_id"] for method, params in self.client.calls if method == "closeTask"]
+        self.assertEqual(close_calls, [done_row["id"], open_row["id"]])
         self.assertEqual(
             len(
                 [
@@ -3829,8 +3833,8 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
             values={"sprint_reservations": json.dumps(["secretary", "other"])},
             request_id="seed-guard-reservations",
         )
-        # The reservations landed on the board behind the writer's back, so the index is
-        # re-seeded from it the way a live installation seeds it.
+        # Restore publishes the reservation through the writer; seed the derived index the way
+        # a live installation reconstructs it from persisted sprint state.
         refresh_active_sprint_projects(self.tmp.name, SprintReader(self.client))  # type: ignore[arg-type]
         bind_observer(self, self.ref)
 

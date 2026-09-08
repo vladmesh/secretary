@@ -364,6 +364,10 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
     def sprints(self) -> list[dict[str, Any]]:
         return self.sprint_reader().list()
 
+    def ensure_backend_ready(self) -> None:
+        """Prepare the sprint store before concurrent writers enter the backend."""
+        self.sprint_reader().list()
+
     def sprint_record_count(self, reference: str | None = None) -> int:
         """Count persisted sprint records through the client boundary, active and archived."""
         project = self.client.call("getProjectByName", name=SPRINT_BOARD_NAME)
