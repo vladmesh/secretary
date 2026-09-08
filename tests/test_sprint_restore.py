@@ -31,7 +31,7 @@ from secretary.sprints import (
     ensure_sprint_board,
     sprint_admission_lock,
 )
-from secretary.tasks import TaskWriter
+from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.sprints import SprintBackendFixture, _write_project_registry
 from tests.observer_identity import as_observer
 from tests.restore_fixtures import _EmptyBoardsKanboard
@@ -95,6 +95,20 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
                         "getAllTasks", project_id=int(project["id"]), status_id=status_id
                     )
                 )
+        return total
+
+    def persisted_reference_count(self, client: object, reference: str) -> int:
+        """Count a reference through the backend client without reading fake rows."""
+        total = 0
+        for name in ("Pipeline", "Secretary sprints"):
+            project = client.call("getProjectByName", name=name)  # type: ignore[attr-defined]
+            if not isinstance(project, dict) or not project.get("id"):
+                continue
+            for status_id in (1, 0):
+                rows = client.call(  # type: ignore[attr-defined]
+                    "getAllTasks", project_id=int(project["id"]), status_id=status_id
+                )
+                total += sum(row.get("reference") == reference for row in rows)
         return total
 
     def setUp(self) -> None:
@@ -292,7 +306,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         self.assertIn("either corrupt or was taken before the observer migration", message)
         self.assertIn("state/board/sprints.json", message)
         # Diagnosis only: the refusal is still whole-set and nothing reached the backend.
-        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+        self.assertEqual(self.persisted_record_count(client), 0)
 
     def test_a_declared_head_the_registry_no_longer_has_is_refused(self) -> None:
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
@@ -308,7 +322,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
                 instance=self.instance,
             )
 
-        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+        self.assertEqual(self.persisted_record_count(client), 0)
 
     def test_a_second_disaster_keeps_the_declared_observer(self) -> None:
         """The checkpoint of a recovered installation recovers the same declared row again."""
@@ -419,7 +433,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
                         instance=self.instance,  # type: ignore[arg-type]
                     )
 
-                self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+                self.assertEqual(self.persisted_record_count(client), 0)
 
         # Disjoint on everything the rules judge, and each row carrying its own observer
         # head: a declared head is no longer something the open set is refused for.
@@ -465,7 +479,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
                 instance=self.instance,  # type: ignore[arg-type]
             )
 
-        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+        self.assertEqual(self.persisted_record_count(client), 0)
 
     def test_restore_refuses_a_lone_open_row_whose_root_is_not_canonical(self) -> None:
         """One open row is the reachable shape: pre-fix creates could only make one.
@@ -492,7 +506,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
                 instance=self.instance,  # type: ignore[arg-type]
             )
 
-        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+        self.assertEqual(self.persisted_record_count(client), 0)
 
     def _legacy_open_row_beside_the_seeded_one(self) -> None:
         """The seeded row open, plus an open row from before sprints owned a product.
@@ -532,7 +546,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
                 instance=self.instance,  # type: ignore[arg-type]
             )
 
-        self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
+        self.assertEqual(self.persisted_record_count(client), 0)
 
     def test_restore_holds_the_admission_lock_from_its_check_to_its_write(self) -> None:
         """Recovery publishes open sprints, so it admits a set and must serialize like one.
@@ -704,8 +718,8 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         client, cards = self._restore()
 
         self.assertEqual(cards, 1)
-        restored = [task for task in client.tasks if task["reference"] == "secretary-12"]  # type: ignore[attr-defined]
-        self.assertEqual(len(restored), 1)
+        self.assertEqual(self.persisted_reference_count(client, "secretary-12"), 1)
+        self.assertEqual(TaskReader(client).show("secretary-12")["ref"], "secretary-12")  # type: ignore[arg-type]
         self.assertEqual(restore_state(self.target_data)["board_parity"], "complete")
 
     def test_repeated_restore_creates_one_entity_and_no_duplicate_records(self) -> None:
@@ -717,9 +731,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         self._restore(client)
 
         self.assertEqual(restore_state(self.target_data)["restore_namespace"], namespace)
-        sprint_board = ensure_sprint_board(client)  # type: ignore[arg-type]
-        entities = [task for task in client.tasks if task["project_id"] == sprint_board]  # type: ignore[attr-defined]
-        self.assertEqual([task["reference"] for task in entities], [self.ref])
+        self.assertEqual(self.persisted_reference_count(client, self.ref), 1)
         live = SprintReader(client, data_dir=self.target_data).show(self.ref)  # type: ignore[arg-type]
         self.assertEqual(
             [comment["body"] for comment in live["comments"]],

@@ -70,7 +70,7 @@ class SprintExecutorPinTests(SprintFixture):
 
     def _assert_nothing_was_written(self) -> None:
         self.assertEqual(self._events(), [])
-        self.assertEqual(self._sprint_rows(), [])
+        self.assertEqual(self.sprint_record_count(), 0)
 
     def test_a_sprint_that_pins_neither_role_says_so_and_writes_no_field(self) -> None:
         created = self._create(goal="unpinned", reference="sprint:unpinned")

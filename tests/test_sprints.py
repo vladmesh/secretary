@@ -968,28 +968,9 @@ class TwoOpenSprintFixture(SprintFixture):
 
     def setUp(self) -> None:
         super().setUp()
-        self.client._record(
-            25,
-            "product:third",
-            "Third",
-            {
-                "record_type": "product",
-                "product_id": "third",
-                "product_projects": json.dumps(["third"]),
-            },
-        )
-        self.client._record(
-            26,
-            "issue:third",
-            "Third issue",
-            {
-                "record_type": "issue",
-                "issue_product": "third",
-                "issue_kind": "feature",
-                "issue_priority": "P1",
-            },
-        )
         (self.instance / "projects" / "third.yaml").write_text("id: third\n", encoding="utf-8")
+        self.arrange_product("third", projects=["third"])
+        self.arrange_issue("issue:third", product="third")
         self.roots = Path(self.tmp.name) / "repos"
 
     def _limit(self, value: object) -> None:
@@ -1037,8 +1018,8 @@ class TwoOpenSprintFixture(SprintFixture):
 
     def _assert_refusal_left_nothing(self, call, code: str, message: str) -> None:
         """Prove a refusal is only an answer: no row, no staged intent, no audit event."""
-        rows = len(self._sprint_rows())
-        transactions = self._transactions()
+        rows = self.sprint_record_count()
+        transactions = self.transaction_state()
         events = [event["event_id"] for event in self._events()]
         audit = TaskAudit(self.tmp.name)
         pending = [event["event_id"] for event in audit.pending_events()]
@@ -1047,8 +1028,8 @@ class TwoOpenSprintFixture(SprintFixture):
             call()
 
         self.assertEqual(raised.exception.code, code)
-        self.assertEqual(len(self._sprint_rows()), rows)
-        self.assertEqual(self._transactions(), transactions)
+        self.assertEqual(self.sprint_record_count(), rows)
+        self.assertEqual(self.transaction_state(), transactions)
         self.assertEqual([event["event_id"] for event in self._events()], events)
         self.assertEqual([event["event_id"] for event in audit.pending_events()], pending)
 
@@ -1160,12 +1141,7 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
 
     def _stored_repositories(self, reference: str, values: list[str]) -> None:
         """Put values on an open row that no create would write, as a legacy row carries."""
-        row = next(task for task in self._sprint_rows() if task["reference"] == reference)
-        self.client.call(
-            "saveTaskMetadata",
-            task_id=row["id"],
-            values={"sprint_repositories": json.dumps(values)},
-        )
+        self.arrange_metadata(reference, sprint_repositories=json.dumps(values))
 
     def test_a_declared_root_is_canonicalized_where_it_is_declared(self) -> None:
         """The reviewer's sequence, which used to admit an overlapping pair.
@@ -2962,16 +2938,27 @@ class SprintTests(SprintFixture):
             request_id="terminal-done",
         )["task"]
         writer.claim(
-            role="dispatcher", actor="dispatcher", reference=done["ref"], worker="worker",
+            role="dispatcher",
+            actor="dispatcher",
+            reference=done["ref"],
+            worker="worker",
             request_id="terminal-claim",
         )
         writer.move(
-            role="dispatcher", actor="dispatcher", reference=done["ref"], target="validate",
-            reason="", request_id="terminal-validate",
+            role="dispatcher",
+            actor="dispatcher",
+            reference=done["ref"],
+            target="validate",
+            reason="",
+            request_id="terminal-validate",
         )
         writer.move(
-            role="dispatcher", actor="dispatcher", reference=done["ref"], target="done",
-            reason="", request_id="terminal-done-move",
+            role="dispatcher",
+            actor="dispatcher",
+            reference=done["ref"],
+            target="done",
+            reason="",
+            request_id="terminal-done-move",
         )
 
         with mock.patch.object(TaskWriter, "archive", side_effect=TaskError("live_work", "live worker", 3)):
@@ -3328,7 +3315,16 @@ class SprintStatusHeadlessCommandTests(SprintFixture):
             contextlib.redirect_stderr(errors),
         ):
             code = main(
-                ["sprint", "status", "--ref", ref, "--data-dir", self.tmp.name, "--instance", str(self.instance)]
+                [
+                    "sprint",
+                    "status",
+                    "--ref",
+                    ref,
+                    "--data-dir",
+                    self.tmp.name,
+                    "--instance",
+                    str(self.instance),
+                ]
             )
         self.assertEqual(code, 0, errors.getvalue())
         return json.loads(output.getvalue())
@@ -4454,17 +4450,7 @@ class SprintCloseDecisionTests(SprintFixture):
         super().setUp()
         # A second open issue of the same product, so a close can decide two issues
         # differently and the refusal has more than one ref to be silent about.
-        self.client._record(
-            30,
-            "issue:second",
-            "Second issue",
-            {
-                "record_type": "issue",
-                "issue_product": "secretary",
-                "issue_kind": "bug",
-                "issue_priority": "P1",
-            },
-        )
+        self.arrange_issue("issue:second", product="secretary")
         self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
 
     def _open(self, **kwargs) -> str:
@@ -5493,9 +5479,7 @@ class SprintCloseDecisionTests(SprintFixture):
         # The command prints the operation's document, and that document refuses to read as a
         # satisfied contract.
         self.assertFalse(answer["definition_of_done"]["satisfied"])
-        self.assertEqual(
-            list_knowledge_documents(self.instance), (closed["closeout"]["document"],)
-        )
+        self.assertEqual(list_knowledge_documents(self.instance), (closed["closeout"]["document"],))
 
     def test_cli_close_without_the_file_refuses_before_it_writes(self) -> None:
         init_state_repo(self.instance)

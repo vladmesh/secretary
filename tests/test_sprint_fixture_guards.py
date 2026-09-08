@@ -39,9 +39,9 @@ BEFORE_REACH_INS = {
 AFTER_REACH_INS = {
     "client.calls": 21,
     "client.tasks": 11,
-    "_sprint_rows": 16,
+    "_sprint_rows": 12,
     "client.metadata": 8,
-    "_transactions": 11,
+    "_transactions": 9,
     "client.comments": 2,
 }
 EXPECTED_CLASSES = {
@@ -84,10 +84,7 @@ def _methods(module: object) -> dict[str, object]:
 class SprintFixtureGuards(unittest.TestCase):
     def test_all_204_original_methods_are_classified_once(self) -> None:
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
-        by_module = {
-            module.__name__: len(_methods(module))
-            for module in SUITES
-        }
+        by_module = {module.__name__: len(_methods(module)) for module in SUITES}
         self.assertEqual(by_module, EXPECTED_METHODS)
         self.assertEqual(len(methods), 204)
         by_class: dict[str, int] = {}
@@ -155,9 +152,7 @@ class SprintFixtureGuards(unittest.TestCase):
                     continue
                 body = textwrap.dedent(inspect.getsource(method))
                 tree = ast.parse(body)
-                names = {
-                    node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
-                } & forbidden_names
+                names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} & forbidden_names
                 rpc = {
                     node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
                 } & forbidden_rpc
@@ -173,7 +168,24 @@ class SprintFixtureGuards(unittest.TestCase):
                     )
                     if token in body
                 }
-                found = sorted(names | rpc | reach_ins)
+                storage_attrs = set()
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Attribute) or node.attr not in {
+                        "calls",
+                        "tasks",
+                        "metadata",
+                        "comments",
+                    }:
+                        continue
+                    owner = node.value
+                    if (
+                        isinstance(owner, ast.Name) and owner.id in {"client", "board", "source", "target"}
+                    ) or (
+                        isinstance(owner, ast.Attribute)
+                        and owner.attr in {"client", "board", "source", "target"}
+                    ):
+                        storage_attrs.add(node.attr)
+                found = sorted(names | rpc | reach_ins | storage_attrs)
                 if found:
                     violations.append(f"{qualified}: {', '.join(found)}")
         self.assertEqual(violations, [])

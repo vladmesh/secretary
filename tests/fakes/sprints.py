@@ -272,8 +272,7 @@ def _write_project_registry(root: Path, *projects: str) -> Path:
         repo = root / "project-repos" / project
         repo.mkdir(parents=True, exist_ok=True)
         (instance / "projects" / f"{project}.yaml").write_text(
-            f"id: {project}\nrepo: {repo}\nenabled: true\nadapter: secretary\n"
-            "default_branch: main\n",
+            f"id: {project}\nrepo: {repo}\nenabled: true\nadapter: secretary\ndefault_branch: main\n",
             encoding="utf-8",
         )
     # A config that validates, because the reads of this installation are reached through
@@ -374,9 +373,7 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         project = self.client.call("getProjectByName", name=SPRINT_BOARD_NAME)
         if not isinstance(project, dict) or not project.get("id"):
             self.fail(f"sprint board is not visible while arranging {reference}")
-        row = self.client.call(
-            "getTaskByReference", project_id=int(project["id"]), reference=reference
-        )
+        row = self.client.call("getTaskByReference", project_id=int(project["id"]), reference=reference)
         if not isinstance(row, dict):
             self.fail(f"sprint record is not visible while arranging {reference}")
         result = self.client.call("saveTaskMetadata", task_id=int(row["id"]), values=values)
@@ -393,22 +390,60 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         )["sprint"]
 
     def arrange_issue_closed(self, reference: str = "issue:open") -> None:
-        ProductIssueStore(  # type: ignore[arg-type]
-            self.client, data_dir=self.tmp.name, instance=self.instance
-        ).close_issue(
+        self.product_issue_store().close_issue(
             reference=reference,
             reason="resolved",
             actor="fixture",
             request_id=f"fixture-close-{reference}",
         )
 
+    def product_issue_store(self) -> ProductIssueStore:
+        """The public ownership contract used to arrange Product and Issue records."""
+        return ProductIssueStore(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance
+        )
+
+    def arrange_product(self, product_id: str, *, projects: list[str]) -> dict[str, Any]:
+        """Arrange fixed ownership identities inside the backend factory seam.
+
+        Product/Issue's public create contract allocates Issue references, while sprint fixtures
+        intentionally exercise stable named ownership. A future SQL fixture overrides this method
+        to seed its disposable ownership tables; portable suites never assume Pipeline rows.
+        """
+        reference = f"product:{product_id}"
+        task_id = max(int(row["id"]) for row in self.client.tasks) + 1
+        self.client._record(
+            task_id,
+            reference,
+            product_id.title(),
+            {
+                "record_type": "product",
+                "product_id": product_id,
+                "product_projects": json.dumps(projects),
+            },
+        )
+        return self.product_issue_store().show_product(product_id)
+
+    def arrange_issue(self, reference: str, *, product: str) -> dict[str, Any]:
+        task_id = max(int(row["id"]) for row in self.client.tasks) + 1
+        self.client._record(
+            task_id,
+            reference,
+            reference,
+            {
+                "record_type": "issue",
+                "issue_product": product,
+                "issue_kind": "feature",
+                "issue_priority": "P1",
+            },
+        )
+        return self.product_issue_store().show_issue(reference)
+
     def arrange_record_active(self, reference: str, *, active: bool) -> None:
         project = self.client.call("getProjectByName", name="Pipeline")
         if not isinstance(project, dict) or not project.get("id"):
             self.fail("Pipeline is not visible")
-        row = self.client.call(
-            "getTaskByReference", project_id=int(project["id"]), reference=reference
-        )
+        row = self.client.call("getTaskByReference", project_id=int(project["id"]), reference=reference)
         if not isinstance(row, dict):
             self.fail(f"record is not visible while arranging {reference}")
         if not active:
@@ -420,9 +455,7 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         project = self.client.call("getProjectByName", name="Pipeline")
         if not isinstance(project, dict) or not project.get("id"):
             self.fail("Pipeline is not visible")
-        row = self.client.call(
-            "getTaskByReference", project_id=int(project["id"]), reference=reference
-        )
+        row = self.client.call("getTaskByReference", project_id=int(project["id"]), reference=reference)
         if not isinstance(row, dict):
             self.fail(f"record is not visible while arranging {reference}")
         result = self.client.call("saveTaskMetadata", task_id=int(row["id"]), values=values)
@@ -446,9 +479,7 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         project = self.client.call("getProjectByName", name="Pipeline")
         if not isinstance(project, dict) or not project.get("id"):
             self.fail("Pipeline is not visible")
-        row = self.client.call(
-            "getTaskByReference", project_id=int(project["id"]), reference=reference
-        )
+        row = self.client.call("getTaskByReference", project_id=int(project["id"]), reference=reference)
         if not isinstance(row, dict):
             self.fail(f"record is not visible: {reference}")
         comments = self.client.call("getAllComments", task_id=int(row["id"]))
