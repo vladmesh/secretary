@@ -17,7 +17,7 @@ from unittest import mock
 
 import secretary.board
 from secretary import state_repo, upgrade
-from secretary.board import migrate, schema, store
+from secretary.board import migrate, provision, schema, store
 from secretary.board.store import (
     ROLES,
     STORE_ENV,
@@ -25,6 +25,7 @@ from secretary.board.store import (
     BoardStoreError,
     ensure_ignored,
     findings,
+    materialize_fresh,
     resolve,
     resolve_role,
     resolve_with_lifecycle,
@@ -188,6 +189,96 @@ class ConnectionFileTests(unittest.TestCase):
 
         self.assertEqual(sorted(os.listdir(self.instance)), before)
 
+    def test_fresh_materialization_is_complete_private_and_never_rotates(self) -> None:
+        subprocess.run(["git", "-C", str(self.instance), "init", "--quiet"], check=True)
+
+        config = materialize_fresh(self.instance)
+        path = store_path(self.instance)
+
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(set(config.as_environ()), set(STORE_ENV))
+        self.assertEqual(len({config.owner_password, config.app_password, config.read_password}), 3)
+        self.assertTrue(state_repo.is_ignored(self.instance, f"/{STORE_FILE}"))
+        before = path.read_bytes()
+        with self.assertRaisesRegex(BoardStoreError, "rotation"):
+            materialize_fresh(self.instance)
+        self.assertEqual(path.read_bytes(), before)
+
+
+class ProvisionDefinitionTests(unittest.TestCase):
+    def test_compose_contract_is_pinned_loopback_and_persistent(self) -> None:
+        self.assertIn("image: postgres:16", provision.COMPOSE_TEXT)
+        self.assertIn("restart: unless-stopped", provision.COMPOSE_TEXT)
+        self.assertIn("127.0.0.1:5432:5432", provision.COMPOSE_TEXT)
+        self.assertIn("board-db:/var/lib/postgresql/data", provision.COMPOSE_TEXT)
+        self.assertNotIn("SECRETARY_DB_APP_PASSWORD", provision.COMPOSE_TEXT)
+        self.assertNotIn("SECRETARY_DB_READ_PASSWORD", provision.COMPOSE_TEXT)
+
+    def test_absent_config_is_an_upgrade_noop_before_touching_docker(self) -> None:
+        with TemporaryDirectory() as temporary, mock.patch.object(provision, "_exists") as inspect:
+            outcome = provision.provision(Path(temporary))
+
+        self.assertIsNone(outcome)
+        inspect.assert_not_called()
+
+    def test_existing_volume_without_config_refuses_new_credentials(self) -> None:
+        with (
+            TemporaryDirectory() as temporary,
+            mock.patch.object(provision, "_exists", return_value=True),
+            mock.patch.object(store, "materialize_fresh") as materialize,
+            self.assertRaisesRegex(BoardStoreError, "exists without board-store.env"),
+        ):
+            provision.provision(
+                Path(temporary),
+                allow_create=True,
+                compose_path=Path(temporary) / "compose.yml",
+            )
+
+        materialize.assert_not_called()
+
+    def test_compose_drift_is_refused_without_replacing_the_file(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_store(root)
+            compose = root / "compose.yml"
+            compose.write_text("services: {}\n", encoding="utf-8")
+            compose.chmod(0o600)
+
+            with self.assertRaisesRegex(BoardStoreError, "definition drift"):
+                provision.provision(root, compose_path=compose)
+
+            self.assertEqual(compose.read_text(encoding="utf-8"), "services: {}\n")
+
+    def test_reconcile_passes_only_the_private_file_path_not_credentials_on_argv(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = write_store(root)
+            compose = root / "compose.yml"
+            compose.write_text(provision.COMPOSE_TEXT, encoding="utf-8")
+            compose.chmod(0o600)
+            calls = []
+
+            def command(arguments, **_kwargs):
+                calls.append(arguments)
+                if "inspect" in arguments:
+                    return "[{}]"
+                if "ps" in arguments:
+                    return "container-id"
+                return ""
+
+            with (
+                mock.patch.object(provision, "_run", side_effect=command),
+                mock.patch.object(provision, "_inspect_container"),
+                mock.patch.object(provision, "_wait_ready"),
+            ):
+                outcome = provision.provision(root, compose_path=compose)
+
+        self.assertIsNotNone(outcome)
+        arguments = " ".join(part for call in calls for part in call)
+        self.assertIn(str(config_path), arguments)
+        for secret in ("owner-secret", "app-secret", "read-secret"):
+            self.assertNotIn(secret, arguments)
+
 
 class SchemaModelTests(unittest.TestCase):
     """The models are the schema (§3), so what §3 constrains has to be *in* them.
@@ -257,9 +348,7 @@ class SchemaModelTests(unittest.TestCase):
             if isinstance(constraint, sa.CheckConstraint)
         ]
 
-        self.assertEqual(
-            len(checks), 38, "§3.13 counts 38 CHECK constraints at the head revision"
-        )
+        self.assertEqual(len(checks), 38, "§3.13 counts 38 CHECK constraints at the head revision")
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
@@ -371,9 +460,7 @@ class MigrationScriptTests(unittest.TestCase):
     def test_the_script_directory_ships_inside_the_installed_package(self) -> None:
         self.assertTrue((migrate.SCRIPT_LOCATION / "env.py").is_file())
         self.assertTrue((migrate.SCRIPT_LOCATION / "script.py.mako").is_file())
-        self.assertEqual(
-            migrate.SCRIPT_LOCATION.parent, Path(secretary.board.__file__).resolve().parent
-        )
+        self.assertEqual(migrate.SCRIPT_LOCATION.parent, Path(secretary.board.__file__).resolve().parent)
 
     def test_the_configuration_carries_no_connection_string_of_its_own(self) -> None:
         """§5.4 is the only place an installation's URL lives; an `alembic.ini` literal is not."""
@@ -498,22 +585,20 @@ class IgnoreLifecycleTests(InstanceRepository):
         self.assertFalse((self.instance / ".gitignore").exists())
         self.assertFalse(self.ignored())
 
-    def test_it_secures_a_configuration_anyone_could_read(self) -> None:
+    def test_it_refuses_a_configuration_anyone_could_read(self) -> None:
         write_store(self.instance, mode=0o644)
 
-        outcome = ensure_ignored(self.instance)
+        with self.assertRaisesRegex(BoardStoreError, "permissions are too broad"):
+            ensure_ignored(self.instance)
 
-        self.assertTrue(outcome.mode_repaired)
-        self.assertIn("secured board store mode", outcome.render())
-        self.assertEqual(store_path(self.instance).stat().st_mode & 0o777, 0o600)
-        resolve(self.instance)
+        self.assertEqual(store_path(self.instance).stat().st_mode & 0o777, 0o644)
 
-    def test_a_dry_run_reports_the_mode_repair_without_making_it(self) -> None:
+    def test_a_dry_run_also_refuses_a_permissive_file(self) -> None:
         write_store(self.instance, mode=0o644)
 
-        outcome = ensure_ignored(self.instance, dry_run=True)
+        with self.assertRaisesRegex(BoardStoreError, "permissions are too broad"):
+            ensure_ignored(self.instance, dry_run=True)
 
-        self.assertTrue(outcome.mode_repaired)
         self.assertEqual(store_path(self.instance).stat().st_mode & 0o777, 0o644)
 
     def test_an_already_private_configuration_needs_no_repair(self) -> None:
@@ -674,9 +759,15 @@ class UpgradeStepTests(unittest.TestCase):
         """§7.4's placement: the driver has to exist before the step can connect."""
         names = [step.__name__ for step in upgrade.STEPS]
 
+        dependency = names.index("step_dependencies")
         self.assertEqual(
-            names[names.index("step_dependencies") + 1],
-            "step_board_store",
+            names[dependency : dependency + 4],
+            [
+                "step_dependencies",
+                "step_dependency_provenance",
+                "step_board_store_provision",
+                "step_board_store",
+            ],
         )
 
     def test_an_installation_with_no_store_is_a_no_op_that_never_connects(self) -> None:

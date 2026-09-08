@@ -13,6 +13,16 @@ suite, then runs these seven named jobs in parallel:
 | integration-board | test / integration-board | Board, dispatcher and Pipeline integration flows. |
 | packaging | test / packaging | Bootstrap, installation, provisioning and upgrade flows. |
 
+The PostgreSQL delivery proof is deliberately split across those boundaries. Packaging tests
+exercise atomic credential materialization, fail-closed config and Compose drift, upgrade ordering
+and pulled-code handoff. `tests.test_board_store_schema` in `integration-board` uses real Docker
+Compose and `postgres:16`: it creates a disposable named volume on loopback port 5432, provisions
+all nine private values, migrates scratch to `0006_sprint_transport_key`, verifies owner/app/read
+logins and privileges, proves default privileges with a later owner-created table, reruns unchanged
+and removes the disposable project and volume. Missing Docker, Compose, psycopg, SQLAlchemy or
+Alembic is a red setup failure, never a skip. No integration test reads or writes the live
+installation, its Compose project or its volume.
+
 Each exact-SHA suite execution writes its GitHub step summary and uploads the
 `ci-evidence-<suite>-<sha>` artifact. Its artifact root contains `report.json`, `junit.xml` and
 `test-output.log`; the log contains all output up to 1,000,000 bytes and carries an explicit

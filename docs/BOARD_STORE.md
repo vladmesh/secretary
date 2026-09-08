@@ -1,7 +1,8 @@
 # The board store: read/write inventory and the PostgreSQL schema
 
-Status: implemented through revision `0006_sprint_transport_key` for Cards, Product/Issue and Sprint.
-Provisioning, live import and cutover remain separate work; the default backend is still Kanboard.
+Status: schema and container provisioning are implemented through revision
+`0006_sprint_transport_key` for Cards, Product/Issue and Sprint. Live import, backend-aware backup
+and cutover remain separate work; the default backend is still Kanboard.
 
 **The engine is given.** The owner chose PostgreSQL on 2026-09-07 (`sprint:1432`, PO comments of
 09:11Z and 09:22Z). This document does not argue for or against it and contains no comparison with
@@ -1522,8 +1523,9 @@ stay where they are; DoD 2 forbids changing admission behaviour in this slice.
 
 ### 5.1 Install method: a container beside the application
 
-**Chosen: `postgres:16` in its own Docker container, managed by a compose file the product writes,
-exactly as Kanboard is today.** Not a system package.
+**Implemented: `postgres:16` in its own Docker container, managed by
+`/opt/secretary/postgres-compose.yml`, which the product writes and verifies.** Not a system
+package. Bootstrap creates it; every configured upgrade reconciles it before Alembic runs.
 
 The reasons, from the inventory and the host:
 
@@ -1574,6 +1576,13 @@ makes "the database is not a file the checkpoint snapshots" a property of the la
 somebody has to remember. That holds whichever way §5.7's open question is answered: nothing the
 file-level backup copies is a live PostgreSQL data file.
 
+The Compose project is `secretary-board-store`, so the durable volume is
+`secretary-board-store_board-db`. Reconciliation verifies the exact image, restart policy,
+loopback publication and mount before `compose up`; drift is refused rather than silently
+recreating the container. An existing volume with no `board-store.env` is also refused: the image
+environment initializes only an empty volume and is not authority for an existing owner's
+password.
+
 ### 5.3 Port publication
 
 **Published, on loopback only: `127.0.0.1:5432:5432`.** This is forced by §5.1: the clients run on
@@ -1615,9 +1624,12 @@ SECRETARY_DB_READ_PASSWORD=<generated at bootstrap>
 
 Nine keys, all required, parsed with `board_transport.parse`'s all-or-nothing rule: an unknown key,
 a missing key, an empty value, a symlink or `mode & 0o077` each refuse the file rather than
-producing a partial configuration. The three passwords are generated at bootstrap with the same
-`secrets` primitive `secret_store.py` already uses; the user names are fixed, so only the passwords
-vary between installations.
+producing a partial configuration. The three passwords are independently generated at bootstrap
+with Python's `secrets` primitive; the user names are fixed, so only the passwords vary between
+installations. The ignore is written before the credentials, and the complete mode-0600 file is
+published atomically. Reconcile never replaces it. A missing file is an explicit no-op for an
+installation that has not been provisioned; a symlink, broad mode, unknown/missing/empty key or
+tracked file stops upgrade before container or migration work.
 
 **Why not the secret store.** `secret_store.py` exists for values whose loss makes an installation
 unrecoverable and which must survive a rebuild on a clean host from a recovery phrase. The database
@@ -1732,6 +1744,11 @@ after the first start rotating it means step 2 and nothing else — editing the 
 alone would change nothing and would leave the file disagreeing with the cluster. That is worth
 stating because the equivalent Kanboard reconciliation *does* flow through `--env-file`, and the
 two are not the same.
+
+The current CLI deliberately exposes no implicit rotation flag. Until a dedicated operator
+rotation command performs the four steps above as one controlled operation, edit neither the file
+nor the Compose environment: ordinary bootstrap and upgrade preserve the working credentials and
+refuse mismatches.
 
 ### 5.6 Pool and the number of real concurrent writers
 

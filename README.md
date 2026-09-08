@@ -51,8 +51,10 @@ sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 ```
 
-Bootstrap pins the board and session-manager transports, generates the local board credentials in
-`INSTANCE/runtime.env` with mode `0600`, and creates the Pipeline board from the instance registry.
+Bootstrap pins the board and session-manager transports, generates their local mode-0600 ignored
+configuration, creates the Pipeline board, and provisions the separate loopback-only `postgres:16`
+board-store container and persistent volume through the current Alembic head. This does not switch
+the card backend or perform a live import/cutover.
 
 ## Status
 

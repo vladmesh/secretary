@@ -484,8 +484,15 @@ class BootstrapBoardTests(unittest.TestCase):
                 mock.patch("secretary.bootstrap._compose_file"),
                 mock.patch("secretary.bootstrap._run"),
                 mock.patch("secretary.bootstrap.KanboardClient.for_instance", return_value=board),
+                mock.patch("secretary.bootstrap.provision_board_store") as provision_store,
+                mock.patch("secretary.bootstrap.migrate_instance") as migrate_store,
+                mock.patch("secretary.bootstrap.verify_board_store_roles") as verify_roles,
             ):
                 self.assertEqual(bootstrap(args), 0)
+
+            provision_store.assert_called_once_with(target, allow_create=True)
+            migrate_store.assert_called_once_with(target)
+            verify_roles.assert_called_once_with(target)
 
             self.assertFalse((target / "runtime.env").exists())
             self.assertTrue((target / BOOTSTRAP_STAMP).is_file())

@@ -33,6 +33,8 @@ from secretary.automations import (
     workspaces_root,
 )
 from secretary.board.migrate import migrate_instance
+from secretary.board.provision import provision as provision_board_store
+from secretary.board.provision import verify_roles as verify_board_store_roles
 from secretary.board.store import BoardStoreError, ensure_ignored, store_path
 from secretary.board_transport import (
     BoardTransportError,
@@ -121,6 +123,11 @@ class UpgradeContext:
     # Recovery may finish safe local work after retaining a checkpoint whose
     # remote publication failed. Every other caller keeps publication required.
     publication_policy: str = "required"
+    pull_result: StepResult | None = None
+    handoff_before: str | None = None
+    handoff_after: str | None = None
+    pulled_before: str | None = None
+    pulled_after: str | None = None
 
 
 @dataclass
@@ -191,7 +198,15 @@ def _touches(changed: tuple[str, ...], prefixes: tuple[str, ...]) -> bool:
 
 
 def step_pull(context: UpgradeContext) -> StepResult:
+    if context.pull_result is not None:
+        return context.pull_result
     if not context.pull:
+        if context.handoff_before and context.handoff_after:
+            return StepResult(
+                "pull",
+                "changed",
+                f"{context.handoff_before[:12]} -> {context.handoff_after[:12]}; running pulled schedule",
+            )
         return StepResult("pull", "skipped", "--no-pull")
     try:
         dirty = _git(context.product_root, ["status", "--porcelain"])
@@ -211,6 +226,8 @@ def step_pull(context: UpgradeContext) -> StepResult:
         return StepResult("pull", "unchanged", after[:12])
     context.changed_paths = _changed_paths(context.product_root, before, after)
     context.code_changed = _touches(context.changed_paths, MEMORY_CODE_PATHS)
+    context.pulled_before = before
+    context.pulled_after = after
     return StepResult("pull", "changed", f"{before[:12]} -> {after[:12]}")
 
 
@@ -308,6 +325,51 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
         return StepResult("dependencies", "failed", "pip install could not run")
     context.code_changed = True
     return StepResult("dependencies", "changed", f"installed the product dev extra into .venv: {reason}")
+
+
+def step_dependency_provenance(context: UpgradeContext) -> StepResult:
+    """Prove core imports come from the selected production installation environment."""
+    venv = context.product_root / ".venv"
+    python = venv / "bin" / "python"
+    if not python.is_file():
+        path = store_path(context.instance_path)
+        if path.exists() or path.is_symlink():
+            return StepResult(
+                "dependency-provenance",
+                "failed",
+                "a configured board store requires the selected product checkout's production venv",
+            )
+        return StepResult("dependency-provenance", "skipped", "no .venv in the product checkout")
+    program = (
+        "import importlib.util,json,pathlib,sys;"
+        "names=('secretary','psycopg','sqlalchemy','alembic');"
+        "print(json.dumps({'prefix':sys.prefix,'origins':{n:str(pathlib.Path(importlib.util.find_spec(n).origin).resolve()) for n in names}}))"
+    )
+    try:
+        completed = _proc.run([str(python), "-P", "-c", program], timeout=60)
+        if completed.returncode:
+            raise ValueError("the import probe failed")
+        evidence = json.loads(completed.stdout)
+        origins = evidence["origins"]
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return StepResult(
+            "dependency-provenance",
+            "failed",
+            "could not import secretary, psycopg, SQLAlchemy and Alembic from the production venv",
+        )
+    root = context.product_root.resolve()
+    try:
+        Path(origins["secretary"]).resolve().relative_to(root)
+        for name in ("psycopg", "sqlalchemy", "alembic"):
+            Path(origins[name]).resolve().relative_to(venv.resolve())
+    except (ValueError, TypeError):
+        return StepResult(
+            "dependency-provenance",
+            "failed",
+            "production imports escaped the selected product root or its venv",
+        )
+    detail = ", ".join(f"{name}={origins[name]}" for name in origins)
+    return StepResult("dependency-provenance", "unchanged", detail)
 
 
 def step_memory_clients(context: UpgradeContext) -> StepResult:
@@ -912,13 +974,53 @@ def step_board_store(context: UpgradeContext) -> StepResult:
     if not revisions:
         return StepResult(
             "board-store",
-            "would-change" if lifecycle.changed and context.dry_run else "changed" if lifecycle.changed else "unchanged",
+            "would-change"
+            if lifecycle.changed and context.dry_run
+            else "changed"
+            if lifecycle.changed
+            else "unchanged",
             f"{prefix}board store schema is already current",
         )
     listed = ", ".join(revisions)
     if context.dry_run:
-        return StepResult("board-store", "would-change", f"{prefix}would apply board store migrations {listed}")
+        return StepResult(
+            "board-store", "would-change", f"{prefix}would apply board store migrations {listed}"
+        )
     return StepResult("board-store", "changed", f"{prefix}applied board store migrations {listed}")
+
+
+def step_board_store_provision(context: UpgradeContext) -> StepResult:
+    """Reconcile the container only for an installation carrying the lifecycle marker."""
+    try:
+        outcome = provision_board_store(context.instance_path, dry_run=context.dry_run)
+    except BoardStoreError as exc:
+        return StepResult("board-store-provision", "failed", str(exc))
+    if outcome is None:
+        return StepResult(
+            "board-store-provision", "skipped", "no board-store.env; PostgreSQL is not provisioned"
+        )
+    return StepResult(
+        "board-store-provision",
+        "would-change"
+        if context.dry_run and outcome.changed
+        else "changed"
+        if outcome.changed
+        else "unchanged",
+        outcome.render(dry_run=context.dry_run),
+    )
+
+
+def step_board_store_roles(context: UpgradeContext) -> StepResult:
+    path = store_path(context.instance_path)
+    if not path.exists() and not path.is_symlink():
+        return StepResult("board-store-roles", "skipped", "PostgreSQL is not provisioned")
+    if context.dry_run:
+        return StepResult("board-store-roles", "skipped", "--dry-run does not test role logins")
+    try:
+        verify_board_store_roles(context.instance_path)
+    except BoardStoreError as exc:
+        return StepResult("board-store-roles", "failed", str(exc))
+    return StepResult("board-store-roles", "unchanged", "owner/app/read role boundary verified")
 
 
 # Validate registries before any mutating materialization step.
@@ -928,7 +1030,10 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_memory_pack,
     step_board_transport,
     step_dependencies,
+    step_dependency_provenance,
+    step_board_store_provision,
     step_board_store,
+    step_board_store_roles,
     step_memory_clients,
     step_head_registry,
     step_publish_head_registry,
@@ -1002,6 +1107,54 @@ def run_upgrade(args) -> int:
         runtime_user=runtime_user,
         runtime_home=runtime_home,
     )
+    handoff = os.environ.get("SECRETARY_UPGRADE_HANDOFF")
+    if handoff:
+        try:
+            marker = json.loads(handoff)
+            before = str(marker["before"])
+            after = str(marker["after"])
+            if _git(product_root, ["rev-parse", "HEAD"]) != after:
+                raise ValueError("checkout no longer matches the pulled revision")
+            if _git(product_root, ["status", "--porcelain"]):
+                raise ValueError("checkout became dirty during pulled-code handoff")
+            changed_paths = marker.get("changed_paths")
+            if not isinstance(changed_paths, list) or not all(
+                isinstance(path, str) for path in changed_paths
+            ):
+                raise ValueError("handoff has no valid changed-path set")
+        except (GitError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"secretary upgrade: invalid pulled-code handoff: {exc}")
+            return 1
+        context.pull = False
+        context.handoff_before = before
+        context.handoff_after = after
+        context.changed_paths = tuple(changed_paths)
+        context.code_changed = _touches(context.changed_paths, MEMORY_CODE_PATHS)
+    elif context.pull and not context.dry_run:
+        pulled = step_pull(context)
+        if pulled.failed:
+            result = UpgradeResult([pulled])
+            print(result.render())
+            return 1
+        if pulled.status == "changed":
+            before = context.pulled_before
+            after = context.pulled_after
+            if before is None or after is None:
+                print("secretary upgrade: pull did not record the before/after revisions")
+                return 1
+            try:
+                _exec_pulled_upgrade(
+                    args,
+                    product_root,
+                    before=before,
+                    after=after,
+                    changed_paths=context.changed_paths,
+                )
+            except OSError as exc:
+                print(f"secretary upgrade: could not run pulled revision {after[:12]}: {exc}")
+                return 1
+            raise AssertionError("exec returned unexpectedly")
+        context.pull_result = pulled
     result = run_steps(context)
     if args.json:
         print(
@@ -1021,6 +1174,47 @@ def run_upgrade(args) -> int:
     else:
         print(result.render())
     return 0 if result.ok else 1
+
+
+def _exec_pulled_upgrade(
+    args: Any,
+    product_root: Path,
+    *,
+    before: str,
+    after: str,
+    changed_paths: tuple[str, ...],
+) -> None:
+    """Replace the import-bound process with the exact checkout revision it just pulled."""
+    python = product_root / ".venv" / "bin" / "python"
+    if not python.is_file():
+        raise FileNotFoundError(f"the pulled checkout has no production interpreter at {python}")
+    argv = [
+        str(python),
+        "-P",
+        "-m",
+        "secretary",
+        "upgrade",
+        "--instance",
+        str(args.instance),
+        "--no-pull",
+        "--base-branch",
+        str(args.base_branch),
+        "--product-root",
+        str(product_root),
+    ]
+    if args.dry_run:
+        argv.append("--dry-run")
+    if getattr(args, "runtime_user", None):
+        argv.extend(("--runtime-user", str(args.runtime_user)))
+    if getattr(args, "host_fixture", None):
+        argv.extend(("--host-fixture", str(args.host_fixture)))
+    if args.json:
+        argv.append("--json")
+    environment = dict(os.environ)
+    environment["SECRETARY_UPGRADE_HANDOFF"] = json.dumps(
+        {"before": before, "after": after, "changed_paths": list(changed_paths)}
+    )
+    os.execve(python, argv, environment)
 
 
 def add_upgrade_command(subparsers) -> None:

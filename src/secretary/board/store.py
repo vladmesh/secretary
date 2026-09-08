@@ -13,18 +13,21 @@ unreachable otherwise: a single user would make every consumer connect as the ow
 does not pick a role freely either; the construction path binds it, which is what turns the
 boundary from advisory into reachable.
 
-Nothing here writes the file.  Generating the three passwords and materializing the file is
-bootstrap's job, and the rotation shape §5.5 describes is a reconcile on top of it; this module
-is the read side those cards and every consumer share.
+The one write path is `materialize_fresh`: bootstrap calls it once after proving no persistent
+volume already exists. It publishes a complete private file and refuses to replace it. Rotation
+remains an explicit operation rather than an ordinary reconcile side effect.
 """
 
 from __future__ import annotations
 
+import os
+import secrets
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 from secretary import state_repo
+from secretary._fsutil import stage_text
 from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
 
 STORE_FILE = "board-store.env"
@@ -126,6 +129,56 @@ class BoardStoreConfig:
 
 def store_path(instance_dir: Path | str) -> Path:
     return normalize_instance_dir(instance_dir) / STORE_FILE
+
+
+def fresh_config() -> BoardStoreConfig:
+    """Build one installation's fixed identities and independent random credentials."""
+    passwords = [secrets.token_urlsafe(32) for _ in ROLES]
+    if len(set(passwords)) != len(passwords):  # defensive even though collision is negligible
+        raise BoardStoreError("could not generate independent board store credentials")
+    return BoardStoreConfig(
+        host="127.0.0.1",
+        port=5432,
+        dbname="secretary",
+        owner_user="secretary_owner",
+        owner_password=passwords[0],
+        app_user="secretary_app",
+        app_password=passwords[1],
+        read_user="secretary_read",
+        read_password=passwords[2],
+    )
+
+
+def materialize_fresh(instance_dir: Path | str) -> BoardStoreConfig:
+    """Atomically create the complete private file, never replacing credentials.
+
+    The ignore is installed before credentials exist.  The temporary is mode 0600 before its
+    rename, so neither a watcher nor a failing process can observe a permissive or partial file.
+    """
+    directory = normalize_instance_dir(instance_dir)
+    path = store_path(directory)
+    if path.exists() or path.is_symlink():
+        raise BoardStoreError("board store configuration already exists; explicit rotation is required")
+    ensure_ignored(directory)
+    config = fresh_config()
+    body = "".join(f"{key}={value}\n" for key, value in config.as_environ().items())
+    staged: Path | None = None
+    try:
+        staged = stage_text(path, body)
+        staged.chmod(0o600)
+        os.link(staged, path, follow_symlinks=False)
+        staged.unlink()
+        staged = None
+    except BoardStoreError:
+        raise
+    except FileExistsError:
+        raise BoardStoreError("board store configuration appeared during provisioning") from None
+    except OSError as exc:
+        raise BoardStoreError(f"could not materialize board store configuration: {exc}") from None
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+    return config
 
 
 def parse(path: Path, *, require_private: bool = True) -> BoardStoreConfig:
@@ -255,33 +308,29 @@ def enforce_exclusion(instance_dir: Path | str, *, dry_run: bool = False) -> Sto
 def ensure_ignored(instance_dir: Path | str, *, dry_run: bool = False) -> StoreOutcome:
     """The durable exclusion `board_transport.ensure` gives the transport, for this file.
 
-    Two actions, each reported independently: the `/board-store.env` entry in the instance
-    repository's exclusions, and a mode repair when the file exists and is readable by anyone but
-    its owner. A file already in the index is not something an exclusion can fix, so it refuses
-    rather than pretending; a symlink refuses for the reason `parse` refuses one.
+    It adds the `/board-store.env` entry to the instance repository's exclusions. A file already
+    in the index is not something an exclusion can fix, so it refuses rather than pretending; a
+    symlink or permissive mode also refuses. Credentials that may already have been exposed are
+    never made healthy by a silent chmod.
 
     It **never creates the file**. The passwords are generated once, by the bootstrap or reconcile
     path that materializes `board-store.env`, and that owner calls this before it writes — which
     is the order that keeps a generated credential from ever being a tracked one. This card ships
     the operation and does not run it against any live installation.
     """
-    ignore_added = enforce_exclusion(instance_dir, dry_run=dry_run).ignore_added
     path = store_path(instance_dir)
     try:
         mode = path.lstat().st_mode
     except FileNotFoundError:
-        return StoreOutcome(ignore_added=ignore_added)
+        return enforce_exclusion(instance_dir, dry_run=dry_run)
     except OSError as exc:
         raise BoardStoreError(f"board store configuration is unreadable: {path}") from exc
     if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
         raise BoardStoreError("board store configuration must be a regular file, not a symlink")
-    mode_repaired = bool(mode & 0o077)
-    if mode_repaired and not dry_run:
-        try:
-            path.chmod(0o600)
-        except OSError as exc:
-            raise BoardStoreError(f"could not secure board store configuration: {exc}") from None
-    return StoreOutcome(ignore_added=ignore_added, mode_repaired=mode_repaired)
+    if mode & 0o077:
+        raise BoardStoreError("board store configuration permissions are too broad; run chmod 0600")
+    ignore_added = enforce_exclusion(instance_dir, dry_run=dry_run).ignore_added
+    return StoreOutcome(ignore_added=ignore_added)
 
 
 def findings(instance_dir: Path | str) -> list[str]:
@@ -323,6 +372,8 @@ __all__ = [
     "enforce_exclusion",
     "ensure_ignored",
     "findings",
+    "fresh_config",
+    "materialize_fresh",
     "parse",
     "resolve",
     "resolve_role",

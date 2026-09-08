@@ -40,7 +40,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from secretary import upgrade
-from secretary.board import migrate, schema
+from secretary.board import migrate, provision, schema
 from secretary.board.backend import record_key
 from secretary.board.store import BoardStoreConfig, BoardStoreError
 
@@ -217,9 +217,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
 
     def test_0006_frozen_backfill_agrees_with_the_runtime_sprint_mapping(self) -> None:
-        revision = importlib.import_module(
-            "secretary.board.migrations.versions.0006_sprint_transport_key"
-        )
+        revision = importlib.import_module("secretary.board.migrations.versions.0006_sprint_transport_key")
         self.assertFalse(hasattr(revision, "record_key"))
         for reference in ("sprint:0", "sprint:1596", "sprint:canary", "sprint:١"):
             with self.subTest(reference=reference):
@@ -290,9 +288,20 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.assertEqual(self.run_migrations(connection), ())
 
         self.assertEqual(self.counts(connection), before)
-        self.assertEqual(
-            connection.exec_driver_sql("SELECT count(*) FROM alembic_version").fetchone()[0], 1
+        self.assertEqual(connection.exec_driver_sql("SELECT count(*) FROM alembic_version").fetchone()[0], 1)
+
+    def test_a_database_at_the_previous_head_advances_to_the_current_head(self) -> None:
+        from alembic import command
+
+        connection = self.owner_connection()
+        command.upgrade(
+            migrate.alembic_config(connection=connection, passwords=self.passwords),
+            "0005_sprint_sql",
         )
+        connection.commit()
+
+        self.assertEqual(self.run_migrations(connection), ("0006_sprint_transport_key",))
+        self.assertEqual(migrate.current_revision(connection), REVISIONS[-1])
 
     def test_a_dry_run_reads_the_version_and_writes_nothing(self) -> None:
         connection = self.owner_connection()
@@ -300,9 +309,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         owed = self.run_migrations(connection, dry_run=True)
 
         self.assertEqual(owed, REVISIONS)
-        self.assertIsNone(
-            connection.exec_driver_sql("SELECT to_regclass('public.products')").fetchone()[0]
-        )
+        self.assertIsNone(connection.exec_driver_sql("SELECT to_regclass('public.products')").fetchone()[0])
         self.assertIsNone(
             connection.exec_driver_sql("SELECT to_regclass('public.alembic_version')").fetchone()[0]
         )
@@ -364,9 +371,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "VALUES ('secretary', %s, 'Secretary', now(), now())",
             (record_key("product", "secretary"),),
         )
-        connection.exec_driver_sql(
-            "INSERT INTO projects (project_id) VALUES ('secretary')"
-        )
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
         connection.exec_driver_sql(
             "INSERT INTO issues (issue_id, board_key, product_id, title, issue_kind, priority, "
             "created_at, updated_at) VALUES ('2fdac531', %s, 'secretary', 'An issue', 'bug', "
@@ -453,9 +458,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.card(connection, "secretary-1439", sprint="sprint:canary-terra-final-20260813")
 
         self.assertEqual(
-            connection.exec_driver_sql(
-                "SELECT task_ref, sprint_ref FROM tasks ORDER BY task_ref"
-            ).fetchall(),
+            connection.exec_driver_sql("SELECT task_ref, sprint_ref FROM tasks ORDER BY task_ref").fetchall(),
             [
                 ("secretary-1438", "sprint:canary-terra-20260813"),
                 ("secretary-1439", "sprint:canary-terra-final-20260813"),
@@ -546,9 +549,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(number, 1038)
         self.assertEqual(
-            connection.exec_driver_sql(
-                "SELECT ref FROM sprints WHERE sprint_number = 1038"
-            ).fetchone()[0],
+            connection.exec_driver_sql("SELECT ref FROM sprints WHERE sprint_number = 1038").fetchone()[0],
             "sprint:1038",
         )
 
@@ -653,9 +654,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             holder.execute("SELECT pg_advisory_unlock(%s)", (migrate.ADVISORY_LOCK_KEY,))
         self.assertTrue(finished.wait(60), "the runner never acquired the released lock")
         worker.join(timeout=5)
-        self.assertEqual(
-            connection.exec_driver_sql("SELECT count(*) FROM alembic_version").fetchone()[0], 1
-        )
+        self.assertEqual(connection.exec_driver_sql("SELECT count(*) FROM alembic_version").fetchone()[0], 1)
 
     def test_the_lock_is_released_once_the_run_is_done(self) -> None:
         connection = self.owner_connection()
@@ -693,9 +692,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 app.exec_driver_sql("CREATE TABLE forbidden (a int)")
 
         with self.engine("read").connect() as reader:
-            self.assertEqual(
-                reader.exec_driver_sql("SELECT count(*) FROM products").fetchone()[0], 2
-            )
+            self.assertEqual(reader.exec_driver_sql("SELECT count(*) FROM products").fetchone()[0], 2)
             with self.assertRaises(sa.exc.ProgrammingError):
                 reader.exec_driver_sql(
                     "INSERT INTO products (product_id, board_key, title, created_at, updated_at) "
@@ -715,9 +712,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             app.exec_driver_sql("INSERT INTO later_table (a) VALUES (2)")
             app.commit()
         with self.engine("read").connect() as reader:
-            self.assertEqual(
-                reader.exec_driver_sql("SELECT count(*) FROM later_table").fetchone()[0], 2
-            )
+            self.assertEqual(reader.exec_driver_sql("SELECT count(*) FROM later_table").fetchone()[0], 2)
 
     def test_the_late_product_comment_table_has_app_and_read_role_grants(self) -> None:
         connection = self.owner_connection()
@@ -812,6 +807,61 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertTrue(result.failed)
         self.assertIn("board store", result.detail)
+
+    def test_compose_provision_migrate_roles_and_rerun_on_disposable_volume(self) -> None:
+        """The delivery boundary itself, not a hand-built equivalent container."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            compose = root / "postgres-compose.yml"
+            project = f"secretary-provision-{root.name.lower()}"
+
+            def cleanup() -> None:
+                config = root / "board-store.env"
+                if config.exists() and compose.exists():
+                    docker(
+                        "compose",
+                        "--project-name",
+                        project,
+                        "--env-file",
+                        str(config),
+                        "--file",
+                        str(compose),
+                        "down",
+                        "--volumes",
+                        "--remove-orphans",
+                    )
+
+            try:
+                first = provision.provision(
+                    root,
+                    allow_create=True,
+                    compose_path=compose,
+                    project=project,
+                )
+                self.assertIsNotNone(first)
+                self.assertTrue(first.changed)
+                secret_values = list(provision.store.resolve(root).as_environ().values())[4::2]
+                report = first.render()
+                self.assertTrue(all(secret not in report for secret in secret_values))
+
+                self.assertEqual(migrate.migrate_instance(root), REVISIONS)
+                provision.verify_roles(root)
+                import sqlalchemy as sa
+
+                engine = sa.create_engine(migrate.sqlalchemy_url(provision.store.resolve_role(root, "owner")))
+                try:
+                    with engine.connect() as connection:
+                        self.assertEqual(migrate.current_revision(connection), migrate.head_revision())
+                finally:
+                    engine.dispose()
+
+                second = provision.provision(root, compose_path=compose, project=project)
+                self.assertIsNotNone(second)
+                self.assertFalse(second.changed)
+                self.assertEqual(migrate.migrate_instance(root), ())
+                self.assertTrue(docker("volume", "inspect", f"{project}_board-db"))
+            finally:
+                cleanup()
 
 
 if __name__ == "__main__":

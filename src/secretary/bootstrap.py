@@ -29,6 +29,9 @@ import yaml
 
 from secretary import _proc
 from secretary._fsutil import write_text_atomic
+from secretary.board.migrate import migrate_instance
+from secretary.board.provision import provision as provision_board_store
+from secretary.board.provision import verify_roles as verify_board_store_roles
 from secretary.board_transport import ensure_from_runtime_values, transport_path
 from secretary.host_apply import pinned_orca_executable
 from secretary.installation import (
@@ -502,6 +505,9 @@ def bootstrap(args: argparse.Namespace) -> int:
             )
             _wait_for_kanboard(target)
             ensure_pipeline_board(target, client=KanboardClient.for_instance(target))
+            provision_board_store(target, allow_create=True)
+            migrate_instance(target)
+            verify_board_store_roles(target)
         print("secretary bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
     except (BootstrapError, InstallError, TaskError, OSError, RuntimeError) as exc:
