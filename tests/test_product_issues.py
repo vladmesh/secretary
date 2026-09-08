@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 from secretary.board.events import BoardEventCanon
@@ -17,6 +18,7 @@ from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskAudit, TaskError, TaskWriter
 from tests.fakes.product_issues import ProductBoard
 from tests.observer_identity import as_observer
+from tests.product_issue_fixtures import ProductIssueFixture
 
 
 class LiveSwimlaneBoard(ProductBoard):
@@ -26,7 +28,7 @@ class LiveSwimlaneBoard(ProductBoard):
     `false` instead of an error, which is what the live board does for `swimlane_id=0`.
     """
 
-    LANES = [
+    LANES: ClassVar[list[dict[str, object]]] = [
         {"id": 9, "name": "service-template", "position": 3},
         {"id": 4, "name": "secretary", "position": 1},
         {"id": 7, "name": "codegen-orchestrator", "position": 2},
@@ -61,15 +63,41 @@ class NoSwimlaneBoard(ProductBoard):
         return super().call(method, **params)
 
 
-class ProductIssueSwimlaneTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmpdir.name)
-        (self.root / "projects").mkdir()
-        (self.root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
+    """Portable lane contract plus named Kanboard transport/recovery cases.
 
-    def tearDown(self) -> None:
-        self.tmpdir.cleanup()
+    The complete method inventory is intentionally kept here: these cases construct a
+    Kanboard transport, alter its replies, or inspect lane/RPC state and do not claim SQL parity.
+    """
+
+    PORTABLE_CONTRACT = frozenset(
+        {
+            "test_a_record_takes_the_lane_named_after_its_product",
+            "test_the_lane_does_not_depend_on_swimlane_order_or_on_a_default_lane",
+            "test_a_product_without_a_lane_gets_one_named_after_it",
+            "test_a_board_without_swimlanes_gets_the_product_lane",
+            "test_a_repeated_delivery_lands_in_the_lane_the_first_one_chose",
+        }
+    )
+    KANBOARD_ONLY = dict.fromkeys(
+        {
+            "test_a_lane_another_writer_added_between_the_two_calls_is_reused",
+            "test_the_lane_is_provisioned_before_the_occurrence_is_staged",
+            "test_a_death_after_the_lane_is_created_leaves_the_record_creatable",
+            "test_a_retried_staged_create_takes_the_lane_of_its_staged_product",
+            "test_refused_create_is_terminal_and_leaves_no_transaction_behind",
+            "test_nonpositive_create_reply_with_a_marker_is_repaired_without_a_second_create",
+            "test_nonpositive_create_proof_failures_keep_product_and_issue_pending",
+            "test_failing_swimlane_lookup_discards_product_and_issue_create",
+            "test_staged_transaction_without_a_backend_row_is_discarded_by_the_operator",
+            "test_discard_refuses_a_transaction_that_already_wrote_to_the_board",
+            "test_quarantined_document_returns_through_adopt_and_retry",
+        },
+        "Kanboard swimlane RPC ordering, false/error shape, or transaction recovery",
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
 
     def _store(self, client) -> ProductIssueStore:
         return ProductIssueStore(client, data_dir=self.root / "data", instance=self.root)
@@ -87,15 +115,16 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
         coincidence of position rather than by the product.  The board is therefore reordered so
         that the coincidence cannot hold: the product lane is now last, and still chosen.
         """
-        client = LiveSwimlaneBoard()
-        client.swimlanes = [
-            {"id": 9, "name": "service-template", "position": 1},
-            {"id": 7, "name": "codegen-orchestrator", "position": 2},
-            {"id": 4, "name": "secretary", "position": 3},
-        ]
-        store = self._store(client)
+        store = self.store_with_lanes(
+            [
+                {"id": 9, "name": "service-template", "position": 1},
+                {"id": 7, "name": "codegen-orchestrator", "position": 2},
+                {"id": 4, "name": "secretary", "position": 3},
+            ]
+        )
 
-        product = store.create_product(
+        product = self.create_product(
+            store=store,
             product_id="secretary",
             projects=["secretary"],
             title="Secretary",
@@ -103,7 +132,8 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             actor="po",
             request_id="live-product",
         )
-        issue = store.create_issue(
+        issue = self.create_issue(
+            store=store,
             product="secretary",
             issue_kind="bug",
             priority="P1",
@@ -114,13 +144,11 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
         )
 
         self.assertEqual(product["id"], "secretary")
-        lanes = [params["swimlane_id"] for method, params in client.calls if method == "createTask"]
-        self.assertEqual(lanes, [4, 4])
-        self.assertEqual(self._created(client, "product:secretary")["swimlane_id"], 4)
-        self.assertEqual(self._created(client, issue["ref"])["swimlane_id"], 4)
-        # Nothing was added: the board already had the lane the product names.
-        self.assertNotIn("addSwimlane", [method for method, _ in client.calls])
-        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.lane_binding("product:secretary", store=store), "secretary")
+        self.assertEqual(self.lane_binding(issue["ref"], store=store), "secretary")
+        self.assertEqual(
+            self.request_state(store=store)["transactions"], {"ok": True, "pending": 0}
+        )
 
     def test_the_lane_does_not_depend_on_swimlane_order_or_on_a_default_lane(self) -> None:
         """The same product takes the same lane whatever order the board lists, `Default` first.
@@ -150,11 +178,10 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
                 root = Path(tmpdir)
                 (root / "projects").mkdir()
                 (root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
-                client = LiveSwimlaneBoard()
-                client.swimlanes = [dict(lane) for lane in order]
-                store = ProductIssueStore(client, data_dir=root / "data", instance=root)
+                store = self.store_with_lanes(order, root=root)
 
-                store.create_product(
+                self.create_product(
+                    store=store,
                     product_id="secretary",
                     projects=["secretary"],
                     title="Secretary",
@@ -163,10 +190,8 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
                     request_id="ordered-product",
                 )
 
-                row = self._created(client, "product:secretary")
-                self.assertEqual(self._lane_names(client)[int(row["swimlane_id"])], "secretary")
-                chosen.append(int(row["swimlane_id"]))
-        self.assertEqual(chosen, [4, 4, 4])
+                chosen.append(self.lane_binding("product:secretary", store=store))
+        self.assertEqual(chosen, ["secretary", "secretary", "secretary"])
 
     def test_a_product_without_a_lane_gets_one_named_after_it(self) -> None:
         """`codegen` is bound to two projects and has no lane of its own on the live board.
@@ -182,10 +207,10 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             "id: service-template\n",
             encoding="utf-8",
         )
-        client = LiveSwimlaneBoard()
-        store = self._store(client)
+        store = self.store_with_lanes(self.existing_project_lanes())
 
-        store.create_product(
+        self.create_product(
+            store=store,
             product_id="codegen",
             projects=["codegen-orchestrator", "service-template"],
             title="Codegen",
@@ -193,7 +218,8 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             actor="po",
             request_id="codegen-product",
         )
-        issue = store.create_issue(
+        issue = self.create_issue(
+            store=store,
             product="codegen",
             issue_kind="feature",
             priority="P2",
@@ -203,19 +229,17 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             request_id="codegen-issue",
         )
 
-        added = [params["name"] for method, params in client.calls if method == "addSwimlane"]
-        self.assertEqual(added, ["codegen"])
-        lane = self._created(client, "product:codegen")["swimlane_id"]
-        self.assertEqual(self._lane_names(client)[int(lane)], "codegen")
-        # The Issue reuses the lane its product created rather than adding a second one.
-        self.assertEqual(self._created(client, issue["ref"])["swimlane_id"], lane)
-        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.lane_binding("product:codegen", store=store), "codegen")
+        self.assertEqual(self.lane_binding(issue["ref"], store=store), "codegen")
+        self.assertEqual(
+            self.request_state(store=store)["transactions"], {"ok": True, "pending": 0}
+        )
 
     def test_a_board_without_swimlanes_gets_the_product_lane(self) -> None:
-        client = NoSwimlaneBoard()
-        store = self._store(client)
+        store = self.store_with_lanes([])
 
-        store.create_product(
+        self.create_product(
+            store=store,
             product_id="secretary",
             projects=["secretary"],
             title="Secretary",
@@ -224,9 +248,10 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             request_id="plain-product",
         )
 
-        lane = self._created(client, "product:secretary")["swimlane_id"]
-        self.assertEqual(self._lane_names(client)[int(lane)], "secretary")
-        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.lane_binding("product:secretary", store=store), "secretary")
+        self.assertEqual(
+            self.request_state(store=store)["transactions"], {"ok": True, "pending": 0}
+        )
 
     def test_a_lane_another_writer_added_between_the_two_calls_is_reused(self) -> None:
         """A refused `addSwimlane` is read back, not reported: the lane exists, that is the answer."""
@@ -254,7 +279,7 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
         self.assertEqual(self._created(client, "product:secretary")["swimlane_id"], 21)
         self.assertEqual([lane["name"] for lane in client.swimlanes], ["secretary"])
 
-    _READ_METHODS = {
+    _READ_METHODS: ClassVar[set[str]] = {
         "getProjectByName",
         "getColumns",
         "getAllTasks",
@@ -337,16 +362,18 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             return result
 
         client.call = die_after_the_lane  # type: ignore[method-assign]
-        with mock.patch.object(TaskAudit, "discard", lambda *args, **kwargs: None):
-            with self.assertRaises(TaskError):
-                store.create_product(
-                    product_id="butler",
-                    projects=["secretary"],
-                    title="Butler",
-                    description="",
-                    actor="po",
-                    request_id="died-after-the-lane",
-                )
+        with (
+            mock.patch.object(TaskAudit, "discard", lambda *args, **kwargs: None),
+            self.assertRaises(TaskError),
+        ):
+            store.create_product(
+                product_id="butler",
+                projects=["secretary"],
+                title="Butler",
+                description="",
+                actor="po",
+                request_id="died-after-the-lane",
+            )
 
         # The lane survives the failed attempt and is reused, not added a second time.
         self.assertEqual([lane["name"] for lane in client.swimlanes][-1], "butler")
@@ -376,9 +403,9 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
         Between the two deliveries the board gains a `Default swimlane` and puts it first, which
         under the lane rule this replaces would have been the lane of the second attempt.
         """
-        client = LiveSwimlaneBoard()
-        store = self._store(client)
-        store.create_product(
+        store = self.store_with_lanes(self.existing_project_lanes())
+        self.create_product(
+            store=store,
             product_id="secretary",
             projects=["secretary"],
             title="Secretary",
@@ -386,7 +413,8 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             actor="po",
             request_id="redelivered-product",
         )
-        issue = store.create_issue(
+        issue = self.create_issue(
+            store=store,
             product="secretary",
             issue_kind="bug",
             priority="P0",
@@ -396,8 +424,11 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             request_id="redelivered-issue",
         )
 
-        client.swimlanes.insert(0, {"id": 33, "name": "Default swimlane", "position": 0})
-        again = store.create_issue(
+        self.add_external_lane(
+            {"id": 33, "name": "Default swimlane", "position": 0}, store=store, first=True
+        )
+        again = self.create_issue(
+            store=store,
             product="secretary",
             issue_kind="bug",
             priority="P0",
@@ -406,7 +437,8 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             actor="po",
             request_id="redelivered-issue",
         )
-        product_again = store.create_product(
+        product_again = self.create_product(
+            store=store,
             product_id="secretary",
             projects=["secretary"],
             title="Secretary",
@@ -417,10 +449,15 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
 
         self.assertEqual(again["ref"], issue["ref"])
         self.assertEqual(product_again["id"], "secretary")
-        rows = [task for task in client.tasks if task.get("reference") in {issue["ref"], "product:secretary"}]
-        self.assertEqual(sorted(int(row["swimlane_id"]) for row in rows), [4, 4])
-        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
-        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.lane_binding("product:secretary", store=store), "secretary")
+        self.assertEqual(self.lane_binding(issue["ref"], store=store), "secretary")
+        self.assertEqual(
+            self.request_state(store=store),
+            {
+                "transactions": {"ok": True, "pending": 0},
+                "audit": {"ok": True, "pending": 0},
+            },
+        )
 
     def test_a_retried_staged_create_takes_the_lane_of_its_staged_product(self) -> None:
         """The staged transaction writer reads the product from its own intent, not from the board.
@@ -891,17 +928,45 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
         self.assertEqual([entry["kind"] for entry in store.audit.events()], ["product_created"])
 
 
-class ProductIssueStoreTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmpdir.name)
-        (self.root / "projects").mkdir()
-        (self.root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
-        self.client = ProductBoard()
-        self.store = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root)
+class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
+    """Reusable ProductIssueStore contract plus explicitly named Kanboard recovery cases."""
 
-    def tearDown(self) -> None:
-        self.tmpdir.cleanup()
+    KANBOARD_ONLY: ClassVar[dict[str, str]] = {
+        "test_claim_rejects_a_product_or_issue_record_without_any_write": "constructs legacy Kanboard card rows and asserts RPC absence",
+        "test_pending_claim_replay_and_reconcile_refuse_a_product_or_issue": "constructs a legacy Kanboard partial claim and exercises audit repair",
+        "test_a_card_in_issues_reaches_ready_only_through_the_po": "constructs a generic Kanboard task in a transport column",
+        "test_rejected_product_metadata_stays_pending_until_same_request_repairs_it": "models Kanboard false metadata reply and audit-pending repair",
+        "test_typed_pending_is_listed_with_its_repair_identity": "models Kanboard false metadata reply and typed repair identity",
+        "test_rejected_issue_metadata_stays_pending_until_same_request_repairs_it": "models Kanboard false metadata reply and audit-pending repair",
+        "test_rejected_issue_metadata_does_not_claim_a_priority_or_close_change": "models Kanboard false metadata reply during mutations",
+        "test_refused_close_comment_leaves_no_typed_occurrence": "models Kanboard nonpositive createComment reply",
+        "test_refused_priority_comment_leaves_no_typed_occurrence": "models Kanboard nonpositive createComment reply",
+        "test_all_operations_restart_without_duplicate_backend_writes": "models lost Kanboard write replies and counts transport effects",
+        "test_generic_reconcile_leaves_product_issue_transaction_for_its_owner": "exercises Kanboard audit-pending ownership repair",
+        "test_existing_product_retry_uses_its_staged_projects_before_the_registry": "models Kanboard metadata failure during staged create recovery",
+        "test_create_reply_loss_is_correlated_and_repaired_without_a_duplicate_row": "models a lost Kanboard createTask reply",
+        "test_new_issue_operation_rejects_until_an_older_pending_priority_is_repaired": "models Kanboard metadata refusal and ordered audit repair",
+        "test_reference_repair_after_create_reply_persists_the_backend_id_first": "models Kanboard updateTask reference repair",
+        "test_pending_priority_blocks_a_second_priority_before_backend_mutation": "models Kanboard metadata refusal and counts comment RPCs",
+    }
+    PORTABLE_CONTRACT = frozenset(
+        {
+            "test_released_writes_publish_complete_typed_product_issue_events",
+            "test_product_and_issue_lists_use_complete_set_and_show_audit_history",
+            "test_issue_needs_all_required_values_and_archive_cannot_bypass_close",
+            "test_issue_close_has_one_terminal_reason_and_audit_event",
+            "test_issue_and_task_column_guards_are_fail_closed",
+            "test_missing_issue_arguments_are_structured",
+            "test_request_id_conflicts_are_rejected_before_a_second_write",
+            "test_committed_priority_replay_survives_a_later_close",
+            "test_priority_update_on_a_closed_issue_preserves_closed_refusal",
+            "test_committed_request_replay_does_not_repeat_the_completed_operation",
+            "test_request_id_never_becomes_a_pending_filename_and_generic_upgrade_is_fail_closed",
+            "test_generic_pending_request_id_blocks_product_before_backend_write",
+            "test_pending_product_identity_blocks_a_second_request_before_create",
+            "test_generic_upgrade_gate_runs_before_product_mutation",
+        }
+    )
 
     def test_released_writes_publish_complete_typed_product_issue_events(self) -> None:
         self.store.create_product(
@@ -934,7 +999,7 @@ class ProductIssueStoreTests(unittest.TestCase):
             actor="po",
             request_id="typed-close",
         )
-        events = self.store.audit.events()
+        events = self.audit_events()
         self.assertEqual(
             [event["kind"] for event in events],
             ["entity.created", "entity.created", "entity.updated", "issue.closed"],
@@ -983,23 +1048,19 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(
             [item["ref"] for item in self.store.list_issues(include_closed=True)], [issue["ref"]]
         )
-        shown = self.store.show_issue(issue["ref"])
+        shown = self.issue(issue["ref"])
         self.assertTrue(shown["closed"])
         self.assertEqual(shown["close_reason"], "resolved")
         self.assertIn(
             "[issue:priority]\nurgent\n[request-id:priority]",
-            [entry["text"] for entry in shown["history"]["comments"]],
+            self.issue_comments(issue["ref"]),
         )
         self.assertEqual(
-            [entry["kind"] for entry in shown["history"]["audit"]],
+            [entry["kind"] for entry in self.issue_history(issue["ref"])["audit"]],
             ["entity.created", "entity.updated", "issue.closed"],
         )
-        status_ids = [
-            params.get("status_id") for method, params in self.client.calls if method == "getAllTasks"
-        ]
-        self.assertIn(1, status_ids)
-        self.assertIn(0, status_ids)
-        self.assertNotIn(2, status_ids)
+        self.assertEqual(self.issue_product_binding(issue["ref"]), "secretary")
+        self.assertEqual(self.product_project_binding("secretary"), ["secretary"])
 
     def test_issue_needs_all_required_values_and_archive_cannot_bypass_close(self) -> None:
         with self.assertRaises(TaskError) as raised:
@@ -1032,7 +1093,9 @@ class ProductIssueStoreTests(unittest.TestCase):
         with self.assertRaises(TaskError) as raised:
             writer.archive(role="po", actor="po", reference=issue["ref"], reason="bypass")
         self.assertEqual(raised.exception.code, "transition_forbidden")
-        self.assertFalse(any(method == "closeTask" for method, _ in self.client.calls))
+        shown = self.issue(issue["ref"])
+        self.assertFalse(shown["closed"])
+        self.assertIsNone(shown["close_reason"])
 
     def test_issue_close_has_one_terminal_reason_and_audit_event(self) -> None:
         self.store.create_product(
@@ -1444,7 +1507,7 @@ class ProductIssueStoreTests(unittest.TestCase):
 
     def test_all_operations_restart_without_duplicate_backend_writes(self) -> None:
         class LoseReplyOnce(ProductBoard):
-            lost: set[str] = set()
+            lost: ClassVar[set[str]] = set()
 
             def call(self, method: str, **params: object) -> object:
                 result = super().call(method, **params)
@@ -1710,7 +1773,8 @@ class ProductIssueStoreTests(unittest.TestCase):
             actor="po",
             request_id="cleanup",
         )
-        self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
+        self.assertEqual(self.record_count("product:secretary"), 1)
+        self.assertEqual([product["id"] for product in self.store.list_products()], ["secretary"])
         self.assertEqual([event["kind"] for event in self.store.audit.events()], ["entity.created"])
 
     def test_request_id_never_becomes_a_pending_filename_and_generic_upgrade_is_fail_closed(self) -> None:
@@ -1751,7 +1815,8 @@ class ProductIssueStoreTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "validation")
         self.assertEqual(TaskAudit(self.root / "data").pending_event("shared"), generic)
-        self.assertFalse(any(method == "createTask" for method, _ in self.client.calls))
+        self.assertEqual(self.record_count("product:secretary"), 0)
+        self.assert_product_absent("secretary")
 
     def test_create_reply_loss_is_correlated_and_repaired_without_a_duplicate_row(self) -> None:
         original_call = self.client.call
@@ -1930,7 +1995,8 @@ class ProductIssueStoreTests(unittest.TestCase):
                 request_id="second-product",
             )
         self.assertEqual(raised.exception.code, "audit_pending")
-        self.assertFalse(any(method == "createTask" for method, _ in self.client.calls))
+        self.assertEqual(self.record_count("product:secretary"), 0)
+        self.assert_product_absent("secretary")
 
     def test_pending_priority_blocks_a_second_priority_before_backend_mutation(self) -> None:
         self.store.create_product(
@@ -2002,7 +2068,9 @@ class ProductIssueStoreTests(unittest.TestCase):
                 request_id="upgrade",
             )
         self.assertEqual(raised.exception.code, "upgrade_required")
-        self.assertFalse(any(method == "createTask" for method, _ in self.client.calls))
+        (pending / "old-generic.json").unlink()
+        self.assertEqual(self.record_count("product:secretary"), 0)
+        self.assert_product_absent("secretary")
 
 
 if __name__ == "__main__":
