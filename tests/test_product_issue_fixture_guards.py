@@ -5,7 +5,9 @@ import inspect
 import textwrap
 import unittest
 
+from secretary.tasks import TaskError
 from tests import test_product_issues as product_issue_tests
+from tests.product_issue_fixtures import ProductIssueFixture
 
 SWIMLANE_METHODS = {
     name
@@ -93,6 +95,40 @@ class ProductIssueFixtureGuards(unittest.TestCase):
                 if found:
                     violations.append(f"{owner.__name__}.{name}: {', '.join(found)}")
         self.assertEqual(violations, [])
+
+
+class ProductIssueFixtureBehaviorTests(ProductIssueFixture, unittest.TestCase):
+    def test_absence_rejects_a_persisted_record_without_product_metadata(self) -> None:
+        self.client.call(
+            "createTask",
+            project_id=1,
+            title="Partial product",
+            description="",
+            column_id=1,
+            swimlane_id=4,
+            reference="product:secretary",
+        )
+
+        self.assertEqual(self.record_count("product:secretary"), 1)
+        with self.assertRaises(TaskError) as malformed:
+            self.product("secretary")
+        self.assertEqual(malformed.exception.code, "validation")
+        with self.assertRaises(AssertionError):
+            self.assert_product_absent("secretary")
+
+    def test_named_failure_injects_one_supported_boundary_failure(self) -> None:
+        with self.named_failure("record_create"), self.assertRaises(TaskError) as refused:
+            self.create_product(
+                product_id="secretary",
+                projects=["secretary"],
+                title="Secretary",
+                description="",
+                actor="po",
+                request_id="fixture-failure",
+            )
+
+        self.assertEqual(refused.exception.code, "backend_rejected")
+        self.assertEqual(self.record_count("product:secretary"), 0)
 
 
 if __name__ == "__main__":

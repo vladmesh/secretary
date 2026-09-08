@@ -113,6 +113,21 @@ class ProductIssueFixture:
             "audit": selected.audit.status(),
         }
 
+    def record_count(self, reference: str, *, store: ProductIssueStore | None = None) -> int:
+        """Count persisted records even when their Product/Issue projection is incomplete.
+
+        A future SQL fixture may override this observation with a direct disposable-database
+        query. The Kanboard fixture reads both active and archived records because a filtered
+        domain listing cannot prove that no partial or duplicate row was written.
+        """
+        client = self._client_for(store or self.store)
+        records = [
+            row
+            for status_id in (1, 0)
+            for row in client.call("getAllTasks", project_id=1, status_id=status_id)
+        ]
+        return sum(row.get("reference") == reference for row in records)
+
     def lane_binding(self, reference: str, *, store: ProductIssueStore | None = None) -> object:
         """Observe a record's lane through the backend protocol, never fake storage."""
         client = self._client_for(store or self.store)
@@ -156,14 +171,14 @@ class ProductIssueFixture:
         original = self.client.call
         armed = True
 
-        def call(name: str, **params: object) -> object:
+        def call(method_name: str, **params: object) -> object:
             nonlocal armed
-            if armed and name == method:
+            if armed and method_name == method:
                 armed = False
                 if error is not None:
                     raise error
                 return result
-            return original(name, **params)
+            return original(method_name, **params)
 
         self.client.call = call  # type: ignore[method-assign]
         try:
@@ -172,5 +187,6 @@ class ProductIssueFixture:
             self.client.call = original  # type: ignore[method-assign]
 
     def assert_product_absent(self, product_id: str) -> None:
-        with self.assertRaises(TaskError):
+        with self.assertRaises(TaskError) as raised:
             self.product(product_id)
+        self.assertEqual(raised.exception.code, "not_found")

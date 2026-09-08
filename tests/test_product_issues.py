@@ -999,7 +999,7 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
             actor="po",
             request_id="typed-close",
         )
-        events = self.store.audit.events()
+        events = self.audit_events()
         self.assertEqual(
             [event["kind"] for event in events],
             ["entity.created", "entity.created", "entity.updated", "issue.closed"],
@@ -1048,15 +1048,15 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
         self.assertEqual(
             [item["ref"] for item in self.store.list_issues(include_closed=True)], [issue["ref"]]
         )
-        shown = self.store.show_issue(issue["ref"])
+        shown = self.issue(issue["ref"])
         self.assertTrue(shown["closed"])
         self.assertEqual(shown["close_reason"], "resolved")
         self.assertIn(
             "[issue:priority]\nurgent\n[request-id:priority]",
-            [entry["text"] for entry in shown["history"]["comments"]],
+            self.issue_comments(issue["ref"]),
         )
         self.assertEqual(
-            [entry["kind"] for entry in shown["history"]["audit"]],
+            [entry["kind"] for entry in self.issue_history(issue["ref"])["audit"]],
             ["entity.created", "entity.updated", "issue.closed"],
         )
         self.assertEqual(self.issue_product_binding(issue["ref"]), "secretary")
@@ -1773,6 +1773,7 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
             actor="po",
             request_id="cleanup",
         )
+        self.assertEqual(self.record_count("product:secretary"), 1)
         self.assertEqual([product["id"] for product in self.store.list_products()], ["secretary"])
         self.assertEqual([event["kind"] for event in self.store.audit.events()], ["entity.created"])
 
@@ -1814,6 +1815,7 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "validation")
         self.assertEqual(TaskAudit(self.root / "data").pending_event("shared"), generic)
+        self.assertEqual(self.record_count("product:secretary"), 0)
         self.assert_product_absent("secretary")
 
     def test_create_reply_loss_is_correlated_and_repaired_without_a_duplicate_row(self) -> None:
@@ -1993,6 +1995,7 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
                 request_id="second-product",
             )
         self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.record_count("product:secretary"), 0)
         self.assert_product_absent("secretary")
 
     def test_pending_priority_blocks_a_second_priority_before_backend_mutation(self) -> None:
@@ -2066,6 +2069,7 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "upgrade_required")
         (pending / "old-generic.json").unlink()
+        self.assertEqual(self.record_count("product:secretary"), 0)
         self.assert_product_absent("secretary")
 
 
