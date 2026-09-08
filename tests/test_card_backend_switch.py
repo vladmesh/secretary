@@ -70,6 +70,20 @@ class EntityIdentityTests(unittest.TestCase):
             backend.entity_id("task", "mysql", 1)
 
 
+class SprintReferenceNumberTests(unittest.TestCase):
+    def test_only_canonical_ascii_numbered_refs_have_a_number(self) -> None:
+        self.assertEqual(backend.sprint_reference_number("sprint:0"), 0)
+        self.assertEqual(backend.sprint_reference_number("sprint:1596"), 1596)
+        self.assertIsNone(backend.sprint_reference_number("sprint:canary"))
+        self.assertIsNone(backend.sprint_reference_number("sprint:١"))
+
+    def test_a_leading_zero_is_refused_instead_of_aliasing_another_ref(self) -> None:
+        with self.assertRaisesRegex(backend.BoardBackendError, "must be canonical"):
+            backend.sprint_reference_number("sprint:01")
+        with self.assertRaisesRegex(backend.BoardBackendError, "must be canonical"):
+            backend.record_key("sprint", "sprint:01")
+
+
 class BoardHostIdentityTests(unittest.TestCase):
     """The `report`/`verdict`/`decide` path resolves a card number on either backend."""
 
@@ -131,15 +145,15 @@ class SwitchRefusalTests(CardBackendEnvironment):
                     self.assertEqual(backend.board_client(Path("/instance"), serves=serves), "kanboard")
             self.assertEqual(built.call_count, 3)
 
-    def test_postgres_refuses_sprint_by_name(self) -> None:
+    def test_postgres_accepts_sprint_capability_before_store_resolution(self) -> None:
         self._switch("postgres")
         for serves in ((backend.SPRINT,), (backend.CARD, backend.SPRINT)):
             with self.subTest(serves=serves):
                 backend.reset_card_backend()
                 with self.assertRaises(TaskError) as raised:
                     backend.board_client(Path("/instance"), serves=serves)
-                self.assertEqual(raised.exception.code, "backend_error")
-                self.assertIn("Kanboard board on this build", raised.exception.message)
+                self.assertEqual(raised.exception.code, "backend_unavailable")
+                self.assertNotIn("Kanboard board on this build", raised.exception.message)
 
     def test_postgres_accepts_product_issue_before_resolving_store_configuration(self) -> None:
         self._switch("postgres")

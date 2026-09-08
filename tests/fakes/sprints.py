@@ -398,6 +398,22 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         if result is not True:
             self.fail(f"backend refused fixture metadata for {reference}")
 
+    def arrange_card_sprint(self, reference: str, sprint: str) -> None:
+        """Arrange an already-linked Card without making a cursor write own that relation."""
+        project = self.client.call("getProjectByName", name="Pipeline")
+        if not isinstance(project, dict) or not project.get("id"):
+            self.fail("Pipeline board is not visible while arranging a linked Card")
+        row = self.client.call(
+            "getTaskByReference", project_id=int(project["id"]), reference=reference
+        )
+        if not isinstance(row, dict):
+            self.fail(f"Card is not visible while arranging {reference}")
+        result = self.client.call(
+            "saveTaskMetadata", task_id=int(row["id"]), values={"sprint_ref": sprint}
+        )
+        if result is not True:
+            self.fail(f"backend refused fixture Sprint link for {reference}")
+
     def arrange_historical_sprint(self, reference: str, *, status: str = "closed") -> dict[str, Any]:
         return self.writer.restore_create(
             reference=reference,

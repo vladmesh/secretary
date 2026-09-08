@@ -1,7 +1,7 @@
 # The board store: read/write inventory and the PostgreSQL schema
 
-Status: implemented through revision `0004_product_issue_sql` for Cards and Product/Issue.
-Sprint storage, importer and cutover remain separate work; the default backend is still Kanboard.
+Status: implemented through revision `0006_sprint_transport_key` for Cards, Product/Issue and Sprint.
+Provisioning, live import and cutover remain separate work; the default backend is still Kanboard.
 
 **The engine is given.** The owner chose PostgreSQL on 2026-09-07 (`sprint:1432`, PO comments of
 09:11Z and 09:22Z). This document does not argue for or against it and contains no comparison with
@@ -181,10 +181,9 @@ installation is in.
 The seam is *underneath* `TaskReader` and `TaskWriter` rather than beside them, for the reason
 this section exists: almost every consumer below reaches cards through those two classes, so one
 replacement under them moves the CLI, the web process, the dispatcher and the observer together.
-`board/sql_cards.py` answers the same board vocabulary over cards plus Product/Issue rows and
+`board/sql_cards.py` answers the same board vocabulary over cards, Product/Issue and Sprint rows and
 comments, and `board/sql_audit.py` is `TaskAudit`'s contract over `requests` and `board_events`
-(§7.3). `ProductIssueStore` follows the same process-wide choice. `SprintReader` and
-`SprintWriter` remain explicitly refused under `postgres` pending their own migration.
+(§7.3). `ProductIssueStore`, `SprintReader` and `SprintWriter` follow the same process-wide choice.
 
 **Where the switch is acted on.**  `board/backend.py:board_client` is the only function in
 `secretary` that constructs a board client, and every entry point in the two tables below reaches
@@ -196,10 +195,8 @@ itself:
 * an unknown `SECRETARY_CARD_BACKEND` refuses at **every** entry point, not only at the ones
   somebody remembered to check;
 * under `postgres`, Product/Issue-only sites such as `product_issue_commands.py` receive the SQL
-  client; a site that also needs sprints — `sprint_commands.py`, `webproto/sprint_reads.py`, `webproto/sprint_ops.py`,
-  `webproto/pause_reads.py`, `status.py`, `data.py:export_sprint_entities`, and `restore.py`,
-  which drives cards *and* sprints through one client — is refused by name instead of being
-  handed a Kanboard client that contradicts the switch;
+  client; sites that also need sprints receive that same SQL client, while an unknown capability
+  is refused by name instead of being handed a client that contradicts the switch;
 * the refusals leave as `TaskError`, the vocabulary every command already renders as a named
   failure with an exit status, so a missing or malformed `board-store.env` (`BoardStoreError`) and
   an unreachable server (`psycopg`) are diagnoses rather than tracebacks.
@@ -652,6 +649,7 @@ CREATE TABLE sprints (
     -- `sprint:canary-terra-20260813` and `sprint:canary-terra-final-20260813`, which an integer
     -- key cannot hold.  `sprint_number` stays for §9's numbering rule, as a nullable unique column.
     ref                text PRIMARY KEY,              -- "sprint:1037", "sprint:canary-terra-20260813"
+    board_key          bigint NOT NULL UNIQUE,        -- disjoint board-client transport namespace
     sprint_number      integer UNIQUE,                -- N in sprint:N, NULL when the ref has none
     goal               text NOT NULL,
     definition_of_done text NOT NULL,
@@ -683,12 +681,14 @@ CREATE SEQUENCE sprint_number_seq;                    -- see §9
 CREATE TABLE sprint_repositories (
     sprint_ref    text   NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
     repository_id bigint NOT NULL REFERENCES repositories(repository_id),
+    ordinal       integer NOT NULL DEFAULT 0,
     PRIMARY KEY (sprint_ref, repository_id)
 );
 
 CREATE TABLE sprint_issues (
     sprint_ref text NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
     issue_id   text NOT NULL REFERENCES issues(issue_id),
+    ordinal    integer NOT NULL DEFAULT 0,
     PRIMARY KEY (sprint_ref, issue_id)
 );
 
@@ -702,6 +702,7 @@ CREATE TABLE sprint_resumes (                         -- append-only; sprints.re
     dod_state            text NOT NULL,
     next_safe_step       text NOT NULL,
     recorded_at          timestamptz NOT NULL,
+    recorded_at_source   text, -- malformed restored legacy spelling, retained as stale evidence
     -- The target a scoped foreign key needs; redundant with the primary key by design.
     UNIQUE (resume_id, sprint_ref)
 );
@@ -719,6 +720,12 @@ number of a new numbered sprint, `sprint:N` is still spelled `sprint:N`, and the
 that can hold every reference the board has. The reference that is still **not** representable is a
 *duplicate* one: `sprint:1037` names two rows on today's board, a live one and an archived one, and
 a primary key holds one of them. §9 records that.
+
+The board-client integer namespace is central and disjoint: Card task numbers are below
+`2000000000`; numbered Sprints occupy `[2000000000,2500000000)`, custom Sprint references occupy
+`[2500000000,3000000000)`, Products `[3000000000,4000000000)`, and Issues
+`[4000000000,5000000000)`. `sprints.board_key` makes dispatch an indexed equality lookup. No
+metadata, comment, update or close path enumerates Sprint rows to guess an integer's owner.
 
 `RESUME_FIELDS` in `sprints.py` is a fixed six-field tuple, so the resume is columns, not a blob.
 Resume *freshness* is derived (`_resume_freshness`) and is not stored, exactly as
@@ -760,8 +767,10 @@ Three properties make this work, and each is load-bearing:
   That is exactly right here — a sprint with no current task (`current_task_ref IS NULL`) and a
   sprint before its first resume are both legal, and `ref` is the primary key and never NULL, so
   the check fires precisely when a cursor is set.
-- `DEFERRABLE INITIALLY DEFERRED` because a sprint row and the card or resume it points at are
-  inserted in one transaction (§7.1), in an order the writer should not have to think about.
+- `DEFERRABLE INITIALLY DEFERRED` is needed by normalized restore's cyclic order: Cards name their
+  Sprint before that Sprint row exists, and the Sprint later names one of those Cards. Commit-time
+  validation permits that transaction order, not an invalid committed state; the schema test commits
+  a cross-Sprint cursor and proves PostgreSQL refuses it.
 
 Moving a card between sprints now has a defined consequence rather than a silent one: the
 `UPDATE tasks SET sprint_ref = …` fails while a sprint still names that card as its current
@@ -780,7 +789,7 @@ CREATE TABLE sprint_budget_events (
     charged         boolean NOT NULL,
     task_ref        text,
     reason          text NOT NULL,
-    request_id      text NOT NULL UNIQUE,            -- references `requests`; see §3.9
+    request_id      text NOT NULL,                   -- references `requests`; see §3.9
     occurred_at     timestamptz NOT NULL,
     CONSTRAINT budget_charge_matches_type
         CHECK (charged = (event_type <> 'infrastructure_blocked'))
@@ -800,7 +809,9 @@ Today `sprint_budget` is a counter object in one metadata value, incremented rea
 rows, the totals in `by_type`, `total`, `signal_reached` and `hard_reached` become an aggregate
 over this table against the installation thresholds — derived, so the two can no longer disagree.
 Idempotency of a retried charge comes from the request-ownership row of §3.9, not from a
-compare-and-swap on a JSON blob.
+compare-and-swap on a JSON blob. Interactive charges have one occurrence per request; restore may
+replay several exported occurrences under the one restore request, so `request_id` is deliberately
+not unique on this evidence table.
 
 The scoped foreign key is the same construction §3.3 applies to the sprint's cursors, and it is
 here for the same reason: `dispatcher_production.py:_reconcile_sprint_budget` resolves the sprint
@@ -920,6 +931,7 @@ CREATE TABLE sprint_projects (
     reserved    boolean NOT NULL DEFAULT true,
     reserved_at timestamptz NOT NULL,
     released_at timestamptz,
+    ordinal     integer NOT NULL DEFAULT 0,
     PRIMARY KEY (sprint_ref, project_id),
     CONSTRAINT reserved_matches_release CHECK (reserved = (released_at IS NULL))
 );
@@ -1424,6 +1436,8 @@ reading:
 | `0002_board_gaps` (2026-09-07, the gaps the first import of real data found) | 23 | 37 | 38 | 23 | 13 | 4 |
 | `0003_task_type_optional` (2026-09-07, the last card that import could not write) | 23 | 37 | 38 | 23 | 13 | 4 |
 | `0004_product_issue_sql` (2026-09-08, Product/Issue and Done retention) | 24 | 37 | 40 | 24 | 16 | 4 |
+| `0005_sprint_sql` (2026-09-08, Sprint runtime and ordered evidence) | 24 | 37 | 40 | 24 | 15 | 4 |
+| `0006_sprint_transport_key` (2026-09-08, disjoint indexed Sprint transport keys) | 24 | 38 | 40 | 24 | 16 | 4 |
 
 The last table and the last primary key are Alembic's `alembic_version` in both rows. The deltas
 are the whole of `0002`: one table (`issue_comments`) with its primary key, its `UNIQUE

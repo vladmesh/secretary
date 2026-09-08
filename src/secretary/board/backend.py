@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 
 #: The one named place.  A card backend is chosen here or it is `kanboard`.
 CARD_BACKEND_ENV = "SECRETARY_CARD_BACKEND"
@@ -113,30 +114,56 @@ PRODUCT_ISSUE = "product/issue"
 #: Which of those the PostgreSQL implementation answers.  A caller that needs anything else is
 #: refused by name, because a silent Kanboard client under a `postgres` switch is the same
 #: "decided by default" defect the switch exists to remove.
-POSTGRES_SERVES = frozenset({CARD, PRODUCT_ISSUE})
+POSTGRES_SERVES = frozenset({CARD, PRODUCT_ISSUE, SPRINT})
 
 
-# Product and Issue share Kanboard's integer-addressed card vocabulary even though their
-# canonical identities are strings.  PostgreSQL stores this deterministic key beside the row
-# and indexes it; ranges above PostgreSQL int4 cannot be confused with card numbers.
-RECORD_KINDS = ("product", "issue")
-RECORD_KEY_BASES = {"product": 3_000_000_000, "issue": 4_000_000_000}
+# Every normalized entity shares the integer-addressed board-client vocabulary.  These ranges
+# are its one namespace: Cards retain their positive int4 task number, while Sprint, Product and
+# Issue keys are stored and indexed beside their string identity.  Sprint reserves two disjoint
+# half-ranges so numbered references are reversible without colliding with custom references.
+RECORD_KINDS = ("sprint", "product", "issue")
+RECORD_KEY_BASES = {"sprint": 2_000_000_000, "product": 3_000_000_000, "issue": 4_000_000_000}
 RECORD_KEY_SPAN = 1_000_000_000
+SPRINT_NUMBER_KEY_SPAN = RECORD_KEY_SPAN // 2
+_ASCII_NUMBERED_SPRINT_REF = re.compile(r"^sprint:([0-9]+)$")
+
+
+def sprint_reference_number(identifier: object) -> int | None:
+    """Return a canonical ASCII ``sprint:N`` number, or None for a custom Sprint ref."""
+    text = str(identifier).strip()
+    match = _ASCII_NUMBERED_SPRINT_REF.fullmatch(text)
+    if match is None:
+        return None
+    number = int(match.group(1))
+    if text != f"sprint:{number}":
+        raise BoardBackendError(
+            f"a numbered Sprint reference must be canonical, not {text!r}"
+        )
+    return number
 
 
 def record_key(kind: str, identifier: str) -> int:
-    """Return the stable SQL board key for one string Product/Issue identity."""
+    """Return the stable SQL transport key for one normalized non-Card identity."""
     if kind not in RECORD_KINDS:
         raise BoardBackendError(f"a board record names one of {', '.join(RECORD_KINDS)}, not {kind!r}")
     text = str(identifier).strip()
     if not text:
         raise BoardBackendError(f"a {kind} key needs an identifier")
+    number = sprint_reference_number(text) if kind == "sprint" else None
+    if number is not None:
+        if number >= SPRINT_NUMBER_KEY_SPAN:
+            raise BoardBackendError(
+                f"a numbered Sprint must be below {SPRINT_NUMBER_KEY_SPAN}, not {number}"
+            )
+        return RECORD_KEY_BASES[kind] + number
     digest = hashlib.sha256(f"{kind}:{text}".encode()).digest()
-    return RECORD_KEY_BASES[kind] + int.from_bytes(digest[:8], "big") % RECORD_KEY_SPAN
+    offset = SPRINT_NUMBER_KEY_SPAN if kind == "sprint" else 0
+    span = SPRINT_NUMBER_KEY_SPAN if kind == "sprint" else RECORD_KEY_SPAN
+    return RECORD_KEY_BASES[kind] + offset + int.from_bytes(digest[:8], "big") % span
 
 
 def record_key_kind(value: object) -> str | None:
-    """Return the Product/Issue kind for a synthetic key, or None for a card key."""
+    """Return the normalized non-Card kind for a transport key, or None for a Card key."""
     try:
         number = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -288,4 +315,5 @@ __all__ = [
     "record_key",
     "record_key_kind",
     "reset_card_backend",
+    "sprint_reference_number",
 ]

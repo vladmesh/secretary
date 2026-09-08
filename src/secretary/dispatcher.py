@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from secretary.board.backend import CARD, board_client
+from secretary.board.backend import CARD, SPRINT, board_client
 from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
 from secretary.board.terminal_taxonomy import (
     TerminalTaxonomy,
@@ -7173,9 +7173,9 @@ def runtime_from_args(
 ) -> DispatcherRuntime:
     instance_path = Path(instance)
     data = Path(data_dir).expanduser() if data_dir else default_data_dir(instance_path)
-    # The dispatcher reads and writes cards, and nothing else, through this client, so it is
+    # DispatcherRuntime also constructs a SprintReader from this client.
     # built by the switch (board/backend.py) rather than by naming one backend here.
-    client = board_client(instance_path, serves=(CARD,))
+    client = board_client(instance_path, serves=(CARD, SPRINT))
     catalog = InstanceCatalog(instance_path)
     return DispatcherRuntime(
         TaskReader(client),

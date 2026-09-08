@@ -556,9 +556,9 @@ class SqlTaskWriterTests(SqlBoardCase):
         now = datetime.now(UTC)
         with self.client.transaction():
             self.client._execute(
-                "INSERT INTO sprints (ref, goal, definition_of_done, status, created_at, updated_at) "
-                "VALUES (%s, %s, %s, 'open', %s, %s) ON CONFLICT (ref) DO NOTHING",
-                ("sprint:test", "a goal", "a definition", now, now),
+                "INSERT INTO sprints (ref, board_key, goal, definition_of_done, status, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, 'open', %s, %s) ON CONFLICT (ref) DO NOTHING",
+                ("sprint:test", backend.record_key("sprint", "sprint:test"), "a goal", "a definition", now, now),
             )
         with (
             mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
@@ -914,9 +914,9 @@ class SqlTaskWriterParityTests(KanboardFixtureCase, kanboard_cases.TaskWriterTes
         now = datetime.now(UTC)
         with self.client.transaction():
             self.client._execute(
-                "INSERT INTO sprints (ref, goal, definition_of_done, status, created_at, "
-                "updated_at) VALUES (%s, %s, %s, 'open', %s, %s) ON CONFLICT (ref) DO NOTHING",
-                (ref, "a goal", "a definition", now, now),
+                "INSERT INTO sprints (ref, board_key, goal, definition_of_done, status, created_at, "
+                "updated_at) VALUES (%s, %s, %s, %s, 'open', %s, %s) ON CONFLICT (ref) DO NOTHING",
+                (ref, backend.record_key("sprint", ref), "a goal", "a definition", now, now),
             )
         with (
             mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),

@@ -2008,6 +2008,7 @@ class SprintTests(SprintFixture):
     def test_restore_rewrites_a_closed_entity_and_refuses_foreign_fields(self) -> None:
         ref = self._create(goal="restore")["sprint"]["ref"]
         self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN)
+        self.arrange_card_sprint("secretary-12", ref)
 
         with self.assertRaisesRegex(TaskError, "unknown sprint fields"):
             self.writer.restore(reference=ref, values={"claim": "worker"})

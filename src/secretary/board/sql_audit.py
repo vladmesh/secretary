@@ -113,7 +113,8 @@ class SqlTaskAudit:
         from secretary.tasks import _event_action
 
         rows = self._query(
-            "SELECT intent FROM requests WHERE status = 'committed' ORDER BY created_at, request_id"
+            "SELECT intent FROM requests WHERE status = 'committed' "
+            "ORDER BY settled_at, created_at, request_id"
         )
         result = []
         for (intent,) in rows:

@@ -61,7 +61,7 @@ from typing import Any
 
 import yaml
 
-from secretary.board.backend import record_key
+from secretary.board.backend import record_key, sprint_reference_number
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
     ISSUE_KINDS,
@@ -704,8 +704,7 @@ def _task_number_of(ref: str) -> int | None:
 
 
 def _sprint_number_of(ref: str) -> int | None:
-    tail = ref.removeprefix(SPRINT_REFERENCE_PREFIX)
-    return int(tail) if tail.isdigit() else None
+    return sprint_reference_number(ref)
 
 
 def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> ImportPlan:
@@ -1162,6 +1161,7 @@ def _plan_sprints(
             source_audit = {**(source_audit or {}), SOURCE_AUDIT_ORIGINAL_REF: row.ref}
         sprints[reference] = {
             "ref": reference,
+            "board_key": record_key("sprint", reference),
             "sprint_number": number,
             "goal": row.meta.get("sprint_goal", ""),
             "definition_of_done": row.meta.get("sprint_definition_of_done", ""),
@@ -2344,6 +2344,11 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
             "a numbered sprint reference keeps its number, and only a numbered one has one",
             {(row["ref"], _sprint_number_of(row["ref"])) for row in rows["sprints"]},
             {(row["ref"], row["sprint_number"]) for row in rows["sprints"]},
+        ),
+        _check(
+            "sprint transport keys agree with their references",
+            {(row["ref"], record_key("sprint", row["ref"])) for row in rows["sprints"]},
+            {(row["ref"], row["board_key"]) for row in rows["sprints"]},
         ),
     ]
 

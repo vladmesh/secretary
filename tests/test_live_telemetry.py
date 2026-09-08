@@ -24,7 +24,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+import secretary.dispatcher as dispatcher_module
 from secretary import host
+from secretary.board.backend import CARD, SPRINT
 from secretary.cli import build_parser
 from secretary.dispatcher import DispatcherRuntime, default_data_dir, runtime_from_args
 from secretary.dispatcher_observer import (
@@ -823,13 +825,19 @@ class EnvDataDirConflictTests(unittest.TestCase):
     def writer_state_path(self) -> Path:
         """Where the packaged unit's own command line lands, parsed by the real CLI parser."""
         args = build_parser().parse_args(["dispatcher", "production-tick", "--instance", str(self.instance)])
-        with mock.patch("secretary.tasks.KanboardClient"):
+        with (
+            mock.patch("secretary.tasks.KanboardClient"),
+            mock.patch(
+                "secretary.dispatcher.board_client", wraps=dispatcher_module.board_client
+            ) as selected,
+        ):
             runtime = runtime_from_args(
                 args.instance,
                 args.data_dir,
                 host_mode="noop",
                 owner="secretary-production",
             )
+        selected.assert_called_once_with(self.instance, serves=(CARD, SPRINT))
         return runtime.production_state.path
 
     def test_writer_health_and_steward_all_land_on_the_env_data_plane(self) -> None:

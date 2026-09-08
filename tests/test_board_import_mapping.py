@@ -462,6 +462,7 @@ class SprintMappingTests(unittest.TestCase):
     def test_a_sprint_carries_goal_dod_status_and_a_tagged_observer(self) -> None:
         result = import_board.plan(source(sprints=(sprint_row(9, 100),)))
         (stored,) = result.rows["sprints"]
+        self.assertEqual(stored["board_key"], import_board.record_key("sprint", "sprint:100"))
         self.assertEqual(stored["sprint_number"], 100)
         self.assertEqual(stored["goal"], "goal 100")
         self.assertEqual(stored["observer"], {"kind": "head", "profile": "claude-observer"})
@@ -489,6 +490,10 @@ class SprintMappingTests(unittest.TestCase):
         )
         (stored,) = result.rows["sprints"]
         self.assertEqual(stored["ref"], "sprint:canary-20260813")
+        self.assertEqual(
+            stored["board_key"],
+            import_board.record_key("sprint", "sprint:canary-20260813"),
+        )
         self.assertIsNone(stored["sprint_number"])
         self.assertEqual(result.report.records_not_imported, [])
 

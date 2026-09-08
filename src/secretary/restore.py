@@ -109,6 +109,20 @@ def restore_state(data_dir: Path) -> dict[str, Any]:
 def import_normalized_board(
     data_dir: Path, *, client: KanboardClient | None = None, instance: Path | None = None
 ) -> int:
+    """Populate an empty board, using one outer transaction when the target is PostgreSQL."""
+    if client is None:
+        if instance is None:
+            raise RestoreError("restore requires the target instance to bind its board")
+        client = board_client(instance, serves=(CARD, SPRINT))
+    if getattr(client, "backend_kind", "kanboard") == "postgres" and not client._depth:
+        with client.transaction():
+            return _import_normalized_board(data_dir, client=client, instance=instance)
+    return _import_normalized_board(data_dir, client=client, instance=instance)
+
+
+def _import_normalized_board(
+    data_dir: Path, *, client: KanboardClient, instance: Path | None = None
+) -> int:
     """Populate an empty board from the normalized export and prove parity on every retry."""
     from secretary.sprints import sprint_admission_lock
 
@@ -121,15 +135,11 @@ def import_normalized_board(
             )
             sprints = _normalized_sprints(data_dir)
             # Validate both sets before the first backend write.
+            if getattr(client, "backend_kind", "kanboard") == "postgres":
+                _check_sql_sprint_current_tasks(cards, sprints)
             _check_restored_observers(sprints, instance)
             _check_restored_executors(sprints)
             _check_restored_admission(sprints, instance)
-            if client is None:
-                if instance is None:
-                    raise RestoreError("restore requires the target instance to bind its board")
-                # Restore drives cards and sprints through one client, so it asks the switch
-                # for both: a backend that holds only cards cannot carry this operation.
-                client = board_client(instance, serves=(CARD, SPRINT))
             reader = TaskReader(client)
             writer = TaskWriter(client, data_dir=data_dir)
             _, unresolved = writer.reconcile(defer_restore_comments=True, defer_bulk_restore=True)
@@ -225,7 +235,8 @@ def _existing_sprints(
 
 def _existing_board_cards(client: KanboardClient, board_id: int) -> dict[str, dict[str, Any]]:
     """Read both active and closed Pipeline records before deciding a restore is empty."""
-    raw_cards = all_project_cards(client, board_id)
+    sql_rows = getattr(client, "restore_card_rows", None)
+    raw_cards = sql_rows() if callable(sql_rows) else all_project_cards(client, board_id)
     result: dict[str, dict[str, Any]] = {}
     for card in raw_cards:
         if not isinstance(card, dict):
@@ -432,7 +443,8 @@ def _restore_sprint_comments_batched(
             raise RestoreError(f"restored sprint disappeared before comment recovery: {reference}")
         task_id = _entity_number("sprint", current["id"])
         occurrences: dict[str, int] = {}
-        for index, body in enumerate(str(entry["text"]) for entry in sprint["comments"]):
+        for index, entry in enumerate(sprint["comments"]):
+            body = str(entry["text"])
             occurrence = occurrences.get(body, 0)
             occurrences[body] = occurrence + 1
             intended.append(
@@ -443,6 +455,7 @@ def _restore_sprint_comments_batched(
                     occurrence,
                     f"{prefix}sprint-comment:{reference}:{index}",
                     entity="sprint",
+                    recorded_at=str(entry.get("ts") or ""),
                 )
             )
     restore_comments_batched(writer, intended)
@@ -844,6 +857,29 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
     return sorted(sprints, key=lambda sprint: str(sprint["reference"]))
 
 
+def _check_sql_sprint_current_tasks(
+    cards: list[dict[str, Any]], sprints: list[dict[str, Any]]
+) -> None:
+    """Refuse a normalized cursor that the scoped SQL relation cannot represent.
+
+    A cursor is a pointer, never an instruction to attach or reparent a Card.  Checking the two
+    exported sets here keeps an invalid archive from writing even its first Pipeline row and gives
+    the operator a stable restore error instead of a commit-time foreign-key diagnostic.
+    """
+    linked = {
+        (str(card["reference"]), str(card.get("metadata", {}).get("sprint_ref") or ""))
+        for card in cards
+    }
+    for sprint in sprints:
+        current = str(sprint.get("current_task") or "")
+        reference = str(sprint["reference"])
+        if current and (current, reference) not in linked:
+            raise RestoreError(
+                f"normalized sprint export current_task {current!r} is not an included Card "
+                f"already linked to {reference}"
+            )
+
+
 def _restore_request_prefix(data_dir: Path, audit: TaskAudit, live_refs: set[str]) -> str:
     """Return the request-id namespace this recovery writes its audit under.
 
@@ -864,10 +900,14 @@ def _restore_request_prefix(data_dir: Path, audit: TaskAudit, live_refs: set[str
 
 def _namespace_is_local(audit: TaskAudit, token: str, live_refs: set[str]) -> bool:
     prefix = f"restore:{token}:"
-    return all(
-        str(event.get("ref") or "") in live_refs
+    events = [
+        event
         for event in audit.events()
         if str(event.get("request_id") or "").startswith(prefix)
+    ]
+    return all(
+        str(event.get("ref") or "") in live_refs
+        for event in events
     )
 
 

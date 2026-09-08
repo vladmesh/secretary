@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import functools
 import hashlib
 import json
 import uuid
@@ -12,7 +13,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from secretary.board.backend import KANBOARD, entity_id, entity_number
+from secretary.board.backend import (
+    KANBOARD,
+    BoardBackendError,
+    entity_id,
+    entity_number,
+    sprint_reference_number,
+)
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     KIND_HEAD,
@@ -442,6 +449,13 @@ def ensure_sprint_board(client: KanboardClient) -> int:
     return board_id
 
 
+def sprint_client(instance: str | Path):
+    """Resolve the process-wide backend for a Sprint-only consumer."""
+    from secretary.board.backend import SPRINT, board_client
+
+    return board_client(instance, serves=(SPRINT,))
+
+
 def _sprint_board(client: KanboardClient, *, create: bool) -> int | None:
     board = client.call("getProjectByName", name=SPRINT_BOARD_NAME)
     board_id = _positive_int(board.get("id")) if isinstance(board, dict) else None
@@ -461,12 +475,22 @@ class _AuditOnce:
     failed, which is what `secretary.webproto.sprint_reads` does.
     """
 
-    def __init__(self, data_dir: Path | None, *, events: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: Path | None,
+        *,
+        events: list[dict[str, Any]] | None = None,
+        audit: Any | None = None,
+    ) -> None:
         self._data_dir = data_dir
         self._events: list[dict[str, Any]] | None = events
+        self._audit = audit
 
     def events(self) -> list[dict[str, Any]]:
         if self._events is not None:
+            return self._events
+        if self._audit is not None:
+            self._events = self._audit.events()
             return self._events
         if self._data_dir is None:
             return []
@@ -512,6 +536,12 @@ class SprintReader:
         self.thresholds = (
             budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         )
+        if getattr(client, "backend_kind", "kanboard") == "postgres":
+            from secretary.board.sql_audit import SqlTaskAudit
+
+            self.audit = SqlTaskAudit(client)
+        else:
+            self.audit = TaskAudit(data_dir) if data_dir is not None else None
 
     def _sprint_rows(self, board_id: int) -> list[dict[str, Any]]:
         """Every row of the sprint board that carries a sprint reference."""
@@ -620,7 +650,7 @@ class SprintReader:
         repositories = _json_list(meta.get("sprint_repositories"))
         budget = _budget(meta.get("sprint_budget"), self.thresholds, meta.get(BUDGET_UNCHARGED_FIELD))
         result: dict[str, Any] = {
-            "id": entity_id("sprint", KANBOARD, task_id),
+            "id": entity_id("sprint", getattr(self.client, "backend_kind", KANBOARD), task_id),
             "ref": _text(raw.get("reference")),
             "goal": meta.get("sprint_goal", ""),
             "definition_of_done": meta.get("sprint_definition_of_done", ""),
@@ -636,7 +666,15 @@ class SprintReader:
             "audit": {
                 "created_at": _rfc3339(raw.get("date_creation")),
                 "updated_at": _rfc3339(raw.get("date_modification")),
-                "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": SPRINT_BOARD_NAME},
+                "backend": {
+                    "kind": getattr(self.client, "backend_kind", "kanboard"),
+                    **(
+                        {"store_ref": result_ref}
+                        if (result_ref := _text(raw.get("reference")))
+                        and getattr(self.client, "backend_kind", "kanboard") == "postgres"
+                        else {"kanboard_task_id": task_id, "board": SPRINT_BOARD_NAME}
+                    ),
+                },
                 # A restored sprint sits on a fresh Kanboard row, so its own dates
                 # describe the recovery, not the sprint. The dates it was restored
                 # from stay readable here.
@@ -685,7 +723,7 @@ class SprintReader:
         board -- passes its own traversal in, and this call opens nothing. With none given the
         journal is walked here, lazily, exactly as `statuses` has always walked it.
         """
-        audit = audit if audit is not None else _AuditOnce(self.data_dir)
+        audit = audit if audit is not None else _AuditOnce(self.data_dir, audit=self.audit)
         result = []
         for listed in sprints:
             sprint = {**listed, "cards": linked.get(listed["ref"], [])}
@@ -801,7 +839,8 @@ class SprintReader:
                 for card in sprint.get("cards") or []
                 if isinstance(card, dict) and str(card.get("ref") or "")
             }
-            for event in (audit if audit is not None else _AuditOnce(self.data_dir)).events():
+            source = audit.events() if audit is not None else (self.audit.events() if self.audit else [])
+            for event in source:
                 if is_significant_observer_event(event, linked_refs=refs, sprint_ref=sprint["ref"]):
                     last_event = max(last_event, str(event.get("occurred_at") or ""))
         recorded_at = str(resume.get("recorded_at") or "")
@@ -818,6 +857,45 @@ class SprintReader:
             "lag_seconds": lag_seconds,
             "threshold_seconds": RESUME_FRESHNESS_GRACE_SECONDS,
         }
+
+
+def _sql_atomic(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    """Put one complete Sprint protocol operation in the SQL client's transaction."""
+    @functools.wraps(method)
+    def wrapped(self: SprintWriter, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if getattr(self.client, "backend_kind", "kanboard") != "postgres":
+            return method(self, *args, **kwargs)
+        request_id = kwargs.get("request_id")
+        try:
+            with self.client._transaction_lock:
+                if self.client._depth:
+                    return method(self, *args, **kwargs)
+                with self.client.transaction():
+                    # Admission, request claims and reservations share this transaction-scoped lock.
+                    self.client._execute("SELECT pg_advisory_xact_lock(%s)", (1_600,))
+                    return method(self, *args, **kwargs)
+        except TaskError as exc:
+            if isinstance(request_id, str):
+                try:
+                    self.transactions.drop(request_id)
+                except TaskError:
+                    pass
+            if exc.code == "audit_pending":
+                raise TaskError(
+                    "backend_error", "PostgreSQL Sprint transaction rolled back", 1
+                ) from None
+            raise
+        except Exception as exc:  # noqa: BLE001 - the rollback is the public fact.
+            if isinstance(request_id, str):
+                try:
+                    self.transactions.drop(request_id)
+                except TaskError:
+                    pass
+            raise TaskError(
+                "backend_error", f"PostgreSQL Sprint transaction rolled back: {exc}", 1
+            ) from None
+
+    return wrapped
 
 
 class SprintWriter:
@@ -838,9 +916,20 @@ class SprintWriter:
             budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         )
         self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
-        self.audit = TaskAudit(data_dir)
+        if getattr(client, "backend_kind", "kanboard") == "postgres":
+            from secretary.board.sql_audit import SqlTaskAudit
+
+            self.audit = SqlTaskAudit(client)
+        else:
+            self.audit = TaskAudit(data_dir)
         # Reuse the Product/Issue transaction's staged-intent semantics.
         self.transactions = ProductIssueTransaction(data_dir, self.audit)
+        if getattr(client, "backend_kind", "kanboard") == "postgres":
+            from secretary.board.sql_sprints import SqlSprintTransaction
+
+            self.transactions = SqlSprintTransaction(
+                client, self.audit, Path(data_dir) / "board" / "sql-sprint-locks"
+            )
         self.data_dir = Path(data_dir)
         self.instance = Path(instance) if instance is not None else None
 
@@ -945,17 +1034,40 @@ class SprintWriter:
         )
         # Lock admission with row creation; resolve request ownership first.
         with sprint_admission_lock(self.data_dir):
-            document, committed = self.transactions.existing(request_id, kind=SPRINT_CREATED, intent=intent)
+            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                try:
+                    with self.client.transaction():
+                        self.client._execute("SELECT pg_advisory_xact_lock(%s)", (1_600,))
+                        return self._create_under_admission(request_id, intent)
+                except TaskError as exc:
+                    if exc.code == "audit_pending":
+                        raise TaskError(
+                            "backend_error", "PostgreSQL Sprint transaction rolled back", 1
+                        ) from None
+                    raise
+                except Exception as exc:  # noqa: BLE001 - rollback is the public fact.
+                    raise TaskError(
+                        "backend_error", f"PostgreSQL Sprint transaction rolled back: {exc}", 1
+                    ) from None
+            return self._create_under_admission(request_id, intent)
+
+    def _create_under_admission(
+        self, request_id: str, intent: dict[str, Any]
+    ) -> dict[str, Any]:
+        document, committed = self.transactions.existing(
+            request_id, kind=SPRINT_CREATED, intent=intent
+        )
+        if committed is not None:
+            return self._committed_result(SPRINT_CREATED, committed)
+        if document is None:
+            self._check_ownership(intent["product"], intent["issues"], intent["reservations"])
+            self._check_conflicts(intent, excluding="")
+            document, committed = self._begin_create(request_id, intent)
             if committed is not None:
                 return self._committed_result(SPRINT_CREATED, committed)
-            if document is None:
-                self._check_ownership(intent["product"], intent["issues"], intent["reservations"])
-                self._check_conflicts(intent, excluding="")
-                document, committed = self._begin_create(request_id, intent)
-                if committed is not None:
-                    return self._committed_result(SPRINT_CREATED, committed)
-            return self._run_create(document, admitted=True)
+        return self._run_create(document, admitted=True)
 
+    @_sql_atomic
     def restore_create(
         self,
         *,
@@ -1039,6 +1151,11 @@ class SprintWriter:
             raise TaskError("validation", "create requires a non-empty goal", 2)
         if reference and not reference.startswith(SPRINT_REFERENCE_PREFIX):
             raise TaskError("validation", f"sprint reference must start with {SPRINT_REFERENCE_PREFIX}", 2)
+        if reference:
+            try:
+                sprint_reference_number(reference)
+            except BoardBackendError as exc:
+                raise TaskError("validation", str(exc), 2) from None
         if status not in SPRINT_STATUSES:
             raise TaskError("validation", f"unknown sprint status {status!r}", 2)
         return {
@@ -1209,6 +1326,8 @@ class SprintWriter:
             update_active_sprint_projects(self.data_dir, sprint)
             return {"action": SPRINT_CREATED, "sprint": sprint, "event_id": str(event["event_id"])}
         except TaskError as exc:
+            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                raise
             answer = exc.code in _ADMISSION_REFUSALS or (
                 exc.code in {"validation", "role_forbidden"} and not document.get("progress")
             )
@@ -1269,7 +1388,12 @@ class SprintWriter:
         task_id = _positive_int(row.get("id"))
         if task_id is None:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
-        event.update({"ref": created_ref, "task_id": entity_id("sprint", KANBOARD, task_id)})
+        event.update({
+            "ref": created_ref,
+            "task_id": entity_id(
+                "sprint", getattr(self.client, "backend_kind", KANBOARD), task_id
+            ),
+        })
         event["backend"]["task_id"] = task_id
         progress["task_id"] = task_id
         self.transactions.save(document)
@@ -1377,6 +1501,11 @@ class SprintWriter:
                 title=str(document["intent"]["goal"]),
                 description=marker,
                 column_id=column_id,
+                **(
+                    {"reference": reference}
+                    if getattr(self.client, "backend_kind", "kanboard") == "postgres"
+                    else {}
+                ),
             )
         )
         if created is None:
@@ -1455,6 +1584,12 @@ class SprintWriter:
         if not isinstance(actual, dict):
             raise TaskError("backend_error", "Kanboard returned invalid sprint metadata", 1)
         stored = {str(key): _text(value) for key, value in actual.items()}
+        if getattr(self.client, "backend_kind", "kanboard") == "postgres" and "sprint_budget" in values:
+            if _budget(stored.get("sprint_budget"), self.thresholds) != _budget(
+                values["sprint_budget"], self.thresholds
+            ):
+                return False
+            values = {key: value for key, value in values.items() if key != "sprint_budget"}
         return all(stored.get(key) == value for key, value in values.items())
 
     def _committed_result(self, action: str, committed: dict[str, Any]) -> dict[str, Any]:
@@ -1561,6 +1696,7 @@ class SprintWriter:
         ]
         _refuse_open_sprint(candidate, others, limit=self._open_sprint_limit())
 
+    @_sql_atomic
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
@@ -1595,6 +1731,18 @@ class SprintWriter:
             request_id=request_id,
         )
 
+        return self._set_current_task_atomic(
+            role=role,
+            actor=actor,
+            reference=reference,
+            task_reference=task_reference,
+            request_id=request_id,
+        )
+
+    @_sql_atomic
+    def _set_current_task_atomic(
+        self, *, role: str, actor: str, reference: str, task_reference: str, request_id: str
+    ) -> dict[str, Any]:
         def mutation(sprint: dict[str, Any]) -> None:
             task = TaskReader(self.client).show(task_reference)
             if task.get("sprint") != reference:
@@ -1609,6 +1757,7 @@ class SprintWriter:
             "current_task_set", role, actor, reference, request_id, {"task": task_reference}, mutation
         )
 
+    @_sql_atomic
     def record_budget(
         self,
         *,
@@ -1860,6 +2009,28 @@ class SprintWriter:
             request_id=request_id,
         )
 
+        return self._resume_atomic(
+            role=role,
+            actor=actor,
+            reference=reference,
+            normalized=normalized,
+            request_id=request_id,
+            delivery_id=delivery_id,
+            through_event=through_event,
+        )
+
+    @_sql_atomic
+    def _resume_atomic(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        normalized: dict[str, str],
+        request_id: str,
+        delivery_id: str,
+        through_event: str,
+    ) -> dict[str, Any]:
         def mutation(sprint: dict[str, Any]) -> None:
             self.client.call(
                 "saveTaskMetadata",
@@ -1878,6 +2049,7 @@ class SprintWriter:
             payload.update({"delivery_id": delivery_id, "through_event": through_event})
         return self._write("resume_recorded", role, actor, reference, request_id, payload, mutation)
 
+    @_sql_atomic
     def close(
         self,
         *,
@@ -1981,6 +2153,17 @@ class SprintWriter:
                         return self._close_result(committed)
                     if document is None:
                         raise TaskError("audit_pending", "sprint close transaction claim is unavailable", 4)
+                if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                    close_payload = document["event"].get("payload", {})
+                    close_plan = close_payload.get("decisions") or {}
+                    closeout_plan = close_payload.get("closeout") or {}
+                    self.client.sprints.save_close(
+                        reference,
+                        request_id,
+                        close_plan,
+                        reason=str(close_payload.get("reason") or ""),
+                        closeout_document=str(closeout_plan.get("document") or "") or None,
+                    )
                 return self._run_close(document)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -2377,6 +2560,8 @@ class SprintWriter:
             self.transactions.save(document)
             self.transactions.complete(document)
         except TaskError as exc:
+            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                raise
             if exc.code == "close_conflict":
                 # Recoverable by construction: the conflict is on the record, and the retry of
                 # this request id may answer exactly it. Saying so is the point of the refusal.
@@ -2656,6 +2841,7 @@ class SprintWriter:
             "definition_of_done": {"satisfied": False, "reason": CLOSE_NOT_DONE},
         }
 
+    @_sql_atomic
     def reopen(
         self,
         *,
@@ -2785,6 +2971,8 @@ class SprintWriter:
             update_active_sprint_projects(self.data_dir, sprint)
             return {"action": SPRINT_REOPENED, "sprint": sprint, "event_id": str(event["event_id"])}
         except TaskError as exc:
+            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                raise
             answer = exc.code in _ADMISSION_REFUSALS or (
                 exc.code in {"validation", "role_forbidden"} and not document.get("progress")
             )
@@ -2859,6 +3047,7 @@ class SprintWriter:
         self.transactions.discard(document)
         return True
 
+    @_sql_atomic
     def restore(
         self, *, reference: str, values: dict[str, str], request_id: str | None = None
     ) -> dict[str, Any]:
@@ -2985,6 +3174,8 @@ class SprintWriter:
         try:
             mutation(sprint)
         except Exception:
+            if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                raise
             self.audit.discard(request_id)
             raise
         return self._record(kind, event)
@@ -2996,7 +3187,7 @@ class SprintWriter:
         request_id = str(event["request_id"])
         self.audit.stage(request_id, event)
         event_id = self.audit.append(request_id, event)
-        update_active_sprint_projects(Path(self.audit.board_dir).parent, sprint)
+        update_active_sprint_projects(self.data_dir, sprint)
         return {"action": kind, "sprint": sprint, "event_id": event_id}
 
     def _committed(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:
@@ -3014,11 +3205,11 @@ class SprintWriter:
         event["backend"]["revision"] = "updated_at:" + str(sprint["audit"]["updated_at"] or "unknown")
         self.audit.stage(str(event["request_id"]), event)
         event_id = self.audit.append(str(event["request_id"]), event)
-        update_active_sprint_projects(Path(self.audit.board_dir).parent, sprint)
+        update_active_sprint_projects(self.data_dir, sprint)
         return {"action": kind, "sprint": sprint, "event_id": event_id}
 
-    @staticmethod
     def _event(
+        self,
         kind: str,
         role: str,
         actor: str,
@@ -3037,7 +3228,7 @@ class SprintWriter:
             "task_id": sprint["id"] if sprint else "",
             "ref": reference,
             "backend": {
-                "kind": "kanboard",
+                "kind": getattr(self.client, "backend_kind", "kanboard"),
                 "task_id": _sprint_number(sprint) if sprint else None,
                 "revision": "pending",
             },

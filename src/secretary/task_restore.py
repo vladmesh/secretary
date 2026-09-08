@@ -22,6 +22,7 @@ class RestoreCommentOccurrence:
     occurrence: int
     request_id: str
     entity: str = "card"
+    recorded_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -570,9 +571,15 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
                             4,
                         )
                     writer.audit.stage(item.request_id, event)
-                    writes.append(
-                        ("createComment", {"task_id": item.task_id, "user_id": 0, "content": item.body})
-                    )
+                    arguments: dict[str, Any] = {
+                        "task_id": item.task_id, "user_id": 0, "content": item.body
+                    }
+                    if (
+                        getattr(writer.client, "backend_kind", "kanboard") == "postgres"
+                        and item.recorded_at
+                    ):
+                        arguments["created_at"] = item.recorded_at
+                    writes.append(("createComment", arguments))
                     staged.append((item, event))
                 if not writes:
                     continue

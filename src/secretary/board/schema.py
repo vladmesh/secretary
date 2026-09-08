@@ -34,10 +34,9 @@ again, this time for carrying no `task_type` metadata against a `NOT NULL` colum
 nullable now and its `CHECK` admits NULL or a value of the closed vocabulary — the board's silence,
 stored as silence.
 
-Revision `0004_product_issue_sql` adds indexed deterministic board keys for Product and Issue,
-lossless Product extensions and comments, and the nullable move timestamp used by SQL Done
-retention. Existing rows receive deterministic keys during the migration; historical tasks keep
-an unknown move time rather than receiving an invented one.
+Revision `0005_sprint_sql` completes the typed Sprint runtime after Product and Issue,
+preserves declared relation order, retains malformed restored resume timestamps as evidence, and
+makes card-to-sprint restore references deferrable inside the one restore transaction.
 
 The version table is Alembic's ``alembic_version`` and is not declared here: it is the migration
 tool's own bookkeeping, it is created by the tool, and inventing a second one beside it is what
@@ -180,6 +179,7 @@ class Sprint(Base):
     # here whatever it spells.  `sprint_number` stays for §9's allocator and for the numbering
     # rule, as a nullable unique column rather than as the key.
     ref = sa.Column(sa.Text, primary_key=True)  # "sprint:1037", "sprint:canary-terra-20260813"
+    board_key = sa.Column(sa.BigInteger, nullable=False, unique=True)
     sprint_number = sa.Column(sa.Integer, autoincrement=False)  # N in sprint:N, NULL when unnumbered
     goal = sa.Column(sa.Text, nullable=False)
     definition_of_done = sa.Column(sa.Text, nullable=False)
@@ -241,6 +241,7 @@ class SprintRepository(Base):
     repository_id = sa.Column(
         sa.BigInteger, sa.ForeignKey("repositories.repository_id"), primary_key=True
     )
+    ordinal = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
 
 
 class SprintIssue(Base):
@@ -250,6 +251,7 @@ class SprintIssue(Base):
         sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True
     )
     issue_id = sa.Column(sa.Text, sa.ForeignKey("issues.issue_id"), primary_key=True)
+    ordinal = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
 
 
 class SprintResume(Base):
@@ -268,6 +270,8 @@ class SprintResume(Base):
     dod_state = sa.Column(sa.Text, nullable=False)
     next_safe_step = sa.Column(sa.Text, nullable=False)
     recorded_at = sa.Column(TIMESTAMPTZ, nullable=False)
+    # Restore must retain malformed legacy evidence so freshness can report it as stale.
+    recorded_at_source = sa.Column(sa.Text)
 
     # The target a scoped foreign key needs; redundant with the primary key by design.
     __table_args__ = (sa.UniqueConstraint("resume_id", "sprint_ref"),)
@@ -293,7 +297,6 @@ class SprintBudgetEvent(Base):
     occurred_at = sa.Column(TIMESTAMPTZ, nullable=False)
 
     __table_args__ = (
-        sa.UniqueConstraint("request_id"),
         sa.CheckConstraint(
             "event_type IN ('red_review','blocked','red_ci','preempt','recreated_task','hotfix',"
             "'infrastructure_blocked')"
@@ -335,7 +338,10 @@ class Task(Base):
     state = sa.Column(sa.Text, nullable=False)
     archived = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false"))
     position = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
-    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref"))
+    sprint_ref = sa.Column(
+        sa.Text,
+        sa.ForeignKey("sprints.ref", deferrable=True, initially="DEFERRED"),
+    )
     claim_worker = sa.Column(sa.Text)
     claimed_at = sa.Column(TIMESTAMPTZ)
     # workspace
@@ -376,6 +382,7 @@ class Task(Base):
         sa.CheckConstraint("codex_launch_mode IN ('tui')"),
         sa.CheckConstraint("retry_same >= 0"),
         sa.CheckConstraint("retry_switch >= 0"),
+        sa.CheckConstraint("task_number < 2000000000", name="task_number_is_in_card_key_range"),
         sa.UniqueConstraint("project_id", "task_number"),
         # The target the sprint's scoped cursor and decision keys need (§3.3, §3.8).
         # Redundant with the primary key by design.
@@ -455,6 +462,7 @@ class SprintProject(Base):
         sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True
     )
     project_id = sa.Column(sa.Text, sa.ForeignKey("projects.project_id"), primary_key=True)
+    ordinal = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     reserved = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("true"))
     reserved_at = sa.Column(TIMESTAMPTZ, nullable=False)
     released_at = sa.Column(TIMESTAMPTZ)
