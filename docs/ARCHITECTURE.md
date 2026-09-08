@@ -213,18 +213,22 @@ yet a stable plugin API.
 
 The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` is always the
 project adapter's namespace. It claims its reserved environment with an owner record before creating
-or populating it, never enables system site packages, and never writes production package paths into
-either environment. Secretary candidates are installed there from their own `.[dev]` declaration,
+or populating it, and first adds `.secretary-task-env/` to the repository-local Git exclude so a
+blanket `git add -A` cannot capture runtime files. It never enables system site packages or writes
+production package paths into either environment. Projects whose adapter omits a broad-check
+interpreter are installed there from their own `.[dev]` declaration,
 while adapter setup runs outside both environments and may create its own `.venv`. Worker and
 reviewer login shells put the dispatcher environment ahead of their ordinary `PATH`; an adapter's
 declared broad-check interpreter may still select its own `.venv`. Rework and retained review prepare
 a missing dispatcher environment before launch, which upgrades old retained workspaces in place.
 Non-mutating gate, release and cleanup boundaries accept an absent pre-upgrade namespace, but if the
 reserved namespace exists they require the same dispatcher owner record before proceeding.
-The production virtualenv is never a general tool source for those roles. Control-plane report and
-verdict commands instead name the registered production source explicitly. The same immutable
-`ProductionRuntime` value binds the dispatcher interpreter, registered product root and observed
-`secretary` import at workspace creation, launch, gate, release and teardown. A mismatch preserves
+The production virtualenv is never a general tool source for those roles. The outer broad wrapper
+and control-plane report and verdict commands instead name the absolute production interpreter and
+registered production source explicitly. For an adapter that omits its interpreter, the wrapper
+passes the reserved candidate interpreter to the inner broad suite, whose receipt attests it. The
+same immutable `ProductionRuntime` value binds the dispatcher interpreter, registered product root
+and observed `secretary` import at workspace creation, launch, gate, release and teardown. A mismatch preserves
 the worktree and blocks the card.
 
 Before launching a head its CLI's first-run questions are answered on its behalf. Otherwise an

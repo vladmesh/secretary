@@ -132,6 +132,12 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--module-arg", action="append", default=[], help="argument passed to --module, repeatable"
     )
+    parser.add_argument(
+        "--default-interpreter",
+        default="",
+        help="candidate interpreter used when the registered adapter omits broad_check.interpreter; "
+        "dispatcher task packets set this to their workspace-owned environment",
+    )
 
 
 def _missing(message: str):
@@ -166,7 +172,11 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
         if args.module_arg:
             raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
         return ResolvedCheck(CheckSpec.for_shell(args.command))
-    contract = _module_contract(Path(args.root), Path(args.instance))
+    contract = _module_contract(
+        Path(args.root),
+        Path(args.instance),
+        default_interpreter=args.default_interpreter,
+    )
     if args.module:
         module, module_args = args.module, list(args.module_arg)
     elif contract.module:
@@ -190,7 +200,12 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
     )
 
 
-def _module_contract(root: Path, instance: Path) -> ModuleContract:
+def _module_contract(
+    root: Path,
+    instance: Path,
+    *,
+    default_interpreter: str = "",
+) -> ModuleContract:
     """Return the registered project's contract, or the CLI default for an unregistered checkout.
 
     A worker's checkout is normally a git worktree, not the registered checkout itself. Comparing
@@ -208,7 +223,12 @@ def _module_contract(root: Path, instance: Path) -> ModuleContract:
     if binding is None:
         return ModuleContract(sys.executable, CLI_DEFAULT_IMPORT_PACKAGE, fallback_reason)
     try:
-        return module_contract(binding, instance=instance, project_root=root)
+        return module_contract(
+            binding,
+            instance=instance,
+            project_root=root,
+            default_interpreter=default_interpreter,
+        )
     except ContractUnusable as exc:
         raise BroadCheckError(exc.code, exc.message) from exc
 
@@ -318,7 +338,7 @@ def run_check_broad(args: argparse.Namespace) -> int:
                 return lookup.authorized_result().shell_status
         # The check's combined output goes to stderr so it stays visible live while stdout keeps
         # carrying exactly one JSON document, as every other command here does.
-        exit_code, receipt = run_broad_check(
+        _exit_code, receipt = run_broad_check(
             spec,
             root=root,
             stream=sys.stderr,

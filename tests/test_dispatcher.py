@@ -10785,14 +10785,33 @@ class HeadPromptTests(unittest.TestCase):
         (package / "__main__.py").write_text(
             "raise SystemExit('SHADOW SECRETARY WAS IMPORTED')\n", encoding="utf-8"
         )
-        env = dict(os.environ, TA_SECRETARY_REPO=str(root))
+        bin_dir = shadow / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "python3").write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+        (bin_dir / "python3").chmod(0o755)
+        env = dict(
+            os.environ,
+            TA_SECRETARY_REPO=str(root),
+            PATH=f"{bin_dir}:/usr/local/bin:/usr/bin:/bin",
+        )
+        task = {**self.task, "project": "non-secretary-project"}
+        self.host.catalog.broad_check_state = ContractVerdict.as_fit(
+            ModuleContract(
+                sys.executable,
+                "non_secretary_project",
+                module="tests.broad",
+                interpreter_declared=False,
+            ),
+            "non-secretary-project",
+        )
 
         for doc in (
-            self.host._worker_task_doc(self.task, "main", "attempt-1"),
-            self.host._review_prompt(self.task, "attempt-1", 3),
+            self.host._worker_task_doc(task, "main", "attempt-1"),
+            self.host._review_prompt(task, "attempt-1", 3),
         ):
             for command in self._command_lines(doc):
                 with self.subTest(command=command):
+                    self.assertIn(f" {sys.executable} -P -m secretary task", command)
                     control_plane_help = command.split(" task ", 1)[0] + " task --help"
                     result = subprocess.run(
                         control_plane_help,
@@ -10805,6 +10824,11 @@ class HeadPromptTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertNotIn("SHADOW SECRETARY WAS IMPORTED", result.stderr)
+
+        broad, show = self.host._broad_check_invocation("non-secretary-project")
+        for command in (broad, show):
+            self.assertIn(f" {sys.executable} -P -m secretary check", command)
+            self.assertIn("--default-interpreter .secretary-task-env/venv/bin/python3", command)
 
 
 class WorkerDurabilityTests(unittest.TestCase):

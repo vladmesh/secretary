@@ -43,6 +43,16 @@ def _record(workspace: str = "") -> DispatcherRecord:
     )
 
 
+def _git_workspace(path: Path) -> None:
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "fixture@example.invalid"], check=True)
+    (path / "tracked").write_text("candidate\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "tracked"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "fixture"], check=True)
+
+
 class _Runtime:
     interpreter = sys.executable
     product_root = "/registered/secretary"
@@ -136,7 +146,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
     def test_workspace_prepare_creates_an_owned_interpreter_and_reuses_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "task"
-            workspace.mkdir()
+            _git_workspace(workspace)
             runtime = _Runtime([_observation()])
             host = _Host(Path(tmp), runtime)
             host._prepare_workspace_environment(str(workspace))
@@ -149,6 +159,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
     def test_dispatcher_environment_is_disjoint_from_adapter_owned_dot_venv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "task"
+            _git_workspace(workspace)
             adapter_environment = workspace / ".venv"
             adapter_environment.mkdir(parents=True)
             sentinel = adapter_environment / "adapter-owned"
@@ -175,6 +186,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
     def test_unclaimed_reserved_environment_is_never_adopted_or_mutated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "task"
+            _git_workspace(workspace)
             environment = workspace / ".secretary-task-env" / "venv"
             environment.mkdir(parents=True)
             sentinel = environment / "foreign"
@@ -226,20 +238,25 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 self.assertNotIn(".secretary-task-env", command)
                 self.assertNotIn("/opt/secretary/.venv/bin", command)
 
-    def test_secretary_environment_is_populated_from_candidate_dev_contract(self) -> None:
+    def test_adapter_default_runtime_is_populated_from_candidate_dev_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "task"
-            workspace.mkdir()
-            (workspace / "pyproject.toml").write_text("[project]\nname = 'secretary'\n", encoding="utf-8")
+            _git_workspace(workspace)
+            (workspace / "pyproject.toml").write_text("[project]\nname = 'other-project'\n", encoding="utf-8")
+            catalog = SimpleNamespace(
+                adapter=lambda project: {
+                    "broad_check": {"module": "tests.broad", "import_package": "secretary"}
+                }
+            )
             host = CommandHostRuntime(  # type: ignore[arg-type]
-                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+                catalog, Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
             )
             original_run = host._run
             commands: list[list[str]] = []
 
             def run(args: list[str], label: str, *, cwd: Path | None = None):
                 commands.append(args)
-                if label == "workspace Secretary dependencies":
+                if label == "workspace candidate dependencies":
                     return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
                 return original_run(args, label, cwd=cwd)
 
@@ -247,10 +264,51 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 mock.patch.object(host, "_run", run),
                 mock.patch.object(host, "_require_workspace_environment"),
             ):
-                host._prepare_workspace_environment(str(workspace), project="secretary")
+                host._prepare_workspace_environment(str(workspace), project="other-project")
 
             candidate_python = str(workspace / ".secretary-task-env" / "venv" / "bin" / "python3")
             self.assertIn([candidate_python, "-m", "pip", "install", "-e", ".[dev]"], commands)
+
+    def test_reserved_environment_is_locally_excluded_and_cannot_be_staged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp) / "other-project"
+            _git_workspace(repository)
+            workspace = Path(tmp) / "task-worktree"
+            subprocess.run(
+                ["git", "-C", str(repository), "worktree", "add", "-qb", "task", str(workspace)],
+                check=True,
+            )
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+            )
+
+            host._prepare_workspace_environment(str(workspace))
+
+            exclude = Path(
+                subprocess.run(
+                    ["git", "-C", str(workspace), "rev-parse", "--git-path", "info/exclude"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            )
+            self.assertIn(".secretary-task-env/", exclude.read_text(encoding="utf-8").splitlines())
+            status = subprocess.run(
+                ["git", "-C", str(workspace), "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(status.stdout, "")
+            host.verify_worker_result({}, _record(str(workspace)))
+            subprocess.run(["git", "-C", str(workspace), "add", "-A"], check=True)
+            staged = subprocess.run(
+                ["git", "-C", str(workspace), "diff", "--cached", "--name-only"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(staged.stdout, "")
 
     def test_rework_prepares_a_missing_pre_upgrade_environment_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

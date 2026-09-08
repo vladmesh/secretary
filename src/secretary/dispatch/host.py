@@ -277,7 +277,6 @@ from triggered_agents.runtime.prompt_document import (
 from triggered_agents.runtime.role_env import WORKSPACE_ENV_DIR
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
-_CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
 
 OBSERVER_WORKSPACE_DIR = OBSERVER_REPO_NAME
 OBSERVER_REPO_BRANCH = "observers"
@@ -2856,6 +2855,7 @@ class CommandHostRuntime:
     def _claim_workspace_environment(self, workspace: str) -> Path:
         """Determine dispatcher ownership before creating or populating its reserved environment."""
         root = Path(workspace).resolve(strict=True)
+        self._exclude_workspace_environment(root)
         environment = self._workspace_environment(root)
         owner = self._workspace_environment_owner(root)
         expected = {"owner": "secretary-dispatcher", "schema_version": 1, "workspace": str(root)}
@@ -2867,6 +2867,38 @@ class CommandHostRuntime:
         except RuntimeError as exc:
             raise HostError(f"workspace Python environment ownership could not be written: {exc}") from None
         return environment
+
+    def _exclude_workspace_environment(self, root: Path) -> None:
+        """Keep the reserved runtime namespace out of this repository's candidate content."""
+        located = self._run(
+            ["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
+            "workspace Git exclude",
+            cwd=root,
+        ).stdout.strip()
+        if not located:
+            raise HostError("workspace Git exclude path is unavailable")
+        exclude = Path(located)
+        if not exclude.is_absolute():
+            exclude = root / exclude
+        try:
+            current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        except (OSError, UnicodeError) as exc:
+            raise HostError(f"workspace Git exclude could not be read: {exc}") from None
+        pattern = f"{Path(WORKSPACE_ENV_DIR).parts[0]}/"
+        if pattern in {line.strip() for line in current.splitlines()}:
+            return
+        separator = "" if not current or current.endswith("\n") else "\n"
+        try:
+            write_text_atomic(exclude, f"{current}{separator}{pattern}\n")
+        except RuntimeError as exc:
+            raise HostError(f"workspace Git exclude could not be written: {exc}") from None
+
+    def _candidate_environment_install_required(self, project: str) -> bool:
+        """Use the adapter's existing default-interpreter choice, never a project-name heuristic."""
+        if not project:
+            return False
+        broad_check = self.catalog.adapter(project).get("broad_check")
+        return isinstance(broad_check, dict) and "interpreter" not in broad_check
 
     def _prepare_workspace_environment(self, workspace: str, *, project: str = "") -> None:
         """Create and populate only the environment the dispatcher has explicitly claimed."""
@@ -2882,10 +2914,10 @@ class CommandHostRuntime:
             "workspace Python environment",
             cwd=root,
         )
-        if project.replace("_", "-") == "secretary" and (root / "pyproject.toml").is_file():
+        if self._candidate_environment_install_required(project) and (root / "pyproject.toml").is_file():
             self._run(
                 [str(environment / "bin" / "python3"), "-m", "pip", "install", "-e", ".[dev]"],
-                "workspace Secretary dependencies",
+                "workspace candidate dependencies",
                 cwd=root,
             )
         try:
@@ -3809,16 +3841,27 @@ class CommandHostRuntime:
         if contract is None or not contract.module:
             return "", ""
         arguments = "".join(f" --module-arg {shlex.quote(argument)}" for argument in contract.args)
+        interpreter = shlex.quote(str(self.production_runtime.interpreter))
+        candidate_default = (
+            f" --default-interpreter {shlex.quote(str(Path(WORKSPACE_ENV_DIR) / 'bin' / 'python3'))}"
+            if not contract.interpreter_declared
+            else ""
+        )
         return (
             (
-                f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary check broad "
-                f"--reuse --module {contract.module}{arguments}"
+                f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary check broad "
+                f"--reuse --module {contract.module}{arguments}{candidate_default}"
             ),
             (
-                f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary check show "
-                f"--module {contract.module}{arguments}"
+                f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary check show "
+                f"--module {contract.module}{arguments}{candidate_default}"
             ),
         )
+
+    def _control_plane_task_command(self) -> str:
+        """Secretary protocol boundary, independent of the candidate shell's PATH."""
+        interpreter = shlex.quote(str(self.production_runtime.interpreter))
+        return f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
 
     def _worker_task_doc(
         self,
@@ -3842,6 +3885,7 @@ class CommandHostRuntime:
             for classification in ("external_fact", "wrong_task_definition")
         }
         body_file = _body_file_path("report", task["ref"], generation)
+        control_plane = self._control_plane_task_command()
         sections = [
             f"# Task {task['ref']}",
             "",
@@ -4039,9 +4083,9 @@ class CommandHostRuntime:
             "either way this round is left waiting. Copy the command from here, never from an",
             "earlier turn of this conversation.",
             *_body_file_instructions(body_file),
-            f"{_CONTROL_PLANE_TASK_COMMAND} report --ref {task['ref']} --role worker --kind done --request-id {request} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} report --ref {task['ref']} --role worker --kind blocked --classification external_fact --request-id {blocked_requests['external_fact']} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} report --ref {task['ref']} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_requests['wrong_task_definition']} --body-file {body_file}",
+            f"{control_plane} report --ref {task['ref']} --role worker --kind done --request-id {request} --body-file {body_file}",
+            f"{control_plane} report --ref {task['ref']} --role worker --kind blocked --classification external_fact --request-id {blocked_requests['external_fact']} --body-file {body_file}",
+            f"{control_plane} report --ref {task['ref']} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_requests['wrong_task_definition']} --body-file {body_file}",
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -4180,6 +4224,7 @@ class CommandHostRuntime:
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
         body_file = _body_file_path("verdict", task["ref"], review_round)
+        control_plane = self._control_plane_task_command()
         current_sha = self.head_commit(record) if record else ""
         attestation = _gate_attestation_for_prompt(record, current_sha)
         sections = [
@@ -4216,8 +4261,8 @@ class CommandHostRuntime:
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --request-id {green_request} --body-file {body_file}",
-            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --request-id {red_request} --body-file {body_file}",
+            f"{control_plane} verdict --ref {task['ref']} --role reviewer --kind green --request-id {green_request} --body-file {body_file}",
+            f"{control_plane} verdict --ref {task['ref']} --role reviewer --kind red --request-id {red_request} --body-file {body_file}",
             "",
         ]
         if attestation:

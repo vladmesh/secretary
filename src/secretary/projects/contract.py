@@ -151,6 +151,9 @@ class ModuleContract:
     the field existed does not. That is not a refusal — an empty `module` only means the caller has
     to name the suite itself, the way every caller did before.
 
+    `interpreter_declared` distinguishes an adapter-owned interpreter from the dispatcher-selected
+    candidate default. It is internal routing metadata and does not change the public source record.
+
     `reason` is set on exactly one contract now, and it is not a project's: the default
     ``check_commands`` uses for a checkout that matches no registered project at all. A registered
     project never reaches here without a declared contract, so no verdict from `decide` carries a
@@ -162,6 +165,7 @@ class ModuleContract:
     reason: str = ""
     module: str = ""
     args: tuple[str, ...] = ()
+    interpreter_declared: bool = True
 
     def as_dict(self) -> dict[str, str]:
         if self.reason:
@@ -258,6 +262,7 @@ def decide(
     *,
     instance: Path,
     workspace: Path | None,
+    default_interpreter: str = "",
 ) -> ContractVerdict:
     """The one decision point about one registered project's broad-check contract.
 
@@ -299,13 +304,20 @@ def decide(
             f"project {project!r} declares no broad-check contract: adapter {adapter_name!r} has "
             "no `broad_check` block",
         )
-    return _declared_contract(configured, adapter_name, workspace)
+    return _declared_contract(
+        configured,
+        adapter_name,
+        workspace,
+        default_interpreter=default_interpreter,
+    )
 
 
 def _declared_contract(
     configured: Any,
     adapter_name: str,
     workspace: Path | None,
+    *,
+    default_interpreter: str = "",
 ) -> ContractVerdict:
     """The contract an adapter declares for itself: complete, runnable, or an open question."""
     if not isinstance(configured, dict):  # schema validation above normally catches this.
@@ -343,12 +355,31 @@ def _declared_contract(
         )
     # An omitted interpreter is not an incomplete contract, it is the common case. PR #329 made the
     # check subprocess prepends the candidate workspace's own import roots to `sys.path` before it
-    # imports the project. Dispatcher heads run the wrapper with their workspace-owned interpreter;
-    # direct CLI callers use the interpreter they deliberately invoked. A declared interpreter still
-    # means exactly what it always did.
+    # imports the project. The dispatcher may supply its reserved candidate interpreter for the
+    # inner suite while its outer wrapper stays on the production runtime; direct CLI callers use
+    # the interpreter they deliberately invoked. A declared interpreter still means exactly what
+    # it always did.
     if "interpreter" not in configured:
+        interpreter = default_interpreter or sys.executable
+        interpreter_path = Path(interpreter)
+        if not interpreter_path.is_absolute() and workspace is not None:
+            interpreter = str(Path(workspace).resolve() / interpreter_path)
+        if not _executable(interpreter):
+            return ContractVerdict.as_refused(
+                INTERPRETER_UNAVAILABLE,
+                adapter_name,
+                f"could not start dispatcher-selected candidate interpreter {interpreter!r}: "
+                "it is not an executable file",
+            )
         return ContractVerdict.as_fit(
-            ModuleContract(sys.executable, import_package, module=module, args=args), adapter_name
+            ModuleContract(
+                interpreter,
+                import_package,
+                module=module,
+                args=args,
+                interpreter_declared=False,
+            ),
+            adapter_name,
         )
     interpreter = str(configured.get("interpreter") or "").strip()
     if not interpreter:
@@ -401,14 +432,27 @@ def contract_of(verdict: ContractVerdict) -> ModuleContract:
     raise ContractStateError(f"unreadable contract verdict {verdict.state!r}")
 
 
-def module_contract(binding: dict[str, Any], *, instance: Path, project_root: Path) -> ModuleContract:
+def module_contract(
+    binding: dict[str, Any],
+    *,
+    instance: Path,
+    project_root: Path,
+    default_interpreter: str = "",
+) -> ModuleContract:
     """The worker's own resolution: the contract to run in THIS tree, or ``ContractUnusable``.
 
     `project_root` is the workspace the check will run in, which is what the adapter schema means
     when it resolves a relative interpreter. Having that tree, this side leaves no question open —
     and it does not re-decide anything either: the state it acts on is the one `decide` returned.
     """
-    return contract_of(decide(binding, instance=instance, workspace=project_root))
+    return contract_of(
+        decide(
+            binding,
+            instance=instance,
+            workspace=project_root,
+            default_interpreter=default_interpreter,
+        )
+    )
 
 
 def _executable(interpreter: str) -> bool:

@@ -1438,20 +1438,45 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self.assertEqual(payload["receipt"]["tail"], "ran --only fast lane")
         self.assertEqual(payload["module_contract"], {"source": "adapter"})
 
-    def test_a_declared_contract_with_no_interpreter_runs_on_the_wrappers_own(self) -> None:
-        """An omitted override means the wrapper's interpreter, with observed candidate import."""
+    def test_a_declared_contract_with_no_interpreter_accepts_the_dispatcher_candidate_runtime(
+        self,
+    ) -> None:
+        """The production wrapper may select a workspace runtime for the inner project suite."""
         self._suite_file("project_suite")
         instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        candidate = self.root / ".secretary-task-env" / "venv"
+        subprocess.run([sys.executable, "-m", "venv", str(candidate)], check=True)
 
-        payload = _run_main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+        payload = _run_main(
+            [
+                "check",
+                "broad",
+                "--root",
+                str(self.root),
+                "--instance",
+                str(instance),
+                "--default-interpreter",
+                ".secretary-task-env/venv/bin/python3",
+            ]
+        )
 
-        self.assertEqual(payload["receipt"]["check_set"]["interpreter"], sys.executable)
+        candidate_python = str(candidate / "bin" / "python3")
+        self.assertEqual(payload["receipt"]["check_set"]["interpreter"], candidate_python)
+        self.assertEqual(payload["receipt"]["project_provenance"]["python"], candidate_python)
         self.assertEqual(payload["receipt"]["check_set"]["module"], "project_suite")
         # And it really did import the candidate, not whatever this interpreter's environment holds.
         self.assertTrue(
             payload["receipt"]["project_provenance"]["inside_workspace"],
             payload["receipt"]["project_provenance"],
         )
+
+    def test_a_direct_check_with_no_interpreter_still_uses_the_callers_runtime(self) -> None:
+        self._suite_file("project_suite")
+        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+
+        payload = _run_main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+
+        self.assertEqual(payload["receipt"]["check_set"]["interpreter"], sys.executable)
 
     def test_check_show_reads_back_the_receipt_the_declared_suite_wrote(self) -> None:
         self._suite_file("project_suite")

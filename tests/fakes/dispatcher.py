@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from secretary.checkpoint import CheckpointResult
@@ -751,6 +752,7 @@ class FakeHost:
         # The real host snapshots the head at bring-up and hands the record back; the fake goes
         # through the same catalog so the routing journal sees real configurations here too.
         self.catalog = catalog or FakeCatalog()
+        self.production_runtime = SimpleNamespace(interpreter=sys.executable)
         # Ordered log of every host call. The per-method lists below answer "did it happen"; this
         # answers "in what order", which some invariants depend on (complete_green must push from
         # the workspace before teardown removes it).
