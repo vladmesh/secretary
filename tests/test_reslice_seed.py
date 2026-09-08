@@ -36,6 +36,7 @@ from secretary.tasks import TaskError, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.fakes.dispatcher import FakeCatalog
 from tests.fakes.tasks import WriteKanboard
+from tests.production_runtime_fixtures import registered_production_runtime
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -474,7 +475,12 @@ class _MergeHost(CommandHostRuntime):
     """`complete_green`'s git and gh, recorded rather than run."""
 
     def __init__(self, root: Path, *, pr_base: str) -> None:
-        super().__init__(FakeCatalog({"validation": {"ci": "github"}}), root, mode="real")  # type: ignore[arg-type]
+        super().__init__(  # type: ignore[arg-type]
+            FakeCatalog({"validation": {"ci": "github"}}),
+            root,
+            mode="real",
+            production_runtime=registered_production_runtime(root),
+        )
         self.pr_base = pr_base
         self.runs: list[list[str]] = []
 
@@ -735,7 +741,12 @@ class _PushCatalog:
 
 class _PushHost(CommandHostRuntime):
     def __init__(self, catalog, root: Path) -> None:
-        super().__init__(catalog, root, mode="real")  # type: ignore[arg-type]
+        super().__init__(  # type: ignore[arg-type]
+            catalog,
+            root,
+            mode="real",
+            production_runtime=registered_production_runtime(root),
+        )
         self.runs: list[list[str]] = []
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
