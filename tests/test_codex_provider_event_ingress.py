@@ -48,6 +48,7 @@ from secretary.projects.contract import (
 )
 from secretary.projects.integration_base import resolve_integration_base
 from tests.fakes.host import FakeSessionHost
+from tests.production_runtime_fixtures import registered_production_runtime
 from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 
@@ -1319,7 +1320,12 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.source_emitted = False
         self.source_events: list[object] = []
         self.session = self.WorkingSession(self._emit_source)
-        self.host = CommandHostRuntime(self.Catalog(self), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.host = CommandHostRuntime(  # type: ignore[arg-type]
+            self.Catalog(self),
+            self.root / "data",
+            mode="real",
+            production_runtime=registered_production_runtime(self.root),
+        )
         self.host.preflight_codex_run = self._real_preflight  # type: ignore[method-assign]
         self.host._run = self._run  # type: ignore[method-assign]
         self.host._run_json = self._run_json  # type: ignore[method-assign]
