@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+import types
 import unittest
 from pathlib import Path
 
@@ -79,6 +80,32 @@ def _methods(module: object) -> dict[str, object]:
             if name.startswith("test_") and callable(value):
                 found[f"{module.__name__}.{owner.__name__}.{name}"] = value
     return found
+
+
+def _portable_sql_shadows(module: object) -> list[str]:
+    violations: list[str] = []
+    for owner in vars(module).values():
+        if not inspect.isclass(owner) or owner.__module__ != module.__name__:
+            continue
+        inherited = owner.__mro__[1:]
+        for name, replacement in owner.__dict__.items():
+            if not name.startswith("test_"):
+                continue
+            original = next(
+                (
+                    base.__dict__[name]
+                    for base in inherited
+                    if name in base.__dict__ and callable(base.__dict__[name])
+                ),
+                None,
+            )
+            if original is None:
+                continue
+            qualified = f"{original.__module__}.{original.__qualname__}"
+            if qualified not in KANBOARD_ONLY:
+                action = "overrides" if callable(replacement) else "shadows"
+                violations.append(f"{owner.__name__}.{name} {action} portable {qualified}")
+    return violations
 
 
 FORBIDDEN_NAMES = {"SprintKanboard", "ProductSprintKanboard", "ensure_sprint_board"}
@@ -261,23 +288,19 @@ class SprintFixtureGuards(unittest.TestCase):
     def test_sql_subclasses_do_not_override_portable_test_bodies(self) -> None:
         from tests import test_sprints_sql_backend as sql
 
-        violations: list[str] = []
-        for owner in vars(sql).values():
-            if not inspect.isclass(owner) or owner.__module__ != sql.__name__:
-                continue
-            inherited = owner.__mro__[1:]
-            for name, method in owner.__dict__.items():
-                if not name.startswith("test_") or not callable(method):
-                    continue
-                original = next(
-                    (base.__dict__[name] for base in inherited if name in base.__dict__), None
-                )
-                if original is None:
-                    continue
-                qualified = f"{original.__module__}.{original.__qualname__}"
-                if qualified not in KANBOARD_ONLY:
-                    violations.append(f"{owner.__name__}.{name} overrides portable {qualified}")
-        self.assertEqual(violations, [])
+        self.assertEqual(_portable_sql_shadows(sql), [])
+
+    def test_a_non_callable_attribute_cannot_hide_a_portable_sql_test(self) -> None:
+        base = type("PortableBase", (), {"test_portable": lambda self: None})
+        base.__module__ = "tests.synthetic_shared"
+        shadow = type("SqlShadow", (base,), {"test_portable": None})
+        shadow.__module__ = "tests.synthetic_sql"
+        module = types.SimpleNamespace(__name__="tests.synthetic_sql", SqlShadow=shadow)
+
+        violations = _portable_sql_shadows(module)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("shadows portable", violations[0])
 
     def test_portable_fixture_helpers_do_not_reach_into_fake_storage(self) -> None:
         allowed = {"make_sprint_client", "_sprint_rows", "_transactions"}

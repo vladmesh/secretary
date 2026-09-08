@@ -13,7 +13,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from secretary.board.backend import KANBOARD, entity_id, entity_number
+from secretary.board.backend import (
+    KANBOARD,
+    BoardBackendError,
+    entity_id,
+    entity_number,
+    sprint_reference_number,
+)
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     KIND_HEAD,
@@ -1145,6 +1151,11 @@ class SprintWriter:
             raise TaskError("validation", "create requires a non-empty goal", 2)
         if reference and not reference.startswith(SPRINT_REFERENCE_PREFIX):
             raise TaskError("validation", f"sprint reference must start with {SPRINT_REFERENCE_PREFIX}", 2)
+        if reference:
+            try:
+                sprint_reference_number(reference)
+            except BoardBackendError as exc:
+                raise TaskError("validation", str(exc), 2) from None
         if status not in SPRINT_STATUSES:
             raise TaskError("validation", f"unknown sprint status {status!r}", 2)
         return {

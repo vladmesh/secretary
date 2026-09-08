@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 
 #: The one named place.  A card backend is chosen here or it is `kanboard`.
 CARD_BACKEND_ENV = "SECRETARY_CARD_BACKEND"
@@ -124,6 +125,21 @@ RECORD_KINDS = ("sprint", "product", "issue")
 RECORD_KEY_BASES = {"sprint": 2_000_000_000, "product": 3_000_000_000, "issue": 4_000_000_000}
 RECORD_KEY_SPAN = 1_000_000_000
 SPRINT_NUMBER_KEY_SPAN = RECORD_KEY_SPAN // 2
+_ASCII_NUMBERED_SPRINT_REF = re.compile(r"^sprint:([0-9]+)$")
+
+
+def sprint_reference_number(identifier: object) -> int | None:
+    """Return a canonical ASCII ``sprint:N`` number, or None for a custom Sprint ref."""
+    text = str(identifier).strip()
+    match = _ASCII_NUMBERED_SPRINT_REF.fullmatch(text)
+    if match is None:
+        return None
+    number = int(match.group(1))
+    if text != f"sprint:{number}":
+        raise BoardBackendError(
+            f"a numbered Sprint reference must be canonical, not {text!r}"
+        )
+    return number
 
 
 def record_key(kind: str, identifier: str) -> int:
@@ -133,8 +149,8 @@ def record_key(kind: str, identifier: str) -> int:
     text = str(identifier).strip()
     if not text:
         raise BoardBackendError(f"a {kind} key needs an identifier")
-    if kind == "sprint" and text.startswith("sprint:") and text[7:].isdigit():
-        number = int(text[7:])
+    number = sprint_reference_number(text) if kind == "sprint" else None
+    if number is not None:
         if number >= SPRINT_NUMBER_KEY_SPAN:
             raise BoardBackendError(
                 f"a numbered Sprint must be below {SPRINT_NUMBER_KEY_SPAN}, not {number}"
@@ -299,4 +315,5 @@ __all__ = [
     "record_key",
     "record_key_kind",
     "reset_card_backend",
+    "sprint_reference_number",
 ]

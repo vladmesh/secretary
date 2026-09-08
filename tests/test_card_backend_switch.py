@@ -70,6 +70,20 @@ class EntityIdentityTests(unittest.TestCase):
             backend.entity_id("task", "mysql", 1)
 
 
+class SprintReferenceNumberTests(unittest.TestCase):
+    def test_only_canonical_ascii_numbered_refs_have_a_number(self) -> None:
+        self.assertEqual(backend.sprint_reference_number("sprint:0"), 0)
+        self.assertEqual(backend.sprint_reference_number("sprint:1596"), 1596)
+        self.assertIsNone(backend.sprint_reference_number("sprint:canary"))
+        self.assertIsNone(backend.sprint_reference_number("sprint:١"))
+
+    def test_a_leading_zero_is_refused_instead_of_aliasing_another_ref(self) -> None:
+        with self.assertRaisesRegex(backend.BoardBackendError, "must be canonical"):
+            backend.sprint_reference_number("sprint:01")
+        with self.assertRaisesRegex(backend.BoardBackendError, "must be canonical"):
+            backend.record_key("sprint", "sprint:01")
+
+
 class BoardHostIdentityTests(unittest.TestCase):
     """The `report`/`verdict`/`decide` path resolves a card number on either backend."""
 

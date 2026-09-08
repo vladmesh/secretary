@@ -61,7 +61,7 @@ from typing import Any
 
 import yaml
 
-from secretary.board.backend import record_key
+from secretary.board.backend import record_key, sprint_reference_number
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
     ISSUE_KINDS,
@@ -704,8 +704,7 @@ def _task_number_of(ref: str) -> int | None:
 
 
 def _sprint_number_of(ref: str) -> int | None:
-    tail = ref.removeprefix(SPRINT_REFERENCE_PREFIX)
-    return int(tail) if tail.isdigit() else None
+    return sprint_reference_number(ref)
 
 
 def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> ImportPlan:

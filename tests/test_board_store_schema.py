@@ -29,6 +29,7 @@ removed in `tearDownClass`, and nothing here reads or writes the live installati
 
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 import threading
@@ -214,6 +215,18 @@ class BoardStoreSchemaTests(unittest.TestCase):
             DOCUMENTED_COUNTS,
             "tables, CHECK, FK, PK, UNIQUE and partial unique indexes must match §3.13's numbers",
         )
+
+    def test_0006_frozen_backfill_agrees_with_the_runtime_sprint_mapping(self) -> None:
+        revision = importlib.import_module(
+            "secretary.board.migrations.versions.0006_sprint_transport_key"
+        )
+        self.assertFalse(hasattr(revision, "record_key"))
+        for reference in ("sprint:0", "sprint:1596", "sprint:canary", "sprint:١"):
+            with self.subTest(reference=reference):
+                self.assertEqual(
+                    revision._sprint_transport_key(reference),
+                    record_key("sprint", reference),
+                )
 
     def test_the_migrated_database_still_matches_the_models(self) -> None:
         """The models are the schema, so a revision that drifts from them is a defect here.

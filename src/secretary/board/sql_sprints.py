@@ -8,14 +8,11 @@ from __future__ import annotations
 
 import contextlib
 import json
-import re
 import tempfile
 from datetime import UTC, datetime
 from typing import Any
 
-from secretary.board.backend import record_key
-
-_NUMBERED = re.compile(r"^sprint:([0-9]+)$")
+from secretary.board.backend import record_key, sprint_reference_number
 
 
 def _now() -> datetime:
@@ -165,8 +162,9 @@ class SqlSprintRecords:
         if product is not None or issues:
             values["sprint_issues"] = json.dumps(issues, separators=(",", ":"))
         projects = [r[0] for r in self.client._query(
-            "SELECT project_id FROM sprint_projects WHERE sprint_ref = %s ORDER BY ordinal",
-            (reference,),
+            "SELECT project_id FROM sprint_projects WHERE sprint_ref = %s "
+            "AND (%s <> 'open' OR reserved) ORDER BY ordinal, project_id",
+            (reference, str(status)),
         )]
         if product is not None or projects:
             values["sprint_reservations"] = json.dumps(projects, separators=(",", ":"))
@@ -220,7 +218,7 @@ class SqlSprintRecords:
         if not required <= set(meta):
             return
         reference = row["reference"]
-        match = _NUMBERED.fullmatch(reference)
+        number = sprint_reference_number(reference)
         now = row["created_at"]
         observer = json.loads(meta["sprint_observer"]) if meta.get("sprint_observer") else None
         worker = self._pin(meta.get("sprint_worker"))
@@ -230,7 +228,7 @@ class SqlSprintRecords:
             "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, status, "
             "observer, worker_pin, reviewer_pin, current_task_ref, source_audit, created_at, updated_at, closed_at) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s,%s)",
-            (reference, sprint_key(reference), int(match.group(1)) if match else None, meta["sprint_goal"],
+            (reference, sprint_key(reference), number, meta["sprint_goal"],
              meta["sprint_definition_of_done"], meta.get("sprint_product") or None, status,
              json.dumps(observer) if observer is not None else None, worker, reviewer,
              meta.get("sprint_source_audit") or None, now, now, None if status == "open" else now),
@@ -270,12 +268,36 @@ class SqlSprintRecords:
                     (reference, str(issue).removeprefix("issue:"), ordinal),
                 )
         if "sprint_reservations" in values:
-            for ordinal, project in enumerate(json.loads(str(values["sprint_reservations"]) or "[]")):
+            projects = [
+                str(project)
+                for project in json.loads(str(values["sprint_reservations"]) or "[]")
+            ]
+            changed_at = _now()
+            self.client._execute(
+                "UPDATE sprint_projects SET reserved=false, released_at=%s "
+                "WHERE sprint_ref=%s AND reserved",
+                (changed_at, reference),
+            )
+            status = self.client._query(
+                "SELECT status FROM sprints WHERE ref=%s", (reference,)
+            )[0][0]
+            reserved = str(status) == "open"
+            for ordinal, project in enumerate(projects):
                 self.client._execute(
-                    "INSERT INTO sprint_projects (sprint_ref, project_id, reserved, reserved_at, ordinal) "
-                    "VALUES (%s,%s,true,%s,%s) ON CONFLICT (sprint_ref, project_id) DO UPDATE SET "
-                    "reserved=true, released_at=NULL, ordinal=EXCLUDED.ordinal",
-                    (reference, str(project), _now(), ordinal),
+                    "INSERT INTO sprint_projects "
+                    "(sprint_ref, project_id, reserved, reserved_at, released_at, ordinal) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (sprint_ref, project_id) DO UPDATE SET "
+                    "reserved=EXCLUDED.reserved, released_at=EXCLUDED.released_at, "
+                    "ordinal=EXCLUDED.ordinal",
+                    (
+                        reference,
+                        project,
+                        reserved,
+                        changed_at,
+                        None if reserved else changed_at,
+                        ordinal,
+                    ),
                 )
 
     def _request(self, reference: str, operation: str | None = None) -> tuple[str, dict[str, Any]] | None:

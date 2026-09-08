@@ -540,6 +540,105 @@ class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
                 self.client._execute("DELETE FROM sprint_projects")
                 self.client.connection.commit()
 
+    def _reservation_rows(self, reference: str) -> list[tuple]:
+        return self.client._query(
+            "SELECT project_id, reserved, ordinal, released_at IS NOT NULL "
+            "FROM sprint_projects WHERE sprint_ref=%s ORDER BY project_id",
+            (reference,),
+        )
+
+    def _seed_two_reservations(self, reference: str = "sprint:reservation-replace") -> str:
+        self.writer.restore_create(
+            reference=reference,
+            goal="reservation replacement",
+            request_id=f"seed-{reference}",
+        )
+        self.writer.restore(
+            reference=reference,
+            values={"sprint_reservations": json.dumps(["secretary", "other"])},
+            request_id=f"seed-reservations-{reference}",
+        )
+        return reference
+
+    def test_restore_replaces_the_active_reservation_set_and_replay_is_exact(self) -> None:
+        reference = self._seed_two_reservations()
+
+        first = self.writer.restore(
+            reference=reference,
+            values={"sprint_reservations": json.dumps(["other"])},
+            request_id="narrow-reservations",
+        )
+        rows = self._reservation_rows(reference)
+        second = self.writer.restore(
+            reference=reference,
+            values={"sprint_reservations": json.dumps(["other"])},
+            request_id="narrow-reservations",
+        )
+
+        self.assertEqual(first["event_id"], second["event_id"])
+        self.assertEqual(self._reservation_rows(reference), rows)
+        self.assertEqual(
+            rows,
+            [("other", True, 0, False), ("secretary", False, 0, True)],
+        )
+        self.assertEqual(first["sprint"]["reservations"], ["other"])
+
+    def test_reservation_narrowing_rolls_back_at_both_boundaries(self) -> None:
+        for suffix in ("claim", "relations"):
+            with self.subTest(boundary=suffix):
+                self.client = self.make_ownership_client()
+                self.writer = SprintWriter(
+                    self.client, data_dir=self.tmp.name, instance=self.instance
+                )
+                reference = self._seed_two_reservations(f"sprint:narrow-{suffix}")
+                before = self._reservation_rows(reference)
+                original = self.client.sprints._replace_relations
+                effect = RuntimeError("after claim") if suffix == "claim" else self._after(original)
+                request_id = f"narrow-rollback-{suffix}"
+
+                with mock.patch.object(
+                    self.client.sprints, "_replace_relations", side_effect=effect
+                ), self.assertRaises(TaskError):
+                    self.writer.restore(
+                        reference=reference,
+                        values={"sprint_reservations": json.dumps(["other"])},
+                        request_id=request_id,
+                    )
+
+                self._assert_no_request(request_id)
+                self.assertEqual(self._reservation_rows(reference), before)
+                self.writer.restore(
+                    reference=reference,
+                    values={"sprint_reservations": '["other"]'},
+                    request_id=request_id,
+                )
+                self.assertEqual(
+                    self._reservation_rows(reference),
+                    [("other", True, 0, False), ("secretary", False, 0, True)],
+                )
+
+    def test_restore_cannot_take_a_project_reserved_by_another_sprint(self) -> None:
+        holder = self._seed_two_reservations("sprint:reservation-holder")
+        contender = "sprint:reservation-contender"
+        self.writer.restore_create(
+            reference=contender, goal="contender", request_id="seed-contender"
+        )
+
+        with self.assertRaises(TaskError) as raised:
+            self.writer.restore(
+                reference=contender,
+                values={"sprint_reservations": json.dumps(["other"])},
+                request_id="contested-reservation",
+            )
+
+        self.assertEqual(raised.exception.code, "backend_error")
+        self._assert_no_request("contested-reservation")
+        self.assertEqual(self._reservation_rows(contender), [])
+        self.assertEqual(
+            [row for row in self._reservation_rows(holder) if row[0] == "other"],
+            [("other", True, 1, False)],
+        )
+
     def test_restore_create_rolls_back_at_both_boundaries_and_retries(self) -> None:
         for suffix in ("claim", "relations"):
             with self.subTest(boundary=suffix):
@@ -604,6 +703,45 @@ class SqlSprintAtomicityTests(SqlSprintFixture, shared.unittest.TestCase):
 
 
 class SqlTransportNamespaceTests(SqlSprintFixture, shared.unittest.TestCase):
+    def test_canonical_and_unicode_digit_refs_are_distinct_and_lossless(self) -> None:
+        writer = SprintWriter(self.client, data_dir=self.tmp.name)
+        ascii_ref = writer.restore_create(
+            reference="sprint:1", goal="ASCII", request_id="ascii-ref"
+        )["sprint"]["ref"]
+        unicode_ref = writer.restore_create(
+            reference="sprint:١", goal="Unicode", request_id="unicode-ref"
+        )["sprint"]["ref"]
+
+        self.assertEqual((ascii_ref, unicode_ref), ("sprint:1", "sprint:١"))
+        self.assertEqual(
+            self.client._query(
+                "SELECT ref, sprint_number FROM sprints "
+                "WHERE ref IN (%s,%s) ORDER BY ref",
+                (ascii_ref, unicode_ref),
+            ),
+            [("sprint:1", 1), ("sprint:١", None)],
+        )
+        self.assertNotEqual(sprint_key(ascii_ref), sprint_key(unicode_ref))
+
+    def test_a_leading_zero_ref_is_rejected_before_sql_persistence(self) -> None:
+        writer = SprintWriter(self.client, data_dir=self.tmp.name)
+
+        with self.assertRaisesRegex(TaskError, "must be canonical") as raised:
+            writer.restore_create(
+                reference="sprint:01", goal="alias", request_id="leading-zero-ref"
+            )
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(
+            self.client._query("SELECT count(*) FROM sprints WHERE ref='sprint:01'"), [(0,)]
+        )
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM requests WHERE request_id='leading-zero-ref'"
+            ),
+            [(0,)],
+        )
+
     def test_secretary_5_and_sprint_5_never_cross_dispatch(self) -> None:
         self.client = self.make_ownership_client()
         self.client.call(
