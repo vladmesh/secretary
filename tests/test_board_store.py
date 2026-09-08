@@ -197,10 +197,10 @@ class SchemaModelTests(unittest.TestCase):
     """
 
     def test_it_declares_every_table_of_section_3_and_no_version_table(self) -> None:
-        """22 tables; the 23rd §3.13 counts is Alembic's own `alembic_version`.
+        """23 tables; the 24th §3.13 counts is Alembic's own `alembic_version`.
 
-        `issue_comments` is the 22nd, added by `0002_board_gaps` because the first import of real
-        data found 479 comments on Issue rows with no table to go to.
+        `product_comments` is the 23rd, added by `0004_product_issue_sql` so the SQL backend can
+        serve the released Product comment vocabulary.
         """
         self.assertEqual(
             sorted(schema.metadata.tables),
@@ -208,6 +208,7 @@ class SchemaModelTests(unittest.TestCase):
                 "board_events",
                 "issue_comments",
                 "issues",
+                "product_comments",
                 "product_projects",
                 "products",
                 "projects",
@@ -232,8 +233,8 @@ class SchemaModelTests(unittest.TestCase):
         self.assertNotIn("schema_migrations", schema.metadata.tables)
         self.assertNotIn("alembic_version", schema.metadata.tables)
 
-    def test_jsonb_is_exactly_the_six_columns_section_3_10_names(self) -> None:
-        """Six since `0002_board_gaps`: `issues.extensions` is (J6), for §8.2's reason."""
+    def test_jsonb_is_exactly_the_seven_columns_section_3_10_names(self) -> None:
+        """Seven since `0004` added lossless Product metadata as (J7)."""
         from sqlalchemy.dialects.postgresql import JSONB
 
         found = {
@@ -288,7 +289,7 @@ class SchemaModelTests(unittest.TestCase):
         )
 
     def test_the_generated_ref_columns_are_postgresql_generated_columns(self) -> None:
-        """Three since `0002_board_gaps` moved the sprint's identity onto its reference.
+        """Four since `0004` added the Product comment request fence.
 
         `sprints.ref` and the three generated `sprint_ref` columns stopped being computed from
         `sprint_number`: the reference is now the stored identity, and it is the scoping column of
@@ -300,6 +301,7 @@ class SchemaModelTests(unittest.TestCase):
             ("products", "ref", "'product:' || product_id"),
             ("issues", "ref", "'issue:' || issue_id"),
             ("issue_comments", "issue_ref", "'issue:' || issue_id"),
+            ("product_comments", "product_ref", "'product:' || product_id"),
         ):
             with self.subTest(table=table):
                 computed = schema.metadata.tables[table].columns[column].computed
@@ -354,7 +356,13 @@ class MigrationScriptTests(unittest.TestCase):
         revisions = [script.revision for script in migrate.script_directory().walk_revisions()]
 
         self.assertEqual(
-            revisions, ["0003_task_type_optional", "0002_board_gaps", "0001_initial"]
+            revisions,
+            [
+                "0004_product_issue_sql",
+                "0003_task_type_optional",
+                "0002_board_gaps",
+                "0001_initial",
+            ],
         )
         self.assertEqual(migrate.head_revision(), migrate.EXPECTED_SCHEMA_REVISION)
 

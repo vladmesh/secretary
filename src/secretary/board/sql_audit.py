@@ -68,6 +68,7 @@ class SqlTaskAudit:
     def __init__(self, client: Any) -> None:
         self.client = client
         self._marker_lock_depth = threading.local()
+        self.legacy_audit: Any | None = None
 
     # --- primitives ------------------------------------------------------------------
 
@@ -133,6 +134,8 @@ class SqlTaskAudit:
         ]
 
     def status(self) -> dict[str, int | bool]:
+        if self.legacy_audit is not None:
+            self.legacy_audit.require_pending_layout()
         pending = int(self._query("SELECT count(*) FROM requests WHERE status = 'staged'")[0][0])
         return {"ok": pending == 0, "pending": pending}
 
@@ -146,6 +149,8 @@ class SqlTaskAudit:
 
     def require_pending_layout(self) -> None:
         """There is no pre-v2 filename layout to upgrade in a table; the gate is a no-op here."""
+        if self.legacy_audit is not None:
+            self.legacy_audit.require_pending_layout()
 
     @staticmethod
     def require_claim(
@@ -209,9 +214,11 @@ class SqlTaskAudit:
         the column and the record it belongs to become visible together or not at all.
         """
         ref = str(event.get("ref") or "")
+        subject = event.get("subject") if isinstance(event.get("subject"), dict) else {}
+        entity_kind = str(subject.get("kind") or "card")
         self._execute(
             "INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, "
-            "ref, created_at, settled_at) VALUES (%s, %s, %s::jsonb, %s, %s, 'card', %s, %s, %s) "
+            "ref, created_at, settled_at) VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (request_id) DO UPDATE SET intent = EXCLUDED.intent, "
             "status = EXCLUDED.status, settled_at = EXCLUDED.settled_at, "
             "protocol = EXCLUDED.protocol, operation = EXCLUDED.operation, ref = EXCLUDED.ref",
@@ -221,6 +228,7 @@ class SqlTaskAudit:
                 json.dumps(event, sort_keys=True),
                 status,
                 self._is_protocol_event(event),
+                entity_kind,
                 ref or None,
                 _now(),
                 None if status == "staged" else _now(),

@@ -11,12 +11,13 @@ Everything §3 constrains is declared here, including the parts an ORM does not 
 
 * every closed vocabulary of §3.12 is a `CheckConstraint`, never a reference table;
 * the four partial unique indexes of §3.6 and §3.8 are `Index(..., postgresql_where=...)`;
-* the three `ref`-shaped generated columns are `Computed(..., persisted=True)`, PostgreSQL
-  generated columns — `products.ref`, `issues.ref` and `issue_comments.issue_ref`;
+* the four `ref`-shaped generated columns are `Computed(..., persisted=True)`, PostgreSQL
+  generated columns — `products.ref`, `issues.ref`, `issue_comments.issue_ref` and
+  `product_comments.product_ref`;
 * §3.3's two scoped sprint cursors are `DEFERRABLE INITIALLY DEFERRED` composite foreign keys,
   and every constraint §3.13 defers to step 2 carries ``use_alter=True`` so it is emitted as an
   ``ALTER TABLE`` after the tables exist, exactly as §3.13 orders it;
-* the six `jsonb` columns are the six §3.10 names and no others.
+* the seven `jsonb` columns are the seven §3.10 names and no others.
 
 Revision `0002_board_gaps` moved four things here, each named by the import run of
 `secretary-1583` on the live board (2026-09-07) that found it: `issue_comments` (479 comments on
@@ -27,11 +28,16 @@ number, because two live sprints are `sprint:canary-terra-20260813` and
 records that had no representable field — a card with no `project` metadata and nine `blocked_by`
 values naming cards that are not on the board.
 
-Revision `0003_task_type_optional` is the last of that same list: the import run of
+Revision `0003_task_type_optional` completed that same list: the import run of
 `secretary-1585` (2026-09-07) named one card the store still could not hold, `secretary-583`
 again, this time for carrying no `task_type` metadata against a `NOT NULL` column.  The column is
 nullable now and its `CHECK` admits NULL or a value of the closed vocabulary — the board's silence,
 stored as silence.
+
+Revision `0004_product_issue_sql` adds indexed deterministic board keys for Product and Issue,
+lossless Product extensions and comments, and the nullable move timestamp used by SQL Done
+retention. Existing rows receive deterministic keys during the migration; historical tasks keep
+an unknown move time rather than receiving an invented one.
 
 The version table is Alembic's ``alembic_version`` and is not declared here: it is the migration
 tool's own bookkeeping, it is created by the tool, and inventing a second one beside it is what
@@ -66,10 +72,12 @@ class Product(Base):
     __tablename__ = "products"
 
     product_id = sa.Column(sa.Text, primary_key=True)  # "secretary"
+    board_key = sa.Column(sa.BigInteger, nullable=False, unique=True)
     ref = sa.Column(sa.Text, sa.Computed("'product:' || product_id", persisted=True))
     title = sa.Column(sa.Text, nullable=False)
     description = sa.Column(sa.Text, nullable=False, server_default=sa.text("''"))
     state = sa.Column(sa.Text, nullable=False, server_default=sa.text("'active'"))
+    extensions = sa.Column(JSONB, nullable=False, server_default=sa.text("'{}'::jsonb"))
     created_at = sa.Column(TIMESTAMPTZ, nullable=False)
     updated_at = sa.Column(TIMESTAMPTZ, nullable=False)
 
@@ -132,6 +140,7 @@ class Issue(Base):
     __tablename__ = "issues"
 
     issue_id = sa.Column(sa.Text, primary_key=True)  # the 20-hex suffix of issue:<id>
+    board_key = sa.Column(sa.BigInteger, nullable=False, unique=True)
     ref = sa.Column(sa.Text, sa.Computed("'issue:' || issue_id", persisted=True))
     product_id = sa.Column(sa.Text, sa.ForeignKey("products.product_id"), nullable=False)
     title = sa.Column(sa.Text, nullable=False)
@@ -350,6 +359,8 @@ class Task(Base):
     extensions = sa.Column(JSONB, nullable=False, server_default=sa.text("'{}'::jsonb"))  # (J3)
     created_at = sa.Column(TIMESTAMPTZ, nullable=False)
     updated_at = sa.Column(TIMESTAMPTZ, nullable=False)
+    # NULL is an honest unknown for rows created before the store observed column moves.
+    date_moved = sa.Column(TIMESTAMPTZ)
 
     __table_args__ = (
         sa.CheckConstraint("title <> ''"),
@@ -516,14 +527,13 @@ class TaskComment(Base):
 
 
 class IssueComment(Base):
-    """The third comment table, added by 0002.
+    """The Issue comment table, added by 0002.
 
     `secretary-1583` read the live board and found 479 comments on Issue rows with nowhere to go:
     §3.7 declared two comment tables and both are foreign-keyed to their own entity, so a comment
     on an Issue was the largest single record loss the import found.  This is §3.7's shape again,
     unchanged — the same columns, the same claim key, the same place in §3.13 — with `issues` as
-    the entity.  The same read counted **0** comments on Product rows, so there is no
-    `product_comments` table and the counted zero is what §3.7 records instead.
+    the entity. Revision 0004 subsequently gave Products the same lossless comment shape.
     """
 
     __tablename__ = "issue_comments"
@@ -550,6 +560,35 @@ class IssueComment(Base):
             ["requests.request_id", "requests.ref"],
             name="issue_comment_claims_its_request",
             use_alter=True,
+        ),
+    )
+
+
+class ProductComment(Base):
+    __tablename__ = "product_comments"
+
+    comment_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
+    product_id = sa.Column(
+        sa.Text, sa.ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False
+    )
+    marker = sa.Column(sa.Text)
+    body = sa.Column(sa.Text, nullable=False)
+    actor_role = sa.Column(sa.Text)
+    actor_id = sa.Column(sa.Text)
+    request_id = sa.Column(sa.Text)
+    created_at = sa.Column(TIMESTAMPTZ, nullable=False)
+    product_ref = sa.Column(sa.Text, sa.Computed("'product:' || product_id", persisted=True))
+
+    __table_args__ = (
+        sa.UniqueConstraint("request_id"),
+        sa.Index("product_comments_by_product", "product_id", "created_at"),
+        sa.ForeignKeyConstraint(
+            ["request_id", "product_ref"],
+            ["requests.request_id", "requests.ref"],
+            name="product_comment_claims_its_request",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
         ),
     )
 
@@ -712,6 +751,7 @@ PASSWORD_PARAMETERS = ("app_password", "read_password")
 
 #: The columns §3.10 declares `jsonb`, and the only ones in the schema.
 JSONB_COLUMNS = (
+    ("products", "extensions"),
     ("sprints", "observer"),
     ("sprints", "source_audit"),
     ("tasks", "extensions"),
@@ -730,6 +770,7 @@ DEFERRED_CONSTRAINTS = (
     "board_event_claims_its_request",
     "task_comment_claims_its_request",
     "issue_comment_claims_its_request",
+    "product_comment_claims_its_request",
     "sprint_comment_claims_its_request",
     "budget_event_claims_its_request",
     "decision_belongs_to_its_close_request",
@@ -749,6 +790,7 @@ __all__ = [
     "Issue",
     "IssueComment",
     "Product",
+    "ProductComment",
     "ProductProject",
     "Project",
     "Repository",

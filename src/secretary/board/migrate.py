@@ -40,9 +40,8 @@ SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 
 #: The revision this build of the product expects a store to be at.  It is Alembic's head, and
 #: `head_revision()` reads it from the script directory rather than trusting this literal.
-#: `0003_task_type_optional` is the head since 2026-09-07: the last card the first import of real
-#: data could not write, closed the way `0002` closed the same card's missing project.
-EXPECTED_SCHEMA_REVISION = "0003_task_type_optional"
+#: `0004_product_issue_sql` is the head serving Product/Issue and Done move timestamps.
+EXPECTED_SCHEMA_REVISION = "0004_product_issue_sql"
 
 #: A fixed 64-bit key, so every runner of every checkout contends on the same lock.  Any constant
 #: would do; this one is the first 63 bits of sha256("secretary.board.migrations"), recorded here

@@ -410,20 +410,17 @@ class IssueAndProductTests(unittest.TestCase):
         self.assertEqual((stored["issue_id"], stored["marker"], stored["body"]), ("d" * 20, "po", "note"))
         self.assertEqual(result.report.records_not_imported, [])
 
-    def test_a_comment_on_a_product_still_has_no_table_and_is_named_one_line_each(self) -> None:
-        """§3.7 records a counted zero for Product comments rather than a fourth table, so a
-        comment on one is still a refusal — and it is named per comment, never as a count."""
+    def test_comments_on_a_product_are_rows_in_the_fourth_comment_table(self) -> None:
         card = SourceRow(
             raw=PRODUCT.raw,
             meta=PRODUCT.meta,
             comments=(comment("[po]\nfirst", created=1), comment("[po]\nsecond", created=2)),
         )
         result = import_board.plan(source(pipeline=(card,)))
-        refusals = [item for item in result.report.records_not_imported if "comment" in item["kind"]]
-        self.assertEqual(len(refusals), 2)
+        self.assertEqual(result.report.records_not_imported, [])
         self.assertEqual(
-            sorted(item["ref"] for item in refusals),
-            ["product:secretary#comment-1", "product:secretary#comment-2"],
+            [(row["product_id"], row["marker"], row["body"]) for row in result.rows["product_comments"]],
+            [("secretary", "po", "first"), ("secretary", "po", "second")],
         )
 
     def test_a_product_carries_its_projects_as_rows(self) -> None:
@@ -987,9 +984,9 @@ class ParityTests(unittest.TestCase):
         checks = import_board.parity(board, result.rows, result.report)
         self.assertFalse(checks["ok"])
 
-    def test_all_three_comment_tables_are_counted_and_compared(self) -> None:
+    def test_all_four_comment_tables_are_counted_and_compared(self) -> None:
         checks = self.parity_of(self.board())
-        counted = [check for check in checks["counts"] if "three tables" in check["name"]]
+        counted = [check for check in checks["counts"] if "four comment tables" in check["name"]]
         self.assertEqual(len(counted), 1)
         compared = {
             check["name"] for check in checks["content"] if "as a multiset" in check["name"]

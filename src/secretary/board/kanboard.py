@@ -139,6 +139,8 @@ class KanboardBoardHost:
                     reference=entity.ref,
                 )
             except Exception:
+                if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                    raise
                 # Post-RPC failure is uncertain: confirm or retain pending, never recreate.
                 return
             task_id = _positive_int(reply)
@@ -222,6 +224,8 @@ class KanboardBoardHost:
                 try:
                     saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
                 except Exception:
+                    if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                        raise
                     # A reply cannot disprove the write; confirmation decides recovery.
                     return
                 if not _comment_saved(saved):
@@ -676,6 +680,8 @@ class KanboardBoardHost:
                 try:
                     saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
                 except Exception:
+                    if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                        raise
                     return
                 if not _comment_saved(saved):
                     raise BoardProtocolError("Kanboard rejected issue close comment")

@@ -730,7 +730,7 @@ class BoardImportIntegrationTests(unittest.TestCase):
 
     def test_the_schema_revision_is_asserted_before_anything_is_written(self) -> None:
         with self.engine("app").connect() as connection:
-            self.assertEqual(migrate.assert_schema_revision(connection), "0003_task_type_optional")
+            self.assertEqual(migrate.assert_schema_revision(connection), "0004_product_issue_sql")
 
     def test_the_read_role_can_query_the_imported_board_and_cannot_write_it(self) -> None:
         import sqlalchemy as sa

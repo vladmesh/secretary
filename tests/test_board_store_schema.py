@@ -4,11 +4,11 @@
 document each shipped a statement PostgreSQL refuses, and both were found by executing them, not
 by reading them. The same applies to the schema's transcription into SQLAlchemy models, so the
 Alembic revision is executed here and the result is counted against the numbers the document's own
-run produced. Three revisions ship now, and §3.13 records the numbers of each: `0001_initial` built 22 tables,
+run produced. Four revisions ship now, and §3.13 records the numbers of each: `0001_initial` built 22 tables,
 34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique constraints and 4 partial unique indexes;
 `0002_board_gaps`, which closes the gaps the first import of real data found, makes that 23, 37,
-38, 23, 13 and 4; and `0003_task_type_optional` leaves every one of those six numbers alone,
-because it drops one `CHECK` on `tasks.task_type` and creates one in its place. The last table and
+38, 23, 13 and 4; `0003_task_type_optional` leaves every one of those six numbers alone; and
+`0004_product_issue_sql` makes the head counts 24, 37, 40, 24, 16 and 4. The last table and
 the last primary key are Alembic's `alembic_version`, which since the owner's decision of
 2026-09-07 stands where §7.4's `schema_migrations` stood.
 
@@ -40,6 +40,7 @@ from tempfile import TemporaryDirectory
 
 from secretary import upgrade
 from secretary.board import migrate, schema
+from secretary.board.backend import record_key
 from secretary.board.store import BoardStoreConfig, BoardStoreError
 
 IMAGE = "postgres:16"
@@ -69,10 +70,15 @@ SELECT
 #: What the same schema makes of a `postgres:16` at the head revision, and what §3.13 records
 #: beside `0001`'s own numbers. A disagreement here is a defect of the transcription into models,
 #: not of the document. Unchanged by `0003`, which trades one `CHECK` for one `CHECK`.
-DOCUMENTED_COUNTS = (23, 37, 38, 23, 13, 4)
+DOCUMENTED_COUNTS = (24, 37, 40, 24, 16, 4)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
-REVISIONS = ("0001_initial", "0002_board_gaps", "0003_task_type_optional")
+REVISIONS = (
+    "0001_initial",
+    "0002_board_gaps",
+    "0003_task_type_optional",
+    "0004_product_issue_sql",
+)
 
 
 def docker(*arguments: str) -> str:
@@ -339,16 +345,18 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection = self.owner_connection()
         self.run_migrations(connection)
         connection.exec_driver_sql(
-            "INSERT INTO products (product_id, title, created_at, updated_at) "
-            "VALUES ('secretary', 'Secretary', now(), now())"
+            "INSERT INTO products (product_id, board_key, title, created_at, updated_at) "
+            "VALUES ('secretary', %s, 'Secretary', now(), now())",
+            (record_key("product", "secretary"),),
         )
         connection.exec_driver_sql(
             "INSERT INTO projects (project_id) VALUES ('secretary')"
         )
         connection.exec_driver_sql(
-            "INSERT INTO issues (issue_id, product_id, title, issue_kind, priority, "
-            "created_at, updated_at) VALUES ('2fdac531', 'secretary', 'An issue', 'bug', "
-            "'P1', now(), now())"
+            "INSERT INTO issues (issue_id, board_key, product_id, title, issue_kind, priority, "
+            "created_at, updated_at) VALUES ('2fdac531', %s, 'secretary', 'An issue', 'bug', "
+            "'P1', now(), now())",
+            (record_key("issue", "2fdac531"),),
         )
         return connection
 
@@ -376,8 +384,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
             (ref, project, int(ref.rsplit("-", 1)[1]), task_type, sprint, extensions),
         )
 
-    def test_a_comment_on_an_issue_has_a_table_and_a_product_comment_has_none(self) -> None:
-        """AC 1: 479 comments live on Issue rows; the same read counted 0 on Product rows."""
+    def test_issue_and_product_comments_have_entity_scoped_tables(self) -> None:
+        """Product writes now need the same durable comment shape already used by Issues."""
         connection = self.prepared()
 
         connection.exec_driver_sql(
@@ -391,9 +399,15 @@ class BoardStoreSchemaTests(unittest.TestCase):
             ).fetchall(),
             [("2fdac531", "issue:closed", "closed as resolved", "issue:2fdac531")],
         )
-        self.assertIsNone(
-            connection.exec_driver_sql("SELECT to_regclass('public.product_comments')").fetchone()[0],
-            "the live board carries no comment on a Product row, so there is no table for one",
+        connection.exec_driver_sql(
+            "INSERT INTO product_comments (product_id, marker, body, actor_role, created_at) "
+            "VALUES ('secretary', 'product:note', 'product note', 'po', now())"
+        )
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT product_id, marker, body, product_ref FROM product_comments"
+            ).fetchall(),
+            [("secretary", "product:note", "product note", "product:secretary")],
         )
 
     def test_an_issue_keeps_the_metadata_keys_the_model_does_not_name(self) -> None:
@@ -437,6 +451,20 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "SELECT ref FROM sprints WHERE sprint_number IS NULL ORDER BY ref"
             ).fetchall(),
             [("sprint:canary-terra-20260813",), ("sprint:canary-terra-final-20260813",)],
+        )
+
+    def test_a_product_keeps_metadata_the_relational_model_does_not_name(self) -> None:
+        connection = self.prepared()
+        connection.exec_driver_sql(
+            "UPDATE products SET extensions = %s::jsonb WHERE product_id = 'secretary'",
+            ('{"kanboard": {"future_product_field": "kept"}}',),
+        )
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT extensions->'kanboard'->>'future_product_field' FROM products "
+                "WHERE product_id = 'secretary'"
+            ).fetchone()[0],
+            "kept",
         )
 
     def test_the_number_and_the_reference_may_not_disagree(self) -> None:
@@ -633,15 +661,17 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection = self.owner_connection()
         self.run_migrations(connection)
         connection.exec_driver_sql(
-            "INSERT INTO products (product_id, title, created_at, updated_at) "
-            "VALUES ('secretary', 'Secretary', now(), now())"
+            "INSERT INTO products (product_id, board_key, title, created_at, updated_at) "
+            "VALUES ('secretary', %s, 'Secretary', now(), now())",
+            (record_key("product", "secretary"),),
         )
         connection.commit()
 
         with self.engine("app").connect() as app:
             app.exec_driver_sql(
-                "INSERT INTO products (product_id, title, created_at, updated_at) "
-                "VALUES ('written-by-app', 'App', now(), now())"
+                "INSERT INTO products (product_id, board_key, title, created_at, updated_at) "
+                "VALUES ('written-by-app', %s, 'App', now(), now())",
+                (record_key("product", "written-by-app"),),
             )
             app.commit()
             with self.assertRaises(sa.exc.ProgrammingError):
@@ -653,8 +683,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
             )
             with self.assertRaises(sa.exc.ProgrammingError):
                 reader.exec_driver_sql(
-                    "INSERT INTO products (product_id, title, created_at, updated_at) "
-                    "VALUES ('written-by-read', 'Read', now(), now())"
+                    "INSERT INTO products (product_id, board_key, title, created_at, updated_at) "
+                    "VALUES ('written-by-read', %s, 'Read', now(), now())",
+                    (record_key("product", "written-by-read"),),
                 )
 
     def test_a_table_a_later_revision_adds_is_reachable_without_a_further_grant(self) -> None:
@@ -671,6 +702,28 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.engine("read").connect() as reader:
             self.assertEqual(
                 reader.exec_driver_sql("SELECT count(*) FROM later_table").fetchone()[0], 2
+            )
+
+    def test_the_late_product_comment_table_has_app_and_read_role_grants(self) -> None:
+        connection = self.owner_connection()
+        self.run_migrations(connection)
+        connection.exec_driver_sql(
+            "INSERT INTO products (product_id, board_key, title, created_at, updated_at) "
+            "VALUES ('secretary', %s, 'Secretary', now(), now())",
+            (record_key("product", "secretary"),),
+        )
+        connection.commit()
+
+        with self.engine("app").connect() as app:
+            app.exec_driver_sql(
+                "INSERT INTO product_comments (product_id, body, created_at) "
+                "VALUES ('secretary', 'from app', now())"
+            )
+            app.commit()
+        with self.engine("read").connect() as reader:
+            self.assertEqual(
+                reader.exec_driver_sql("SELECT body FROM product_comments").fetchall(),
+                [("from app",)],
             )
 
     # --- `step_board_store` end to end -------------------------------------------------

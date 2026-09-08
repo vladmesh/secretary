@@ -21,6 +21,7 @@ converts anything, so setting the name back to `kanboard` is the whole of the ro
 
 from __future__ import annotations
 
+import hashlib
 import os
 
 #: The one named place.  A card backend is chosen here or it is `kanboard`.
@@ -112,7 +113,39 @@ PRODUCT_ISSUE = "product/issue"
 #: Which of those the PostgreSQL implementation answers.  A caller that needs anything else is
 #: refused by name, because a silent Kanboard client under a `postgres` switch is the same
 #: "decided by default" defect the switch exists to remove.
-POSTGRES_SERVES = frozenset({CARD})
+POSTGRES_SERVES = frozenset({CARD, PRODUCT_ISSUE})
+
+
+# Product and Issue share Kanboard's integer-addressed card vocabulary even though their
+# canonical identities are strings.  PostgreSQL stores this deterministic key beside the row
+# and indexes it; ranges above PostgreSQL int4 cannot be confused with card numbers.
+RECORD_KINDS = ("product", "issue")
+RECORD_KEY_BASES = {"product": 3_000_000_000, "issue": 4_000_000_000}
+RECORD_KEY_SPAN = 1_000_000_000
+
+
+def record_key(kind: str, identifier: str) -> int:
+    """Return the stable SQL board key for one string Product/Issue identity."""
+    if kind not in RECORD_KINDS:
+        raise BoardBackendError(f"a board record names one of {', '.join(RECORD_KINDS)}, not {kind!r}")
+    text = str(identifier).strip()
+    if not text:
+        raise BoardBackendError(f"a {kind} key needs an identifier")
+    digest = hashlib.sha256(f"{kind}:{text}".encode()).digest()
+    return RECORD_KEY_BASES[kind] + int.from_bytes(digest[:8], "big") % RECORD_KEY_SPAN
+
+
+def record_key_kind(value: object) -> str | None:
+    """Return the Product/Issue kind for a synthetic key, or None for a card key."""
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    for kind in RECORD_KINDS:
+        base = RECORD_KEY_BASES[kind]
+        if base <= number < base + RECORD_KEY_SPAN:
+            return kind
+    return None
 
 
 def board_client(
@@ -240,6 +273,9 @@ __all__ = [
     "KANBOARD",
     "POSTGRES",
     "PRODUCT_ISSUE",
+    "RECORD_KEY_BASES",
+    "RECORD_KEY_SPAN",
+    "RECORD_KINDS",
     "SPRINT",
     "BoardBackendError",
     "board_client",
@@ -249,5 +285,7 @@ __all__ = [
     "entity_id",
     "entity_number",
     "parse_card_backend",
+    "record_key",
+    "record_key_kind",
     "reset_card_backend",
 ]
