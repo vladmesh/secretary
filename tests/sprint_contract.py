@@ -165,8 +165,3 @@ KANBOARD_ONLY: Final[dict[str, str]] = {
         "injects a lossy Kanboard saveTaskMetadata response during restore parity",
     ),
 }
-
-
-KANBOARD_ONLY_BY_METHOD: Final[dict[str, str]] = {
-    qualified.rsplit(".", 1)[-1]: reason for qualified, reason in KANBOARD_ONLY.items()
-}

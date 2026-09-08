@@ -970,7 +970,7 @@ class TwoOpenSprintFixture(SprintFixture):
         super().setUp()
         (self.instance / "projects" / "third.yaml").write_text("id: third\n", encoding="utf-8")
         self.arrange_product("third", projects=["third"])
-        self.arrange_issue("issue:third", product="third")
+        self.third_issue = self.arrange_issue("third", product="third")["ref"]
         self.roots = Path(self.tmp.name) / "repos"
 
     def _limit(self, value: object) -> None:
@@ -1002,7 +1002,7 @@ class TwoOpenSprintFixture(SprintFixture):
             ("goal", "third"),
             ("reference", "sprint:third"),
             ("product", "third"),
-            ("issues", ["issue:third"]),
+            ("issues", [self.third_issue]),
             ("projects", ["third"]),
             ("repositories", [str(self.roots / "third")]),
             ("observer", none_choice()),
@@ -1419,7 +1419,7 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
         candidates = {
             "first": ("secretary", "issue:open", "secretary"),
             "second": ("other", "issue:foreign", "other"),
-            "third": ("third", "issue:third", "third"),
+            "third": ("third", self.third_issue, "third"),
         }
 
         def open_sprint(name: str) -> None:
@@ -4450,11 +4450,11 @@ class SprintCloseDecisionTests(SprintFixture):
         super().setUp()
         # A second open issue of the same product, so a close can decide two issues
         # differently and the refusal has more than one ref to be silent about.
-        self.arrange_issue("issue:second", product="secretary")
+        self.second_issue = self.arrange_issue("second", product="secretary")["ref"]
         self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
 
     def _open(self, **kwargs) -> str:
-        kwargs.setdefault("issues", ["issue:open", "issue:second"])
+        kwargs.setdefault("issues", ["issue:open", self.second_issue])
         return self._create(goal="decided close", **kwargs)["sprint"]["ref"]
 
     def _card(self, sprint: str, title: str, request_id: str) -> str:
@@ -4511,7 +4511,7 @@ class SprintCloseDecisionTests(SprintFixture):
             )
 
         self.assertEqual(raised.exception.code, "validation")
-        self.assertIn("issue:second", raised.exception.message)
+        self.assertIn(self.second_issue, raised.exception.message)
         self.assertNotIn("issue:open,", raised.exception.message)
         self.assertEqual(self._contract_state(ref), before)
         self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
@@ -4529,7 +4529,7 @@ class SprintCloseDecisionTests(SprintFixture):
                 decisions={
                     "issues": [
                         {"ref": "issue:open", "verdict": "open", "reason": "unfinished"},
-                        {"ref": "issue:second", "verdict": "resolved", "reason": "not this sprint's"},
+                        {"ref": self.second_issue, "verdict": "resolved", "reason": "not this sprint's"},
                     ]
                 },
             )
@@ -4547,7 +4547,7 @@ class SprintCloseDecisionTests(SprintFixture):
             decisions={
                 "issues": [
                     {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed in this sprint"},
-                    {"ref": "issue:second", "verdict": "open", "reason": "only half of it was reached"},
+                    {"ref": self.second_issue, "verdict": "open", "reason": "only half of it was reached"},
                 ]
             },
         )
@@ -4556,7 +4556,7 @@ class SprintCloseDecisionTests(SprintFixture):
         closed = store.show_issue("issue:open")
         self.assertTrue(closed["closed"])
         self.assertEqual(closed["close_reason"], "resolved")
-        self.assertFalse(store.show_issue("issue:second")["closed"])
+        self.assertFalse(store.show_issue(self.second_issue)["closed"])
         # Closed with its reason where an operator reads issues, and gone from the open list.
         self.assertEqual(
             sorted(
@@ -4575,10 +4575,21 @@ class SprintCloseDecisionTests(SprintFixture):
         )
         self.assertEqual(
             recorded["payload"]["decisions"]["issues"],
-            [
-                {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed in this sprint"},
-                {"ref": "issue:second", "verdict": "open", "reason": "only half of it was reached"},
-            ],
+            sorted(
+                [
+                    {
+                        "ref": "issue:open",
+                        "verdict": "resolved",
+                        "reason": "the fix landed in this sprint",
+                    },
+                    {
+                        "ref": self.second_issue,
+                        "verdict": "open",
+                        "reason": "only half of it was reached",
+                    },
+                ],
+                key=lambda item: item["ref"],
+            ),
         )
 
     def test_a_close_short_of_a_disposition_names_the_cards_and_their_states(self) -> None:
@@ -4696,7 +4707,7 @@ class SprintCloseDecisionTests(SprintFixture):
         decisions = {
             "issues": [
                 {"ref": "issue:open", "verdict": "resolved", "reason": "done by the sprint"},
-                {"ref": "issue:second", "verdict": "open", "reason": "carried forward"},
+                {"ref": self.second_issue, "verdict": "open", "reason": "carried forward"},
             ],
             "cards": [
                 {"ref": first, "verdict": "drop", "reason": "not finished"},
@@ -4795,7 +4806,7 @@ class SprintCloseDecisionTests(SprintFixture):
                     actor="operator",
                     goal="the successor sprint",
                     product="secretary",
-                    issues=["issue:second"],
+                    issues=[self.second_issue],
                     projects=["secretary"],
                     observer=head_choice("codex-observer"),
                     request_id="successor-create",
@@ -4846,7 +4857,7 @@ class SprintCloseDecisionTests(SprintFixture):
         ref = self._open()
         card = self._card(ref, "still open work", "conflict-card")
         self._store().close_issue(
-            reference="issue:second",
+            reference=self.second_issue,
             reason="duplicate",
             actor="another-po",
             request_id="somebody-elses-close",
@@ -4854,7 +4865,7 @@ class SprintCloseDecisionTests(SprintFixture):
         stated = {
             "issues": [
                 {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
-                {"ref": "issue:second", "verdict": "resolved", "reason": "this one landed too"},
+                {"ref": self.second_issue, "verdict": "resolved", "reason": "this one landed too"},
             ],
             "cards": [{"ref": card, "verdict": "drop", "reason": "not finished"}],
         }
@@ -4870,7 +4881,7 @@ class SprintCloseDecisionTests(SprintFixture):
             )
 
         self.assertEqual(raised.exception.code, "validation")
-        self.assertIn("issue:second (duplicate)", raised.exception.message)
+        self.assertIn(f"{self.second_issue} (duplicate)", raised.exception.message)
         self.assertIn("already_closed", raised.exception.message)
         self.assertEqual(self._writes(before), [])
         self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
@@ -4885,7 +4896,7 @@ class SprintCloseDecisionTests(SprintFixture):
                     decisions={
                         "issues": [
                             {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
-                            {"ref": "issue:second", "reason": "somebody else got there", **wrong},
+                            {"ref": self.second_issue, "reason": "somebody else got there", **wrong},
                         ],
                         "cards": list(stated["cards"]),
                     },
@@ -4897,7 +4908,7 @@ class SprintCloseDecisionTests(SprintFixture):
         confirmed["issues"] = [
             {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
             {
-                "ref": "issue:second",
+                "ref": self.second_issue,
                 "verdict": "already_closed",
                 "actual": "duplicate",
                 "reason": "another PO closed it as a duplicate while this sprint ran",
@@ -4913,9 +4924,9 @@ class SprintCloseDecisionTests(SprintFixture):
 
         # The confirmed issue is not closed again, and it keeps the reason it actually carries.
         self.assertEqual(result["closed_issues"], ["issue:open"])
-        self.assertEqual(self._store().show_issue("issue:second")["close_reason"], "duplicate")
+        self.assertEqual(self._store().show_issue(self.second_issue)["close_reason"], "duplicate")
         self.assertEqual(
-            [item for item in result["issue_decisions"] if item["ref"] == "issue:second"],
+            [item for item in result["issue_decisions"] if item["ref"] == self.second_issue],
             [confirmed["issues"][1]],
         )
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
@@ -4935,10 +4946,10 @@ class SprintCloseDecisionTests(SprintFixture):
 
         def closing_the_other_issue_too(self_store, **kwargs):
             answer = real_close_issue(self_store, **kwargs)
-            if kwargs["reference"] == "issue:open":
+            if kwargs["reference"] == self.second_issue:
                 real_close_issue(
                     self_store,
-                    reference="issue:second",
+                    reference="issue:open",
                     reason="wont_do",
                     actor="another-po",
                     request_id="a-close-that-raced-this-one",
@@ -4948,7 +4959,7 @@ class SprintCloseDecisionTests(SprintFixture):
         stated = {
             "issues": [
                 {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
-                {"ref": "issue:second", "verdict": "invalid", "reason": "it was never a bug"},
+                {"ref": self.second_issue, "verdict": "invalid", "reason": "it was never a bug"},
             ]
         }
 
@@ -4963,7 +4974,9 @@ class SprintCloseDecisionTests(SprintFixture):
                 )
 
         self.assertEqual(raised.exception.code, "close_conflict")
-        self.assertIn("issue:second was closed as wont_do by somebody else", raised.exception.message)
+        self.assertIn(
+            "issue:open was closed as wont_do by somebody else", raised.exception.message
+        )
         self.assertIn("already_closed", raised.exception.message)
         # The sprint is not closed on a verdict nobody stated, and the close is still there.
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")  # type: ignore[arg-type]
@@ -4977,12 +4990,16 @@ class SprintCloseDecisionTests(SprintFixture):
                 request_id="raced-issue-close",
                 decisions={
                     "issues": [
-                        {"ref": "issue:open", "verdict": "invalid", "reason": "restated"},
                         {
-                            "ref": "issue:second",
+                            "ref": "issue:open",
                             "verdict": "already_closed",
                             "actual": "wont_do",
                             "reason": "another PO got there first",
+                        },
+                        {
+                            "ref": self.second_issue,
+                            "verdict": "resolved",
+                            "reason": "restated",
                         },
                     ]
                 },
@@ -4995,8 +5012,8 @@ class SprintCloseDecisionTests(SprintFixture):
                 request_id="raced-issue-close",
                 decisions={
                     "issues": [
-                        {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
-                        {"ref": "issue:second", "verdict": "open", "reason": "leaving it open instead"},
+                        {"ref": "issue:open", "verdict": "open", "reason": "leaving it open instead"},
+                        {"ref": self.second_issue, "verdict": "open", "reason": "leaving it open instead"},
                     ]
                 },
             )
@@ -5008,25 +5025,25 @@ class SprintCloseDecisionTests(SprintFixture):
             request_id="raced-issue-close",
             decisions={
                 "issues": [
-                    {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
                     {
-                        "ref": "issue:second",
+                        "ref": "issue:open",
                         "verdict": "already_closed",
                         "actual": "wont_do",
                         "reason": "another PO got there first",
                     },
+                    {"ref": self.second_issue, "verdict": "invalid", "reason": "it was never a bug"},
                 ]
             },
         )
 
-        self.assertEqual(result["closed_issues"], ["issue:open"])
-        self.assertEqual(self._store().show_issue("issue:second")["close_reason"], "wont_do")
+        self.assertEqual(result["closed_issues"], [self.second_issue])
+        self.assertEqual(self._store().show_issue(self.second_issue)["close_reason"], "invalid")
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
         self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
         closes = [
             event
             for event in self._events()
-            if event.get("kind") == "issue.closed" and event.get("ref") == "issue:open"
+            if event.get("kind") == "issue.closed" and event.get("ref") == self.second_issue
         ]
         self.assertEqual(len(closes), 1)
 
@@ -5254,7 +5271,7 @@ class SprintCloseDecisionTests(SprintFixture):
                 actor="operator",
                 goal="the successor sprint",
                 product="secretary",
-                issues=["issue:second"],
+                issues=[self.second_issue],
                 projects=["secretary"],
                 observer=head_choice("codex-observer"),
                 request_id=request_id,

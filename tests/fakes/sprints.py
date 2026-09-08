@@ -23,7 +23,7 @@ from tests.fakes.board import BatchedCalls
 from tests.head_registry import write_installed_pair
 from tests.observer_identity import bind_observer
 from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON
-from tests.sprint_contract import KANBOARD_ONLY_BY_METHOD
+from tests.sprint_contract import KANBOARD_ONLY as SPRINT_KANBOARD_ONLY
 
 # A close states a verdict on every issue its sprint declared, and every sprint this fixture
 # opens declares `issue:open`. The tests below are about the rest of the close, so they give
@@ -57,6 +57,7 @@ class SprintKanboard(BatchedCalls):
                 {"id": 6, "title": "Done"},
             ]
         }
+        self.swimlanes: dict[int, list[dict[str, object]]] = {7: []}
         self.tasks = [
             {
                 "id": 12,
@@ -83,11 +84,22 @@ class SprintKanboard(BatchedCalls):
             project_id = max(self.projects.values()) + 1
             self.projects[str(params["name"])] = project_id
             self.columns[project_id] = [{"id": project_id * 10, "title": "Backlog"}]
+            self.swimlanes[project_id] = []
             return project_id
         if method == "getColumns":
             return self.columns[int(params["project_id"])]
         if method == "getActiveSwimlanes":
-            return []
+            return list(self.swimlanes[int(params["project_id"])])
+        if method == "addSwimlane":
+            project_id = int(params["project_id"])
+            lane_id = max(
+                (int(lane["id"]) for lanes in self.swimlanes.values() for lane in lanes),
+                default=0,
+            ) + 1
+            self.swimlanes[project_id].append(
+                {"id": lane_id, "name": str(params["name"]), "position": len(self.swimlanes[project_id]) + 1}
+            )
+            return lane_id
         if method == "getAllTasks":
             status = params.get("status_id")
             if status not in {0, 1}:
@@ -303,13 +315,15 @@ class SprintBackendFixture:
     """One factory and exclusion policy shared by every portable sprint suite."""
 
     BACKEND = "kanboard"
-    KANBOARD_ONLY: ClassVar[dict[str, str]] = KANBOARD_ONLY_BY_METHOD
+    KANBOARD_ONLY: ClassVar[dict[str, str]] = SPRINT_KANBOARD_ONLY
 
     def make_sprint_client(self) -> ProductSprintKanboard:
         return ProductSprintKanboard()
 
     def skip_kanboard_only(self) -> None:
-        reason = self.KANBOARD_ONLY.get(self._testMethodName)  # type: ignore[attr-defined]
+        method = getattr(type(self), self._testMethodName)  # type: ignore[attr-defined]
+        qualified = f"{method.__module__}.{method.__qualname__}"
+        reason = self.KANBOARD_ONLY.get(qualified)
         if reason and self.BACKEND != "kanboard":
             self.skipTest(f"Kanboard-only: {reason}")  # type: ignore[attr-defined]
 
@@ -404,40 +418,27 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         )
 
     def arrange_product(self, product_id: str, *, projects: list[str]) -> dict[str, Any]:
-        """Arrange fixed ownership identities inside the backend factory seam.
-
-        Product/Issue's public create contract allocates Issue references, while sprint fixtures
-        intentionally exercise stable named ownership. A future SQL fixture overrides this method
-        to seed its disposable ownership tables; portable suites never assume Pipeline rows.
-        """
-        reference = f"product:{product_id}"
-        task_id = max(int(row["id"]) for row in self.client.tasks) + 1
-        self.client._record(
-            task_id,
-            reference,
-            product_id.title(),
-            {
-                "record_type": "product",
-                "product_id": product_id,
-                "product_projects": json.dumps(projects),
-            },
+        """Arrange ownership through the public Product/Issue mutation contract."""
+        return self.product_issue_store().create_product(
+            product_id=product_id,
+            projects=projects,
+            title=product_id.title(),
+            description="",
+            actor="fixture",
+            request_id=f"fixture-product-{product_id}",
         )
-        return self.product_issue_store().show_product(product_id)
 
-    def arrange_issue(self, reference: str, *, product: str) -> dict[str, Any]:
-        task_id = max(int(row["id"]) for row in self.client.tasks) + 1
-        self.client._record(
-            task_id,
-            reference,
-            reference,
-            {
-                "record_type": "issue",
-                "issue_product": product,
-                "issue_kind": "feature",
-                "issue_priority": "P1",
-            },
+    def arrange_issue(self, name: str, *, product: str) -> dict[str, Any]:
+        """Arrange an Issue and return its backend-independent normalized identity."""
+        return self.product_issue_store().create_issue(
+            product=product,
+            issue_kind="feature",
+            priority="P1",
+            title=name,
+            description="",
+            actor="fixture",
+            request_id=f"fixture-issue-{product}-{name}",
         )
-        return self.product_issue_store().show_issue(reference)
 
     def arrange_record_active(self, reference: str, *, active: bool) -> None:
         project = self.client.call("getProjectByName", name="Pipeline")

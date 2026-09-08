@@ -193,6 +193,28 @@ class SprintFixtureGuards(unittest.TestCase):
     def test_kanboard_only_locations_are_exactly_the_named_inventory(self) -> None:
         self.assertEqual(ALLOWED_KANBOARD_ONLY_LOCATIONS, frozenset(KANBOARD_ONLY))
 
+    def test_portable_fixture_helpers_do_not_reach_into_fake_storage(self) -> None:
+        allowed = {"make_sprint_client", "_sprint_rows", "_transactions"}
+        violations: list[str] = []
+        for name, method in SprintFixture.__dict__.items():
+            if name in allowed or not callable(method):
+                continue
+            body = textwrap.dedent(inspect.getsource(method))
+            found = sorted(
+                token
+                for token in (
+                    "self.client.calls",
+                    "self.client.tasks",
+                    "self.client.metadata",
+                    "self.client.comments",
+                    "self.client._record",
+                )
+                if token in body
+            )
+            if found:
+                violations.append(f"{name}: {', '.join(found)}")
+        self.assertEqual(violations, [])
+
     def test_every_backend_dependent_portable_suite_uses_the_one_factory_seam(self) -> None:
         owners = (
             test_sprints.SprintOwnershipTests,
