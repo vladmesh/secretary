@@ -1109,10 +1109,17 @@ it is untested against the real thing, and that is the state of the evidence.
 
 ## Dispatcher task Python isolation
 
-Every newly prepared card workspace contains `.venv`, created before its adapter setup. Worker and
-reviewer `python3`, `python`, `pip` and broad-check subprocesses must resolve there. Do not run
-candidate installs against `PRODUCT_ROOT/.venv`, and do not use `PYTHONPATH` to conceal or repair an
-editable install that points elsewhere.
+Every newly prepared card workspace contains the dispatcher-owned
+`.secretary-task-env/venv`, claimed before creation and kept separate from the adapter-owned `.venv`.
+Secretary's candidate `.[dev]` contract is installed into the dispatcher environment, so worker and
+reviewer `python3`, `python`, `pip` and `ruff` resolve there. An adapter may create and use its own
+`.venv`; the dispatcher never pre-creates, inspects, injects production packages into, or removes it
+separately. Adapter setup runs with neither virtualenv active and with the production venv removed
+from `PATH`. A retained pre-upgrade workspace gets the dispatcher environment on its next rework or
+review launch. Do not run candidate installs against `PRODUCT_ROOT/.venv`, and do not use
+`PYTHONPATH` to conceal or repair an editable install that points elsewhere.
+Gate, release and cleanup make the same ownership decision without creating an environment: an
+absent namespace is a valid pre-upgrade state, while an existing unowned namespace fails closed.
 
 At prepare, launch, gate, release and immediately before removal, the dispatcher probes the fixed
 production interpreter. A failure names one of `interpreter_unavailable`, `missing_import`,

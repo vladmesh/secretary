@@ -98,7 +98,9 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "curator": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
 }
 RUFF_ROLES = frozenset(("worker", "reviewer"))
-WORKSPACE_ENV_DIR = ".venv"
+# Reserved to the dispatcher. A project's conventional ``.venv`` remains adapter-owned, so uv,
+# make and setup commands never share an environment with the head-launch boundary.
+WORKSPACE_ENV_DIR = ".secretary-task-env/venv"
 
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
 # are rejected before reaching this gate; they remain here as the board's declared roles.

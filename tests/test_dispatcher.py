@@ -11496,7 +11496,9 @@ class DispatcherLauncherTests(unittest.TestCase):
                 # The wrapper binds names out of the launcher's own environment, so it has to be
                 # rendered inside it: rendered outside, a live host's SECRETARY_RUNTIME_ENV_FILE
                 # would reach the launched process and the fixture's runtime.env never would.
-                candidate_python = workspace / ".venv" / "bin" / "python3"
+                candidate_python = (
+                    workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
+                )
                 candidate_python.parent.mkdir(parents=True)
                 candidate_python.symlink_to("/usr/bin/python3")
                 wrapped = wrap_role_command("reviewer", probe, workspace=str(workspace))

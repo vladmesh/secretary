@@ -146,8 +146,10 @@ dispatcher-owned exact-SHA GitHub gate, which remains the complete required suit
 
 ## Changed Python lint
 
-The task checkout's disposable `.venv` supplies the pinned Ruff and Python that worker and reviewer
-role commands receive on `PATH`; the production virtualenv is not a lint or test tool boundary.
+The task checkout's dispatcher-owned `.secretary-task-env/venv` installs the Secretary candidate's
+`.[dev]` contract and therefore supplies its pinned Ruff and Python to worker and reviewer `PATH`.
+An adapter-owned `.venv` is separate and is used only when the adapter or its broad-check contract
+names it. The production virtualenv is not a lint or test tool boundary.
 Never lint the repository as a whole. Against the task base, build the non-deleted
 changed and untracked Python path set, then pass only that set explicitly to both checks:
 

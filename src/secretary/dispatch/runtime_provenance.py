@@ -20,8 +20,10 @@ from typing import Any
 _PROBE = r"""
 import importlib
 import importlib.metadata
+import ast
 import json
 import pathlib
+import re
 import site
 import sys
 
@@ -56,7 +58,23 @@ for raw_root in roots:
             continue
         for line in lines:
             value = line.strip()
-            if not value or value.startswith("#") or value.startswith("import "):
+            if not value or value.startswith("#"):
+                continue
+            if value.startswith("import "):
+                match = re.match(r"import\s+([A-Za-z_][A-Za-z0-9_]*)", value)
+                finder = root / ((match.group(1) if match else "") + ".py")
+                try:
+                    tree = ast.parse(finder.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, SyntaxError):
+                    continue
+                for node in ast.walk(tree):
+                    target = pathlib.Path(node.value) if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+                    if target is None or not target.is_absolute():
+                        continue
+                    item = ("pth_finder", str(pth), str(target))
+                    if item not in seen:
+                        seen.add(item)
+                        payload["metadata_targets"].append(item)
                 continue
             target = pathlib.Path(value)
             if not target.is_absolute():

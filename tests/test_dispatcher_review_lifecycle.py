@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch import host as dispatcher_host_module
 from secretary.checkpoint import CheckpointResult
+from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatcher import (
     STOPPED_BY_OPERATOR,
     STOPPED_BY_RECONCILIATION,
@@ -410,6 +410,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             str(path.relative_to(self.workspace)): path.read_bytes()
             for path in sorted(self.workspace.rglob("*"))
             if path.is_file()
+            and not path.relative_to(self.workspace).is_relative_to(".secretary-task-env")
         }
 
     def test_the_pane_receives_a_bounded_pointer_and_never_the_review(self) -> None:
@@ -457,7 +458,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         )
 
     def test_the_bring_up_does_not_touch_the_candidate_checkout(self) -> None:
-        """Preparing a prompt is not a licence to edit the tree the reviewer is about to judge.
+        """Preparing a prompt is not a licence to edit the candidate files under review.
 
         A `REVIEW.md` in the workspace can be a tracked part of a candidate as easily as a packet
         left by a dispatcher that predates this seam, and the nudge names an absolute path, so
@@ -473,6 +474,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             host.start_review(self.task, self._record())
 
         self.assertEqual(self._checkout_contents(), before)
+        self.assertTrue((self.workspace / ".secretary-task-env" / "owner.json").is_file())
 
     def test_a_retry_rewrites_the_same_document_and_sends_a_fresh_nudge(self) -> None:
         """The pointer always names the round's current task, so a retry cannot review a stale one."""

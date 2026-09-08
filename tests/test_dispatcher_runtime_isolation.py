@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -60,6 +61,11 @@ class _Host(CommandHostRuntime):
     def __init__(self, root: Path, runtime: _Runtime) -> None:
         super().__init__(SimpleNamespace(), root, mode="real", production_runtime=runtime)  # type: ignore[arg-type]
         self.effects: list[str] = []
+        self.environment_checks: list[str] = []
+
+    def _decide_workspace_environment_ownership(self, workspace: str) -> str:
+        self.environment_checks.append(workspace)
+        return super()._decide_workspace_environment_ownership(workspace)
 
     def stop_workspace(self, record: DispatcherRecord) -> None:
         self.effects.append("stop")
@@ -77,9 +83,10 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             with mock.patch(
                 "secretary.dispatch.host._gate_check", return_value=GateResult("green", "fixture")
             ) as gate:
-                result = host.gate_check({}, _record())
+                result = host.gate_check({}, _record(str(Path(tmp) / "task")))
         self.assertEqual(result.status, "green")
         self.assertEqual(runtime.calls, 2)
+        self.assertEqual(host.environment_checks, [str(Path(tmp) / "task")])
         gate.assert_called_once()
 
     def test_cleanup_refuses_after_stop_but_before_worktree_removal(self) -> None:
@@ -90,6 +97,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             with self.assertRaisesRegex(HostError, "workspace_targeted_editable"):
                 host.teardown(record)
         self.assertEqual(host.effects, ["stop"])
+        self.assertEqual(host.environment_checks, [str(Path(tmp) / "task")])
 
     def test_release_is_fenced_before_and_after_its_effect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,6 +117,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 )
         self.assertEqual(runtime.calls, 2)
         self.assertEqual(host.effects, ["merge"])
+        self.assertEqual(host.environment_checks, [str(Path(tmp) / "task")])
 
     def test_release_refusal_cannot_reach_the_merge_effect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,11 +140,197 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             runtime = _Runtime([_observation()])
             host = _Host(Path(tmp), runtime)
             host._prepare_workspace_environment(str(workspace))
-            python = workspace / ".venv" / "bin" / "python3"
+            python = workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
             first = python.stat().st_ino
             host._prepare_workspace_environment(str(workspace))
             self.assertEqual(python.stat().st_ino, first)
             self.assertTrue(os.access(python, os.X_OK))
+
+    def test_dispatcher_environment_is_disjoint_from_adapter_owned_dot_venv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "task"
+            adapter_environment = workspace / ".venv"
+            adapter_environment.mkdir(parents=True)
+            sentinel = adapter_environment / "adapter-owned"
+            sentinel.write_text("untouched\n", encoding="utf-8")
+            runtime = _Runtime([_observation()])
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(), Path(tmp), mode="real", production_runtime=runtime
+            )
+
+            host._prepare_workspace_environment(str(workspace))
+
+            dispatcher_python = workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched\n")
+            self.assertFalse(
+                any(adapter_environment.rglob("_secretary_production_dependencies.pth"))
+            )
+            imported = subprocess.run(
+                [str(dispatcher_python), "-I", "-c", "import secretary"],
+                cwd=tmp,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(imported.returncode, 0, "production packages leaked into task venv")
+
+    def test_unclaimed_reserved_environment_is_never_adopted_or_mutated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "task"
+            environment = workspace / ".secretary-task-env" / "venv"
+            environment.mkdir(parents=True)
+            sentinel = environment / "foreign"
+            sentinel.write_text("untouched\n", encoding="utf-8")
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+            )
+
+            with self.assertRaisesRegex(HostError, "ownership is unavailable"):
+                host._prepare_workspace_environment(str(workspace))
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched\n")
+
+    def test_adapter_setup_receives_neither_dispatcher_nor_production_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "task"
+            workspace.mkdir()
+            catalog = SimpleNamespace(
+                adapter=lambda project: {
+                    "setup": {"commands": ["uv sync --locked"]},
+                    "smoke": {"command": ".venv/bin/python -m tests.smoke"},
+                }
+            )
+            runtime = _Runtime([_observation()])
+            runtime.interpreter = "/opt/secretary/.venv/bin/python3"
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                catalog, Path(tmp), mode="real", production_runtime=runtime
+            )
+            commands: list[str] = []
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"PATH": "/opt/secretary/.venv/bin:/usr/local/bin:/usr/bin"},
+                    clear=True,
+                ),
+                mock.patch.object(
+                    host,
+                    "_run_shell",
+                    side_effect=lambda command, cwd, label: commands.append(command),
+                ),
+            ):
+                host._run_setup("adapter-project", str(workspace))
+
+            self.assertEqual(len(commands), 2)
+            for command in commands:
+                self.assertIn("PATH=/usr/local/bin:/usr/bin", command)
+                self.assertIn("unset VIRTUAL_ENV", command)
+                self.assertNotIn(".secretary-task-env", command)
+                self.assertNotIn("/opt/secretary/.venv/bin", command)
+
+    def test_secretary_environment_is_populated_from_candidate_dev_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "task"
+            workspace.mkdir()
+            (workspace / "pyproject.toml").write_text("[project]\nname = 'secretary'\n", encoding="utf-8")
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+            )
+            original_run = host._run
+            commands: list[list[str]] = []
+
+            def run(args: list[str], label: str, *, cwd: Path | None = None):
+                commands.append(args)
+                if label == "workspace Secretary dependencies":
+                    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+                return original_run(args, label, cwd=cwd)
+
+            with (
+                mock.patch.object(host, "_run", run),
+                mock.patch.object(host, "_require_workspace_environment"),
+            ):
+                host._prepare_workspace_environment(str(workspace), project="secretary")
+
+            candidate_python = str(
+                workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
+            )
+            self.assertIn(
+                [candidate_python, "-m", "pip", "install", "-e", ".[dev]"], commands
+            )
+
+    def test_rework_prepares_a_missing_pre_upgrade_environment_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "task"
+            workspace.mkdir()
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(integration_base=lambda project, override: "main"),
+                Path(tmp),
+                mode="real",
+                production_runtime=_Runtime([_observation()]),
+            )
+            order: list[str] = []
+            task = {"ref": "secretary-1", "project": "secretary", "workspace": {}, "routing": {}}
+            record = _record(str(workspace))
+
+            with (
+                mock.patch.object(host, "_require_project_available"),
+                mock.patch.object(
+                    host,
+                    "_prepare_workspace_environment",
+                    side_effect=lambda *args, **kwargs: order.append("prepare"),
+                ),
+                mock.patch.object(
+                    host,
+                    "_require_workspace_environment",
+                    side_effect=lambda *args: order.append("require"),
+                ),
+                mock.patch.object(host, "_clear_report_bodies"),
+                mock.patch.object(host, "_worker_task_doc", return_value="task\n"),
+                mock.patch.object(
+                    host, "_launch", side_effect=lambda *args, **kwargs: order.append("launch")
+                ),
+            ):
+                host.restart_worker(task, record)
+
+            self.assertEqual(order, ["prepare", "require", "launch"])
+
+    def test_retained_review_prepares_a_missing_pre_upgrade_environment_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "task"
+            workspace.mkdir()
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+            )
+            order: list[str] = []
+            task = {"ref": "secretary-1", "project": "secretary", "routing": {}}
+            record = _record(str(workspace))
+            document = Path(tmp) / "review.md"
+
+            def launch(*args, **kwargs):
+                order.append("launch")
+                raise HostError("launch reached")
+
+            with (
+                mock.patch.object(host, "_require_project_available"),
+                mock.patch.object(
+                    host,
+                    "_prepare_workspace_environment",
+                    side_effect=lambda *args, **kwargs: order.append("prepare"),
+                ),
+                mock.patch.object(
+                    host,
+                    "_require_workspace_environment",
+                    side_effect=lambda *args: order.append("require"),
+                ),
+                mock.patch.object(host, "_clear_body_file"),
+                mock.patch.object(host, "_review_document", return_value=(document, "review")),
+                mock.patch.object(host, "_split_anchor", return_value=""),
+                mock.patch.object(host, "_launch", side_effect=launch),
+                self.assertRaisesRegex(HostError, "launch reached"),
+            ):
+                host.start_review(task, record)
+
+            self.assertEqual(order, ["prepare", "require", "launch"])
 
 
 if __name__ == "__main__":

@@ -54,7 +54,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             root = Path(tmp)
             expected = self._ruff_version(Path(__file__).resolve().parents[1])
             (root / "src").symlink_to(Path(__file__).resolve().parents[1] / "src", target_is_directory=True)
-            ruff = root / ".venv" / "bin" / "ruff"
+            ruff = root / role_env.WORKSPACE_ENV_DIR / "bin" / "ruff"
             ruff.parent.mkdir(parents=True)
             ruff.write_text(
                 "#!/bin/sh\n"
@@ -67,7 +67,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                 encoding="utf-8",
             )
             ruff.chmod(0o755)
-            python = root / ".venv" / "bin" / "python3"
+            python = root / role_env.WORKSPACE_ENV_DIR / "bin" / "python3"
             python.symlink_to("/usr/bin/python3")
             ensure_board_transport(root, allow_default=True)
             base_env = {

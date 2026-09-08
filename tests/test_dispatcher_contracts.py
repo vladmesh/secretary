@@ -31,8 +31,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import dispatcher as dispatcher_module
-from secretary.dispatch import host as dispatcher_host_module
 from secretary import (
     dispatcher_launcher,
     dispatcher_observer,
@@ -40,11 +38,13 @@ from secretary import (
     dispatcher_review,
     upgrade,
 )
+from secretary import dispatcher as dispatcher_module
 from secretary import role_env as head_role_env
 from secretary import (
     tasks as tasks_module,
 )
 from secretary.board_transport import ensure as ensure_board_transport
+from secretary.dispatch import host as dispatcher_host_module
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_state import DispatcherRecord
@@ -838,7 +838,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ, {**unit_env, "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, clear=True
         ):
-            workspace_python = self.root / ".venv" / "bin" / "python3"
+            workspace_python = self.root / ".secretary-task-env" / "venv" / "bin" / "python3"
             workspace_python.parent.mkdir(parents=True)
             workspace_python.symlink_to(sys.executable)
             command = wrap_role_command(
@@ -847,6 +847,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
+            check=False,
             capture_output=True,
             text=True,
             timeout=120,
@@ -871,7 +872,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         bound = self.unit_env("secretary-dispatcher-production.service")
         bound["TA_SECRETARY_REPO"] = str(Path(__file__).resolve().parents[1])
         with mock.patch.dict(os.environ, bound, clear=True):
-            workspace_python = self.root / ".venv" / "bin" / "python3"
+            workspace_python = self.root / ".secretary-task-env" / "venv" / "bin" / "python3"
             workspace_python.parent.mkdir(parents=True)
             workspace_python.symlink_to(sys.executable)
             command = wrap_role_command(
@@ -886,6 +887,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
+            check=False,
             capture_output=True,
             text=True,
             timeout=120,
@@ -935,6 +937,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
+            check=False,
             capture_output=True,
             text=True,
             timeout=120,

@@ -211,13 +211,21 @@ Launch and cleanup still depend on Orca's specific API; a target session protoco
 milestone. Head-specific rendering and delivery are confined to adapters, but that contract is not
 yet a stable plugin API.
 
-Each card worktree owns one disposable `.venv`. The dispatcher creates it with the production
-interpreter before adapter setup, and worker and reviewer login shells put only that environment
-ahead of their ordinary `PATH`; rework and retained review reuse it. The production virtualenv is
-never a general tool source for those roles. Control-plane report and verdict commands instead name
-the registered production source explicitly. The same immutable `ProductionRuntime` value binds the
-dispatcher interpreter, registered product root and observed `secretary` import at workspace
-creation, launch, gate, release and teardown. A mismatch preserves the worktree and blocks the card.
+The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` is always the
+project adapter's namespace. It claims its reserved environment with an owner record before creating
+or populating it, never enables system site packages, and never writes production package paths into
+either environment. Secretary candidates are installed there from their own `.[dev]` declaration,
+while adapter setup runs outside both environments and may create its own `.venv`. Worker and
+reviewer login shells put the dispatcher environment ahead of their ordinary `PATH`; an adapter's
+declared broad-check interpreter may still select its own `.venv`. Rework and retained review prepare
+a missing dispatcher environment before launch, which upgrades old retained workspaces in place.
+Non-mutating gate, release and cleanup boundaries accept an absent pre-upgrade namespace, but if the
+reserved namespace exists they require the same dispatcher owner record before proceeding.
+The production virtualenv is never a general tool source for those roles. Control-plane report and
+verdict commands instead name the registered production source explicitly. The same immutable
+`ProductionRuntime` value binds the dispatcher interpreter, registered product root and observed
+`secretary` import at workspace creation, launch, gate, release and teardown. A mismatch preserves
+the worktree and blocks the card.
 
 Before launching a head its CLI's first-run questions are answered on its behalf. Otherwise an
 interactive head sits in a dialog instead of working: it never goes idle, the prompt is never

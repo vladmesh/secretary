@@ -2957,7 +2957,7 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         self.workspaces = self.data_dir / "workspaces"
         self.binding_name: str | None = "codegen_orchestrator"
         self.host = CommandHostRuntime(self.catalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
-        self.host._prepare_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
+        self.host._prepare_workspace_environment = lambda *args, **kwargs: None  # type: ignore[method-assign]
         self.host._require_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
         self.json_calls: list[list[str]] = []
         # What Orca answers `worktree show` with, keyed by path. The create call writes into it.

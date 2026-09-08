@@ -274,6 +274,7 @@ from triggered_agents.runtime.prompt_document import (
 from triggered_agents.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
+from triggered_agents.runtime.role_env import WORKSPACE_ENV_DIR
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
@@ -991,8 +992,8 @@ class CommandHostRuntime:
         reused = Path(workspace).exists()
         if reused:
             self._validate_resumable_workspace(task, workspace)
-            missing_environment = not self._workspace_python(workspace).is_file()
-            self._prepare_workspace_environment(workspace)
+            missing_environment = not self._workspace_environment_ready(workspace)
+            self._prepare_workspace_environment(workspace, project=project)
             if missing_environment:
                 self._run_setup(project, workspace)
         else:
@@ -1003,7 +1004,7 @@ class CommandHostRuntime:
                 raise HostError("resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
             workspace = self._create_workspace(project, worker_id, seed, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
-            self._prepare_workspace_environment(workspace)
+            self._prepare_workspace_environment(workspace, project=project)
             self._run_setup(project, workspace)
         self._require_workspace_environment(workspace)
         self._clear_report_bodies(task["ref"])
@@ -1046,6 +1047,7 @@ class CommandHostRuntime:
             # Same family as the missing resume workspace above: the checkout this card's rework
             # continues in is not there, which is this card's own bring-up contract, not the host's.
             raise HostError("rework workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
+        self._prepare_workspace_environment(str(workspace), project=str(task["project"]))
         self._require_workspace_environment(str(workspace))
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         self._clear_report_bodies(task["ref"])
@@ -1729,6 +1731,8 @@ class CommandHostRuntime:
             workspace.mkdir(parents=True, exist_ok=True)
         elif not workspace.is_dir():
             raise HostError("review workspace is missing")
+        self._prepare_workspace_environment(record.workspace, project=str(task["project"]))
+        self._require_workspace_environment(record.workspace)
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
         document, nudge = self._review_document(task, record)
         launched = self._launch(
@@ -1922,6 +1926,8 @@ class CommandHostRuntime:
 
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         self._require_production_runtime("candidate-gate-before")
+        if record.workspace:
+            self._decide_workspace_environment_ownership(record.workspace)
         result = _gate_check(self, task, record)
         self._require_production_runtime("candidate-gate-after")
         return result
@@ -2051,6 +2057,7 @@ class CommandHostRuntime:
         self._require_production_runtime("release-before")
         if self.mode == "noop" or not record.workspace:
             return
+        self._decide_workspace_environment_ownership(record.workspace)
         if os.environ.get("SECRETARY_DISPATCHER_AUTOMERGE", "on").strip().lower() == "off":
             return
         branch = _legacy_worker_branch(task["ref"])
@@ -2654,6 +2661,7 @@ class CommandHostRuntime:
         if self.mode == "noop" or not record.workspace:
             return
         self._require_production_runtime("cleanup-before-stop")
+        self._decide_workspace_environment_ownership(record.workspace)
         try:
             self.stop_workspace(record)
         except HostError:
@@ -2825,79 +2833,122 @@ class CommandHostRuntime:
             return
         adapter = self.catalog.adapter(project)
         for command in adapter.get("setup", {}).get("commands", []):
-            self._run_workspace_shell(str(command), Path(workspace), "setup command")
+            self._run_adapter_shell(str(command), Path(workspace), "setup command")
         smoke = adapter.get("smoke", {}).get("command")
         if smoke:
-            self._run_workspace_shell(str(smoke), Path(workspace), "smoke command")
+            self._run_adapter_shell(str(smoke), Path(workspace), "smoke command")
 
-    def _prepare_workspace_environment(self, workspace: str) -> None:
-        """Create the one disposable Python environment owned by this task checkout."""
+    @staticmethod
+    def _workspace_environment(workspace: str | Path) -> Path:
+        """The reserved dispatcher-owned environment; adapter-owned ``.venv`` is disjoint."""
+        return Path(workspace) / WORKSPACE_ENV_DIR
+
+    @classmethod
+    def _workspace_environment_owner(cls, workspace: str | Path) -> Path:
+        return cls._workspace_environment(workspace).parent / "owner.json"
+
+    @classmethod
+    def _workspace_environment_ready_file(cls, workspace: str | Path) -> Path:
+        return cls._workspace_environment(workspace).parent / "ready"
+
+    @classmethod
+    def _workspace_environment_ready(cls, workspace: str | Path) -> bool:
+        return cls._workspace_environment_ready_file(workspace).is_file()
+
+    def _claim_workspace_environment(self, workspace: str) -> Path:
+        """Determine dispatcher ownership before creating or populating its reserved environment."""
+        root = Path(workspace).resolve(strict=True)
+        environment = self._workspace_environment(root)
+        owner = self._workspace_environment_owner(root)
+        expected = {"owner": "secretary-dispatcher", "schema_version": 1, "workspace": str(root)}
+        if self._decide_workspace_environment_ownership(workspace) == "dispatcher":
+            return environment
+        environment.parent.mkdir(parents=True)
+        try:
+            write_text_atomic(owner, json.dumps(expected, sort_keys=True) + "\n")
+        except RuntimeError as exc:
+            raise HostError(f"workspace Python environment ownership could not be written: {exc}") from None
+        return environment
+
+    def _prepare_workspace_environment(self, workspace: str, *, project: str = "") -> None:
+        """Create and populate only the environment the dispatcher has explicitly claimed."""
         if self.mode == "noop":
             return
         root = Path(workspace)
-        environment = root / ".venv"
-        if environment.exists():
+        environment = self._claim_workspace_environment(workspace)
+        if self._workspace_environment_ready(workspace):
             self._require_workspace_environment(workspace)
-            self._share_production_dependencies(environment)
             return
         self._run(
-            [self.production_runtime.interpreter, "-m", "venv", "--system-site-packages", str(environment)],
+            [self.production_runtime.interpreter, "-m", "venv", str(environment)],
             "workspace Python environment",
             cwd=root,
         )
-        self._share_production_dependencies(environment)
-        self._require_workspace_environment(workspace)
-
-    def _share_production_dependencies(self, environment: Path) -> None:
-        """Expose installed dependencies read-only without lending pip the production prefix.
-
-        A venv made by a venv interpreter inherits the base OS site packages, not its parent's
-        site-packages. The production environment is the installation's dependency authority, so
-        the task environment may read that directory; its own prefix remains the only pip target.
-        Candidate provenance still refuses an import that resolves back to the production checkout.
-        """
-        located = self._run(
-            [
-                self.production_runtime.interpreter,
-                "-I",
-                "-c",
-                "import sysconfig; print(sysconfig.get_paths()['purelib'])",
-            ],
-            "production dependency path",
-        ).stdout.strip()
-        candidates = sorted(environment.glob("lib/python*/site-packages"))
-        if not located or len(candidates) != 1:
-            raise HostError("workspace Python environment has no unambiguous site-packages directory")
-        # A plain path makes installed dependencies importable but does not recursively execute the
-        # production directory's editable ``.pth`` files. In particular it does not lend the task
-        # environment the production checkout's ``secretary`` import.
+        if project.replace("_", "-") == "secretary" and (root / "pyproject.toml").is_file():
+            self._run(
+                [str(environment / "bin" / "python3"), "-m", "pip", "install", "-e", ".[dev]"],
+                "workspace Secretary dependencies",
+                cwd=root,
+            )
         try:
-            write_text_atomic(candidates[0] / "_secretary_production_dependencies.pth", located + "\n")
+            write_text_atomic(self._workspace_environment_ready_file(workspace), "ready\n")
         except RuntimeError as exc:
-            raise HostError(f"workspace dependency boundary could not be written: {exc}") from None
+            raise HostError(f"workspace Python environment readiness could not be written: {exc}") from None
+        self._require_workspace_environment(workspace)
 
     @staticmethod
     def _workspace_python(workspace: str | Path) -> Path:
-        return Path(workspace) / ".venv" / "bin" / "python3"
+        return Path(workspace) / WORKSPACE_ENV_DIR / "bin" / "python3"
+
+    def _decide_workspace_environment_ownership(self, workspace: str) -> str:
+        """Classify the reserved namespace without requiring a pre-upgrade environment."""
+        if self.mode == "noop":
+            return "absent"
+        root = Path(workspace).resolve(strict=False)
+        environment = self._workspace_environment(root)
+        namespace = environment.parent
+        if not namespace.exists():
+            return "absent"
+        owner = self._workspace_environment_owner(root)
+        expected = {"owner": "secretary-dispatcher", "schema_version": 1, "workspace": str(root)}
+        try:
+            observed = json.loads(owner.read_text(encoding="utf-8"))
+            inside = namespace.resolve(strict=True).is_relative_to(root)
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            raise HostError(
+                f"workspace Python environment ownership is unavailable at {namespace}"
+            ) from None
+        if observed != expected or not inside:
+            raise HostError(f"workspace Python environment ownership is invalid at {namespace}")
+        return "dispatcher"
 
     def _require_workspace_environment(self, workspace: str) -> None:
         if self.mode == "noop":
             return
+        environment = self._workspace_environment(workspace)
         python = self._workspace_python(workspace)
         try:
-            environment = python.parent.parent.resolve(strict=True)
-            inside = environment.is_relative_to(Path(workspace).resolve(strict=True))
+            root = Path(workspace).resolve(strict=True)
+            inside = environment.resolve(strict=True).is_relative_to(root)
         except (OSError, RuntimeError, ValueError):
             inside = False
-        if not inside or not os.access(python, os.X_OK):
-            raise HostError(f"workspace Python environment is unavailable at {python.parent.parent}")
+        if (
+            self._decide_workspace_environment_ownership(workspace) != "dispatcher"
+            or not inside
+            or not self._workspace_environment_ready(workspace)
+            or not os.access(python, os.X_OK)
+        ):
+            raise HostError(f"workspace Python environment is unavailable at {environment}")
 
-    def _run_workspace_shell(self, command: str, cwd: Path, label: str) -> None:
-        environment = cwd / ".venv"
-        prefix = (
-            f"PATH={shlex.quote(str(environment / 'bin'))}${{PATH:+:$PATH}}; "
-            f"VIRTUAL_ENV={shlex.quote(str(environment))}; export PATH VIRTUAL_ENV; "
+    def _run_adapter_shell(self, command: str, cwd: Path, label: str) -> None:
+        """Run adapter setup without lending it the production or dispatcher environment."""
+        production_bin = Path(self.production_runtime.interpreter).parent.resolve(strict=False)
+        safe_path = os.pathsep.join(
+            entry
+            for entry in os.environ.get("PATH", "").split(os.pathsep)
+            if entry and Path(entry).resolve(strict=False) != production_bin
         )
+        prefix = f"PATH={shlex.quote(safe_path)}; unset VIRTUAL_ENV; export PATH; "
         self._run_shell(prefix + command, cwd, label)
 
     def production_runtime_provenance(self) -> RuntimeProvenance:
@@ -3763,10 +3814,14 @@ class CommandHostRuntime:
             return "", ""
         arguments = "".join(f" --module-arg {shlex.quote(argument)}" for argument in contract.args)
         return (
-            f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary check broad "
-            f"--reuse --module {contract.module}{arguments}",
-            f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary check show "
-            f"--module {contract.module}{arguments}",
+            (
+                f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary check broad "
+                f"--reuse --module {contract.module}{arguments}"
+            ),
+            (
+                f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary check show "
+                f"--module {contract.module}{arguments}"
+            ),
         )
 
     def _worker_task_doc(

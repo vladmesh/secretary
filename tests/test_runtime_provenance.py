@@ -18,6 +18,13 @@ def _fixture(root: Path, marker: str) -> None:
     package = root / "secretary"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(f"MARKER = {marker!r}\n", encoding="utf-8")
+    (package / "dispatcher_tick.py").write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "from secretary import MARKER\n"
+        "Path(sys.argv[1]).write_text(json.dumps({'action': 'normal', 'marker': MARKER}) + '\\n')\n",
+        encoding="utf-8",
+    )
     (root / "pyproject.toml").write_text(
         "[build-system]\nrequires = []\nbuild-backend = 'fixture_backend'\nbackend-path = ['.']\n",
         encoding="utf-8",
@@ -79,6 +86,15 @@ class ProductionRuntimeTests(unittest.TestCase):
             ).probe()
         self.assertEqual(observed.classification, "interpreter_unavailable")
 
+    def test_missing_import_has_its_own_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            python = _venv(root / ".venv")
+            observed = ProductionRuntime(
+                str(python), str(root / "secretary"), workspaces_root=str(root / "workspaces")
+            ).probe()
+        self.assertEqual(observed.classification, "missing_import")
+
     def test_representative_worker_install_cannot_retarget_production(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -88,7 +104,7 @@ class ProductionRuntimeTests(unittest.TestCase):
             _fixture(task, "candidate")
             production_python = _venv(production / ".venv")
             _install(production_python, production)
-            _venv(task / ".venv")
+            _venv(task / ".secretary-task-env" / "venv")
 
             env = runtime_env(
                 "worker",
@@ -103,7 +119,8 @@ class ProductionRuntimeTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.splitlines()
-            self.assertTrue(all(str(task / ".venv" / "bin") in entry for entry in resolved))
+            task_bin = task / ".secretary-task-env" / "venv" / "bin"
+            self.assertTrue(all(str(task_bin) in entry for entry in resolved))
             self.assertNotIn("PYTHONPATH", env)
 
             # This is the ordinary incident command shape. The launch environment, not a rewritten
@@ -125,13 +142,23 @@ class ProductionRuntimeTests(unittest.TestCase):
             )
             observed = runtime.probe()
             self.assertEqual(observed.classification, "valid", observed.as_dict())
-            tick = subprocess.run(
-                [str(production_python), "-I", "-c", "import secretary; print(secretary.MARKER)"],
+            tick_record = root / "dispatcher-tick.json"
+            subprocess.run(
+                [
+                    str(production_python),
+                    "-I",
+                    "-m",
+                    "secretary.dispatcher_tick",
+                    str(tick_record),
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(tick.stdout.strip(), "production")
+            self.assertEqual(
+                json.loads(tick_record.read_text(encoding="utf-8")),
+                {"action": "normal", "marker": "production"},
+            )
 
     def test_workspace_metadata_is_refused_before_and_after_checkout_vanishes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,6 +185,33 @@ class ProductionRuntimeTests(unittest.TestCase):
             self.assertEqual({entry[0] for entry in present.metadata_targets}, {"pth", "direct_url"})
             shutil.rmtree(task)
             self.assertEqual(runtime.probe().classification, "workspace_targeted_editable")
+
+    def test_executable_editable_finder_is_refused_without_direct_url_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            production = root / "secretary"
+            task = root / "workspaces" / "secretary" / "task-finder"
+            _fixture(production, "production")
+            _fixture(task, "candidate")
+            python = _venv(production / ".venv")
+            _install(python, production)
+            site_packages = next((production / ".venv" / "lib").glob("python*/site-packages"))
+            for direct in site_packages.glob("secretary-*.dist-info/direct_url.json"):
+                direct.unlink()
+            finder_name = "__editable___secretary_finder"
+            (site_packages / f"{finder_name}.py").write_text(
+                f"MAPPING = {{'secretary': {str(task / 'secretary')!r}}}\n", encoding="utf-8"
+            )
+            (site_packages / "__editable__.secretary.pth").write_text(
+                f"import {finder_name}; {finder_name}.install()\n", encoding="utf-8"
+            )
+
+            observed = ProductionRuntime(
+                str(python), str(production), workspaces_root=str(root / "workspaces")
+            ).probe()
+
+            self.assertEqual(observed.classification, "workspace_targeted_editable")
+            self.assertIn("pth_finder", {entry[0] for entry in observed.metadata_targets})
 
     def test_symlinks_are_normalized_without_lexical_prefix_confusion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
