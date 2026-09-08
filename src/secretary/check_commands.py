@@ -351,11 +351,11 @@ def run_check_broad(args: argparse.Namespace) -> int:
         return _fail(BroadCheckError("unrepresentable_result", "the check result could not be recorded"))
     # `run_broad_check` derives both values from one RunResult. Refuse loudly if that internal
     # invariant ever regresses instead of returning a receipt status softer than the subprocess.
-    if _exit_code != result.shell_status:
+    if _exit_code != result.exit_code:
         return _fail(
             BroadCheckError(
                 "receipt_status_mismatch",
-                f"check exit status {_exit_code} disagrees with recorded status {result.shell_status}",
+                f"check exit code {_exit_code} disagrees with recorded exit code {result.exit_code}",
             )
         )
     payload = {

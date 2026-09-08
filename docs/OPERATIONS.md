@@ -3322,8 +3322,9 @@ stream as it goes past, so a runner that prints `OK (skipped=8)` and then megaby
 still has its counts recorded, without
 the receipt growing to hold the logs.
 The CLI reconstructs the recorded result before printing the receipt and refuses
-`receipt_status_mismatch` if its shell status differs from the subprocess status returned by the
-runner; it never silently chooses the softer of two answers.
+`receipt_status_mismatch` if its raw exit code differs from the subprocess result returned by the
+runner. Shell status is then derived from that one result, including `128+N` for a signal; the CLI
+never silently chooses the softer of two answers.
 
 Two check shapes are accepted, and they differ in one promise:
 

@@ -1495,7 +1495,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self.assertEqual(stdout.getvalue(), "")
         error = json.loads(stderr.getvalue())["error"]
         self.assertEqual(error["code"], "receipt_status_mismatch")
-        self.assertIn("status 7", error["message"])
+        self.assertIn("exit code 7", error["message"])
 
     def test_check_show_reads_back_the_receipt_the_declared_suite_wrote(self) -> None:
         self._suite_file("project_suite")
