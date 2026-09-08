@@ -1055,6 +1055,51 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
             "the suite must have run exactly once: the second call reused the receipt",
         )
 
+    def test_existing_candidate_roots_are_promoted_once_ahead_of_production(self) -> None:
+        production = self._src_layout_checkout(Path(self.tmpdir.name) / "production", "production")
+        candidate = self._init_workspace(Path(self.tmpdir.name) / "candidate", project_package="")
+        self._src_layout_checkout(candidate, "candidate")
+        log = self.scripts / "normalized-path.json"
+        suite = self._suite(
+            "pathsuite",
+            "import json, os, secretary, sys\n"
+            f"open({str(log)!r}, 'w', encoding='utf-8').write(json.dumps({{\n"
+            "    'imported': secretary.__file__,\n"
+            "    'pythonpath': os.environ.get('PYTHONPATH'),\n"
+            "    'sys_path': sys.path,\n"
+            "}))\n",
+            root=candidate,
+        )
+        _git(candidate, "add", "-A")
+        _git(candidate, "commit", "-q", "-m", "a src-layout candidate")
+        candidate_root = str(candidate.resolve())
+        candidate_src = str((candidate / "src").resolve())
+        production_src = str((production / "src").resolve())
+        inherited_pythonpath = os.pathsep.join(
+            [production_src, candidate_src, candidate_src, candidate_root]
+        )
+
+        exit_code, receipt = run_broad_check(
+            suite,
+            root=candidate,
+            stream=self.stream,
+            env={**os.environ, "PYTHONPATH": inherited_pythonpath},
+        )
+
+        self.assertEqual(exit_code, 0, receipt["tail"])
+        observed = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(observed["pythonpath"], inherited_pythonpath)
+        self.assertEqual(observed["sys_path"][:2], [candidate_root, candidate_src])
+        self.assertEqual(observed["sys_path"].count(candidate_root), 1)
+        self.assertEqual(observed["sys_path"].count(candidate_src), 1)
+        self.assertIn(production_src, observed["sys_path"][2:])
+        self.assertEqual(
+            observed["imported"],
+            str((candidate / "src" / "secretary" / "__init__.py").resolve()),
+        )
+        self.assertEqual(receipt["project_provenance"]["imported_project"], observed["imported"])
+        self.assertTrue(receipt["project_provenance"]["inside_workspace"])
+
     def test_the_recorded_roots_are_the_candidate_s_own_root_and_src(self) -> None:
         """The argv slot and the receipt field say the same thing, and neither is a workspace path
         dressed up as evidence: `inside_workspace` is still computed from the observed import."""
