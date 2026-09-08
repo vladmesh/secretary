@@ -27,6 +27,27 @@ The live board backend stays the operational store. The remote Git HEAD is the l
 recovery checkpoint. Between commits, live state runs ahead of the checkpoint by the RPO. That is the
 expected gap, not a desync.
 
+## Backend-aware cold archives
+
+Archive creation resolves `SECRETARY_CARD_BACKEND` once before touching an engine. Both backends
+carry the portable normalized Product, Issue, Task and Sprint views, comments, request/audit
+history and inert run/claim state. A `core` archive contains only that engine-independent recovery
+surface. A Kanboard `full` archive retains the legacy `raw_board` directory. A PostgreSQL `full`
+archive is version 2 and instead contains `engine/postgres.dump`, a custom-format, data-only dump
+made and listed by the pinned `postgres:16` client. Its manifest records the source Alembic head,
+server/client version, table counts and the dump's local-recovery purpose. It contains no database
+password, role secret, `board-store.env`, or claim that the dump restores Kanboard.
+
+Use `SECRETARY_CARD_BACKEND=postgres secretary restore-postgres ARCHIVE --instance TARGET` only
+with a distinct disposable target whose `board-store.env`, container, database and owner/app/read
+roles are managed by the existing board-store lifecycle. The command verifies archive identity and
+checksums, refuses the source endpoint, migrates the target to the recorded head, verifies roles,
+requires every application table to be empty, restores in one `pg_restore` transaction as owner,
+and compares table counts and normalized cards/sprints. A same-archive retry verifies the marker
+and parity and performs no restore. Extraction and restore never start a dispatcher, worker,
+reviewer or observer. An error does not replace an existing archive or touch the source database;
+repair or recreate only the disposable target before retrying.
+
 ## What the checkpoint contains
 
 The canon, the normalised minimum needed to resume work:

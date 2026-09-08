@@ -67,14 +67,28 @@ ANALYTICS_MANIFEST = "analytics-manifest.json"
 ANALYTICS_SCHEMA = "secretary.board.analytics-checkpoint"
 ANALYTICS_VERSION = 1
 ANALYTICS_FILES = ("events.ndjson", "cards.ndjson", "sprints.ndjson", "export.json")
-BOARD_ENTRIES = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json", ANALYTICS_MANIFEST)
+BOARD_ENTRIES = (
+    "cards.ndjson",
+    "sprints.ndjson",
+    "events.ndjson",
+    "audit.ndjson",
+    "export.json",
+    ANALYTICS_MANIFEST,
+)
 BOARD_REQUIRED = ("cards.ndjson", "sprints.ndjson", "export.json")
 RUNS_ENTRIES = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")
 RUNS_REQUIRED = RUNS_ENTRIES
 
 # Derived neighbours of the canon. They are never copied into `state/`; the
 # ignore files keep them out if anything else drops them there.
-BOARD_IGNORE = ("cards.json", "sprints.json", "kanboard-raw-*/", "pending-audit/", ".audit.lock")
+BOARD_IGNORE = (
+    "cards.json",
+    "sprints.json",
+    "audit.json",
+    "kanboard-raw-*/",
+    "pending-audit/",
+    ".audit.lock",
+)
 RUNS_IGNORE = ("cards.json",)
 
 STAGED_PATHSPEC = BOARD_RUNS_PATHSPEC

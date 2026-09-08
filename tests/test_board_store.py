@@ -209,7 +209,7 @@ class ProvisionDefinitionTests(unittest.TestCase):
     def test_compose_contract_is_pinned_loopback_and_persistent(self) -> None:
         self.assertIn("image: postgres:16", provision.COMPOSE_TEXT)
         self.assertIn("restart: unless-stopped", provision.COMPOSE_TEXT)
-        self.assertIn("127.0.0.1:5432:5432", provision.COMPOSE_TEXT)
+        self.assertIn("127.0.0.1:${SECRETARY_DB_PORT}:5432", provision.COMPOSE_TEXT)
         self.assertIn("board-db:/var/lib/postgresql/data", provision.COMPOSE_TEXT)
         self.assertNotIn("SECRETARY_DB_APP_PASSWORD", provision.COMPOSE_TEXT)
         self.assertNotIn("SECRETARY_DB_READ_PASSWORD", provision.COMPOSE_TEXT)

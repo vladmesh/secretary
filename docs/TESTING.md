@@ -13,10 +13,15 @@ suite, then runs these seven named jobs in parallel:
 | integration-board | test / integration-board | Board, dispatcher and Pipeline integration flows. |
 | packaging | test / packaging | Bootstrap, installation, provisioning and upgrade flows. |
 
-The PostgreSQL delivery proof is deliberately split across those boundaries. Packaging tests
+The PostgreSQL delivery proof is deliberately split across those boundaries. Recovery coverage
+uses isolated disposable source and target stores with dynamically published loopback ports; it
+exercises the pinned container's `pg_dump` and `pg_restore`, backend-specific archive verification,
+source-endpoint refusal, parity and same-archive idempotency. Missing Docker or SQL dependencies is
+a red setup failure, not a skip. Packaging tests
 exercise atomic credential materialization, fail-closed config and Compose drift, upgrade ordering
 and pulled-code handoff. `tests.test_board_store_schema` in `integration-board` uses real Docker
-Compose and `postgres:16`: it creates a disposable named volume on loopback port 5432, provisions
+Compose and `postgres:16`: it creates a disposable named volume on a dynamically selected loopback
+port, provisions
 all nine private values, migrates scratch to `0006_sprint_transport_key`, verifies owner/app/read
 logins and privileges, proves default privileges with a later owner-created table, reruns unchanged
 and removes the disposable project and volume. Missing Docker, Compose, psycopg, SQLAlchemy or

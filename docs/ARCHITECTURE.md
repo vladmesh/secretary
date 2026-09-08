@@ -60,6 +60,15 @@ instance repository    one private repository per installation: config + portabl
 data directory         local mutable and derived runtime data plane
 ```
 
+Backup policy is selected from that same board-backend boundary. Portable normalized board and
+process state is common to `core` and `full`; engine material is an additional mutually exclusive
+component. Kanboard names `raw_board`. PostgreSQL names `postgres_dump` and records its custom
+format, pinned engine/client major, source Alembic head and data-only local-restore purpose. Backup
+code does not inspect ORM rows or parse a second database configuration. It asks the public board
+client for normalized state and the established `board-store.env` resolver for the owner connection.
+PostgreSQL dump/restore execution lives in `postgres_recovery.py`; archive policy and verification
+remain engine-neutral except for validating that declared component contract.
+
 The product repository holds no real project bindings, credentials, cards or host-local state. The
 instance repository holds persona, project bindings, adapters, policies and head profiles. Its
 `secrets/` directory keeps a metadata catalog and sealed values in Git next to board and memory; the

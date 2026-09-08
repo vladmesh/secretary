@@ -176,25 +176,35 @@ def export_board(
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
     _ensure_dir(board_dir, "board data dir")
-    audit = TaskAudit(data_dir).status()
-    if not audit["ok"]:
-        raise RuntimeError(f"board export blocked by {audit['pending']} unresolved pending audit record(s)")
-    # Product/Issue writes own their private staged journals.  They cannot be
-    # reconstructed from an untyped partial backend row, so no checkpoint may
-    # export the board while one remains.
-    from secretary.product_issues import ProductIssueTransaction
-
-    product_issue = ProductIssueTransaction(data_dir, TaskAudit(data_dir)).status()
-    if not product_issue["ok"]:
-        raise RuntimeError(
-            f"board export blocked by {product_issue['pending']} unresolved Product/Issue transaction(s)"
-        )
-
     try:
         task_reader = (
             reader if reader is not None else TaskReader(board_client(instance_dir, serves=(CARD,)))
         )
+        task_client = getattr(task_reader, "client", None)
+        if getattr(task_client, "backend_kind", "kanboard") == "postgres":
+            from secretary.board.sql_audit import SqlTaskAudit
+
+            audit_owner = SqlTaskAudit(task_client)
+        else:
+            audit_owner = TaskAudit(data_dir)
+        audit = audit_owner.status()
+        if not audit["ok"]:
+            raise RuntimeError(
+                f"board export blocked by {audit['pending']} unresolved pending audit record(s)"
+            )
+        if getattr(task_client, "backend_kind", "kanboard") != "postgres":
+            # SQL Product/Issue effects and claims are one transaction.  The
+            # private staged journal exists only on the Kanboard implementation.
+            from secretary.product_issues import ProductIssueTransaction
+
+            product_issue = ProductIssueTransaction(data_dir, audit_owner).status()
+            if not product_issue["ok"]:
+                raise RuntimeError(
+                    "board export blocked by "
+                    f"{product_issue['pending']} unresolved Product/Issue transaction(s)"
+                )
         cards = task_reader.export()
+        history = audit_owner.events()
     except TaskError as exc:
         raise RuntimeError(f"secretary task export failed: {exc.message}") from None
     if not isinstance(cards, list):
@@ -210,6 +220,8 @@ def export_board(
 
     # Sprint entities live on their own board and never reach the task board export, so the
     # checkpoint reads them separately instead of inferring them from linked cards.
+    if sprint_client is None and getattr(task_client, "backend_kind", "kanboard") == "postgres":
+        sprint_client = task_client
     sprints = export_sprint_entities(instance_dir, sprint_client)
 
     raw_active_task_count = _latest_raw_active_task_count(
@@ -232,6 +244,8 @@ def export_board(
         _write_ndjson(staging / "cards.ndjson", normalized)
         _write_json(staging / "sprints.json", {"version": 1, "sprints": sprints})
         _write_ndjson(staging / "sprints.ndjson", sprints)
+        _write_json(staging / "audit.json", {"version": 1, "events": history})
+        _write_ndjson(staging / "audit.ndjson", history)
         _write_json(staging / "export.json", summary)
         # Validate the exact pair restore consumes before replacing the last good live export.
         from secretary.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
@@ -243,12 +257,17 @@ def export_board(
         _publish_component_entries(
             staging,
             board_dir,
-            ["cards.json", "cards.ndjson", "sprints.json", "sprints.ndjson", "export.json"],
+            [
+                "cards.json", "cards.ndjson", "sprints.json", "sprints.ndjson",
+                "audit.json", "audit.ndjson", "export.json",
+            ],
             "board export",
         )
     except RuntimeError:
         _cleanup_staging_dir(staging)
         raise
+    if reader is None and getattr(task_client, "backend_kind", "kanboard") == "postgres":
+        task_client.connection.close()
     return DataExport(path=board_dir / "cards.json", count=len(normalized), source=summary["source"])
 
 

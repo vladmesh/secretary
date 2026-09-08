@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -8,6 +9,7 @@ from secretary.data import DataExport
 
 ARCHIVE_ROOT = "secretary-backup"
 BACKUP_VERSION = 1
+POSTGRES_BACKUP_VERSION = 2
 
 BackupKind = Literal["core", "full"]
 RestoreAction = Literal["restore", "exclude"]
@@ -31,6 +33,7 @@ class BackupPolicy:
     forbidden_entries: tuple[str, ...]
     retention_seconds: int | None
     restore_capability: str
+    backend: str = "kanboard"
 
     @property
     def required_components(self) -> tuple[str, ...]:
@@ -118,6 +121,39 @@ FULL_POLICY = BackupPolicy(
     restore_capability="full-snapshot",
 )
 
+POSTGRES_CORE_POLICY = BackupPolicy(
+    kind="core",
+    components=(
+        *CORE_POLICY.components,
+        ComponentPolicy(
+            "board_history",
+            "board/audit.json",
+            required_entries=("board/audit.ndjson",),
+        ),
+    ),
+    forbidden_entries=CORE_POLICY.forbidden_entries,
+    retention_seconds=None,
+    restore_capability="normalized-core",
+    backend="postgres",
+)
+
+POSTGRES_FULL_POLICY = BackupPolicy(
+    kind="full",
+    components=(
+        ComponentPolicy("postgres_dump", "engine/postgres.dump"),
+        *tuple(component for component in FULL_POLICY.components if component.name != "raw_board"),
+        ComponentPolicy(
+            "board_history",
+            "board/audit.json",
+            required_entries=("board/audit.ndjson",),
+        ),
+    ),
+    forbidden_entries=(),
+    retention_seconds=48 * 60 * 60,
+    restore_capability="postgres-local-recovery",
+    backend="postgres",
+)
+
 POLICIES: dict[BackupKind, BackupPolicy] = {
     "core": CORE_POLICY,
     "full": FULL_POLICY,
@@ -125,14 +161,16 @@ POLICIES: dict[BackupKind, BackupPolicy] = {
 BACKUP_KINDS: tuple[BackupKind, ...] = tuple(POLICIES)
 
 
-def policy_for(kind: object) -> BackupPolicy | None:
+def policy_for(kind: object, backend: str = "kanboard") -> BackupPolicy | None:
     if not isinstance(kind, str):
         return None
+    if backend == "postgres":
+        return {"core": POSTGRES_CORE_POLICY, "full": POSTGRES_FULL_POLICY}.get(kind)
     return POLICIES.get(kind) if kind in POLICIES else None
 
 
 def component_archive_name(path: str) -> str:
-    if path.startswith("debug/"):
+    if path.startswith(("debug/", "engine/")):
         return f"{ARCHIVE_ROOT}/{path}"
     return f"{ARCHIVE_ROOT}/secretary-data/{path}"
 
@@ -161,13 +199,27 @@ def build_components_manifest(
     *,
     policy: BackupPolicy,
     data_dir: Path,
-    raw_dump: Path,
+    raw_dump: Path | None,
     exports: dict[str, DataExport],
+    postgres_dump: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     components: dict[str, Any] = {}
     for component in policy.components:
         if component.name == "raw_board":
+            if raw_dump is None:
+                raise RuntimeError("Kanboard full backup has no raw board dump")
             components[component.name] = {"path": _relative_to_data(data_dir, raw_dump)}
+        elif component.name == "postgres_dump":
+            if postgres_dump is None:
+                raise RuntimeError("PostgreSQL full backup has no engine dump")
+            components[component.name] = {"path": component.path, **postgres_dump}
+        elif component.name == "board_history":
+            try:
+                payload = json.loads((data_dir / component.path).read_text(encoding="utf-8"))
+                count = len(payload.get("events", [])) if isinstance(payload, dict) else 0
+            except (OSError, ValueError):
+                count = 0
+            components[component.name] = {"path": component.path, "count": count}
         elif component.name == "runs_state":
             components[component.name] = {
                 "path": component.path,
@@ -201,6 +253,8 @@ def should_skip_data_entry(relative: Path, *, policy: BackupPolicy) -> bool:
         return True
     if policy.kind == "core":
         return _skip_core_data_entry(relative)
+    if policy.backend == "postgres" and relative.parts[:1] == ("board",):
+        return len(relative.parts) > 1 and relative.parts[1].startswith("kanboard-raw-")
     return False
 
 

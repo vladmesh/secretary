@@ -22,7 +22,7 @@ COMPOSE_TEXT = f"""services:
     image: {IMAGE}
     restart: unless-stopped
     ports:
-      - 127.0.0.1:5432:5432
+      - 127.0.0.1:${{SECRETARY_DB_PORT}}:5432
     environment:
       POSTGRES_DB: ${{SECRETARY_DB_NAME}}
       POSTGRES_USER: ${{SECRETARY_DB_OWNER_USER}}
@@ -125,7 +125,7 @@ def _write_compose(path: Path, *, dry_run: bool) -> bool:
         raise BoardStoreError(f"could not reconcile board store compose definition: {exc}") from None
 
 
-def _inspect_container(container: str, *, volume_name: str) -> None:
+def _inspect_container(container: str, *, volume_name: str, host_port: int = 5432) -> None:
     try:
         payload = json.loads(_run(["docker", "inspect", container], timeout=30))[0]
     except (json.JSONDecodeError, IndexError, TypeError):
@@ -142,8 +142,8 @@ def _inspect_container(container: str, *, volume_name: str) -> None:
         problems.append(f"image is {image!r}, expected {IMAGE}")
     if restart != "unless-stopped":
         problems.append(f"restart policy is {restart!r}, expected unless-stopped")
-    if ports != {("127.0.0.1", "5432")}:
-        problems.append("published port is not exactly 127.0.0.1:5432:5432")
+    if ports != {("127.0.0.1", str(host_port))}:
+        problems.append(f"published port is not exactly 127.0.0.1:{host_port}:5432")
     if ("volume", volume_name, "/var/lib/postgresql/data") not in mounts:
         problems.append(f"persistent volume is not {volume_name}")
     if problems:
@@ -205,14 +205,14 @@ def provision(
     assert config is not None
     container = _run(_compose_argv(compose_path, project, config_path, "ps", "--all", "--quiet", "postgres"))
     if container:
-        _inspect_container(container, volume_name=volume_name)
+        _inspect_container(container, volume_name=volume_name, host_port=config.port)
     else:
         actions.append("create PostgreSQL container and volume")
     _run(_compose_argv(compose_path, project, config_path, "up", "--detach", "postgres"))
     container = _run(_compose_argv(compose_path, project, config_path, "ps", "--all", "--quiet", "postgres"))
     if not container:
         raise BoardStoreError("Docker Compose did not create the board store container")
-    _inspect_container(container, volume_name=volume_name)
+    _inspect_container(container, volume_name=volume_name, host_port=config.port)
     _wait_ready(config)
     return ProvisionOutcome(tuple(actions))
 
