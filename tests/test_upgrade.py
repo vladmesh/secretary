@@ -843,6 +843,183 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("failed", result.render())
 
+    def test_pulled_code_handoff_preserves_the_upgrade_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            python = root / ".venv" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("", encoding="utf-8")
+            args = SimpleNamespace(
+                instance="/srv/instance/instance.yaml",
+                base_branch="stable",
+                dry_run=False,
+                runtime_user="operator",
+                host_fixture="/tmp/host-fixture",
+                json=True,
+            )
+            with mock.patch("secretary.upgrade.os.execve") as execute:
+                upgrade._exec_pulled_upgrade(
+                    args,
+                    root,
+                    before="a" * 40,
+                    after="b" * 40,
+                    changed_paths=("pyproject.toml",),
+                )
+
+        executable, argv, environment = execute.call_args.args
+        self.assertEqual(executable, python)
+        self.assertEqual(argv[:5], [str(python), "-P", "-m", "secretary", "upgrade"])
+        self.assertIn("--no-pull", argv)
+        self.assertIn("/srv/instance/instance.yaml", argv)
+        self.assertIn("stable", argv)
+        self.assertIn("operator", argv)
+        self.assertIn("/tmp/host-fixture", argv)
+        self.assertIn("--json", argv)
+        self.assertEqual(
+            json.loads(environment["SECRETARY_UPGRADE_HANDOFF"]),
+            {
+                "before": "a" * 40,
+                "after": "b" * 40,
+                "changed_paths": ["pyproject.toml"],
+            },
+        )
+
+    def test_handoff_pull_step_names_revisions_without_pulling_again(self) -> None:
+        context = self.context(
+            FakeUnitInstaller(),
+            pull=False,
+            handoff_before="a" * 40,
+            handoff_after="b" * 40,
+        )
+        with mock.patch("secretary.upgrade.fast_forward") as pull:
+            result = upgrade.step_pull(context)
+
+        pull.assert_not_called()
+        self.assertEqual(result.status, "changed")
+        self.assertIn("aaaaaaaaaaaa -> bbbbbbbbbbbb", result.detail)
+
+    def test_handoff_process_verifies_exact_head_and_runs_the_current_schedule_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            product = root / "product"
+            instance = root / "instance"
+            product.mkdir()
+            instance.mkdir()
+            subprocess.run(["git", "init", "--quiet", product], check=True)
+            subprocess.run(["git", "-C", product, "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", product, "config", "user.email", "test@example.invalid"], check=True)
+            (product / "README").write_text("current\n", encoding="utf-8")
+            subprocess.run(["git", "-C", product, "add", "README"], check=True)
+            subprocess.run(["git", "-C", product, "commit", "--quiet", "-m", "current"], check=True)
+            revision = subprocess.run(
+                ["git", "-C", product, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            report = SimpleNamespace(
+                ok=True,
+                instance_path=instance / "instance.yaml",
+                data_dir=root / "data",
+            )
+            args = SimpleNamespace(
+                instance=str(instance),
+                product_root=str(product),
+                base_branch="main",
+                dry_run=False,
+                no_pull=False,
+                runtime_user=None,
+                host_fixture=None,
+                json=False,
+            )
+            captured = []
+
+            def run_once(context):
+                captured.append(context)
+                return upgrade.UpgradeResult()
+
+            marker = json.dumps({"before": "a" * 40, "after": revision, "changed_paths": ["pyproject.toml"]})
+            with (
+                mock.patch.dict(os.environ, {"SECRETARY_UPGRADE_HANDOFF": marker}),
+                mock.patch("secretary.upgrade.validate_instance", return_value=report),
+                mock.patch("secretary.upgrade.resolve_runtime_owner", return_value=("operator", root)),
+                mock.patch("secretary.upgrade.run_steps", side_effect=run_once) as steps,
+            ):
+                self.assertEqual(upgrade.run_upgrade(args), 0)
+
+        steps.assert_called_once()
+        self.assertEqual(len(captured), 1)
+        self.assertFalse(captured[0].pull)
+        self.assertEqual(captured[0].changed_paths, ("pyproject.toml",))
+
+    def test_dependency_provenance_refuses_imports_outside_the_selected_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            python = root / ".venv" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("", encoding="utf-8")
+            evidence = {
+                "prefix": str(root / ".venv"),
+                "origins": {
+                    "secretary": "/another/checkout/secretary/__init__.py",
+                    "psycopg": str(root / ".venv/lib/python/site-packages/psycopg/__init__.py"),
+                    "sqlalchemy": str(root / ".venv/lib/python/site-packages/sqlalchemy/__init__.py"),
+                    "alembic": str(root / ".venv/lib/python/site-packages/alembic/__init__.py"),
+                },
+            }
+            context = self.context(FakeUnitInstaller(), product_root=root)
+            with mock.patch(
+                "secretary.upgrade._proc.run",
+                return_value=subprocess.CompletedProcess([], 0, json.dumps(evidence), ""),
+            ):
+                result = upgrade.step_dependency_provenance(context)
+
+        self.assertTrue(result.failed)
+        self.assertIn("escaped", result.detail)
+
+    def test_changed_pull_hands_off_before_any_import_bound_schedule_step(self) -> None:
+        class HandedOff(Exception):
+            pass
+
+        report = SimpleNamespace(
+            ok=True,
+            instance_path=Path("/srv/instance/instance.yaml"),
+            data_dir=Path("/srv/data"),
+        )
+        args = SimpleNamespace(
+            instance="/srv/instance",
+            product_root="/srv/product",
+            base_branch="main",
+            dry_run=False,
+            no_pull=False,
+            runtime_user=None,
+            host_fixture=None,
+            json=False,
+        )
+
+        def pulled(context):
+            context.pulled_before = "a" * 40
+            context.pulled_after = "b" * 40
+            context.changed_paths = ("src/secretary/new_step.py", "pyproject.toml")
+            return upgrade.StepResult("pull", "changed", "aaaaaaaaaaaa -> bbbbbbbbbbbb")
+
+        with (
+            mock.patch.dict(os.environ, {"SECRETARY_UPGRADE_HANDOFF": ""}),
+            mock.patch("secretary.upgrade.validate_instance", return_value=report),
+            mock.patch("secretary.upgrade.resolve_runtime_owner", return_value=("operator", Path("/srv"))),
+            mock.patch("secretary.upgrade.step_pull", side_effect=pulled),
+            mock.patch("secretary.upgrade._exec_pulled_upgrade", side_effect=HandedOff) as execute,
+            mock.patch("secretary.upgrade.run_steps") as steps,
+            self.assertRaises(HandedOff),
+        ):
+            upgrade.run_upgrade(args)
+
+        steps.assert_not_called()
+        self.assertEqual(
+            execute.call_args.kwargs["changed_paths"],
+            ("src/secretary/new_step.py", "pyproject.toml"),
+        )
+
     def test_a_dependency_manifest_move_triggers_a_reinstall_decision(self):
         units = FakeUnitInstaller()
         context = self.context(units, changed_paths=("pyproject.toml",), dry_run=True)

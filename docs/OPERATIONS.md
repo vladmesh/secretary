@@ -77,6 +77,29 @@ the role-environment wrapper and resolve board transport from the installation.
 Migrate that complete tuple only through the board-transport upgrade path; it is no longer a recoverable
 runtime secret.
 
+### PostgreSQL board store
+
+A fresh `secretary bootstrap` creates `/opt/secretary/postgres-compose.yml`, the
+`secretary-board-store_board-db` named volume and `<instance>/board-store.env`, then runs Alembic
+to the shipped head and verifies the owner/app/read logins and privilege boundary. PostgreSQL is
+the only containerized part of this path; the CLI, web process, dispatcher and heads remain host
+processes. The service publishes only `127.0.0.1:5432` and supplies version-matched `psql`,
+`pg_dump` and `pg_restore` inside `postgres:16` for later backup/restore work.
+
+`board-store.env` contains exactly nine keys and three independent passwords, is mode 0600 and is
+git-ignored. Do not print it, put its values on an argument list or commit it. An ordinary upgrade
+with no file reports PostgreSQL as not provisioned and continues. Once the file exists, an invalid
+file, unreachable server, unexpected container image/volume/port, role drift or migration failure
+stops the upgrade before consumer restart. Preserve the file, Compose definition and volume,
+repair the named cause, and rerun the same command. A rerun retains the volume and credentials and
+applies only migrations still owed.
+
+There is no implicit credential rotation. Editing `POSTGRES_PASSWORD` cannot rotate an owner in a
+non-empty volume. Rotation requires `ALTER ROLE`, an atomic whole-file rewrite and restart of the
+web and dispatcher consumers as one explicit operator operation; that command is not shipped in
+this slice. Backend-aware dump/restore and cutover are also separate work. Do not set
+`SECRETARY_CARD_BACKEND=postgres` merely because provisioning and migrations are green.
+
 The store does not promise worker isolation: it has no broker and no grants, and the installation key
 opens every secret at once, with the same rights that previously read `runtime.env` (see
 [Recovery](RECOVERY.md#secrets)).
@@ -3051,6 +3074,10 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | `pull` | `git fetch` plus `merge --ff-only` of the product checkout. A dirty checkout is refused. |
 | `registries` | read the selected checkout's skill manifest, this installation's optional overlay and the head canon, and decide the whole skill delivery; a registry that cannot be read or cannot be delivered stops the run here, before the first write |
 | `dependencies` | reinstall into the virtualenv if the pull moved the dependency manifest |
+| `dependency-provenance` | import `secretary`, psycopg, SQLAlchemy and Alembic with `-P` from the selected product root and its production venv |
+| `board-store-provision` | no-op before provisioning; otherwise verify/start the pinned `postgres:16` service and persistent volume without rotating credentials |
+| `board-store` | connect as owner and apply Alembic to the shipped head |
+| `board-store-roles` | verify owner/app/read credentials, role attributes and privilege boundaries |
 | `head-registry` | generate `heads/heads.yaml` from this installation's canon plus `heads/source.yaml`, naming that canon, its owner, the checkout and revision it came from, and the snapshot digest |
 | `head-registry-checkpoint` | commit only the generated pair under the shared instance-repository writer lock and fast-forward publish it; an unavailable or diverged remote stops the upgrade with the retained local checkpoint named |
 | `role-skills` | `role_skills sync` into the shells' skill directories |
@@ -3062,6 +3089,14 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 
 Flags: `--no-pull` (re-materialise only), `--base-branch`, `--product-root`, `--runtime-user`,
 `--json`.
+
+When `pull` advances the checkout, the import-bound process performs no later materialization. It
+replaces itself with `python -P -m secretary` from the exact pulled checkout and passes the
+instance, flags, base branch, runtime user, changed paths and before/after revisions to that
+process. The new process verifies the clean exact revision, marks pull as already completed and
+runs its own current schedule once. This is why a step first introduced by the pulled revision
+runs in the same ordinary upgrade. `--no-pull` has no handoff and runs the current schedule once;
+dry-run fetches and reports the target but does not move or execute it.
 
 ### Upgrading from another checkout
 
