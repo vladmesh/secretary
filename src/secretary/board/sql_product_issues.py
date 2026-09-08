@@ -39,13 +39,10 @@ holds, so a Product/Issue row's `swimlane_id` is its own product's lane by const
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from secretary.board.backend import record_key, record_key_kind
-
-#: The Issues column: every Product and Issue row lives there and nowhere else
-#: (`product_issues.py:validate_product_issue_records`).
-ISSUES_COLUMN_ID = 1
 
 #: §8.1's Product keys, and the column or table each one is.
 PRODUCT_KEYS = ("record_type", "product_id", "product_projects")
@@ -59,6 +56,8 @@ ISSUE_KEYS = (
     "issue_priority",
     "issue_closed_reason",
 )
+
+_REQUEST_STAMP = re.compile(r"^\[request-id:([^\]\r\n]+)\]$")
 
 
 class ProductIssueRecords:
@@ -102,6 +101,17 @@ class ProductIssueRecords:
 
         return SqlCardError(message)
 
+    def _issues_column_id(self) -> int:
+        """Read the Product/Issue column from the SQL client's one board vocabulary."""
+        board = self.client.call("getProjectByName", name="Pipeline")
+        if not isinstance(board, dict):  # pragma: no cover - the SQL vocabulary declares it
+            raise self._error("the SQL board vocabulary has no Pipeline board")
+        columns = self.client.call("getColumns", project_id=int(board["id"]))
+        matches = [int(column["id"]) for column in columns if column.get("title") == "Issues"]
+        if len(matches) != 1:
+            raise self._error("the SQL board vocabulary must contain exactly one Issues column")
+        return matches[0]
+
     def identifier_for(self, kind: str, task_id: int) -> str:
         """Resolve through the indexed stored key and verify its deterministic identity."""
         column, table = ("product_id", "products") if kind == "product" else ("issue_id", "issues")
@@ -124,7 +134,7 @@ class ProductIssueRecords:
             "reference": staged["reference"],
             "title": staged["title"],
             "description": staged["description"],
-            "column_id": ISSUES_COLUMN_ID,
+            "column_id": self._issues_column_id(),
             "position": 0,
             "swimlane_id": self.client._lane_id(staged["lane"]),
             "date_creation": _epoch(staged["created_at"]),
@@ -153,7 +163,7 @@ class ProductIssueRecords:
             "reference": f"product:{product_id}",
             "title": _text(title),
             "description": _text(description),
-            "column_id": ISSUES_COLUMN_ID,
+            "column_id": self._issues_column_id(),
             "position": 0,
             "swimlane_id": self.client._lane_id(product_id),
             "date_creation": _epoch(created),
@@ -168,7 +178,7 @@ class ProductIssueRecords:
             "reference": f"issue:{issue_id}",
             "title": _text(title),
             "description": _text(description),
-            "column_id": ISSUES_COLUMN_ID,
+            "column_id": self._issues_column_id(),
             "position": 0,
             "swimlane_id": self.client._lane_id(product_id),
             "date_creation": _epoch(created),
@@ -335,7 +345,7 @@ class ProductIssueRecords:
             }
             bag = rows[0][0] if isinstance(rows[0][0], dict) else json.loads(rows[0][0] or "{}")
             for name, value in (bag.get("kanboard") or {}).items():
-                if name != "swimlane":
+                if name not in PRODUCT_KEYS:
                     meta[name] = _text(value)
             return meta
         rows = self.client._query(
@@ -354,7 +364,7 @@ class ProductIssueRecords:
             meta["issue_closed_reason"] = _text(close_reason)
         bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
         for name, value in (bag.get("kanboard") or {}).items():
-            if name != "swimlane":
+            if name not in ISSUE_KEYS:
                 meta[name] = _text(value)
         return meta
 
@@ -398,7 +408,6 @@ class ProductIssueRecords:
             self._write_projects(product_id, values.get("product_projects"))
             self.client._lane_added(product_id)
         else:
-            self._reject_unmodelled(values, ISSUE_KEYS, "issue", allow_extensions=True)
             product_id = _text(values.get("issue_product"))
             if not product_id:
                 raise self._error(f"an Issue names its Product: {reference} named none")
@@ -457,7 +466,6 @@ class ProductIssueRecords:
         if "product_projects" in values:
             self._write_projects(product_id, values.get("product_projects"))
         bag = self._extension_bag(values, PRODUCT_KEYS)
-        removals = [key for key in values if key not in PRODUCT_KEYS and not _text(values[key])]
         assignments: list[str] = []
         params: list[Any] = []
         if bag:
@@ -466,12 +474,6 @@ class ProductIssueRecords:
                 "coalesce(extensions->'kanboard', '{}'::jsonb) || %s::jsonb, true)"
             )
             params.append(json.dumps(bag))
-        for key in removals:
-            assignments.append(
-                "extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard}', "
-                "coalesce(extensions->'kanboard', '{}'::jsonb) - %s, true)"
-            )
-            params.append(key)
         assignments.append("updated_at = %s")
         params.extend((_now(), product_id))
         self.client._execute(
@@ -480,7 +482,6 @@ class ProductIssueRecords:
         return True
 
     def _update_issue(self, issue_id: str, values: dict[str, Any]) -> bool:
-        self._reject_unmodelled(values, ISSUE_KEYS, "issue", allow_extensions=True)
         if _text(values.get("record_type")) not in {"", "issue"}:
             raise self._error("an Issue's record type is its table and cannot be rewritten")
         assignments, params = [], []
@@ -493,23 +494,12 @@ class ProductIssueRecords:
                 assignments.append(f"{column} = %s")
                 params.append(_text(values[key]))
         bag = self._extension_bag(values, ISSUE_KEYS)
-        removals = [
-            key
-            for key in values
-            if key not in ISSUE_KEYS and not _text(values[key])
-        ]
         if bag:
             assignments.append(
                 "extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard}', "
                 "coalesce(extensions->'kanboard', '{}'::jsonb) || %s::jsonb, true)"
             )
             params.append(json.dumps(bag))
-        for key in removals:
-            assignments.append(
-                "extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard}', "
-                "coalesce(extensions->'kanboard', '{}'::jsonb) - %s, true)"
-            )
-            params.append(key)
         if assignments:
             assignments.append("updated_at = %s")
             params.append(_now())
@@ -536,17 +526,26 @@ class ProductIssueRecords:
         return {
             key: _text(value)
             for key, value in values.items()
-            if key not in modelled and _text(value)
+            if key not in modelled
         }
-
-    @staticmethod
-    def _reject_unmodelled(*_args: Any, **_kwargs: Any) -> None:
-        """Unknown metadata is deliberately retained in each entity's extension bag."""
 
     # --- comments --------------------------------------------------------------------
 
     def _comment_table(self, kind: str) -> tuple[str, str]:
-        return ("product_comments", "product_id") if kind == "product" else ("issue_comments", "issue_id")
+        return (
+            ("product_comments", "product_id")
+            if kind == "product"
+            else ("issue_comments", "issue_id")
+        )
+
+    @staticmethod
+    def _comment_request_id(content: str) -> str | None:
+        """Return the canonical request stamp when the comment carries one."""
+        for line in reversed(content.splitlines()):
+            match = _REQUEST_STAMP.fullmatch(line)
+            if match is not None:
+                return match.group(1)
+        return None
 
     def comments(self, task_id: int) -> list[dict[str, Any]]:
         key = int(task_id)
@@ -573,10 +572,21 @@ class ProductIssueRecords:
         table, column = self._comment_table(kind)
         first = content.splitlines()[0] if content else ""
         marker = first[1:-1] if first.startswith("[") and first.endswith("]") else None
+        request_id = self._comment_request_id(content)
+        if request_id is not None:
+            existing = self.client._query(
+                f"SELECT comment_id, {column}, body FROM {table} WHERE request_id = %s",
+                (request_id,),
+            )
+            if existing:
+                comment_id, owner, body = existing[0]
+                if owner != identifier or body != content:
+                    raise self._error("request id belongs to another comment or entity")
+                return int(comment_id)
         rows = self.client._query(
-            f"INSERT INTO {table} ({column}, marker, body, created_at) "
-            "VALUES (%s, %s, %s, %s) RETURNING comment_id",
-            (identifier, marker, content, _now()),
+            f"INSERT INTO {table} ({column}, marker, body, request_id, created_at) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING comment_id",
+            (identifier, marker, content, request_id, _now()),
         )
         return int(rows[0][0])
 
@@ -597,4 +607,4 @@ def _now() -> Any:
     return card_now()
 
 
-__all__ = ["ISSUES_COLUMN_ID", "ISSUE_KEYS", "PRODUCT_KEYS", "ProductIssueRecords"]
+__all__ = ["ISSUE_KEYS", "PRODUCT_KEYS", "ProductIssueRecords"]

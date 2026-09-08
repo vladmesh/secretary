@@ -1191,9 +1191,10 @@ The rule is now explicit, and `request_settled_matches_status` is what enforces 
 transitions, comments, budget charges, sprint create, Product/Issue writes. It is one transaction
 (§7.1), so it claims **directly as `committed`, with `settled_at` set in the same statement**:
 
-For the delivered Product/Issue slice the four writer paths are Product create, Issue create,
-Issue priority replace and Issue close. All enter `SqlCardClient.transaction()` through the one
-`ProductIssueStore._host_mutation` boundary. The host may stage internally while building the
+For the delivered Product/Issue slice the five writer paths are Product create, Issue create,
+Issue priority replace, Issue close and operator recovery of one of those operations. All enter the
+one `SqlCardClient.transaction()` through the `ProductIssueStore._host_mutation` boundary. The host
+may stage internally while building the
 effect, but the stage is never externally visible: request claim, final entity and relationships,
 comment where applicable, and `board_events` insert commit together. A failure after any one of
 those statements rolls all of them back; retrying the same request performs one effect, while a
@@ -2190,7 +2191,7 @@ dependencies beside `psycopg[binary]` (§5.8).
 | `record_type` (`task`/`issue`/`product`) | task metadata | table identity: the three record types become three tables |
 | column name (`Ready`, `In progress`, …) | Kanboard column | `tasks.state`, via `_STATE_BY_COLUMN` |
 | `is_active = 0` | Kanboard row status | `tasks.archived` |
-| `swimlane` | Kanboard swimlane, per product | derived from the product; kept in `extensions` for provenance (§8.2) — `tasks.extensions` for a card, `issues.extensions` for an Issue since 2026-09-07 |
+| `swimlane` | Kanboard swimlane, per product | the serving lane is derived from the relational product; the independently observed metadata value is kept and returned from `extensions` as provenance (§8.2), without choosing placement — `tasks.extensions` for a card, `issues.extensions` for an Issue since 2026-09-07, and `products.extensions` for a Product since `0004` |
 | `sprint_goal`, `sprint_definition_of_done` | sprint metadata | `sprints.goal`, `.definition_of_done` |
 | `sprint_repositories` | JSON array of paths | `sprint_repositories` rows (§8.3) |
 | `sprint_product`, `sprint_issues` | metadata / JSON array | `sprints.product_id`, `sprint_issues` rows |
@@ -2360,6 +2361,9 @@ Losing nothing means not deleting the closeouts and not pretending a reconstruct
   `product_lanes.py` exists because some rows predate it. The importer derives the lane from the
   product and keeps the observed lane in `extensions` where the two disagree, so
   `product_lanes.py`'s finding survives the migration instead of being silently normalized away.
+  SQL serving always derives placement from the relational product, while metadata reads return
+  the observed `extensions.kanboard.swimlane` value as provenance; that value never overrides the
+  derived lane.
 
 **Three fields the board leaves empty where the schema demanded one (2026-09-07).** These are not
 absent *fields*; they are records the first import of real data could not write, and the choice

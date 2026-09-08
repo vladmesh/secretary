@@ -1123,6 +1123,7 @@ class ProductIssueStore:
             raise TaskError(
                 "backend_error", f"PostgreSQL Product/Issue transaction rolled back: {detail}", 1
             ) from None
+
     def _require_sql_legacy_namespace_free(self, request_id: str) -> None:
         """Refuse unmigrated file claims before a SQL mutation touches the database."""
         if getattr(self.client, "backend_kind", "kanboard") != "postgres":

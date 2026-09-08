@@ -188,7 +188,8 @@ class SqlProductIssueStoreTests(SqlProductIssueFixture, shared.ProductIssueStore
             self.client.call(
                 "saveTaskMetadata", task_id=product_key,
                 values={"record_type": "product", "product_id": "secretary",
-                        "product_projects": '["secretary"]', "future_product": "kept"},
+                        "product_projects": '["secretary"]', "future_product": "kept",
+                        "created_empty": "", "swimlane": "observed-product-lane"},
             )
             issue_key = self.client.call(
                 "createTask", project_id=1, title="Crash", description="", column_id=1,
@@ -197,12 +198,115 @@ class SqlProductIssueStoreTests(SqlProductIssueFixture, shared.ProductIssueStore
             self.client.call(
                 "saveTaskMetadata", task_id=issue_key,
                 values={"record_type": "issue", "issue_product": "secretary",
-                        "issue_kind": "bug", "issue_priority": "P2", "future_issue": "kept"},
+                        "issue_kind": "bug", "issue_priority": "P2", "future_issue": "kept",
+                        "created_empty": "", "swimlane": "observed-issue-lane"},
             )
-        self.assertEqual(self.client.call("getTaskMetadata", task_id=product_key)["future_product"], "kept")
+        product_meta = self.client.call("getTaskMetadata", task_id=product_key)
+        self.assertEqual(product_meta["future_product"], "kept")
+        self.assertEqual(product_meta["created_empty"], "")
+        self.assertEqual(product_meta["swimlane"], "observed-product-lane")
         issue_meta = self.client.call("getTaskMetadata", task_id=issue_key)
         self.assertEqual(issue_meta["future_issue"], "kept")
+        self.assertEqual(issue_meta["created_empty"], "")
+        self.assertEqual(issue_meta["swimlane"], "observed-issue-lane")
         self.assertEqual(issue_meta["issue_priority"], "P2")
+
+        with self.client.transaction():
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=product_key,
+                values={"product_id": "secretary", "future_product": "", "swimlane": ""},
+            )
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=issue_key,
+                values={"issue_priority": "P1", "future_issue": "", "swimlane": ""},
+            )
+        product_meta = self.client.call("getTaskMetadata", task_id=product_key)
+        issue_meta = self.client.call("getTaskMetadata", task_id=issue_key)
+        self.assertEqual(product_meta["future_product"], "")
+        self.assertEqual(product_meta["swimlane"], "")
+        self.assertEqual(product_meta["product_id"], "secretary")
+        self.assertEqual(issue_meta["future_issue"], "")
+        self.assertEqual(issue_meta["swimlane"], "")
+        self.assertEqual(issue_meta["issue_priority"], "P1")
+
+    def test_stamped_comments_claim_requests_and_refuse_foreign_entities(self) -> None:
+        self._create_product("product-create")
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash",
+            description="", actor="po", request_id="issue-create",
+        )
+        product_key = backend.record_key("product", "secretary")
+        issue_key = backend.record_key("issue", issue["ref"].removeprefix("issue:"))
+
+        ordinary = self.client.call(
+            "createComment", task_id=product_key, content="ordinary product note"
+        )
+        ordinary_issue = self.client.call(
+            "createComment", task_id=issue_key, content="ordinary issue note"
+        )
+        stamped_body = "[product:note]\ncreated\n[request-id:product-create]"
+        stamped = self.client.call("createComment", task_id=product_key, content=stamped_body)
+        replay = self.client.call("createComment", task_id=product_key, content=stamped_body)
+        self.assertEqual(replay, stamped)
+        self.assertEqual(
+            self.client._query(
+                "SELECT body, request_id FROM product_comments ORDER BY comment_id"
+            ),
+            [("ordinary product note", None), (stamped_body, "product-create")],
+        )
+
+        self.store.update_priority(
+            reference=issue["ref"], priority="P1", reason="urgent", actor="po",
+            request_id="issue-priority",
+        )
+        self.store.update_priority(
+            reference=issue["ref"], priority="P1", reason="urgent", actor="po",
+            request_id="issue-priority",
+        )
+        self.assertEqual(
+            self.client._query(
+                "SELECT request_id, issue_ref FROM issue_comments WHERE request_id = %s",
+                ("issue-priority",),
+            ),
+            [("issue-priority", issue["ref"])],
+        )
+        self.assertEqual(
+            self.client._query(
+                "SELECT request_id FROM issue_comments WHERE comment_id = %s", (ordinary_issue,)
+            ),
+            [(None,)],
+        )
+
+        with self.assertRaises(TaskError), self.client.transaction():
+            self.client.call(
+                "createComment",
+                task_id=issue_key,
+                content="[issue:note]\nforeign\n[request-id:product-create]",
+            )
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM issue_comments WHERE request_id = %s", ("product-create",)
+            ),
+            [(0,)],
+        )
+        self.assertIsInstance(ordinary, int)
+
+    def test_reconcile_lanes_is_a_structural_no_op_on_sql(self) -> None:
+        self._create_product("lane-product")
+        self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash",
+            description="", actor="po", request_id="lane-issue",
+        )
+
+        planned = self.store.reconcile_lanes()
+        applied = self.store.reconcile_lanes(apply=True)
+
+        self.assertEqual(planned["moves"], [])
+        self.assertEqual(planned["moved"], 0)
+        self.assertEqual(applied["moves"], [])
+        self.assertEqual(applied["moved"], 0)
 
     def test_board_key_lookup_is_indexed_and_collision_refuses(self) -> None:
         self._create_product("first")
