@@ -113,7 +113,7 @@ PRODUCT_ISSUE = "product/issue"
 #: Which of those the PostgreSQL implementation answers.  A caller that needs anything else is
 #: refused by name, because a silent Kanboard client under a `postgres` switch is the same
 #: "decided by default" defect the switch exists to remove.
-POSTGRES_SERVES = frozenset({CARD, PRODUCT_ISSUE})
+POSTGRES_SERVES = frozenset({CARD, PRODUCT_ISSUE, SPRINT})
 
 
 # Product and Issue share Kanboard's integer-addressed card vocabulary even though their

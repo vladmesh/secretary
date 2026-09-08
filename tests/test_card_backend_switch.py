@@ -131,15 +131,15 @@ class SwitchRefusalTests(CardBackendEnvironment):
                     self.assertEqual(backend.board_client(Path("/instance"), serves=serves), "kanboard")
             self.assertEqual(built.call_count, 3)
 
-    def test_postgres_refuses_sprint_by_name(self) -> None:
+    def test_postgres_accepts_sprint_capability_before_store_resolution(self) -> None:
         self._switch("postgres")
         for serves in ((backend.SPRINT,), (backend.CARD, backend.SPRINT)):
             with self.subTest(serves=serves):
                 backend.reset_card_backend()
                 with self.assertRaises(TaskError) as raised:
                     backend.board_client(Path("/instance"), serves=serves)
-                self.assertEqual(raised.exception.code, "backend_error")
-                self.assertIn("Kanboard board on this build", raised.exception.message)
+                self.assertEqual(raised.exception.code, "backend_unavailable")
+                self.assertNotIn("Kanboard board on this build", raised.exception.message)
 
     def test_postgres_accepts_product_issue_before_resolving_store_configuration(self) -> None:
         self._switch("postgres")

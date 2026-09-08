@@ -217,7 +217,7 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         with (
             mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}),
             mock.patch.object(discover, "SprintReader") as reader,
-            mock.patch.object(discover.KanboardClient, "for_instance"),
+            mock.patch.object(discover, "sprint_client"),
         ):
             reader.return_value.show.return_value = {"reservations": ["alpha"]}
             self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "alpha")
@@ -240,7 +240,7 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         with (
             mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}),
             mock.patch.object(discover, "SprintReader") as reader,
-            mock.patch.object(discover.KanboardClient, "for_instance"),
+            mock.patch.object(discover, "sprint_client"),
         ):
             reader.return_value.show.return_value = {"reservations": ["alpha", "beta"]}
             self.assertEqual(
@@ -259,7 +259,7 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         with (
             mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}),
             mock.patch.object(discover, "SprintReader") as reader,
-            mock.patch.object(discover.KanboardClient, "for_instance"),
+            mock.patch.object(discover, "sprint_client"),
         ):
             reader.return_value.show.return_value = {"reservations": ["alpha"]}
             self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "alpha")

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board import migrate, schema
+from secretary.board.backend import record_key
 from secretary.board.sql_cards import SqlCardClient, _task_number_of
 from secretary.board.store import BoardStoreConfig
 
@@ -57,6 +58,8 @@ class PostgresBoard:
             f"POSTGRES_USER={OWNER}",
             "-e",
             f"POSTGRES_PASSWORD={OWNER_PASSWORD}",
+            "--tmpfs",
+            "/var/lib/postgresql/data:rw,size=1g",
             "-p",
             "127.0.0.1::5432",
             IMAGE,
@@ -103,26 +106,47 @@ class PostgresBoard:
 
         self._serial += 1
         name = f"board_store_case_{self._serial}"
-        previous = f"board_store_case_{self._serial - 1}"
         with psycopg.connect(
             self.config("postgres").for_role("owner").conninfo(), autocommit=True
         ) as maintenance:
-            # The revision's `CREATE ROLE` is cluster-wide, so the roles are dropped between
-            # cases; a role cannot be dropped while the previous case's database still grants
-            # to it, which is why that database goes first.
-            maintenance.execute(f"DROP DATABASE IF EXISTS {previous} WITH (FORCE)")
             maintenance.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
-            maintenance.execute(f"DROP ROLE IF EXISTS {schema.APP_ROLE}")
-            maintenance.execute(f"DROP ROLE IF EXISTS {schema.READ_ROLE}")
             maintenance.execute(f"CREATE DATABASE {name} OWNER {OWNER}")
         config = self.config(name)
         engine = sa.create_engine(migrate.sqlalchemy_url(config.for_role("owner")))
         try:
             with engine.connect() as connection:
-                migrate.apply(connection, passwords=migrate.passwords_for(config))
+                if self._serial == 1:
+                    migrate.apply(connection, passwords=migrate.passwords_for(config))
+                else:
+                    # PostgreSQL roles are cluster-wide.  Later per-test databases reuse the
+                    # roles proven by the first migration and materialize the same current
+                    # metadata without rerunning 0001's intentionally one-time CREATE ROLE.
+                    schema.metadata.create_all(connection)
+                    connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {schema.APP_ROLE}, {schema.READ_ROLE}")
+                    connection.exec_driver_sql(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {schema.APP_ROLE}")
+                    connection.exec_driver_sql(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {schema.APP_ROLE}")
+                    connection.exec_driver_sql(f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {schema.READ_ROLE}")
+                    from alembic import command
+
+                    command.stamp(
+                        migrate.alembic_config(
+                            connection=connection, passwords=migrate.passwords_for(config)
+                        ),
+                        "heads",
+                    )
+                    connection.commit()
         finally:
             engine.dispose()
         return config
+
+    def drop_database(self, name: str) -> None:
+        """Release one per-test database as soon as its last client is closed."""
+        import psycopg
+
+        with psycopg.connect(
+            self.config("postgres").for_role("owner").conninfo(), autocommit=True
+        ) as maintenance:
+            maintenance.execute(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
 
 
 def _epoch(value: Any) -> datetime:
@@ -164,12 +188,29 @@ def seed_client(config: BoardStoreConfig, fake: Any, instance_dir: Path | str) -
         for name in sorted(set(lanes.values())):
             client._lane_names().append(name) if name not in client._lane_names() else None
         client._lanes = sorted(set(client._lanes or []))
-        numbers = {
-            int(row["id"]): _task_number_of(str(row["reference"])) for row in fake.tasks
-        }
+        numbers = {}
+        for row in fake.tasks:
+            reference = str(row["reference"])
+            kind = reference.split(":", 1)[0] if ":" in reference else ""
+            numbers[int(row["id"])] = (
+                record_key(kind, reference.split(":", 1)[1])
+                if kind in {"product", "issue"}
+                else _task_number_of(reference)
+            )
         for row in fake.tasks:
             number = numbers[int(row["id"])]
             reference = str(row["reference"])
+            meta = dict(fake.metadata.get(int(row["id"]), {}))
+            if meta.get("record_type") in {"product", "issue"}:
+                client.call(
+                    "createTask", project_id=1, title=str(row.get("title") or reference),
+                    description=str(row.get("description") or ""), column_id=1,
+                    swimlane_id=0, reference=reference,
+                )
+                client.call("saveTaskMetadata", task_id=number, values=meta)
+                if int(row.get("is_active", 1) or 0) == 0:
+                    client.call("closeTask", task_id=number)
+                continue
             state_column = columns.get(int(row.get("column_id") or 0), "Issues")
             from secretary.tasks import _STATE_BY_COLUMN
 
@@ -182,7 +223,6 @@ def seed_client(config: BoardStoreConfig, fake: Any, instance_dir: Path | str) -
                 position_value = max(int(position), 0)
             except (TypeError, ValueError):
                 position_value = 0
-            meta = dict(fake.metadata.get(int(row["id"]), {}))
             client._execute(
                 "INSERT INTO tasks (task_ref, task_number, title, description, state, archived, "
                 "position, project_id, created_at, updated_at, extensions) "
@@ -202,7 +242,11 @@ def seed_client(config: BoardStoreConfig, fake: Any, instance_dir: Path | str) -
                 ),
             )
         for identifier, meta in fake.metadata.items():
-            if meta and int(identifier) in numbers:
+            if (
+                meta
+                and int(identifier) in numbers
+                and meta.get("record_type") not in {"product", "issue"}
+            ):
                 client.call("saveTaskMetadata", task_id=numbers[int(identifier)], values=dict(meta))
         for identifier in sorted(numbers):
             for comment in fake.call("getAllComments", task_id=identifier) or []:

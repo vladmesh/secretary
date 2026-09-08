@@ -19,8 +19,7 @@ import sqlite3
 from pathlib import Path
 
 from secretary.config import ConfigError, load_config
-from secretary.sprints import SPRINT_REFERENCE_PREFIX, SprintReader
-from secretary.tasks import KanboardClient
+from secretary.sprints import SPRINT_REFERENCE_PREFIX, SprintReader, sprint_client
 from triggered_agents.runtime.paths import default_instance_path, instance_dir
 
 # Claude project-dir naming: every non-alphanumeric cwd character becomes "-".
@@ -168,7 +167,7 @@ def _observer_reference(cwd: Path) -> str | None:
 def _observer_route(reference: str, instance: Path, known_ids: set[str]) -> str:
     """Resolve an observer from its sprint's complete structured reservation set."""
     try:
-        sprint = SprintReader(KanboardClient.for_instance(instance)).show(
+        sprint = SprintReader(sprint_client(instance)).show(
             reference, include_cards=False, include_resume_freshness=False
         )
     # Board reachability is not curator work.  A failure to read the structured record is

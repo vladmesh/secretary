@@ -44,7 +44,6 @@ LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset(
         ("runtime/production_telemetry.py", "secretary.config"),
         ("agents/curator/discover.py", "secretary.config"),
         ("agents/curator/discover.py", "secretary.sprints"),
-        ("agents/curator/discover.py", "secretary.tasks"),
     }
 )
 

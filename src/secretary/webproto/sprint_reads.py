@@ -1328,9 +1328,10 @@ class SprintReadLayer(ProtocolBoundary):
         read of this layer creates nothing. `linked_cards` reads the Pipeline board through
         `TaskReader`, which has no create at all.
         """
+        client = self._client()
         liveness = self._production(data_dir, now=now)
-        journal = self._journal(data_dir, now=now)
-        reader = SprintReader(self._client(), data_dir=data_dir, thresholds=_thresholds(report))
+        journal = self._journal(data_dir, client=client, now=now)
+        reader = SprintReader(client, data_dir=data_dir, thresholds=_thresholds(report))
         cards = self._linked_cards(reader, data_dir, now=now)
         production: _Production | None = liveness.value if liveness.answered else None
         try:
@@ -1407,14 +1408,19 @@ class SprintReadLayer(ProtocolBoundary):
             )
         return Reading(SOURCE_LIVENESS, sources.available(now), production)
 
-    def _journal(self, data_dir: Path, *, now: float) -> Reading:
+    def _journal(self, data_dir: Path, *, client: Any, now: float) -> Reading:
         """The committed audit, walked once for the whole document.
 
         A source of its own: it is the file the resume-freshness verdict is judged against, it is
         not the sprint board, and an installation can lose one without losing the other.
         """
         try:
-            events = TaskAudit(data_dir).events()
+            if getattr(client, "backend_kind", "kanboard") == "postgres":
+                from secretary.board.sql_audit import SqlTaskAudit
+
+                events = SqlTaskAudit(client).events()
+            else:
+                events = TaskAudit(data_dir).events()
         except _SOURCE_FAILURES as exc:
             return Reading(
                 SOURCE_JOURNAL,

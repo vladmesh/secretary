@@ -111,6 +111,7 @@ unit tests/test_sprint_restore.py
 unit tests/test_sprint_executors.py
 unit tests/test_sprint_fixture_guards.py
 unit tests/test_sprint_listing_budget.py
+integration-board tests/test_sprints_sql_backend.py
 unit tests/test_sprints.py
 unit tests/test_state_repo.py
 unit tests/test_status.py

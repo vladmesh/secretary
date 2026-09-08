@@ -358,6 +358,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0005_sprint_sql",
                 "0004_product_issue_sql",
                 "0003_task_type_optional",
                 "0002_board_gaps",

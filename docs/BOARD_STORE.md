@@ -1,7 +1,7 @@
 # The board store: read/write inventory and the PostgreSQL schema
 
-Status: implemented through revision `0004_product_issue_sql` for Cards and Product/Issue.
-Sprint storage, importer and cutover remain separate work; the default backend is still Kanboard.
+Status: implemented through revision `0005_sprint_sql` for Cards, Product/Issue and Sprint.
+Provisioning, live import and cutover remain separate work; the default backend is still Kanboard.
 
 **The engine is given.** The owner chose PostgreSQL on 2026-09-07 (`sprint:1432`, PO comments of
 09:11Z and 09:22Z). This document does not argue for or against it and contains no comparison with
@@ -181,10 +181,9 @@ installation is in.
 The seam is *underneath* `TaskReader` and `TaskWriter` rather than beside them, for the reason
 this section exists: almost every consumer below reaches cards through those two classes, so one
 replacement under them moves the CLI, the web process, the dispatcher and the observer together.
-`board/sql_cards.py` answers the same board vocabulary over cards plus Product/Issue rows and
+`board/sql_cards.py` answers the same board vocabulary over cards, Product/Issue and Sprint rows and
 comments, and `board/sql_audit.py` is `TaskAudit`'s contract over `requests` and `board_events`
-(§7.3). `ProductIssueStore` follows the same process-wide choice. `SprintReader` and
-`SprintWriter` remain explicitly refused under `postgres` pending their own migration.
+(§7.3). `ProductIssueStore`, `SprintReader` and `SprintWriter` follow the same process-wide choice.
 
 **Where the switch is acted on.**  `board/backend.py:board_client` is the only function in
 `secretary` that constructs a board client, and every entry point in the two tables below reaches
@@ -196,10 +195,8 @@ itself:
 * an unknown `SECRETARY_CARD_BACKEND` refuses at **every** entry point, not only at the ones
   somebody remembered to check;
 * under `postgres`, Product/Issue-only sites such as `product_issue_commands.py` receive the SQL
-  client; a site that also needs sprints — `sprint_commands.py`, `webproto/sprint_reads.py`, `webproto/sprint_ops.py`,
-  `webproto/pause_reads.py`, `status.py`, `data.py:export_sprint_entities`, and `restore.py`,
-  which drives cards *and* sprints through one client — is refused by name instead of being
-  handed a Kanboard client that contradicts the switch;
+  client; sites that also need sprints receive that same SQL client, while an unknown capability
+  is refused by name instead of being handed a client that contradicts the switch;
 * the refusals leave as `TaskError`, the vocabulary every command already renders as a named
   failure with an exit status, so a missing or malformed `board-store.env` (`BoardStoreError`) and
   an unreachable server (`psycopg`) are diagnoses rather than tracebacks.
@@ -683,12 +680,14 @@ CREATE SEQUENCE sprint_number_seq;                    -- see §9
 CREATE TABLE sprint_repositories (
     sprint_ref    text   NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
     repository_id bigint NOT NULL REFERENCES repositories(repository_id),
+    ordinal       integer NOT NULL DEFAULT 0,
     PRIMARY KEY (sprint_ref, repository_id)
 );
 
 CREATE TABLE sprint_issues (
     sprint_ref text NOT NULL REFERENCES sprints(ref) ON DELETE CASCADE,
     issue_id   text NOT NULL REFERENCES issues(issue_id),
+    ordinal    integer NOT NULL DEFAULT 0,
     PRIMARY KEY (sprint_ref, issue_id)
 );
 
@@ -702,6 +701,7 @@ CREATE TABLE sprint_resumes (                         -- append-only; sprints.re
     dod_state            text NOT NULL,
     next_safe_step       text NOT NULL,
     recorded_at          timestamptz NOT NULL,
+    recorded_at_source   text, -- malformed restored legacy spelling, retained as stale evidence
     -- The target a scoped foreign key needs; redundant with the primary key by design.
     UNIQUE (resume_id, sprint_ref)
 );
@@ -780,7 +780,7 @@ CREATE TABLE sprint_budget_events (
     charged         boolean NOT NULL,
     task_ref        text,
     reason          text NOT NULL,
-    request_id      text NOT NULL UNIQUE,            -- references `requests`; see §3.9
+    request_id      text NOT NULL,                   -- references `requests`; see §3.9
     occurred_at     timestamptz NOT NULL,
     CONSTRAINT budget_charge_matches_type
         CHECK (charged = (event_type <> 'infrastructure_blocked'))
@@ -800,7 +800,9 @@ Today `sprint_budget` is a counter object in one metadata value, incremented rea
 rows, the totals in `by_type`, `total`, `signal_reached` and `hard_reached` become an aggregate
 over this table against the installation thresholds — derived, so the two can no longer disagree.
 Idempotency of a retried charge comes from the request-ownership row of §3.9, not from a
-compare-and-swap on a JSON blob.
+compare-and-swap on a JSON blob. Interactive charges have one occurrence per request; restore may
+replay several exported occurrences under the one restore request, so `request_id` is deliberately
+not unique on this evidence table.
 
 The scoped foreign key is the same construction §3.3 applies to the sprint's cursors, and it is
 here for the same reason: `dispatcher_production.py:_reconcile_sprint_budget` resolves the sprint
@@ -920,6 +922,7 @@ CREATE TABLE sprint_projects (
     reserved    boolean NOT NULL DEFAULT true,
     reserved_at timestamptz NOT NULL,
     released_at timestamptz,
+    ordinal     integer NOT NULL DEFAULT 0,
     PRIMARY KEY (sprint_ref, project_id),
     CONSTRAINT reserved_matches_release CHECK (reserved = (released_at IS NULL))
 );
@@ -1424,6 +1427,7 @@ reading:
 | `0002_board_gaps` (2026-09-07, the gaps the first import of real data found) | 23 | 37 | 38 | 23 | 13 | 4 |
 | `0003_task_type_optional` (2026-09-07, the last card that import could not write) | 23 | 37 | 38 | 23 | 13 | 4 |
 | `0004_product_issue_sql` (2026-09-08, Product/Issue and Done retention) | 24 | 37 | 40 | 24 | 16 | 4 |
+| `0005_sprint_sql` (2026-09-08, Sprint runtime and ordered evidence) | 24 | 37 | 40 | 24 | 15 | 4 |
 
 The last table and the last primary key are Alembic's `alembic_version` in both rows. The deltas
 are the whole of `0002`: one table (`issue_comments`) with its primary key, its `UNIQUE

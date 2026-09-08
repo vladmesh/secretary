@@ -37,6 +37,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+import threading
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +45,7 @@ from typing import Any
 
 from secretary.board.backend import record_key_kind
 from secretary.board.sql_product_issues import ProductIssueRecords
+from secretary.board.sql_sprints import SqlSprintRecords, sprint_key
 from secretary.board.store import BoardStoreCredentials
 from secretary.tasks import TaskError
 
@@ -75,6 +77,8 @@ _STATE_BY_COLUMN_ID = {identifier: state for state, identifier in _COLUMN_ID_BY_
 #: not have; a name that is not this one is not found, exactly as Kanboard answers.
 BOARD_NAME = "Pipeline"
 BOARD_ID = 1
+SPRINT_BOARD_NAME = "Secretary sprints"
+SPRINT_BOARD_ID = 2
 
 #: §8.1's metadata keys that are `tasks` columns, and the column each one is.  Everything else a
 #: caller writes lands in `extensions.kanboard` (§8.2).
@@ -214,10 +218,12 @@ class SqlCardClient:
         self.instance_dir = Path(instance_dir)
         self._connection: Any = None
         self._depth = 0
+        self._transaction_lock = threading.RLock()
         # The virtual lane table: names the rows themselves carry, plus what `addSwimlane` adds.
         self._lanes: list[str] | None = None
         # The Product/Issue half of the same vocabulary, over the same connection (§3.1, §3.2).
         self.records = ProductIssueRecords(self)
+        self.sprints = SqlSprintRecords(self)
 
     # --- connection ------------------------------------------------------------------
 
@@ -238,6 +244,12 @@ class SqlCardClient:
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[None]:
+        """Serialize use of this client's single connection, including cross-thread tests."""
+        with self._transaction_lock, self._transaction():
+            yield
+
+    @contextlib.contextmanager
+    def _transaction(self) -> Iterator[None]:
         """One transaction per protocol mutation (§7.1), re-entrant for nested effects.
 
         The writer opens this once around a whole protocol mutation — the request claim, the card
@@ -266,14 +278,19 @@ class SqlCardClient:
                 # Two pieces of state are derived from rows this transaction wrote and are wrong
                 # the moment those rows are gone: the staged creates and the virtual lane table.
                 self.records.staged.clear()
+                self.sprints.staged.clear()
                 self._lanes = None
             raise
         else:
-            if self.records.staged:
+            if self.records.staged or self.sprints.staged:
                 pending = ", ".join(
-                    sorted(row["reference"] for row in self.records.staged.values())
+                    sorted(
+                        [row["reference"] for row in self.records.staged.values()]
+                        + [row["reference"] for row in self.sprints.staged.values()]
+                    )
                 )
                 self.records.staged.clear()
+                self.sprints.staged.clear()
                 self._lanes = None
                 self.connection.rollback()
                 raise SqlCardError(
@@ -312,12 +329,25 @@ class SqlCardClient:
         """The batched read, which is one round trip here because there is no round trip."""
         return [self.call(method, **arguments) for method, arguments in calls]
 
+    def restore_card_rows(self) -> list[dict[str, Any]]:
+        """Stored Card rows only; Product/Issue ownership is not restore emptiness."""
+        return self._rows()
+
     # --- board shape -----------------------------------------------------------------
 
     def _rpc_getProjectByName(self, *, name: str) -> dict[str, Any] | None:
-        return {"id": BOARD_ID, "name": BOARD_NAME} if name == BOARD_NAME else None
+        if name == BOARD_NAME:
+            return {"id": BOARD_ID, "name": BOARD_NAME}
+        if name == SPRINT_BOARD_NAME:
+            return {"id": SPRINT_BOARD_ID, "name": SPRINT_BOARD_NAME}
+        return None
+
+    def _rpc_createProject(self, *, name: str) -> Any:
+        return SPRINT_BOARD_ID if name == SPRINT_BOARD_NAME else False
 
     def _rpc_getColumns(self, *, project_id: int) -> list[dict[str, Any]]:
+        if int(project_id) == SPRINT_BOARD_ID:
+            return [{"id": 1, "title": "Sprints"}]
         return [{"id": identifier, "title": title} for identifier, title in BOARD_COLUMNS]
 
     def _lane_names(self) -> list[str]:
@@ -436,6 +466,8 @@ class SqlCardClient:
         filter means the same thing for all three: an archived Product and a closed Issue are
         `is_active = 0`, exactly as an archived card is.
         """
+        if int(project_id) == SPRINT_BOARD_ID:
+            return self.sprints.rows() if status_id == 1 else []
         if status_id not in {0, 1}:
             return []
         rows = self._rows("archived = %s", (status_id == 0,))
@@ -444,6 +476,8 @@ class SqlCardClient:
         return rows
 
     def _rpc_getTaskByReference(self, *, project_id: int, reference: str) -> dict[str, Any] | None:
+        if int(project_id) == SPRINT_BOARD_ID:
+            return self.sprints.row_by_reference(reference)
         if self.records.kind_of_reference(reference) is not None:
             return self.records.row_by_reference(reference)
         rows = self._rows("task_ref = %s", (reference,))
@@ -467,6 +501,10 @@ class SqlCardClient:
         swimlane_id: int = 0,
         reference: str = "",
     ) -> Any:
+        if int(project_id) == SPRINT_BOARD_ID:
+            return self.sprints.create(
+                title=title, description=description, reference=reference
+            )
         if not reference:
             raise SqlCardError("the board store identifies a card by its reference (§9)")
         if self.records.kind_of_reference(reference) is not None:
@@ -502,6 +540,13 @@ class SqlCardClient:
         return int(rows[0][0])
 
     def _rpc_updateTask(self, *, id: int, **fields: Any) -> bool:
+        if any(key == int(id) for key in self.sprints.staged) or any(
+            sprint_key(str(ref)) == int(id)
+            for (ref,) in self._query("SELECT ref FROM sprints")
+        ):
+            result = self.sprints.update(int(id), fields)
+            self._commit_unless_nested()
+            return result
         if record_key_kind(id) is not None:
             result = self.records.update(int(id), fields)
             self._commit_unless_nested()
@@ -548,6 +593,12 @@ class SqlCardClient:
         return True
 
     def _rpc_closeTask(self, *, task_id: int) -> bool:
+        if any(key == int(task_id) for key in self.sprints.staged) or any(
+            sprint_key(str(ref)) == int(task_id)
+            for (ref,) in self._query("SELECT ref FROM sprints")
+        ):
+            # Sprint terminal state is a typed column, not archive state.
+            return True
         if record_key_kind(task_id) is not None:
             result = self.records.close(int(task_id))
             self._commit_unless_nested()
@@ -562,6 +613,11 @@ class SqlCardClient:
     # --- metadata --------------------------------------------------------------------
 
     def _rpc_getTaskMetadata(self, *, task_id: int) -> dict[str, str]:
+        if int(task_id) in self.sprints.staged or any(
+            sprint_key(str(ref)) == int(task_id)
+            for (ref,) in self._query("SELECT ref FROM sprints")
+        ):
+            return self.sprints.metadata(int(task_id))
         if record_key_kind(task_id) is not None:
             return self.records.metadata(int(task_id))
         ref = self._ref_of(task_id)
@@ -621,6 +677,13 @@ class SqlCardClient:
         return meta
 
     def _rpc_saveTaskMetadata(self, *, task_id: int, values: dict[str, Any]) -> bool:
+        if int(task_id) in self.sprints.staged or any(
+            sprint_key(str(ref)) == int(task_id)
+            for (ref,) in self._query("SELECT ref FROM sprints")
+        ):
+            result = self.sprints.save_metadata(int(task_id), values)
+            self._commit_unless_nested()
+            return result
         if record_key_kind(task_id) is not None:
             result = self.records.save_metadata(int(task_id), values)
             self._commit_unless_nested()
@@ -636,14 +699,26 @@ class SqlCardClient:
                 column = _METADATA_COLUMNS[key]
                 assignments.append(f"{column} = %s")
                 params.append(text or _ENUM_DEFAULTS.get(key))
+                if text:
+                    bag_removals.append(key)
+                else:
+                    bag_updates[key] = ""
             elif key in _METADATA_COUNTERS:
                 assignments.append(f"{_METADATA_COUNTERS[key]} = %s")
                 params.append(int(text) if text.isdigit() else 0)
             elif key == _METADATA_TIMESTAMP[0]:
                 assignments.append(f"{_METADATA_TIMESTAMP[1]} = %s")
                 params.append(_timestamp(text))
+                if text:
+                    bag_removals.append(key)
+                else:
+                    bag_updates[key] = ""
             elif key in _METADATA_LINKS:
                 self._write_link(ref, key, text)
+                if text:
+                    bag_removals.append(key)
+                else:
+                    bag_updates[key] = ""
             elif text:
                 bag_updates[key] = text
             else:
@@ -654,15 +729,18 @@ class SqlCardClient:
                 "coalesce(extensions->'kanboard', '{}'::jsonb) || %s::jsonb, true)"
             )
             params.append(json.dumps(bag_updates))
-        for key in bag_removals:
-            assignments.append("extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard}', "
-                               "coalesce(extensions->'kanboard', '{}'::jsonb) - %s, true)")
-            params.append(key)
         if assignments:
             assignments.append("updated_at = %s")
             params.append(_now())
             params.append(ref)
             self._execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE task_ref = %s", tuple(params))
+        for key in bag_removals:
+            self._execute(
+                "UPDATE tasks SET extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), "
+                "'{kanboard}', coalesce(extensions->'kanboard', '{}'::jsonb) - %s, true) "
+                "WHERE task_ref = %s",
+                (key, ref),
+            )
         self._commit_unless_nested()
         return True
 
@@ -699,6 +777,11 @@ class SqlCardClient:
     # --- comments --------------------------------------------------------------------
 
     def _rpc_getAllComments(self, *, task_id: int) -> list[dict[str, Any]]:
+        if int(task_id) in self.sprints.staged or any(
+            sprint_key(str(ref)) == int(task_id)
+            for (ref,) in self._query("SELECT ref FROM sprints")
+        ):
+            return self.sprints.comments(int(task_id))
         if record_key_kind(task_id) is not None:
             return self.records.comments(int(task_id))
         ref = self._ref_of(task_id)
@@ -711,7 +794,16 @@ class SqlCardClient:
             )
         ]
 
-    def _rpc_createComment(self, *, task_id: int, content: str, user_id: int = 0) -> Any:
+    def _rpc_createComment(
+        self, *, task_id: int, content: str, user_id: int = 0, created_at: Any = None
+    ) -> Any:
+        if int(task_id) in self.sprints.staged or any(
+            sprint_key(str(ref)) == int(task_id)
+            for (ref,) in self._query("SELECT ref FROM sprints")
+        ):
+            comment_id = self.sprints.create_comment(int(task_id), content, created_at=created_at)
+            self._commit_unless_nested()
+            return comment_id
         if record_key_kind(task_id) is not None:
             comment_id = self.records.create_comment(int(task_id), content)
             self._commit_unless_nested()
@@ -722,10 +814,16 @@ class SqlCardClient:
         rows = self._query(
             "INSERT INTO task_comments (task_ref, marker, body, created_at) "
             "VALUES (%s, %s, %s, %s) RETURNING comment_id",
-            (ref, marker, content, _now()),
+            (ref, marker, content, _timestamp(created_at) if created_at else _now()),
         )
         self._commit_unless_nested()
         return int(rows[0][0])
+
+
+    def _rpc_removeTask(self, *, task_id: int) -> bool:
+        result = self.sprints.remove(int(task_id))
+        self._commit_unless_nested()
+        return result
 
 
 __all__ = ["BOARD_COLUMNS", "BOARD_ID", "BOARD_NAME", "SqlCardClient", "SqlCardError"]

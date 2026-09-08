@@ -355,9 +355,9 @@ class SqlBackendProductIssueSwitchTests(unittest.TestCase):
         backend.reset_card_backend()
         self.addCleanup(backend.reset_card_backend)
 
-    def test_postgres_serves_product_issue_but_still_refuses_sprint(self) -> None:
+    def test_postgres_serves_product_issue_and_sprint(self) -> None:
         self.assertIn(backend.PRODUCT_ISSUE, backend.POSTGRES_SERVES)
-        self.assertNotIn(backend.SPRINT, backend.POSTGRES_SERVES)
+        self.assertIn(backend.SPRINT, backend.POSTGRES_SERVES)
 
     def test_record_keys_are_stable_disjoint_and_not_card_numbers(self) -> None:
         product = backend.record_key("product", "secretary")
