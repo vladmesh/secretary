@@ -42,6 +42,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from secretary.board.backend import record_key_kind
+from secretary.board.sql_product_issues import ProductIssueRecords
 from secretary.board.store import BoardStoreCredentials
 from secretary.tasks import TaskError
 
@@ -214,6 +216,8 @@ class SqlCardClient:
         self._depth = 0
         # The virtual lane table: names the rows themselves carry, plus what `addSwimlane` adds.
         self._lanes: list[str] | None = None
+        # The Product/Issue half of the same vocabulary, over the same connection (§3.1, §3.2).
+        self.records = ProductIssueRecords(self)
 
     # --- connection ------------------------------------------------------------------
 
@@ -258,8 +262,24 @@ class SqlCardClient:
                 self.connection.rollback()
             except Exception as exc:  # noqa: BLE001 - every driver failure becomes one refusal.
                 raise _driver_error("roll back", exc) from failure
+            finally:
+                # Two pieces of state are derived from rows this transaction wrote and are wrong
+                # the moment those rows are gone: the staged creates and the virtual lane table.
+                self.records.staged.clear()
+                self._lanes = None
             raise
         else:
+            if self.records.staged:
+                pending = ", ".join(
+                    sorted(row["reference"] for row in self.records.staged.values())
+                )
+                self.records.staged.clear()
+                self._lanes = None
+                self.connection.rollback()
+                raise SqlCardError(
+                    f"a Product/Issue create was never finished and cannot commit: {pending}. "
+                    "The row's own table needs the values `saveTaskMetadata` carries (§3.2)"
+                )
             with _translated("commit"):
                 self.connection.commit()
         finally:
@@ -327,6 +347,13 @@ class SqlCardClient:
         lanes.sort()
         return lanes.index(name) + 1
 
+    def _lane_added(self, name: str) -> None:
+        """A product this transaction created is a lane from now on (§8.6)."""
+        lanes = self._lane_names()
+        if name not in lanes:
+            lanes.append(name)
+            lanes.sort()
+
     def _lane_id(self, name: str | None) -> int:
         if not name:
             return 0
@@ -345,11 +372,23 @@ class SqlCardClient:
 
     _CARD_COLUMNS = (
         "task_ref, task_number, title, description, state, archived, position, "
-        "extensions, created_at, updated_at"
+        "extensions, created_at, updated_at, date_moved"
     )
 
     def _row(self, values: tuple[Any, ...]) -> dict[str, Any]:
-        (ref, number, title, description, state, archived, position, extensions, created, updated) = values
+        (
+            ref,
+            number,
+            title,
+            description,
+            state,
+            archived,
+            position,
+            extensions,
+            created,
+            updated,
+            moved,
+        ) = values
         bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
         lane = (bag.get("kanboard") or {}).get("swimlane")
         return {
@@ -362,6 +401,11 @@ class SqlCardClient:
             "swimlane_id": self._lane_id(lane),
             "date_creation": _epoch(created),
             "date_modification": _epoch(updated),
+            # §3.5's `date_moved`, added by revision `0004`: when this card entered the column it
+            # is in.  A row the store cannot date — every row written before that revision —
+            # answers no value at all rather than a substitute, which is what keeps Done
+            # retention refusing an episode nobody can name (§8.6).
+            **({"date_moved": _epoch(moved)} if moved is not None else {}),
             "is_active": 0 if archived else 1,
         }
 
@@ -385,11 +429,23 @@ class SqlCardClient:
         return rows
 
     def _rpc_getAllTasks(self, *, project_id: int, status_id: int = 1) -> list[dict[str, Any]]:
+        """Every row of the board, which is three tables here and one on Kanboard (§8.1).
+
+        `all_project_cards` is how `ProductIssueStore` sees the board at all, so a Product or an
+        Issue that is not in this answer is a record the catalogue cannot report.  The status
+        filter means the same thing for all three: an archived Product and a closed Issue are
+        `is_active = 0`, exactly as an archived card is.
+        """
         if status_id not in {0, 1}:
             return []
-        return self._rows("archived = %s", (status_id == 0,))
+        rows = self._rows("archived = %s", (status_id == 0,))
+        active = status_id == 1
+        rows += [row for row in self.records.rows() if bool(row["is_active"]) is active]
+        return rows
 
     def _rpc_getTaskByReference(self, *, project_id: int, reference: str) -> dict[str, Any] | None:
+        if self.records.kind_of_reference(reference) is not None:
+            return self.records.row_by_reference(reference)
         rows = self._rows("task_ref = %s", (reference,))
         return rows[0] if rows else None
 
@@ -413,14 +469,18 @@ class SqlCardClient:
     ) -> Any:
         if not reference:
             raise SqlCardError("the board store identifies a card by its reference (§9)")
+        if self.records.kind_of_reference(reference) is not None:
+            return self.records.create(
+                title=title, description=description, reference=reference
+            )
         number = _task_number_of(reference)
         lane = self._lane_name(swimlane_id)
         extensions: dict[str, Any] = {"kanboard": {"swimlane": lane}} if lane else {}
         now = _now()
         self._execute(
             "INSERT INTO tasks (task_ref, task_number, title, description, state, archived, "
-            "position, extensions, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s, false, %s, %s::jsonb, %s, %s)",
+            "position, extensions, created_at, updated_at, date_moved) "
+            "VALUES (%s, %s, %s, %s, %s, false, %s, %s::jsonb, %s, %s, %s)",
             (
                 reference,
                 number,
@@ -429,6 +489,7 @@ class SqlCardClient:
                 _STATE_BY_COLUMN_ID[int(column_id)],
                 self._next_position(_STATE_BY_COLUMN_ID[int(column_id)]),
                 json.dumps(extensions),
+                now,
                 now,
                 now,
             ),
@@ -441,6 +502,10 @@ class SqlCardClient:
         return int(rows[0][0])
 
     def _rpc_updateTask(self, *, id: int, **fields: Any) -> bool:
+        if record_key_kind(id) is not None:
+            result = self.records.update(int(id), fields)
+            self._commit_unless_nested()
+            return result
         ref = self._ref_of(id)
         assignments = []
         params: list[Any] = []
@@ -463,21 +528,30 @@ class SqlCardClient:
     def _rpc_moveTaskPosition(
         self, *, project_id: int, task_id: int, column_id: int, position: int, swimlane_id: int = 0
     ) -> bool:
+        if record_key_kind(task_id) is not None:
+            raise SqlCardError(
+                "a Product or Issue is a row of its own table and has no column to move to: "
+                "both live in Issues (docs/BOARD_STORE.md §8.1)"
+            )
         ref = self._ref_of(task_id)
         state = _STATE_BY_COLUMN_ID[int(column_id)]
         lane = self._lane_name(swimlane_id)
         self._execute(
-            "UPDATE tasks SET state = %s, position = %s, updated_at = %s, "
+            "UPDATE tasks SET state = %s, position = %s, updated_at = %s, date_moved = %s, "
             "extensions = CASE WHEN %s::text IS NULL THEN extensions "
             "ELSE jsonb_set(coalesce(extensions, '{}'::jsonb), '{kanboard,swimlane}', "
             "to_jsonb(%s::text), true) END "
             "WHERE task_ref = %s",
-            (state, max(1, int(position)), _now(), lane, lane, ref),
+            (state, max(1, int(position)), _now(), _now(), lane, lane, ref),
         )
         self._commit_unless_nested()
         return True
 
     def _rpc_closeTask(self, *, task_id: int) -> bool:
+        if record_key_kind(task_id) is not None:
+            result = self.records.close(int(task_id))
+            self._commit_unless_nested()
+            return result
         ref = self._ref_of(task_id)
         self._execute(
             "UPDATE tasks SET archived = true, updated_at = %s WHERE task_ref = %s", (_now(), ref)
@@ -488,6 +562,8 @@ class SqlCardClient:
     # --- metadata --------------------------------------------------------------------
 
     def _rpc_getTaskMetadata(self, *, task_id: int) -> dict[str, str]:
+        if record_key_kind(task_id) is not None:
+            return self.records.metadata(int(task_id))
         ref = self._ref_of(task_id)
         rows = self._query(
             "SELECT project_id, task_type, claim_worker, slug, base_branch, seed_ref, complexity, "
@@ -545,6 +621,10 @@ class SqlCardClient:
         return meta
 
     def _rpc_saveTaskMetadata(self, *, task_id: int, values: dict[str, Any]) -> bool:
+        if record_key_kind(task_id) is not None:
+            result = self.records.save_metadata(int(task_id), values)
+            self._commit_unless_nested()
+            return result
         ref = self._ref_of(task_id)
         assignments: list[str] = []
         params: list[Any] = []
@@ -619,6 +699,8 @@ class SqlCardClient:
     # --- comments --------------------------------------------------------------------
 
     def _rpc_getAllComments(self, *, task_id: int) -> list[dict[str, Any]]:
+        if record_key_kind(task_id) is not None:
+            return self.records.comments(int(task_id))
         ref = self._ref_of(task_id)
         return [
             {"id": identifier, "date_creation": _epoch(created), "comment": body}
@@ -630,6 +712,10 @@ class SqlCardClient:
         ]
 
     def _rpc_createComment(self, *, task_id: int, content: str, user_id: int = 0) -> Any:
+        if record_key_kind(task_id) is not None:
+            comment_id = self.records.create_comment(int(task_id), content)
+            self._commit_unless_nested()
+            return comment_id
         ref = self._ref_of(task_id)
         first = content.splitlines()[0] if content else ""
         marker = first[1:-1] if first.startswith("[") and first.endswith("]") else None

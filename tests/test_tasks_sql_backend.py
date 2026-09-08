@@ -374,57 +374,29 @@ class SqlTaskWriterTests(SqlBoardCase):
 
     # --- Done retention, the fourth path with a board effect -------------------------
 
-    @contextlib.contextmanager
-    def _card_moved_at(self, reference: str, moved_at: int):
-        """Answer `date_moved` for one card, which this store has no column for.
+    def _move_time(self, reference: str) -> int:
+        candidates = self.reader.done_retention_candidates()
+        row = next(candidate for candidate in candidates if candidate["reference"] == reference)
+        self.assertIsInstance(row["date_moved"], int)
+        return int(row["date_moved"])
 
-        This is the one fact the fixture supplies rather than the product, and it is named here
-        rather than hidden: `tasks` has no column for when a card entered its column, so
-        `SqlCardClient._row` answers no `date_moved` and `TaskWriter._retention_matches` refuses
-        every candidate on this backend before a close is ever issued (see
-        `test_done_retention_is_unreachable_on_this_backend_without_a_date_moved`).  That absence
-        is a finding about the schema, not the subject of the case below: what is under test is
-        that when the close *is* reached, it and its record stand or fall together.  Everything
-        else — the freshness guard, `closeTask`, the proof and the append — is the product's.
-        """
-        served = self.client.call
-        number = int(self.reader.show(reference)["id"].rsplit("_", 1)[1])
-
-        def call(name: str, /, **params):
-            result = served(name, **params)
-            if name == "getAllTasks" and isinstance(result, list):
-                for row in result:
-                    if isinstance(row, dict) and int(row.get("id") or 0) == number:
-                        row["date_moved"] = moved_at
-            return result
-
-        with mock.patch.object(self.client, "call", side_effect=call):
-            yield
-
-    def test_done_retention_is_unreachable_on_this_backend_without_a_date_moved(self) -> None:
-        """Why the case below has to supply one field, stated as an assertion rather than a claim.
-
-        `tasks` holds no column for when a card entered its column, and §8.6 does not list the
-        field among the ones the store deliberately drops, so `SqlCardClient` answers no
-        `date_moved` at all.  `TaskWriter._retention_matches` compares that against the episode the
-        caller names, so every candidate is refused: retention on this backend closes nothing,
-        stages nothing, and reports itself skipped.  A finding for the schema, not a licence to add
-        a column here (AC6).
-        """
-        self._place("secretary-468", "done")
-
-        result = self.writer.retire_done(
-            reference="secretary-468",
-            expected_date_moved=100,
-            cutoff=101,
-            retention_days=14,
-            request_id="rq-retire-unreachable",
+    def test_historical_done_row_without_observed_move_time_is_skipped(self) -> None:
+        """Migration does not invent a timestamp for an episode the SQL store never observed."""
+        self.client._execute(
+            "UPDATE tasks SET state = 'done', date_moved = NULL WHERE task_ref = %s",
+            ("secretary-468",),
         )
-
+        self.client._commit_unless_nested()
+        self.assertEqual(
+            self.reader.done_retention_candidates(),
+            [{"reference": "secretary-468", "date_moved": None}],
+        )
+        result = self.writer.retire_done(
+            reference="secretary-468", expected_date_moved=100, cutoff=101,
+            retention_days=14, request_id="rq-retire-unknown",
+        )
         self.assertTrue(result["skipped"])
-        self.assertFalse(result["retired"])
-        self.assertTrue(self.reader.show("secretary-468")["state"] == "done")
-        self.assertNothingSurvived("rq-retire-unreachable")
+        self.assertNothingSurvived("rq-retire-unknown")
 
     def test_a_lost_close_reply_in_done_retention_leaves_neither_the_close_nor_a_staged_request(
         self,
@@ -440,16 +412,16 @@ class SqlTaskWriterTests(SqlBoardCase):
         transaction, so the lost reply takes the close with it.
         """
         self._place("secretary-468", "done")
+        moved_at = self._move_time("secretary-468")
 
         with (
-            self._card_moved_at("secretary-468", 100),
             self._loses_the_reply_to("closeTask"),
             self.assertRaises(TaskError) as raised,
         ):
             self.writer.retire_done(
                 reference="secretary-468",
-                expected_date_moved=100,
-                cutoff=101,
+                expected_date_moved=moved_at,
+                cutoff=moved_at + 1,
                 retention_days=14,
                 request_id="rq-retire-lost-close-reply",
             )
@@ -472,15 +444,15 @@ class SqlTaskWriterTests(SqlBoardCase):
         close at all, which is exactly the vacuity the parked-case block is about.
         """
         self._place("secretary-468", "done")
+        moved_at = self._move_time("secretary-468")
 
-        with self._card_moved_at("secretary-468", 100):
-            result = self.writer.retire_done(
-                reference="secretary-468",
-                expected_date_moved=100,
-                cutoff=101,
-                retention_days=14,
-                request_id="rq-retire-committed",
-            )
+        result = self.writer.retire_done(
+            reference="secretary-468",
+            expected_date_moved=moved_at,
+            cutoff=moved_at + 1,
+            retention_days=14,
+            request_id="rq-retire-committed",
+        )
 
         self.assertTrue(result["retired"])
         self.assertEqual(
@@ -495,6 +467,41 @@ class SqlTaskWriterTests(SqlBoardCase):
             ),
             [("committed",)],
         )
+        replay = self.writer.retire_done(
+            reference="secretary-468",
+            expected_date_moved=moved_at,
+            cutoff=moved_at + 1,
+            retention_days=14,
+            request_id="rq-retire-committed",
+        )
+        self.assertTrue(replay["skipped"])
+        self.assertFalse(replay["retired"])
+        self.assertEqual(
+            self.client._query(
+                "SELECT count(*) FROM requests WHERE request_id = %s",
+                ("rq-retire-committed",),
+            ),
+            [(1,)],
+        )
+
+    def test_done_retention_fresh_guard_uses_the_real_move_episode(self) -> None:
+        self._place("secretary-468", "done")
+        moved_at = self._move_time("secretary-468")
+
+        result = self.writer.retire_done(
+            reference="secretary-468", expected_date_moved=moved_at, cutoff=moved_at,
+            retention_days=14, request_id="rq-retire-fresh",
+        )
+
+        self.assertTrue(result["skipped"])
+        self.assertFalse(result["retired"])
+        self.assertEqual(
+            self.client._query(
+                "SELECT archived FROM tasks WHERE task_ref = %s", ("secretary-468",)
+            ),
+            [(False,)],
+        )
+        self.assertNothingSurvived("rq-retire-fresh")
 
     def test_a_comment_lands_with_its_request_row_committed(self) -> None:
         result = self.writer.comment(

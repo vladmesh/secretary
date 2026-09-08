@@ -9,6 +9,7 @@ import os
 import re
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -455,7 +456,15 @@ class ProductIssueStore:
     def __init__(self, client: KanboardClient, *, data_dir: str | Path, instance: str | Path) -> None:
         self.client = client
         self.data_dir = Path(data_dir)
-        self.audit = TaskAudit(data_dir)
+        if getattr(client, "backend_kind", "kanboard") == "postgres":
+            from secretary.board.sql_audit import SqlTaskAudit
+
+            self.audit = SqlTaskAudit(client)
+        else:
+            self.audit = TaskAudit(data_dir)
+        self.legacy_audit = TaskAudit(data_dir)
+        if getattr(client, "backend_kind", "kanboard") == "postgres":
+            self.audit.legacy_audit = self.legacy_audit
         self.transactions = ProductIssueTransaction(data_dir, self.audit)
         self.instance = Path(instance)
 
@@ -1009,7 +1018,8 @@ class ProductIssueStore:
             if exc.code != "not_found":
                 raise
             try:
-                result = self._host().recover_product_issue(request_id)
+                host = self._host()
+                result = self._host_mutation(lambda: host.recover_product_issue(request_id))
             except Exception as recovery:
                 raise self._host_error(recovery) from None
             if result.entity.kind.value == PRODUCT_TYPE:
@@ -1095,6 +1105,32 @@ class ProductIssueStore:
             return TaskError("backend_rejected", str(exc), 1)
         return TaskError("validation", str(exc), 2)
 
+    def _host_mutation(self, callback: Callable[[], Any]) -> Any:
+        """Run one Product/Issue host mutation at the SQL client's shared boundary."""
+        if getattr(self.client, "backend_kind", "kanboard") != "postgres":
+            return callback()
+        try:
+            with self.client.transaction():
+                return callback()
+        except TaskError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+            if isinstance(exc, ValueError):
+                raise TaskError("validation", str(exc), 2) from None
+            # PostgreSQL rolled the claim, entity/comment effect and event back together.  There
+            # is no repairable half-effect and therefore no `audit_pending` response.
+            detail = exc.__cause__ or exc
+            raise TaskError(
+                "backend_error", f"PostgreSQL Product/Issue transaction rolled back: {detail}", 1
+            ) from None
+    def _require_sql_legacy_namespace_free(self, request_id: str) -> None:
+        """Refuse unmigrated file claims before a SQL mutation touches the database."""
+        if getattr(self.client, "backend_kind", "kanboard") != "postgres":
+            return
+        self.legacy_audit.require_pending_layout()
+        if self.legacy_audit.event(request_id) is not None:
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
+
     def create_product(
         self,
         *,
@@ -1116,6 +1152,7 @@ class ProductIssueStore:
             )
         reference = f"product:{product_id}"
         request_id = request_id or str(uuid.uuid4())
+        self._require_sql_legacy_namespace_free(request_id)
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -1135,16 +1172,18 @@ class ProductIssueStore:
                 from secretary.board import Actor, Create, Product
 
                 try:
-                    host.create(
-                        Create(
-                            Product(
-                                reference, title, projects=tuple(sorted(projects)), description=description
-                            ),
-                            Actor("po", actor),
-                            "Product created",
-                            request_id=request_id,
-                        )
+                    operation = Create(
+                        Product(
+                            reference,
+                            title,
+                            projects=tuple(sorted(projects)),
+                            description=description,
+                        ),
+                        Actor("po", actor),
+                        "Product created",
+                        request_id=request_id,
                     )
+                    self._host_mutation(lambda: host.create(operation))
                 except Exception as exc:
                     raise self._host_error(exc) from None
                 return self.show_product(product_id)
@@ -1176,6 +1215,7 @@ class ProductIssueStore:
         request_id = request_id or str(uuid.uuid4())
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
         reference = f"issue:{digest}"
+        self._require_sql_legacy_namespace_free(request_id)
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -1184,21 +1224,21 @@ class ProductIssueStore:
                 from secretary.board import Actor, Create, Issue
 
                 try:
-                    self._host().create(
-                        Create(
-                            Issue(
-                                reference,
-                                title,
-                                f"product:{product}",
-                                priority=priority,
-                                issue_kind=issue_kind,
-                                description=description,
-                            ),
-                            Actor("po", actor),
-                            "Issue created",
-                            request_id=request_id,
-                        )
+                    host = self._host()
+                    operation = Create(
+                        Issue(
+                            reference,
+                            title,
+                            f"product:{product}",
+                            priority=priority,
+                            issue_kind=issue_kind,
+                            description=description,
+                        ),
+                        Actor("po", actor),
+                        "Issue created",
+                        request_id=request_id,
                     )
+                    self._host_mutation(lambda: host.create(operation))
                 except Exception as exc:
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)
@@ -1211,6 +1251,7 @@ class ProductIssueStore:
         if priority not in ISSUE_PRIORITIES or not reason.strip():
             raise TaskError("validation", "priority update requires P0-P3 and a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
+        self._require_sql_legacy_namespace_free(request_id)
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -1234,7 +1275,7 @@ class ProductIssueStore:
                     ):
                         raise TaskError("validation", "request id belongs to another operation or payload", 2)
                     try:
-                        host.recover_product_issue(request_id)
+                        self._host_mutation(lambda: host.recover_product_issue(request_id))
                     except Exception as exc:
                         raise self._host_error(exc) from None
                     return self.show_issue(reference)
@@ -1254,7 +1295,8 @@ class ProductIssueStore:
                     current.close_reason,
                 )
                 try:
-                    host.replace(Replace(desired, Actor("po", actor), reason, request_id=request_id))
+                    operation = Replace(desired, Actor("po", actor), reason, request_id=request_id)
+                    self._host_mutation(lambda: host.replace(operation))
                 except Exception as exc:
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)
@@ -1269,6 +1311,7 @@ class ProductIssueStore:
                 "validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2
             )
         request_id = request_id or str(uuid.uuid4())
+        self._require_sql_legacy_namespace_free(request_id)
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -1293,16 +1336,16 @@ class ProductIssueStore:
                     if existing is None:
                         raise TaskError("closed", "issue is already closed", 3)
                 try:
-                    self._host().transition(
-                        TransitionRequest(
-                            EntityKind.ISSUE,
-                            reference,
-                            IssueState.CLOSED,
-                            Actor("po", actor),
-                            reason,
-                            request_id=request_id,
-                        )
+                    host = self._host()
+                    operation = TransitionRequest(
+                        EntityKind.ISSUE,
+                        reference,
+                        IssueState.CLOSED,
+                        Actor("po", actor),
+                        reason,
+                        request_id=request_id,
                     )
+                    self._host_mutation(lambda: host.transition(operation))
                 except Exception as exc:
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)

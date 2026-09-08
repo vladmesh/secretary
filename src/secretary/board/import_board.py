@@ -34,7 +34,7 @@ subtracted now.  A record the board holds and the store does not fails its axis,
 own identifier in ``records_missing`` — one line each, never an aggregate — and makes the result
 red.  A fifth axis, ``accounting``, then compares the refusals with the records actually missing in
 both directions, so "a record that is neither imported nor named is a defect" is a check rather
-than a promise.  The content axis compares all three comment tables, because comparing only the
+than a promise.  The content axis compares all four comment tables, because comparing only the
 first of them let a reviewer change a stored sprint comment's body and still be told ``True``.
 
 **What revision ``0002_board_gaps`` moved here.**  The sprint's identity is its reference, so every
@@ -61,6 +61,7 @@ from typing import Any
 
 import yaml
 
+from secretary.board.backend import record_key
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
     ISSUE_KINDS,
@@ -166,10 +167,11 @@ TABLE_ORDER = (
     "task_comments",
     "sprint_comments",
     "issue_comments",
+    "product_comments",
     "sprint_decisions",
 )
 
-#: The three comment tables of §3.7, each with the column that names its entity.  They are one
+#: The four comment tables, each with the column that names its entity.  They are one
 #: list because every rule about a comment — §8.1's marker, §8.2's counting, both parity axes —
 #: applies to all three, and the reviewer's finding of 2026-09-07 was a rule that reached only
 #: the first of them.
@@ -182,6 +184,7 @@ COMMENT_TABLES = (
     ("task_comments", "task_ref"),
     ("sprint_comments", "sprint_ref"),
     ("issue_comments", "issue_id"),
+    ("product_comments", "product_id"),
 )
 
 
@@ -738,7 +741,7 @@ def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> Im
     tasks = _plan_tasks(source, card_rows, sprints, products, rows, report)
     _link_sprint_cursors(source, sprints, tasks, report)
     _plan_budget(source, sprints, rows, report, thresholds=thresholds)
-    _plan_comments(source, tasks, sprints, issues, rows, report)
+    _plan_comments(source, tasks, sprints, products, issues, rows, report)
     _plan_decisions(source, sprints, tasks, rows, report)
 
     report.expected_zero = [
@@ -897,6 +900,7 @@ def _plan_products(
     product_rows: list[SourceRow], rows: dict[str, list[dict[str, Any]]], report: ImportReport
 ) -> dict[str, dict[str, Any]]:
     products: dict[str, dict[str, Any]] = {}
+    stray_keys: Counter[str] = Counter()
     known_projects = {row["project_id"] for row in rows["projects"]}
     for row in one_row_per_ref(product_rows, kind="product", report=report):
         product_id = _text(row.meta.get(META_PRODUCT_ID))
@@ -916,11 +920,20 @@ def _plan_products(
             )
             continue
         created = _required_when(row.raw.get("date_creation"), datetime.fromtimestamp(0, tz=UTC))
+        extensions = {
+            key: value
+            for key, value in row.meta.items()
+            if key not in {META_RECORD_TYPE, META_PRODUCT_ID, META_PRODUCT_PROJECTS}
+        }
+        for key in extensions:
+            stray_keys[key] += 1
         products[product_id] = {
             "product_id": product_id,
+            "board_key": record_key("product", product_id),
             "title": _text(row.raw.get("title")) or product_id,
             "description": _text(row.raw.get("description")),
             "state": "archived" if row.archived else "active",
+            "extensions": _extensions_of(extensions),
             "created_at": created,
             "updated_at": _required_when(row.raw.get("date_modification"), created),
         }
@@ -935,6 +948,10 @@ def _plan_products(
                 continue
             rows["product_projects"].append({"product_id": product_id, "project_id": project_id})
     rows["products"] = [products[key] for key in sorted(products)]
+    report.extensions_keys += [
+        {"key": key, "rows": count, "where": "products.extensions.kanboard"}
+        for key, count in sorted(stray_keys.items(), key=lambda item: (-item[1], item[0]))
+    ]
     return products
 
 
@@ -1006,6 +1023,7 @@ def _plan_issues(
             stray_keys[key] += 1
         issues[issue_id] = {
             "issue_id": issue_id,
+            "board_key": record_key("issue", issue_id),
             "product_id": product_id,
             "title": _text(row.raw.get("title")),
             "description": _text(row.raw.get("description")),
@@ -1442,6 +1460,7 @@ def _plan_tasks(
             ),
             "created_at": created,
             "updated_at": _required_when(row.raw.get("date_modification"), created),
+            "date_moved": _when(row.raw.get("date_moved")),
         }
         for ordinal, head in enumerate(_split_heads(row.meta.get("retry_heads"))):
             rows["task_retry_heads"].append({"task_ref": ref, "ordinal": ordinal, "head": head})
@@ -1687,14 +1706,15 @@ def _plan_comments(
     source: BoardSource,
     tasks: dict[str, dict[str, Any]],
     sprints: dict[str, dict[str, Any]],
+    products: dict[str, dict[str, Any]],
     issues: dict[str, dict[str, Any]],
     rows: dict[str, list[dict[str, Any]]],
     report: ImportReport,
 ) -> None:
-    """§8.1's marker rule, applied once, to every comment on both boards and all three tables.
+    """§8.1's marker rule, applied once, to every comment on both boards and all four tables.
 
-    All three: ``task_comments``, ``sprint_comments`` and — since 0002 gave Issues a table —
-    ``issue_comments``.  A comment that belongs to a record the store does not hold is named one
+    The fourth is ``product_comments``, added by 0004. A comment that belongs to a record the
+    store does not hold is named one
     line per comment, with the Kanboard comment id, because "479 comments on Issue rows" names a
     number and the question a failing parity asks is *which ones*.
     """
@@ -1722,17 +1742,20 @@ def _plan_comments(
     for row in source.pipeline:
         record_type = row.meta.get(META_RECORD_TYPE)
         if record_type == PRODUCT_TYPE:
+            product_id = _text(row.meta.get(META_PRODUCT_ID))
             for comment in row.comments:
-                # §3.7 has no `product_comments` table, because the 2026-09-07 read counted zero
-                # comments on Product rows.  If the board ever grows one, it is named here rather
-                # than dropped, one line per comment.
-                refuse(
-                    "product comment",
-                    row.ref,
-                    comment,
-                    "§3.7 declares three comment tables — task, sprint and issue — and a Product "
-                    "is none of them; the counted zero is what §3.7 records instead of a fourth "
-                    "table, so this comment has nowhere to land",
+                if product_id not in products:
+                    refuse(
+                        "product comment", row.ref, comment,
+                        "the Product itself was not imported, and product_comments.product_id "
+                        "is a foreign key into products",
+                    )
+                    continue
+                rows["product_comments"].append(
+                    {
+                        "product_id": product_id,
+                        **stored(comment, products[product_id]["updated_at"]),
+                    }
                 )
             continue
         if record_type == ISSUE_TYPE:
@@ -1940,6 +1963,7 @@ TRANSACTION_GROUPS = (
             "task_comments",
             "sprint_comments",
             "issue_comments",
+            "product_comments",
             "sprint_decisions",
         ),
     ),
@@ -2070,6 +2094,7 @@ def apply(plan_result: ImportPlan, connection: Any) -> dict[str, int]:
             "task_comments",
             "sprint_comments",
             "issue_comments",
+            "product_comments",
             "sprint_decisions",
         ):
             _insert(connection, name, rows[name], written)
@@ -2194,6 +2219,7 @@ _COMMENT_OWNER = {
     "task_comments": lambda row: row["task_ref"],
     "sprint_comments": lambda row: row["sprint_ref"],
     "issue_comments": lambda row: "issue:" + row["issue_id"],
+    "product_comments": lambda row: "product:" + row["product_id"],
 }
 
 
@@ -2240,13 +2266,12 @@ def _comments_of(inventory: BoardInventory, table: str):
             yield owner, row, comment
 
 
-#: Which §3.7 table a comment belongs in, by the kind of record it sits on.  A Product is in none
-#: of them, which is why a comment on one is a refusal and not a row (§3.7's counted zero).
+#: Which comment table a comment belongs in, by the kind of record it sits on.
 _COMMENT_TABLE_OF_KIND = {
     "card": "task_comments",
     "sprint": "sprint_comments",
     "issue": "issue_comments",
-    "product": None,
+    "product": "product_comments",
 }
 
 
@@ -2292,7 +2317,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
             "duplicate of a reference under a distinguishing one rather than dropping it",
         ),
         _check(
-            "every comment on either board is stored, in one of §3.7's three tables",
+            "every comment on either board is stored, in one of the four comment tables",
             board_comment_total,
             stored_comment_total,
             note=", ".join(f"{table}: {len(rows[table])}" for table, _ in COMMENT_TABLES),
@@ -2414,8 +2439,9 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
         **{ref: row["updated_at"] for ref, row in stored_tasks.items()},
         **{ref: row["updated_at"] for ref, row in stored_sprints.items()},
         **{ref: row["updated_at"] for ref, row in stored_issues.items()},
+        **{ref: row["updated_at"] for ref, row in stored_products.items()},
     }
-    owners = set(stored_tasks) | set(stored_sprints) | set(stored_issues)
+    owners = set(stored_tasks) | set(stored_sprints) | set(stored_issues) | set(stored_products)
     content = [
         _check(
             "card title, description, state, archived flag and position",
@@ -2494,7 +2520,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
             Counter((row["sprint_ref"], row["event_type"]) for row in rows["sprint_budget_events"]),
         ),
     ]
-    # One content check per comment table.  Three, not one: the axis used to compare card comments
+    # One content check per comment table.  The axis used to compare card comments
     # alone, so a reviewer could change the body of a stored *sprint* comment from `original` to
     # `altered` and parity still returned True.  Each table is now its own multiset of
     # (owner, second, marker, body), which is what makes an altered body a failure wherever it is.

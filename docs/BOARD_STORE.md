@@ -1,8 +1,7 @@
 # The board store: read/write inventory and the PostgreSQL schema
 
-Status: accepted design, no implementation. This document is the contract the remaining cards of
-`sprint:1432` are cut against. It contains no SQL migration, no importer and no cutover procedure;
-those are separate cards.
+Status: implemented through revision `0004_product_issue_sql` for Cards and Product/Issue.
+Sprint storage, importer and cutover remain separate work; the default backend is still Kanboard.
 
 **The engine is given.** The owner chose PostgreSQL on 2026-09-07 (`sprint:1432`, PO comments of
 09:11Z and 09:22Z). This document does not argue for or against it and contains no comparison with
@@ -182,10 +181,10 @@ installation is in.
 The seam is *underneath* `TaskReader` and `TaskWriter` rather than beside them, for the reason
 this section exists: almost every consumer below reaches cards through those two classes, so one
 replacement under them moves the CLI, the web process, the dispatcher and the observer together.
-`board/sql_cards.py` answers the same board vocabulary over `tasks`, `task_comments` and their
-satellites, and `board/sql_audit.py` is `TaskAudit`'s contract over `requests` and `board_events`
-(§7.3).  `SprintReader`/`SprintWriter` and `ProductIssueStore` are not switched by that name and
-remain Kanboard-only; their card is the next one.
+`board/sql_cards.py` answers the same board vocabulary over cards plus Product/Issue rows and
+comments, and `board/sql_audit.py` is `TaskAudit`'s contract over `requests` and `board_events`
+(§7.3). `ProductIssueStore` follows the same process-wide choice. `SprintReader` and
+`SprintWriter` remain explicitly refused under `postgres` pending their own migration.
 
 **Where the switch is acted on.**  `board/backend.py:board_client` is the only function in
 `secretary` that constructs a board client, and every entry point in the two tables below reaches
@@ -196,8 +195,8 @@ itself:
 
 * an unknown `SECRETARY_CARD_BACKEND` refuses at **every** entry point, not only at the ones
   somebody remembered to check;
-* under `postgres`, a site that needs sprints or Product/Issue — `sprint_commands.py`,
-  `product_issue_commands.py`, `webproto/sprint_reads.py`, `webproto/sprint_ops.py`,
+* under `postgres`, Product/Issue-only sites such as `product_issue_commands.py` receive the SQL
+  client; a site that also needs sprints — `sprint_commands.py`, `webproto/sprint_reads.py`, `webproto/sprint_ops.py`,
   `webproto/pause_reads.py`, `status.py`, `data.py:export_sprint_entities`, and `restore.py`,
   which drives cards *and* sprints through one client — is refused by name instead of being
   handed a Kanboard client that contradicts the switch;
@@ -224,6 +223,12 @@ the other backend produced, which is how `report`, `verdict` and `decide` refuse
 PostgreSQL backend — through `BoardHost.marker_comment`'s card lookup — while the reader that had
 just minted the identity worked; `sprints.py`'s sprint lookup carried the same defect with
 `sprint_kanboard_`.
+
+Product and Issue retain their string references but the inherited board vocabulary addresses a
+row by integer. `board.backend.record_key` hashes `<kind>:<identifier>` into disjoint positive
+`bigint` ranges above the card schema's `int4`; the value is stored as each row's unique indexed
+`board_key`. Lookups use that index and verify the deterministic mapping. A collision is refused,
+never resolved by scanning or guessing, and Product, Issue and Card keys cannot cross kinds.
 
 
 `KanboardClient` (`src/secretary/tasks.py:469`) is a generic JSON-RPC client with `call`,
@@ -484,7 +489,7 @@ Conventions: `text` for identifiers, `timestamptz` for time, surrogate `bigint` 
 row has no natural key. Every reference between entities is a real foreign key, and a reference
 that is only meaningful *within* one sprint is a **composite** foreign key carrying the sprint —
 never a bare existence check (§3.3, §3.4, §3.8). Closed vocabularies are `CHECK` constraints, by
-the uniform rule of §3.12. `jsonb` appears in exactly five places, each justified inline (§3.10).
+the uniform rule of §3.12. `jsonb` appears in exactly seven places, each justified inline (§3.10).
 
 **What the first import of real data changed here (2026-09-07).** `secretary-1583` ran the
 importer against the whole live board — 1513 Pipeline rows with 15 571 comments, 102 sprint rows —
@@ -509,10 +514,12 @@ points at are inserted in one transaction (§7.1).
 ```sql
 CREATE TABLE products (
     product_id   text PRIMARY KEY,                    -- "secretary"; matches ^[a-z0-9][a-z0-9-]{0,62}$
+    board_key    bigint NOT NULL UNIQUE,              -- stable indexed adapter key; see §9
     ref          text GENERATED ALWAYS AS ('product:' || product_id) STORED UNIQUE,
     title        text NOT NULL CHECK (title <> ''),
     description  text NOT NULL DEFAULT '',
     state        text NOT NULL DEFAULT 'active' CHECK (state IN ('active','archived')),
+    extensions   jsonb NOT NULL DEFAULT '{}'::jsonb, -- (J7); unknown metadata provenance
     created_at   timestamptz NOT NULL,
     updated_at   timestamptz NOT NULL
 );
@@ -545,6 +552,10 @@ CREATE TABLE product_projects (                       -- Product.projects, today
     PRIMARY KEY (product_id, project_id)
 );
 ```
+
+`products.extensions.kanboard` preserves every metadata key outside the known Product columns and
+the relational `product_projects` set. The adapter filters known keys before merging this bag, so
+provenance cannot replace canonical identity or relationships.
 
 `projects` and `repositories` are present "to the extent of existing links" only: the registry file
 stays canonical for the binding (§6), and these tables exist so that `sprint_projects.project_id`,
@@ -606,6 +617,7 @@ produces them, and every consumer that asks "is this project registered?" keeps 
 ```sql
 CREATE TABLE issues (
     issue_id     text PRIMARY KEY,                    -- the 20-hex suffix of issue:<id>
+    board_key    bigint NOT NULL UNIQUE,              -- stable indexed adapter key; see §9
     ref          text GENERATED ALWAYS AS ('issue:' || issue_id) STORED UNIQUE,
     product_id   text NOT NULL REFERENCES products(product_id),
     title        text NOT NULL CHECK (title <> ''),
@@ -840,6 +852,7 @@ CREATE TABLE tasks (
     extensions     jsonb NOT NULL DEFAULT '{}'::jsonb,   -- (J3)
     created_at     timestamptz NOT NULL,
     updated_at     timestamptz NOT NULL,
+    date_moved    timestamptz,                       -- NULL when no move time was observed
     UNIQUE (project_id, task_number),
     -- The target the sprint's scoped cursor and decision keys need (§3.3, §3.8).
     -- Redundant with the primary key by design.
@@ -893,6 +906,10 @@ survives; `depends_on_task` is the foreign key and carries the same reference wh
 there, so a dependency that *can* be checked still is. "Unresolved" is then a query
 (`depends_on_task IS NULL`) rather than an absence, and the check constraint forbids the two
 columns from naming different cards. §8.6 states the choice and its reason.
+
+`tasks.date_moved` is set on SQL create and every successful column move. Done retention reads
+that stored episode time. Revision `0004` leaves historical rows NULL rather than inventing an
+age; such rows remain visible as candidates with unknown time and are skipped until a real move.
 
 ### 3.6 Reservations
 
@@ -952,16 +969,29 @@ CREATE TABLE issue_comments (                         -- added 2026-09-07; see b
     created_at  timestamptz NOT NULL
 );
 CREATE INDEX issue_comments_by_issue ON issue_comments (issue_id, created_at);
+
+CREATE TABLE product_comments (                       -- added by 0004
+    comment_id  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id  text NOT NULL REFERENCES products(product_id) ON DELETE CASCADE,
+    marker      text,
+    body        text NOT NULL,
+    actor_role  text,
+    actor_id    text,
+    request_id  text UNIQUE,
+    created_at  timestamptz NOT NULL,
+    product_ref text GENERATED ALWAYS AS ('product:' || product_id) STORED
+);
+CREATE INDEX product_comments_by_product ON product_comments (product_id, created_at);
 ```
 
-**Three tables, and the third one's count.** `issue_comments` exists because the 2026-09-07 import
+**Four tables.** `issue_comments` exists because the 2026-09-07 import
 found **479** comments on Issue rows and this section declared only two comment tables, both
 foreign-keyed to their own entity — the largest single record loss the run reported. It is §3.7's
 own shape with `issues` as the entity: the same columns, the same `UNIQUE (request_id)`, the same
-claim key in §3.13 step 2, the same place in the order. The Product side was recounted by reading
-the live board on 2026-09-07 and the answer is **0**: not one of the 8 Product rows carries a
-comment. So there is no `product_comments` table, and the counted zero is recorded here instead of
-a table nothing would fill — if a Product ever takes a comment, this is the shape it gets.
+claim key in §3.13 step 2, the same place in the order. The Product side was recounted on
+2026-09-07 and had no existing comments, but the released board vocabulary permits a Product
+comment. Revision `0004_product_issue_sql` adds the same entity/request-fenced shape before
+PostgreSQL serves that vocabulary.
 
 The marker becomes a column because today it is recovered by string-parsing the first line of the
 comment body (`tasks._normalize_comment`), and a body whose first line happens to look like
@@ -1116,6 +1146,9 @@ ALTER TABLE task_comments
 ALTER TABLE issue_comments
   ADD CONSTRAINT issue_comment_claims_its_request
       FOREIGN KEY (request_id, issue_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
+ALTER TABLE product_comments
+  ADD CONSTRAINT product_comment_claims_its_request
+      FOREIGN KEY (request_id, product_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
 ALTER TABLE sprint_comments
   ADD CONSTRAINT sprint_comment_claims_its_request
       FOREIGN KEY (request_id, sprint_ref) REFERENCES requests (request_id, ref) MATCH SIMPLE;
@@ -1157,6 +1190,14 @@ The rule is now explicit, and `request_settled_matches_status` is what enforces 
 **Shape A — the mutation is entirely inside the database.** This is almost every operation: card
 transitions, comments, budget charges, sprint create, Product/Issue writes. It is one transaction
 (§7.1), so it claims **directly as `committed`, with `settled_at` set in the same statement**:
+
+For the delivered Product/Issue slice the four writer paths are Product create, Issue create,
+Issue priority replace and Issue close. All enter `SqlCardClient.transaction()` through the one
+`ProductIssueStore._host_mutation` boundary. The host may stage internally while building the
+effect, but the stage is never externally visible: request claim, final entity and relationships,
+comment where applicable, and `board_events` insert commit together. A failure after any one of
+those statements rolls all of them back; retrying the same request performs one effect, while a
+committed replay performs none. SQL therefore never returns `audit_pending` for such a rollback.
 
 ```sql
 INSERT INTO requests (request_id, operation, intent, status, protocol,
@@ -1252,7 +1293,7 @@ the previous draft gave to a separate `command_requests` table. There is no `com
 second table for staged intents would have re-created the split namespace this section exists to
 prevent.
 
-### 3.10 The six `jsonb` columns, and why each is one
+### 3.10 The seven `jsonb` columns, and why each is one
 
 | Column | Why it is not relational |
 |---|---|
@@ -1262,6 +1303,7 @@ prevent.
 | (J4) `board_events.data` | Per-`EventKind` payloads: marker bodies, attempt usage in five token dimensions across three accounts, outcome dispositions. Twenty-plus kinds with disjoint payloads; one table per kind is a larger change than this sprint carries, and the payloads are already validated by `board/models.py` on the way in. |
 | (J5) `requests.intent` | The frozen argument set of an arbitrary command, compared for equality on retry. Its shape is the command's, not the schema's. |
 | (J6) `issues.extensions` | (J3) for an Issue, added 2026-09-07: the import found nine leftover metadata keys on 158 Issue rows and a lane that is not the product's, and an Issue had nowhere to keep them. Same rule, same §8.2 counting, same prohibition on holding a field this schema names. |
+| (J7) `products.extensions` | The Product counterpart added by `0004`: metadata outside `record_type`, `product_id` and the relational project set remains lossless provenance and cannot override those known fields. |
 
 Nothing else is JSON. In particular `product_projects`, `sprint_repositories`, `sprint_issues`,
 `task_retry_heads`, `task_issues`, budget counters, resume fields and close decisions — all of
@@ -1370,7 +1412,7 @@ is the whole of its placement, and it is why the order above did not otherwise c
 Every fence in §3 that begins `ALTER TABLE` is a step-2 fence and is labelled as one. Every fence
 that begins `CREATE` is a step-1 fence. Nothing else needs to be decided at execution time.
 
-**The catalogue, per revision.** The schema of §3 is built by two Alembic revisions, and a card
+**The catalogue, per revision.** The schema of §3 is built by four Alembic revisions, and a card
 that checks its work against a migrated database needs the numbers of the one it ran. Both are
 counted from a real `postgres:16` by `tests/test_board_store_schema.py`, never asserted from
 reading:
@@ -1380,6 +1422,7 @@ reading:
 | `0001_initial` (the numbers §10's run produced) | 22 | 34 | 36 | 22 | 12 | 4 |
 | `0002_board_gaps` (2026-09-07, the gaps the first import of real data found) | 23 | 37 | 38 | 23 | 13 | 4 |
 | `0003_task_type_optional` (2026-09-07, the last card that import could not write) | 23 | 37 | 38 | 23 | 13 | 4 |
+| `0004_product_issue_sql` (2026-09-08, Product/Issue and Done retention) | 24 | 37 | 40 | 24 | 16 | 4 |
 
 The last table and the last primary key are Alembic's `alembic_version` in both rows. The deltas
 are the whole of `0002`: one table (`issue_comments`) with its primary key, its `UNIQUE
@@ -1395,6 +1438,11 @@ recounted from the same container rather than assumed: the revision drops one `C
 `tasks.task_type` and creates one in its place, and makes a column nullable, which no count here
 measures. The number that *is* different is the one this table does not carry — the column's
 `NOT NULL`, which is what the revision is for.
+
+`0004` adds `product_comments`, its entity and request foreign keys, primary key and request
+uniqueness; indexed unique `board_key` columns on Products and Issues; Product extensions; and
+nullable `tasks.date_moved`. The timestamp deliberately stays NULL for history whose move time
+the SQL store never observed.
 
 The split exists because four of the schema's relations are forward or mutual, and a scoped
 foreign key (§3.3) makes that unavoidable rather than incidental: `sprints` must exist before
@@ -2153,10 +2201,10 @@ dependencies beside `psycopg[binary]` (§5.8).
 | `sprint_resume` | JSON object, six fields | one `sprint_resumes` row, columns |
 | `sprint_source_audit` | JSON | `sprints.source_audit` jsonb (J2) |
 | `sprint_observer`, executor pins | encoded strings | `sprints.observer` jsonb (J1), `worker_pin`, `reviewer_pin` |
-| `product_id`, `product_projects` | metadata / JSON array | `products.product_id`, `product_projects` rows |
+| `product_id`, `product_projects` | metadata / JSON array | `products.product_id`, `product_projects` rows; other Product keys stay in `products.extensions.kanboard` |
 | `issue_product`, `issue_kind`, `issue_priority`, `issue_closed_reason` | metadata | `issues` columns with CHECKs |
 | `reference_repair` | metadata provenance | `tasks.extensions` (it describes a Kanboard-era repair) |
-| `[role]\nbody` comments | Kanboard comments | `task_comments` / `sprint_comments` / `issue_comments`: first line parsed once at import into `marker`, remainder into `body`. The third table is there because the 2026-09-07 import found 479 comments on Issue rows (§3.7) |
+| `[role]\nbody` comments | Kanboard comments | `task_comments` / `sprint_comments` / `issue_comments` / `product_comments`: first line parsed once at import into `marker`, remainder into `body` |
 | `[report:done]`, `[report:blocked]` with a `classification:` line, `[review:green]`, `[review:red]`, `[decision:release]`, `[decision:rework]`, `[decision:reslice]` | Kanboard comments rendered from typed events | `board_events` rows (`data` carries `marker`, `body`, `status`, `classification`, `decision`) **and** a `task_comments` row; the event is the fact, the comment is its rendering, exactly as `EventKind`'s comment already says |
 | `[secretary-product-issue-transaction:<digest>]`, `[secretary-sprint-transaction:<digest>]` | Kanboard comments used as transaction witnesses | **not** carried forward as comments: they exist because Kanboard has no transaction. They import into `requests` as settled rows, with their digest retained for traceability |
 
@@ -2386,7 +2434,7 @@ approximate for historical rows, and the report says so rather than presenting t
 | card decision (`release`/`rework`/`reslice`) | `[decision:*]` comment + `CARD_DECIDED` event | `board_events` + `task_comments.marker` |
 | worker report and review verdict | `[report:*]` / `[review:*]` comments + events | same |
 | budgets | `sprint_budget` JSON counters | `sprint_budget_events` + derived totals (§8.7) |
-| `request_id` | `TaskAudit` committed/pending records over one journal index, plus the Product/Issue transaction documents it cross-checks | `requests.request_id` PRIMARY KEY — one namespace for the installation. `board_events`, `task_comments`, `sprint_comments`, `sprint_budget_events` and `sprint_decisions` all reference it (§3.9); the first four are additionally unique per request, `sprint_decisions` is not, because one close claims one id and writes many decisions |
+| `request_id` | `TaskAudit` committed/pending records over one journal index, plus the Product/Issue transaction documents it cross-checks | `requests.request_id` PRIMARY KEY — one namespace for the installation. `board_events`, `task_comments`, `issue_comments`, `product_comments`, `sprint_comments`, `sprint_budget_events` and `sprint_decisions` all reference it (§3.9); the first six are additionally unique per request, `sprint_decisions` is not, because one close claims one id and writes many decisions |
 | `event_id` | `events.ndjson` records | `board_events.event_id` PK |
 | head run reference | `Actor.head_run_ref` on events | `board_events.head_run_ref` (a reference only; the head registry stays out of this schema) |
 
@@ -2489,10 +2537,10 @@ illustrative: every remaining one, including §3.9's three lifecycle fences and 
 `UPDATE`, was run verbatim with its `:name` binds supplied. That is 21 executed + 1 compared = 22, and the
 transcript quoted in this round's report has a line for each.
 
-The result was a database of 22 tables carrying 37 `CHECK`, 38 foreign-key, 22 primary-key and 13
-unique constraints and 4 partial unique indexes — §3.13's `0002_board_gaps` row without
-`alembic_version`, which this run does not create because Alembic is what creates it and this run
-executes the document rather than the migration. All 18 negative probes were refused, each by the
+The 2026-09-07 result was a database of 22 tables carrying 37 `CHECK`, 38 foreign-key, 22
+primary-key and 13 unique constraints and 4 partial unique indexes, before `0004`. The current
+mandatory migration/schema gate counts 24, 37, 40, 24, 16 and 4 including `alembic_version`, and
+also runs Alembic `compare_metadata`. All 18 original negative probes were refused, each by the
 constraint or the privilege it names; all 13 positive probes were accepted.
 
 **What the 2026-09-07 re-run found (`secretary-1585`).** `0002_board_gaps` changed §3 and left

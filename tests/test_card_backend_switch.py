@@ -131,15 +131,22 @@ class SwitchRefusalTests(CardBackendEnvironment):
                     self.assertEqual(backend.board_client(Path("/instance"), serves=serves), "kanboard")
             self.assertEqual(built.call_count, 3)
 
-    def test_postgres_refuses_by_name_the_entities_it_does_not_serve(self) -> None:
+    def test_postgres_refuses_sprint_by_name(self) -> None:
         self._switch("postgres")
-        for serves in ((backend.SPRINT,), (backend.PRODUCT_ISSUE,), (backend.CARD, backend.SPRINT)):
+        for serves in ((backend.SPRINT,), (backend.CARD, backend.SPRINT)):
             with self.subTest(serves=serves):
                 backend.reset_card_backend()
                 with self.assertRaises(TaskError) as raised:
                     backend.board_client(Path("/instance"), serves=serves)
                 self.assertEqual(raised.exception.code, "backend_error")
                 self.assertIn("Kanboard board on this build", raised.exception.message)
+
+    def test_postgres_accepts_product_issue_before_resolving_store_configuration(self) -> None:
+        self._switch("postgres")
+        with self.assertRaises(TaskError) as raised:
+            backend.board_client(Path("/nonexistent-instance"), serves=(backend.PRODUCT_ISSUE,))
+        self.assertEqual(raised.exception.code, "backend_unavailable")
+        self.assertNotIn("Kanboard board on this build", raised.exception.message)
 
     def test_a_store_that_is_not_configured_refuses_with_the_store_s_own_reason(self) -> None:
         """`BoardStoreError` is a `RuntimeError`; a CLI must not answer with its traceback."""
