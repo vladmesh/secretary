@@ -1276,7 +1276,7 @@ class CommandHostRuntime:
             try:
                 receipt = self.head_runtime_for(lifecycle_run).deliver(
                     lifecycle_run,
-                    head_ops.NudgePointer(text=_observer_launch_prompt()),
+                    head_ops.NudgePointer.at_document(str(workspace / OBSERVER_PROMPT_FILE)),
                     transport=self._head_transport(
                         str(workspace),
                         OBSERVER_PROMPT_FILE,
@@ -1293,7 +1293,7 @@ class CommandHostRuntime:
                     failure = receipt.failure or HostError(
                         f"the observer launch prompt was refused: {receipt.reason}"
                     )
-            except (TuiDeliveryError, HostError) as exc:
+            except (PromptDocumentError, TuiDeliveryError, HostError) as exc:
                 failure = exc
             if failure is None:
                 lifecycle_run = bound_run
@@ -1554,20 +1554,14 @@ class CommandHostRuntime:
         if not current:
             raise HostError("observer terminal is unavailable for an event wake")
         delivery = getattr(record, "delivery", None)
-        delivery_id = str(getattr(delivery, "delivery_id", "") or "")
-        through_event = str(getattr(delivery, "through_event", "") or "")
-        message = _render_observer_wake_context(sprint, change=change)
-        if delivery_id and through_event:
-            message += (
-                " Acknowledge this delivery in that resume with --delivery-id "
-                f"{delivery_id} --through-event {through_event}."
-            )
-        # The wakes this sprint has already lost travel with the wake that reaches the head, so the
-        # resume written from this turn reports what happened rather than what a head could see.
-        evidence_line = _observer_delivery_evidence_summary(delivery) if delivery is not None else ""
-        if evidence_line:
-            message += f" Sprint delivery evidence to carry into your closing resume: {evidence_line}."
+        message = _render_observer_wake_context(sprint, change=change, delivery=delivery)
+        document = Path(workspace) / OBSERVER_PROMPT_FILE
         try:
+            # One boundary for every adapter: atomically replace the complete live document before
+            # constructing or sending its bounded, single-line pointer. A redelivery uses the same
+            # path and rewrites it only when the rendered snapshot has changed.
+            self._write_prompt(document, message)
+            pointer = head_ops.NudgePointer.at_document(str(document))
             adapter = self._prompt_adapter(getattr(record, "run", {}), str(getattr(record, "head", "")))
             # A wake carries both proofs a delivery can have, and either one confirms it. The head
             # is live and working, so the screen evidence this used to rely on alone is the weaker
@@ -1579,16 +1573,17 @@ class CommandHostRuntime:
             waking = replace(self._observer_lifecycle_run(record), handle=current)
             receipt = self.head_runtime_for(waking).deliver(
                 waking,
-                head_ops.NudgePointer(text=message),
+                pointer,
                 transport=self._head_transport(
                     workspace,
+                    OBSERVER_PROMPT_FILE,
                     adapter=adapter,
                     role=OBSERVER_ROLE,
                     ack_out_of_band=True,
                 ),
                 subject="observer-wake",
             )
-        except TuiDeliveryError as exc:
+        except (PromptDocumentError, RuntimeError, TuiDeliveryError) as exc:
             failure = HostError(f"observer wake was not delivered: {exc}")
             # The lifecycle stores this beside the sprint: the delivery boundary's own evidence
             # (terminal identity, payload size and hash, stage, fingerprints) and no prompt text.

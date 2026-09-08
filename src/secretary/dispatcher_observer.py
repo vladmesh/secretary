@@ -983,7 +983,10 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
     """
     try:
         # Observer reconciliation needs cards and the event stream, but not the independently
-        # rendered resume-freshness field. Skipping it keeps this path to one audit snapshot.
+        # rendered resume-freshness field. Read the event boundary first: every committed comment
+        # event follows its board mutation, so the subsequent entity snapshot contains everything
+        # in this batch. A comment committed after the audit snapshot belongs to the next batch.
+        events = runtime.audit.events()
         sprint = runtime.sprints.show(ref, include_resume_freshness=False)
         cards = sprint.get("cards") if isinstance(sprint.get("cards"), list) else []
         refs = {
@@ -991,9 +994,12 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
             for card in cards
             if isinstance(card, dict) and str(card.get("ref") or "")
         }
-        events = runtime.audit.events()
     except (TaskError, HostError, OSError, ValueError, TypeError):
         return {"known": False, "pending": False, "reason": "linked card audit is unavailable"}
+    try:
+        _observer_comments(sprint)
+    except TaskError as exc:
+        return {"known": False, "pending": False, "reason": exc.message}
     resumes: list[dict[str, Any]] = []
     for event in events:
         if str(event.get("ref") or "") == ref and str(event.get("kind") or "") == "resume_recorded":
@@ -1038,6 +1044,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
         "pending": True,
         "event_id": latest_id,
         "change": "sprint-entity" if str(latest.get("ref") or "") == ref else "linked-card",
+        "sprint": sprint,
         "pending_from": _event_id(significant[0]),
         "occurred_at": str(latest.get("occurred_at") or ""),
         "age_seconds": _event_age_seconds(str(latest.get("occurred_at") or "")),
@@ -1877,13 +1884,12 @@ def _wake_for_event(
         # Delivery acceptance is a terminal concern. The causal acknowledgement is deliberately
         # out of band: the next normal reconciliation reads the observer's durable resume once,
         # instead of polling the complete audit stream while the prompt-delivery loop runs.
-        # The event cursor decides which immutable batch is owed.  The wake body is a separate,
-        # fresh read of the whole sprint entity: comments added after an earlier read or while an
-        # older batch is awaiting acknowledgement must still reach the observer before it acts.
-        sprint = runtime.sprints.show(ref, include_resume_freshness=False)
         accepted = runtime.host.nudge_observer(
             record,
-            sprint=sprint,
+            # `_observer_event_state` made this authoritative full read before delivery intent was
+            # entered. Carry that exact snapshot to the document boundary: a second board read here
+            # could fail after intent persistence and needlessly list the whole Pipeline again.
+            sprint=event["sprint"],
             change=str(event.get("change") or "linked-card"),
         )
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
@@ -2307,6 +2313,7 @@ def _launch_observer(
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
         # when the sprint was created: goal, DoD, repositories and current card all move.
         sprint = runtime.sprints.show(ref, include_resume_freshness=False)
+        _observer_comments(sprint)
     except (HostError, TaskError) as exc:
         return _defer(
             runtime,
@@ -3328,8 +3335,7 @@ def render_observer_prompt(
 
 def _observer_sprint_context(sprint: dict[str, Any]) -> list[str]:
     """Render all live comments in board order, then the subordinate saved resume."""
-    raw_comments = sprint.get("comments")
-    comments = raw_comments if isinstance(raw_comments, list) else []
+    comments = _observer_comments(sprint)
     lines = [
         "## Live sprint comments",
         "",
@@ -3370,7 +3376,17 @@ def _observer_sprint_context(sprint: dict[str, Any]) -> list[str]:
     return lines
 
 
-def render_observer_wake_context(sprint: dict[str, Any], *, change: str) -> str:
+def _observer_comments(sprint: dict[str, Any]) -> list[Any]:
+    """Distinguish a loaded empty comment list from context that was never loaded."""
+    comments = sprint.get("comments")
+    if "comments" not in sprint or not isinstance(comments, list):
+        raise TaskError("backend_error", "live sprint comments are unavailable", 1)
+    return comments
+
+
+def render_observer_wake_context(
+    sprint: dict[str, Any], *, change: str, delivery: ObserverDelivery | None = None
+) -> str:
     """Wake text with the same live owner-decision context a replacement launch receives."""
     changed = "The sprint entity changed." if change == "sprint-entity" else "A linked card changed."
     lead = (
@@ -3382,7 +3398,7 @@ def render_observer_wake_context(sprint: dict[str, Any], *, change: str) -> str:
         "boundary; the live sprint context below may be newer. Apply all owner decisions before "
         "taking the next semantic step, then record resume."
     )
-    return lead + "\n\n" + "\n".join(_observer_sprint_context(sprint)).rstrip()
+    return lead + "\n\n" + render_observer_prompt(sprint, delivery=delivery)
 
 
 def _executor_lines(sprint: dict[str, Any]) -> list[str]:
