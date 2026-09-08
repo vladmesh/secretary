@@ -3840,28 +3840,25 @@ class CommandHostRuntime:
         contract = verdict.contract if verdict.fit else None
         if contract is None or not contract.module:
             return "", ""
-        arguments = "".join(f" --module-arg {shlex.quote(argument)}" for argument in contract.args)
-        interpreter = shlex.quote(str(self.production_runtime.interpreter))
-        candidate_default = (
-            f" --default-interpreter {shlex.quote(str(Path(WORKSPACE_ENV_DIR) / 'bin' / 'python3'))}"
-            if not contract.interpreter_declared
-            else ""
-        )
+        broad_arguments = ["check", "broad", "--reuse", "--module", contract.module]
+        show_arguments = ["check", "show", "--module", contract.module]
+        for argument in contract.args:
+            broad_arguments.extend(("--module-arg", argument))
+            show_arguments.extend(("--module-arg", argument))
+        if not contract.interpreter_declared:
+            candidate = str(Path(WORKSPACE_ENV_DIR) / "bin" / "python3")
+            broad_arguments.extend(("--default-interpreter", candidate))
+            show_arguments.extend(("--default-interpreter", candidate))
         return (
-            (
-                f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary check broad "
-                f"--reuse --module {contract.module}{arguments}{candidate_default}"
-            ),
-            (
-                f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary check show "
-                f"--module {contract.module}{arguments}{candidate_default}"
-            ),
+            self._control_plane_command(*broad_arguments),
+            self._control_plane_command(*show_arguments),
         )
 
-    def _control_plane_task_command(self) -> str:
-        """Secretary protocol boundary, independent of the candidate shell's PATH."""
+    def _control_plane_command(self, *arguments: str) -> str:
+        """Render one head-visible Secretary command on the production control-plane boundary."""
         interpreter = shlex.quote(str(self.production_runtime.interpreter))
-        return f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
+        suffix = "".join(f" {shlex.quote(argument)}" for argument in arguments)
+        return f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m secretary{suffix}"
 
     def _worker_task_doc(
         self,
@@ -3885,7 +3882,41 @@ class CommandHostRuntime:
             for classification in ("external_fact", "wrong_task_definition")
         }
         body_file = _body_file_path("report", task["ref"], generation)
-        control_plane = self._control_plane_task_command()
+        report_commands = {
+            "done": self._control_plane_command(
+                "task",
+                "report",
+                "--ref",
+                task["ref"],
+                "--role",
+                "worker",
+                "--kind",
+                "done",
+                "--request-id",
+                request,
+                "--body-file",
+                body_file,
+            ),
+            **{
+                classification: self._control_plane_command(
+                    "task",
+                    "report",
+                    "--ref",
+                    task["ref"],
+                    "--role",
+                    "worker",
+                    "--kind",
+                    "blocked",
+                    "--classification",
+                    classification,
+                    "--request-id",
+                    blocked_requests[classification],
+                    "--body-file",
+                    body_file,
+                )
+                for classification in ("external_fact", "wrong_task_definition")
+            },
+        }
         sections = [
             f"# Task {task['ref']}",
             "",
@@ -3962,20 +3993,22 @@ class CommandHostRuntime:
             broad_invocation = [f"    {broad_command}", ""]
             show_invocation = f"`{show_command}` and quote its summary"
         else:
+            fallback_broad = self._control_plane_command(
+                "check", "broad", "--reuse", "--module", "<the suite module you chose>"
+            )
+            fallback_show = self._control_plane_command("check", "show", "--module", "<the same module>")
             broad_invocation = [
                 "This project's adapter declares no broad suite, so there is no exact command to",
                 "print here. Work out which suite this card's acceptance criteria require, run that",
                 "one through the wrapper by naming it yourself:",
                 "",
-                "    python3 -m secretary check broad --reuse --module <the suite module you chose>",
+                f"    {fallback_broad}",
                 "",
                 "and say in your report which module you ran and why that is the right suite. Do not",
                 "reach for repository-wide test discovery because it is the easiest thing to type.",
                 "",
             ]
-            show_invocation = (
-                "`python3 -m secretary check show --module <the same module>` and quote its summary"
-            )
+            show_invocation = f"`{fallback_show}` and quote its summary"
         sections += [
             "## Check-cost contract",
             "",
@@ -4083,9 +4116,9 @@ class CommandHostRuntime:
             "either way this round is left waiting. Copy the command from here, never from an",
             "earlier turn of this conversation.",
             *_body_file_instructions(body_file),
-            f"{control_plane} report --ref {task['ref']} --role worker --kind done --request-id {request} --body-file {body_file}",
-            f"{control_plane} report --ref {task['ref']} --role worker --kind blocked --classification external_fact --request-id {blocked_requests['external_fact']} --body-file {body_file}",
-            f"{control_plane} report --ref {task['ref']} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_requests['wrong_task_definition']} --body-file {body_file}",
+            report_commands["done"],
+            report_commands["external_fact"],
+            report_commands["wrong_task_definition"],
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -4224,7 +4257,23 @@ class CommandHostRuntime:
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
         body_file = _body_file_path("verdict", task["ref"], review_round)
-        control_plane = self._control_plane_task_command()
+        verdict_commands = {
+            kind: self._control_plane_command(
+                "task",
+                "verdict",
+                "--ref",
+                task["ref"],
+                "--role",
+                "reviewer",
+                "--kind",
+                kind,
+                "--request-id",
+                request,
+                "--body-file",
+                body_file,
+            )
+            for kind, request in (("green", green_request), ("red", red_request))
+        }
         current_sha = self.head_commit(record) if record else ""
         attestation = _gate_attestation_for_prompt(record, current_sha)
         sections = [
@@ -4261,8 +4310,8 @@ class CommandHostRuntime:
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
-            f"{control_plane} verdict --ref {task['ref']} --role reviewer --kind green --request-id {green_request} --body-file {body_file}",
-            f"{control_plane} verdict --ref {task['ref']} --role reviewer --kind red --request-id {red_request} --body-file {body_file}",
+            verdict_commands["green"],
+            verdict_commands["red"],
             "",
         ]
         if attestation:

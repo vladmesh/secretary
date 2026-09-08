@@ -346,6 +346,18 @@ def run_check_broad(args: argparse.Namespace) -> int:
         )
     except BroadCheckError as exc:
         return _fail(exc)
+    result = recorded_result(receipt)
+    if result is None:  # unreachable: the writer records the model it just derived
+        return _fail(BroadCheckError("unrepresentable_result", "the check result could not be recorded"))
+    # `run_broad_check` derives both values from one RunResult. Refuse loudly if that internal
+    # invariant ever regresses instead of returning a receipt status softer than the subprocess.
+    if _exit_code != result.shell_status:
+        return _fail(
+            BroadCheckError(
+                "receipt_status_mismatch",
+                f"check exit status {_exit_code} disagrees with recorded status {result.shell_status}",
+            )
+        )
     payload = {
         "reused": False,
         "path": str(receipt_path(root, spec)),
@@ -355,9 +367,6 @@ def run_check_broad(args: argparse.Namespace) -> int:
     if resolved.module_contract is not None:
         payload["module_contract"] = resolved.module_contract
     print(json.dumps(payload, sort_keys=True, indent=2))
-    result = recorded_result(receipt)
-    if result is None:  # unreachable: the writer records the model it just derived
-        raise BroadCheckError("unrepresentable_result", "the check result could not be recorded")
     return result.shell_status
 
 

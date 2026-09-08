@@ -626,16 +626,20 @@ packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA 
 delta, so the next reviewer verifies the delta and closure rather than restarting at the original base.
 
 Worker and reviewer shells execute with `workspace/.secretary-task-env/venv/bin` first. When an
-adapter omits `broad_check.interpreter`, its candidate `.[dev]` install supplies the project runtime
-there; this is an adapter capability, not a project-name exception.
+adapter declares `broad_check` and omits `broad_check.interpreter`, its candidate `.[dev]` install
+supplies the project runtime there; this is an adapter capability, not a project-name exception. An
+adapter with no `broad_check` declared gets a bare reserved environment because it declared no
+candidate-install contract.
 Adapter setup runs outside both virtualenvs, and an adapter's explicit relative broad-check
 interpreter may select its exclusively owned `.venv`. The general role environment removes the
 launcher's production `PYTHONPATH`. The module receipt records the check process's actual
 interpreter, environment prefix and import origin, and an origin outside the candidate remains a
-refusal. Product control-plane commands in task packets are a narrow exception: their command line
-explicitly names the absolute production interpreter and registered production `src`, instead of
-lending every shell the production virtualenv. The broad command has the same outer boundary, but
-selects the reserved candidate interpreter for the inner suite when the adapter omitted one.
+refusal. One control-plane renderer makes every head-visible Secretary protocol, report, verdict,
+`check broad` and `check show` command explicitly name the absolute production interpreter, `-P`,
+and registered production `src`, instead of lending every shell the production virtualenv. A fit
+broad contract may then select an explicit candidate interpreter for its inner suite. Missing,
+refused and module-less contracts keep the production wrapper reachable but infer no inner runtime
+from `PATH`.
 
 One production-runtime provenance probe fences workspace prepare, worker/reviewer launch, both
 sides of a gate query, both sides of release, and worktree removal. It invokes the fixed production

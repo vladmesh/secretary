@@ -888,7 +888,7 @@ class FakeHost:
     _select_revision_bound_worker_feedback = CommandHostRuntime._select_revision_bound_worker_feedback
     _validated_worker_prerequisites = CommandHostRuntime._validated_worker_prerequisites
     _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)
-    _control_plane_task_command = CommandHostRuntime._control_plane_task_command
+    _control_plane_command = CommandHostRuntime._control_plane_command
 
     def _broad_check_invocation(self, project: str) -> tuple[str, str]:
         """Borrowed from the real host, like the document builder that calls it.

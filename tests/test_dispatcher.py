@@ -10830,6 +10830,68 @@ class HeadPromptTests(unittest.TestCase):
             self.assertIn(f" {sys.executable} -P -m secretary check", command)
             self.assertIn("--default-interpreter .secretary-task-env/venv/bin/python3", command)
 
+    def test_every_contract_branch_uses_the_single_head_command_renderer(self) -> None:
+        cases = (
+            (
+                "fit",
+                ContractVerdict.as_fit(
+                    ModuleContract(
+                        sys.executable,
+                        "example",
+                        module="tests.broad",
+                        interpreter_declared=False,
+                    ),
+                    "example",
+                ),
+                True,
+            ),
+            (
+                "unfit",
+                ContractVerdict.as_refused(CANNOT_ATTEST_PROJECT, "example", "cannot attest"),
+                False,
+            ),
+            (
+                "absent-broad-check",
+                ContractVerdict.as_refused(BROAD_CHECK_NOT_DECLARED, "example", "broad check not declared"),
+                False,
+            ),
+            (
+                "empty-module",
+                ContractVerdict.as_fit(ModuleContract(sys.executable, "example"), "example"),
+                False,
+            ),
+        )
+        task = {**self.task, "project": "example"}
+        command_prefix = f" {sys.executable} -P -m secretary "
+
+        for name, verdict, has_candidate_default in cases:
+            with self.subTest(case=name):
+                self.host.catalog.broad_check_state = verdict
+                renderer = self.host._control_plane_command
+                with mock.patch.object(self.host, "_control_plane_command", wraps=renderer) as rendered:
+                    worker = self.host._worker_task_doc(task, "main", "attempt-1")
+                    reviewer = self.host._review_prompt(task, "attempt-1", 3)
+
+                commands = [
+                    line
+                    for document in (worker, reviewer)
+                    for line in document.splitlines()
+                    if " -m secretary " in line
+                ]
+                self.assertTrue(commands)
+                for command in commands:
+                    self.assertIn("PYTHONPATH=", command)
+                    self.assertIn(command_prefix, command)
+                    self.assertNotIn("python3 -m secretary", command)
+                calls = [call.args for call in rendered.call_args_list]
+                self.assertGreaterEqual(sum(call[:1] == ("task",) for call in calls), 5)
+                self.assertTrue(any(call[:2] == ("check", "broad") for call in calls))
+                self.assertTrue(any(call[:2] == ("check", "show") for call in calls))
+                self.assertEqual(
+                    "--default-interpreter .secretary-task-env/venv/bin/python3" in worker,
+                    has_candidate_default,
+                )
+
 
 class WorkerDurabilityTests(unittest.TestCase):
     """verify_worker_result runs against a real git worktree.

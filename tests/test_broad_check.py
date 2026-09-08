@@ -1478,6 +1478,25 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
 
         self.assertEqual(payload["receipt"]["check_set"]["interpreter"], sys.executable)
 
+    def test_the_cli_refuses_a_subprocess_status_that_disagrees_with_its_receipt(self) -> None:
+        spec = self._suite("project_suite", "print('OK')\n")
+        _, receipt = self._run(spec)
+        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        stdout, stderr = StringIO(), StringIO()
+
+        with (
+            mock.patch("sys.stdout", stdout),
+            mock.patch("sys.stderr", stderr),
+            mock.patch("secretary.check_commands.run_broad_check", return_value=(7, receipt)),
+        ):
+            status = main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        error = json.loads(stderr.getvalue())["error"]
+        self.assertEqual(error["code"], "receipt_status_mismatch")
+        self.assertIn("status 7", error["message"])
+
     def test_check_show_reads_back_the_receipt_the_declared_suite_wrote(self) -> None:
         self._suite_file("project_suite")
         instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
