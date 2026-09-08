@@ -108,6 +108,9 @@ from secretary.dispatcher_observer import (
 from secretary.dispatcher_observer import (
     observer_pid_file as _observer_pid_file,
 )
+from secretary.dispatcher_observer import (
+    render_observer_wake_context as _render_observer_wake_context,
+)
 from secretary.dispatcher_review import (
     command_terminal_status as _command_terminal_status,
 )
@@ -1534,7 +1537,7 @@ class CommandHostRuntime:
                 run = updated
         return _provider_progress_for_run(run)
 
-    def nudge_observer(self, record: Any) -> str:
+    def nudge_observer(self, record: Any, *, sprint: dict[str, Any], change: str = "linked-card") -> str:
         """Give an idle observer one event-driven turn without replacing its head."""
         if self.mode == "noop":
             return DELIVERY_ACCEPTED
@@ -1553,14 +1556,7 @@ class CommandHostRuntime:
         delivery = getattr(record, "delivery", None)
         delivery_id = str(getattr(delivery, "delivery_id", "") or "")
         through_event = str(getattr(delivery, "through_event", "") or "")
-        message = (
-            "A linked card changed. Read its worker report, reviewer verdict and any valid executed "
-            "dispatcher-owned exact-SHA gate receipt first. Suppress a routine broad rerun only when "
-            "that receipt exists; "
-            "none/noop/missing evidence proves no broad suite, so run or request appropriate validation "
-            "when the decision needs it. Keep a worker-local broad receipt with the worker. It does "
-            "not suppress that rerun. Take the next semantic step, then record resume."
-        )
+        message = _render_observer_wake_context(sprint, change=change)
         if delivery_id and through_event:
             message += (
                 " Acknowledge this delivery in that resume with --delivery-id "

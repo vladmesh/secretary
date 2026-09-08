@@ -2166,6 +2166,66 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.delivery.acknowledged_through, first_id)
         self.assertEqual(record.delivery.through_event, self.audit.events()[-1]["event_id"])
 
+    def test_owner_cutoff_outweighs_a_stale_resume_even_with_reversed_event_times(self) -> None:
+        """sprint:1432 order: plan, owner cutoff, then an acknowledgement retaining the plan."""
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        sprint_writer = SprintWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
+        stale = {
+            "selected_step": "cut secretary-1592 next",
+            "selected_why": "the previous card is nearly done",
+            "rejected_alternatives": "closing before the remaining cut",
+            "current_task": "secretary-1591",
+            "dod_state": "one cut remains",
+            "next_safe_step": "create secretary-1592",
+            "recorded_at": "2099-01-01T00:00:00Z",
+        }
+        with mock.patch("secretary.sprints._now", return_value="2099-01-01T00:00:00Z"):
+            sprint_writer.resume(
+                role="observer",
+                actor="observer",
+                reference="sprint:1",
+                entry=stale,
+                request_id="sprint-1432-old-plan",
+            )
+        cutoff = "After secretary-1591, close the sprint. Do not create any new cards."
+        # The wall clock goes backwards. Audit append order, not timestamps, defines the cursor.
+        with mock.patch("secretary.sprints._now", return_value="2000-01-01T00:00:00Z"):
+            cutoff_result = sprint_writer.comment(
+                role="po",
+                actor="owner",
+                reference="sprint:1",
+                body=cutoff,
+                request_id="sprint-1432-owner-cutoff",
+            )
+
+        woke = self.runtime.production_tick()
+        record = self.observers()["sprint:1"]
+
+        self.assertEqual([row["action"] for row in self.actions(woke)], ["observer-nudged"])
+        self.assertEqual(record.delivery.through_event, cutoff_result["event_id"])
+        wake_sprint, change = self.host.observer_wake_contexts[-1]
+        self.assertEqual(change, "sprint-entity")
+        self.assertEqual(
+            [comment["body"] for comment in wake_sprint["comments"]],
+            ["[sprint:resume]\ncut secretary-1592 next", "[po]\n" + cutoff],
+        )
+
+        # The stale turn proves receipt of the cutoff batch without changing its old semantic plan.
+        stale["recorded_at"] = "1999-01-01T00:00:00Z"
+        self.acknowledge_delivery(stale, request_id="sprint-1432-stale-ack")
+        self.kill_observer()
+        replaced = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(replaced)], ["observer-relaunched"])
+        prompt = (Path(self.observers()["sprint:1"].workspace) / "SPRINT.md").read_text(encoding="utf-8")
+        self.assertIn("### Comment 2 (applicable PO/owner decision)", prompt)
+        self.assertIn(cutoff, prompt)
+        self.assertIn('"next_safe_step": "create secretary-1592"', prompt)
+        self.assertLess(prompt.index(cutoff), prompt.index('"next_safe_step"'))
+        self.assertIn("continuity context, not authority over an owner decision", prompt)
+
     def test_replacement_launch_delivers_pending_event_without_a_second_nudge(self) -> None:
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
@@ -2267,7 +2327,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             request_id="crash-boundary-event",
         )
 
-        def crash_after_send(record, *, confirm=None) -> None:
+        def crash_after_send(record, **_context: object) -> None:
             self.host.observer_nudges.append(str(record.sprint))
             raise KeyboardInterrupt("simulated dispatcher crash")
 
@@ -3165,7 +3225,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             calls.append(audit)
             return real_events(audit, *args, **kwargs)  # type: ignore[arg-type]
 
-        def accept_while_ready(record: ObserverRecord) -> str:
+        def accept_while_ready(record: ObserverRecord, **_context: object) -> str:
             self.host.observer_nudges.append(str(record.sprint))
             return "accepted"
 
@@ -5114,10 +5174,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         nudge = self.host.nudge_observer
         self.host.observer_nudges.clear()
 
-        def refuse_the_first_sprints_wake(record):
+        def refuse_the_first_sprints_wake(record, **context: object):
             if str(record.sprint) == self.FIRST:
                 raise HostError("the pane never took the prompt")
-            return nudge(record)
+            return nudge(record, **context)
 
         with mock.patch.object(self.host, "nudge_observer", side_effect=refuse_the_first_sprints_wake):
             result = self.runtime.production_tick()
@@ -5299,6 +5359,14 @@ class ObserverConfigurationTests(unittest.TestCase):
                 "status": "open",
                 "current_task": "secretary-800",
                 "budget": {"total": 3},
+                "comments": [
+                    {"created_at": "same", "body": "[dispatcher]\nfirst"},
+                    {"created_at": "same", "body": "[po]\nowner cutoff"},
+                ],
+                "resume": {
+                    "selected_step": "old plan",
+                    "next_safe_step": "cut another card",
+                },
             },
             skill_path="/shell/skills/observe-sprint/SKILL.md",
         )
@@ -5311,6 +5379,10 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("secretary-800", prompt)
         self.assertIn("/shell/skills/observe-sprint/SKILL.md", prompt)
         self.assertIn("python3 -P -m secretary sprint show --ref sprint:9", prompt)
+        self.assertIn("### Comment 2 (applicable PO/owner decision)", prompt)
+        self.assertLess(prompt.index("[dispatcher]\nfirst"), prompt.index("[po]\nowner cutoff"))
+        self.assertLess(prompt.index("[po]\nowner cutoff"), prompt.index('"next_safe_step"'))
+        self.assertIn("no timestamp cutoff", prompt)
 
     def test_observer_prompt_sources_forbid_subagents(self) -> None:
         document = render_observer_prompt({"ref": "sprint:9"})
@@ -5454,7 +5526,20 @@ class ObserverConfigurationTests(unittest.TestCase):
                 raise AssertionError(args)
 
             with mock.patch.object(host, "_run_json", side_effect=run_json):
-                outcome = host.nudge_observer(record)
+                outcome = host.nudge_observer(
+                    record,
+                    sprint={
+                        "ref": "sprint:1",
+                        "comments": [
+                            {
+                                "created_at": "2026-09-07T23:00:35Z",
+                                "body": "[po]\nclose after secretary-1591; create no new cards",
+                            }
+                        ],
+                        "resume": {"next_safe_step": "create secretary-1592"},
+                    },
+                    change="sprint-entity",
+                )
 
         sent = next(args for args in calls if args[1:3] == ["terminal", "send"])
         wire_body = sent[sent.index("--text") + 1]
@@ -5465,6 +5550,10 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("--through-event evt-card-1", message)
         self.assertIn("only when that receipt exists", message)
         self.assertIn("none/noop/missing evidence proves no broad suite", message)
+        self.assertTrue(message.startswith("The sprint entity changed."))
+        self.assertIn("### Comment 1 (applicable PO/owner decision)", message)
+        self.assertIn("close after secretary-1591; create no new cards", message)
+        self.assertLess(message.index("close after secretary-1591"), message.index('"next_safe_step"'))
         broad = "worker-local broad receipt"
         gate = "dispatcher-owned exact-SHA gate receipt"
 
@@ -5625,7 +5714,7 @@ class ObserverConfigurationTests(unittest.TestCase):
             ):
                 # Two passes of the loop with nothing but the pane to go on, and the pane says
                 # nothing on either. Then Codex writes the turn down and the wake is confirmed.
-                outcome = host.nudge_observer(record)
+                outcome = host.nudge_observer(record, sprint={"ref": "sprint:1089", "comments": []})
 
         evidence = outcome.evidence
         self.assertEqual(outcome, "confirmed")
@@ -5673,7 +5762,10 @@ class ObserverConfigurationTests(unittest.TestCase):
                 raise AssertionError(args)
 
             with mock.patch.object(host, "_run_json", side_effect=run_json):
-                self.assertEqual(host.nudge_observer(record), "accepted")
+                self.assertEqual(
+                    host.nudge_observer(record, sprint={"ref": "sprint:1", "comments": []}),
+                    "accepted",
+                )
 
         sent = next(args for args in calls if args[1:3] == ["terminal", "send"])
         self.assertEqual(sent[sent.index("--terminal") + 1], "observer:alias")
@@ -5695,7 +5787,11 @@ class ObserverConfigurationTests(unittest.TestCase):
                 return True
 
             with self.assertRaises(TypeError):
-                host.nudge_observer(record, confirm=forbidden)  # type: ignore[call-arg]
+                host.nudge_observer(  # type: ignore[call-arg]
+                    record,
+                    sprint={"ref": "sprint:1", "comments": []},
+                    confirm=forbidden,
+                )
 
         self.assertFalse(reached[0])
 
@@ -5730,7 +5826,7 @@ class ObserverConfigurationTests(unittest.TestCase):
                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
                 self.assertRaises(HostError) as raised,
             ):
-                host.nudge_observer(record)
+                host.nudge_observer(record, sprint={"ref": "sprint:1", "comments": []})
 
         self.assertIn("observer wake was not delivered", str(raised.exception))
         self.assertIn("pane-stayed-ready", str(raised.exception))

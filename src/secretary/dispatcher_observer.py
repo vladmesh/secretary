@@ -44,6 +44,7 @@ attested provider source.
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -1036,6 +1037,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
         "known": True,
         "pending": True,
         "event_id": latest_id,
+        "change": "sprint-entity" if str(latest.get("ref") or "") == ref else "linked-card",
         "pending_from": _event_id(significant[0]),
         "occurred_at": str(latest.get("occurred_at") or ""),
         "age_seconds": _event_age_seconds(str(latest.get("occurred_at") or "")),
@@ -1875,7 +1877,15 @@ def _wake_for_event(
         # Delivery acceptance is a terminal concern. The causal acknowledgement is deliberately
         # out of band: the next normal reconciliation reads the observer's durable resume once,
         # instead of polling the complete audit stream while the prompt-delivery loop runs.
-        accepted = runtime.host.nudge_observer(record)
+        # The event cursor decides which immutable batch is owed.  The wake body is a separate,
+        # fresh read of the whole sprint entity: comments added after an earlier read or while an
+        # older batch is awaiting acknowledgement must still reach the observer before it acts.
+        sprint = runtime.sprints.show(ref, include_resume_freshness=False)
+        accepted = runtime.host.nudge_observer(
+            record,
+            sprint=sprint,
+            change=str(event.get("change") or "linked-card"),
+        )
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
         evidence = _evidence_of(exc)
         if delivery_readiness_state(evidence) == READINESS_BUSY:
@@ -2296,7 +2306,7 @@ def _launch_observer(
     try:
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
         # when the sprint was created: goal, DoD, repositories and current card all move.
-        sprint = runtime.sprints.show(ref, include_cards=False, include_resume_freshness=False)
+        sprint = runtime.sprints.show(ref, include_resume_freshness=False)
     except (HostError, TaskError) as exc:
         return _defer(
             runtime,
@@ -3286,6 +3296,7 @@ def render_observer_prompt(
             else []
         ),
         "",
+        *_observer_sprint_context(sprint),
     ]
     if marker[0]:
         sections.extend(
@@ -3313,6 +3324,65 @@ def render_observer_prompt(
             ]
         )
     return "\n".join(sections)
+
+
+def _observer_sprint_context(sprint: dict[str, Any]) -> list[str]:
+    """Render all live comments in board order, then the subordinate saved resume."""
+    raw_comments = sprint.get("comments")
+    comments = raw_comments if isinstance(raw_comments, list) else []
+    lines = [
+        "## Live sprint comments",
+        "",
+        "This is the complete current comment list in board order, with no timestamp cutoff. Apply",
+        "every applicable PO/owner decision before evaluating the saved resume or its",
+        "`next_safe_step`; the resume is continuity context, not authority over an owner decision.",
+        "",
+    ]
+    if not comments:
+        lines.extend(["(none)", ""])
+    for index, comment in enumerate(comments, 1):
+        row = comment if isinstance(comment, dict) else {}
+        body = str(row.get("body") or "")
+        owner = body == "[po]" or body.startswith("[po]\n")
+        label = " (applicable PO/owner decision)" if owner else ""
+        lines.extend(
+            [
+                f"### Comment {index}{label}",
+                "",
+                f"created_at: {row.get('created_at') or '(unknown)'!s}",
+                "",
+                body or "(empty comment body)",
+                "",
+            ]
+        )
+    resume = sprint.get("resume") if isinstance(sprint.get("resume"), dict) else None
+    lines.extend(
+        [
+            "## Saved observer resume",
+            "",
+            "Apply the owner decisions above first. If this resume conflicts with one, revise the plan",
+            "and reflect that decision in the next resume instead of following stale `next_safe_step`.",
+            "",
+            json.dumps(resume, ensure_ascii=False, indent=2) if resume is not None else "(none)",
+            "",
+        ]
+    )
+    return lines
+
+
+def render_observer_wake_context(sprint: dict[str, Any], *, change: str) -> str:
+    """Wake text with the same live owner-decision context a replacement launch receives."""
+    changed = "The sprint entity changed." if change == "sprint-entity" else "A linked card changed."
+    lead = (
+        changed + " Read its worker report, reviewer verdict and any valid executed dispatcher-owned "
+        "exact-SHA gate receipt first. Suppress a routine broad rerun only when that receipt "
+        "exists; none/noop/missing evidence proves no broad suite, so run or request appropriate "
+        "validation when the decision needs it. Keep a worker-local broad receipt with the worker. "
+        "It does not suppress that rerun. The delivery marker is only the immutable audit batch "
+        "boundary; the live sprint context below may be newer. Apply all owner decisions before "
+        "taking the next semantic step, then record resume."
+    )
+    return lead + "\n\n" + "\n".join(_observer_sprint_context(sprint)).rstrip()
 
 
 def _executor_lines(sprint: dict[str, Any]) -> list[str]:

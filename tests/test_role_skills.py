@@ -102,6 +102,17 @@ class CanonicalRegistryTests(unittest.TestCase):
         self.assertNotIn("Before an ordinary RED goes back for another worker round", text)
         self.assertIn("Apply the same classification to the Blocked evidence", text)
 
+    def test_observer_skill_requires_live_owner_comments_before_semantic_writes(self) -> None:
+        source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
+        text = source.read_text(encoding="utf-8")
+
+        self.assertIn("Before `task create`, before `task decide`", text)
+        self.assertIn("post-Done next-cut or close", text)
+        self.assertIn("complete comments list in board order", text)
+        self.assertIn("Do not use a\ntimestamp cutoff", text)
+        self.assertIn("Apply every applicable owner decision before the saved resume", text)
+        self.assertIn("reflect it in the resume written for this turn", text)
+
     def test_observer_skill_stops_a_round_that_only_moves_the_defect(self) -> None:
         source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
         text = source.read_text(encoding="utf-8")
