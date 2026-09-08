@@ -28,7 +28,7 @@ class LiveSwimlaneBoard(ProductBoard):
     `false` instead of an error, which is what the live board does for `swimlane_id=0`.
     """
 
-    LANES = [
+    LANES: ClassVar[list[dict[str, object]]] = [
         {"id": 9, "name": "service-template", "position": 3},
         {"id": 4, "name": "secretary", "position": 1},
         {"id": 7, "name": "codegen-orchestrator", "position": 2},
@@ -97,16 +97,7 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
     )
 
     def setUp(self) -> None:
-        reason = self.KANBOARD_ONLY.get(self._testMethodName)
-        if reason and self.BACKEND != "kanboard":
-            self.skipTest(reason)
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmpdir.name)
-        (self.root / "projects").mkdir()
-        (self.root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
-
-    def tearDown(self) -> None:
-        self.tmpdir.cleanup()
+        super().setUp()
 
     def _store(self, client) -> ProductIssueStore:
         return ProductIssueStore(client, data_dir=self.root / "data", instance=self.root)
@@ -124,7 +115,7 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
         coincidence of position rather than by the product.  The board is therefore reordered so
         that the coincidence cannot hold: the product lane is now last, and still chosen.
         """
-        client, store = self.lane_store(
+        store = self.store_with_lanes(
             [
                 {"id": 9, "name": "service-template", "position": 1},
                 {"id": 7, "name": "codegen-orchestrator", "position": 2},
@@ -132,7 +123,8 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             ]
         )
 
-        product = store.create_product(
+        product = self.create_product(
+            store=store,
             product_id="secretary",
             projects=["secretary"],
             title="Secretary",
@@ -140,7 +132,8 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             actor="po",
             request_id="live-product",
         )
-        issue = store.create_issue(
+        issue = self.create_issue(
+            store=store,
             product="secretary",
             issue_kind="bug",
             priority="P1",
@@ -151,9 +144,11 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
         )
 
         self.assertEqual(product["id"], "secretary")
-        self.assertEqual(self.lane_binding_for(client, "product:secretary"), "secretary")
-        self.assertEqual(self.lane_binding_for(client, issue["ref"]), "secretary")
-        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.lane_binding("product:secretary", store=store), "secretary")
+        self.assertEqual(self.lane_binding(issue["ref"], store=store), "secretary")
+        self.assertEqual(
+            self.request_state(store=store)["transactions"], {"ok": True, "pending": 0}
+        )
 
     def test_the_lane_does_not_depend_on_swimlane_order_or_on_a_default_lane(self) -> None:
         """The same product takes the same lane whatever order the board lists, `Default` first.
@@ -183,9 +178,10 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
                 root = Path(tmpdir)
                 (root / "projects").mkdir()
                 (root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
-                client, store = self.lane_store(order, root=root)
+                store = self.store_with_lanes(order, root=root)
 
-                store.create_product(
+                self.create_product(
+                    store=store,
                     product_id="secretary",
                     projects=["secretary"],
                     title="Secretary",
@@ -194,7 +190,7 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
                     request_id="ordered-product",
                 )
 
-                chosen.append(self.lane_binding_for(client, "product:secretary"))
+                chosen.append(self.lane_binding("product:secretary", store=store))
         self.assertEqual(chosen, ["secretary", "secretary", "secretary"])
 
     def test_a_product_without_a_lane_gets_one_named_after_it(self) -> None:
@@ -211,9 +207,10 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             "id: service-template\n",
             encoding="utf-8",
         )
-        client, store = self.lane_store([dict(lane) for lane in LiveSwimlaneBoard.LANES])
+        store = self.store_with_lanes(self.existing_project_lanes())
 
-        store.create_product(
+        self.create_product(
+            store=store,
             product_id="codegen",
             projects=["codegen-orchestrator", "service-template"],
             title="Codegen",
@@ -221,7 +218,8 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             actor="po",
             request_id="codegen-product",
         )
-        issue = store.create_issue(
+        issue = self.create_issue(
+            store=store,
             product="codegen",
             issue_kind="feature",
             priority="P2",
@@ -231,14 +229,17 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             request_id="codegen-issue",
         )
 
-        self.assertEqual(self.lane_binding_for(client, "product:codegen"), "codegen")
-        self.assertEqual(self.lane_binding_for(client, issue["ref"]), "codegen")
-        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.lane_binding("product:codegen", store=store), "codegen")
+        self.assertEqual(self.lane_binding(issue["ref"], store=store), "codegen")
+        self.assertEqual(
+            self.request_state(store=store)["transactions"], {"ok": True, "pending": 0}
+        )
 
     def test_a_board_without_swimlanes_gets_the_product_lane(self) -> None:
-        client, store = self.lane_store([])
+        store = self.store_with_lanes([])
 
-        store.create_product(
+        self.create_product(
+            store=store,
             product_id="secretary",
             projects=["secretary"],
             title="Secretary",
@@ -247,8 +248,10 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             request_id="plain-product",
         )
 
-        self.assertEqual(self.lane_binding_for(client, "product:secretary"), "secretary")
-        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.lane_binding("product:secretary", store=store), "secretary")
+        self.assertEqual(
+            self.request_state(store=store)["transactions"], {"ok": True, "pending": 0}
+        )
 
     def test_a_lane_another_writer_added_between_the_two_calls_is_reused(self) -> None:
         """A refused `addSwimlane` is read back, not reported: the lane exists, that is the answer."""
@@ -276,7 +279,7 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
         self.assertEqual(self._created(client, "product:secretary")["swimlane_id"], 21)
         self.assertEqual([lane["name"] for lane in client.swimlanes], ["secretary"])
 
-    _READ_METHODS = {
+    _READ_METHODS: ClassVar[set[str]] = {
         "getProjectByName",
         "getColumns",
         "getAllTasks",
@@ -315,7 +318,8 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
         no longer be created under its own request id.  Creating the product lane is such a write,
         so it happens before the occurrence is staged.
         """
-        client, store = self.lane_store([dict(lane) for lane in LiveSwimlaneBoard.LANES])
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
         trace = self._staging_trace(client)
 
         store.create_product(
@@ -358,16 +362,18 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             return result
 
         client.call = die_after_the_lane  # type: ignore[method-assign]
-        with mock.patch.object(TaskAudit, "discard", lambda *args, **kwargs: None):
-            with self.assertRaises(TaskError):
-                store.create_product(
-                    product_id="butler",
-                    projects=["secretary"],
-                    title="Butler",
-                    description="",
-                    actor="po",
-                    request_id="died-after-the-lane",
-                )
+        with (
+            mock.patch.object(TaskAudit, "discard", lambda *args, **kwargs: None),
+            self.assertRaises(TaskError),
+        ):
+            store.create_product(
+                product_id="butler",
+                projects=["secretary"],
+                title="Butler",
+                description="",
+                actor="po",
+                request_id="died-after-the-lane",
+            )
 
         # The lane survives the failed attempt and is reused, not added a second time.
         self.assertEqual([lane["name"] for lane in client.swimlanes][-1], "butler")
@@ -397,8 +403,9 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
         Between the two deliveries the board gains a `Default swimlane` and puts it first, which
         under the lane rule this replaces would have been the lane of the second attempt.
         """
-        client, store = self.lane_store([dict(lane) for lane in LiveSwimlaneBoard.LANES])
-        store.create_product(
+        store = self.store_with_lanes(self.existing_project_lanes())
+        self.create_product(
+            store=store,
             product_id="secretary",
             projects=["secretary"],
             title="Secretary",
@@ -406,7 +413,8 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             actor="po",
             request_id="redelivered-product",
         )
-        issue = store.create_issue(
+        issue = self.create_issue(
+            store=store,
             product="secretary",
             issue_kind="bug",
             priority="P0",
@@ -416,8 +424,11 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             request_id="redelivered-issue",
         )
 
-        self.prepend_lane(client, {"id": 33, "name": "Default swimlane", "position": 0})
-        again = store.create_issue(
+        self.add_external_lane(
+            {"id": 33, "name": "Default swimlane", "position": 0}, store=store, first=True
+        )
+        again = self.create_issue(
+            store=store,
             product="secretary",
             issue_kind="bug",
             priority="P0",
@@ -426,7 +437,8 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
             actor="po",
             request_id="redelivered-issue",
         )
-        product_again = store.create_product(
+        product_again = self.create_product(
+            store=store,
             product_id="secretary",
             projects=["secretary"],
             title="Secretary",
@@ -437,10 +449,15 @@ class ProductIssueSwimlaneTests(ProductIssueFixture, unittest.TestCase):
 
         self.assertEqual(again["ref"], issue["ref"])
         self.assertEqual(product_again["id"], "secretary")
-        self.assertEqual(self.lane_binding_for(client, "product:secretary"), "secretary")
-        self.assertEqual(self.lane_binding_for(client, issue["ref"]), "secretary")
-        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
-        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.lane_binding("product:secretary", store=store), "secretary")
+        self.assertEqual(self.lane_binding(issue["ref"], store=store), "secretary")
+        self.assertEqual(
+            self.request_state(store=store),
+            {
+                "transactions": {"ok": True, "pending": 0},
+                "audit": {"ok": True, "pending": 0},
+            },
+        )
 
     def test_a_retried_staged_create_takes_the_lane_of_its_staged_product(self) -> None:
         """The staged transaction writer reads the product from its own intent, not from the board.
@@ -1490,7 +1507,7 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
 
     def test_all_operations_restart_without_duplicate_backend_writes(self) -> None:
         class LoseReplyOnce(ProductBoard):
-            lost: set[str] = set()
+            lost: ClassVar[set[str]] = set()
 
             def call(self, method: str, **params: object) -> object:
                 result = super().call(method, **params)
