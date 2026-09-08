@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,10 +108,10 @@ class ProductionRuntime:
             "SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")
         )
         registered = Path(product_root).expanduser()
-        # The registered installation, not whichever interpreter imported a diagnostic or test
-        # caller, is the value being protected.
-        interpreter = registered / ".venv" / "bin" / "python3"
-        return cls(str(interpreter), str(registered), workspaces_root=str(root))
+        # Capture the interpreter that is actually running the dispatcher. Production's systemd
+        # unit starts the entry point from the registered checkout's venv; recording sys.executable
+        # preserves that fact without guessing a layout that differs for an installed CI runner.
+        return cls(sys.executable, str(registered), workspaces_root=str(root))
 
     def probe(self) -> RuntimeProvenance:
         """Observe this exact interpreter without ambient source-path assistance."""

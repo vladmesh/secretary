@@ -37,7 +37,16 @@ def _venv(root: Path) -> Path:
 
 def _install(python: Path, checkout: Path) -> None:
     subprocess.run(
-        [str(python), "-m", "pip", "install", "--no-index", "-e", ".[dev]"],
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--no-build-isolation",
+            "-e",
+            ".[dev]",
+        ],
         cwd=checkout,
         check=True,
         capture_output=True,
@@ -88,7 +97,7 @@ class ProductionRuntimeTests(unittest.TestCase):
             subprocess.run(
                 ["python3", "-m", "pip", "install", "-e", ".[dev]"],
                 cwd=task,
-                env={**env, "PIP_NO_INDEX": "1"},
+                env={**env, "PIP_NO_INDEX": "1", "PIP_NO_BUILD_ISOLATION": "1"},
                 check=True,
                 capture_output=True,
                 text=True,

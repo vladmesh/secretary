@@ -24,6 +24,7 @@ import inspect
 import os
 import pwd
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -837,7 +838,12 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ, {**unit_env, "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, clear=True
         ):
-            command = wrap_role_command("worker", "printenv TA_SECRETARY_REPO")
+            workspace_python = self.root / ".venv" / "bin" / "python3"
+            workspace_python.parent.mkdir(parents=True)
+            workspace_python.symlink_to(sys.executable)
+            command = wrap_role_command(
+                "worker", "printenv TA_SECRETARY_REPO", workspace=str(self.root)
+            )
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
@@ -865,7 +871,12 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         bound = self.unit_env("secretary-dispatcher-production.service")
         bound["TA_SECRETARY_REPO"] = str(Path(__file__).resolve().parents[1])
         with mock.patch.dict(os.environ, bound, clear=True):
-            command = wrap_role_command("worker", "printenv SECRETARY_INSTANCE")
+            workspace_python = self.root / ".venv" / "bin" / "python3"
+            workspace_python.parent.mkdir(parents=True)
+            workspace_python.symlink_to(sys.executable)
+            command = wrap_role_command(
+                "worker", "printenv SECRETARY_INSTANCE", workspace=str(self.root)
+            )
 
         # The role wrapper starts in a worktree.  A package there must not shadow the selected
         # control plane merely because Python's default path would put the cwd first.

@@ -6,6 +6,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# CI installs the checked-out candidate into its selected Python rather than into the production
+# systemd layout. Register that checkout explicitly so runtime-provenance tests exercise the same
+# interpreter/root invariant without falling back to the runner user's nonexistent ~/secretary.
+env:
+  TA_SECRETARY_REPO: ${{ github.workspace }}
+
 jobs:
   test_suites:
     name: test / ${{ matrix.suite }}
