@@ -1290,6 +1290,9 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
+        workspace_python = self.workspace / ".venv" / "bin" / "python3"
+        workspace_python.parent.mkdir(parents=True)
+        workspace_python.symlink_to(sys.executable)
         self.repo = self.root / "repo"
         (self.repo / ".git").mkdir(parents=True)
         self.binary = self.root / "codex"

@@ -1435,12 +1435,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self.assertEqual(payload["module_contract"], {"source": "adapter"})
 
     def test_a_declared_contract_with_no_interpreter_runs_on_the_wrappers_own(self) -> None:
-        """A supported contract must not require a `workspace/.venv` that does not exist.
-
-        The Secretary worktrees have no venv of their own. Since the check subprocess prepends the
-        candidate's own import roots to `sys.path`, the wrapper's interpreter imports the candidate,
-        so naming none is correct rather than merely convenient (issue:8b39e60e4df361c6138e).
-        """
+        """An omitted override means the wrapper's interpreter, with observed candidate import."""
         self._suite_file("project_suite")
         instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
 

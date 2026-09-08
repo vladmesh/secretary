@@ -342,12 +342,10 @@ def _declared_contract(
             f"adapter {adapter_name!r} declares broad-check arguments that are not a list of strings",
         )
     # An omitted interpreter is not an incomplete contract, it is the common case. PR #329 made the
-    # check subprocess prepend the candidate workspace's own import roots to `sys.path` before it
-    # imports the project, so the interpreter that runs the wrapper imports the CANDIDATE and not
-    # whatever a shared editable installation points at. That is what lets a project whose worktrees
-    # have no venv of their own declare a supported contract at all: requiring `workspace/.venv`
-    # here would demand a directory the Secretary worktrees do not have and are not getting
-    # (issue:8b39e60e4df361c6138e). A declared interpreter still means exactly what it always did.
+    # check subprocess prepends the candidate workspace's own import roots to `sys.path` before it
+    # imports the project. Dispatcher heads run the wrapper with their workspace-owned interpreter;
+    # direct CLI callers use the interpreter they deliberately invoked. A declared interpreter still
+    # means exactly what it always did.
     if "interpreter" not in configured:
         return ContractVerdict.as_fit(
             ModuleContract(sys.executable, import_package, module=module, args=args), adapter_name

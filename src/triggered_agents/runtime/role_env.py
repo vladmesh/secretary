@@ -14,7 +14,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .paths import PRODUCT_ENV, configured_product_root, default_instance_path
+from .paths import PRODUCT_ENV, default_instance_path
 
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
 SECRETARY_RUNTIME_ENV_FILE_ENV = "SECRETARY_RUNTIME_ENV_FILE"
@@ -98,6 +98,7 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "curator": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
 }
 RUFF_ROLES = frozenset(("worker", "reviewer"))
+WORKSPACE_ENV_DIR = ".venv"
 
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
 # are rejected before reaching this gate; they remain here as the board's declared roles.
@@ -177,7 +178,11 @@ def _is_sensitive_name(name: str) -> bool:
 
 
 def runtime_env(
-    role: str, *, base_env: dict[str, str] | None = None, env_file: Path | str | None = None
+    role: str,
+    *,
+    base_env: dict[str, str] | None = None,
+    env_file: Path | str | None = None,
+    workspace: Path | str | None = None,
 ) -> dict[str, str]:
     """Return a sanitized env for `role`, with role-allowed values overlaid from the source file."""
     allowed = set(allowlist(role))
@@ -203,8 +208,18 @@ def runtime_env(
             env[key] = base[key]
 
     if role in RUFF_ROLES:
-        venv_bin = configured_product_root(base) / ".venv" / "bin"
-        env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
+        if workspace is not None:
+            environment = Path(workspace).expanduser() / WORKSPACE_ENV_DIR
+            venv_bin = environment / "bin"
+            python = venv_bin / "python3"
+            if not python.is_file() or not os.access(python, os.X_OK):
+                raise RoleEnvError(f"workspace Python environment is unavailable at {environment}")
+            env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
+            env["VIRTUAL_ENV"] = str(environment)
+        # The wrapper itself is imported through an explicit production source prefix. That is a
+        # trusted command boundary, not ambient authority for every command the head subsequently
+        # runs. Candidate imports come from its environment or the broad-check bootstrap.
+        env.pop("PYTHONPATH", None)
 
     if role in BOARD_ROLES:
         env["BOARD_ROLE"] = role
@@ -213,17 +228,24 @@ def runtime_env(
     return env
 
 
-def role_shell_command(role: str, command: str, *, environ: dict[str, str] | None = None) -> str:
+def role_shell_command(
+    role: str,
+    command: str,
+    *,
+    environ: dict[str, str] | None = None,
+    workspace: Path | str | None = None,
+) -> str:
     """Make product-provisioned tools available inside a role's login shell.
 
     The role wrapper starts ``/bin/sh -lc`` so a head gets its normal login environment. Some
     shell profiles replace ``PATH`` there, after ``runtime_env()`` has already supplied it. Keep
-    the product venv prefix in the command itself for the two roles that use the pinned linter.
+    the workspace venv prefix in the command itself for worker and reviewer tooling.
     """
     if role not in RUFF_ROLES:
         return command
-    env = os.environ if environ is None else environ
-    venv_bin = configured_product_root(env) / ".venv" / "bin"
+    if workspace is None:
+        return command
+    venv_bin = Path(workspace).expanduser() / WORKSPACE_ENV_DIR / "bin"
     return f"PATH={shlex.quote(str(venv_bin))}${{PATH:+:$PATH}}; export PATH; {command}"
 
 
@@ -257,7 +279,12 @@ def launch_binding() -> list[str]:
 
 
 def wrap_shell_command(
-    role: str, command: str, *, pythonpath: str | None = None, env_file: Path | str | None = None
+    role: str,
+    command: str,
+    *,
+    pythonpath: str | None = None,
+    env_file: Path | str | None = None,
+    workspace: Path | str | None = None,
 ) -> str:
     """Shell command that execs `command` under the role env without putting secret values in argv."""
     py_path = pythonpath or runtime_pythonpath()
@@ -274,7 +301,14 @@ def wrap_shell_command(
     ]
     if env_file is not None:
         parts += ["--env-file", shlex.quote(str(env_file))]
-    parts += ["--", "/bin/sh", "-lc", shlex.quote(role_shell_command(role, command))]
+    if workspace is not None:
+        parts += ["--workspace", shlex.quote(str(workspace))]
+    parts += [
+        "--",
+        "/bin/sh",
+        "-lc",
+        shlex.quote(role_shell_command(role, command, workspace=workspace)),
+    ]
     return " ".join(parts)
 
 
@@ -282,6 +316,7 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
     parser = argparse.ArgumentParser(prog=f"{prog} exec")
     parser.add_argument("--role", required=True)
     parser.add_argument("--env-file")
+    parser.add_argument("--workspace")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     ns = parser.parse_args(argv)
     command = list(ns.command)
@@ -290,7 +325,9 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
     if not command:
         parser.error("missing command after --")
     try:
-        env = runtime_env(ns.role, env_file=ns.env_file)
+        if ns.role in RUFF_ROLES and not ns.workspace:
+            raise RoleEnvError(f"role {ns.role!r} requires a workspace-owned Python environment")
+        env = runtime_env(ns.role, env_file=ns.env_file, workspace=ns.workspace)
         if ns.role in BOARD_TRANSPORT_ROLES:
             from .board_transport import BoardTransportError, resolve_for_environ
 

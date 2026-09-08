@@ -1107,6 +1107,25 @@ backend altered those strings on the way through by trimming, re-encoding or cha
 overlap check would be comparing something other than what was declared. Nothing observed says it does;
 it is untested against the real thing, and that is the state of the evidence.
 
+## Dispatcher task Python isolation
+
+Every newly prepared card workspace contains `.venv`, created before its adapter setup. Worker and
+reviewer `python3`, `python`, `pip` and broad-check subprocesses must resolve there. Do not run
+candidate installs against `PRODUCT_ROOT/.venv`, and do not use `PYTHONPATH` to conceal or repair an
+editable install that points elsewhere.
+
+At prepare, launch, gate, release and immediately before removal, the dispatcher probes the fixed
+production interpreter. A failure names one of `interpreter_unavailable`, `missing_import`,
+`wrong_root` or `workspace_targeted_editable`, blocks the card, and retains its workspace. Inspect the
+reported interpreter, registered root, import origin and metadata target. Recovery is an explicit
+operator action from the registered production checkout only:
+
+    PRODUCT_ROOT/.venv/bin/python3 -m pip install --no-deps -e PRODUCT_ROOT
+
+Substitute the exact absolute registered root for both `PRODUCT_ROOT` occurrences, then run the
+read-only provenance/dispatcher check appropriate to the incident. Do not restart or kill
+application heads, rewrite task metadata, or delete the retained checkout as part of this recovery.
+
 ## Sprint observer heads
 
 The same production tick, in the same reconciliation pass, keeps one observer head per open sprint on the

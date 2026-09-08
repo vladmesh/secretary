@@ -6199,7 +6199,23 @@ class DispatcherRuntime:
                 step=step,
                 outcome="merge failed",
             )
-        self.host.teardown(record)
+        try:
+            self.host.teardown(record)
+        except HostError as exc:
+            # Cleanup is a provenance boundary, not best effort. A mismatch keeps the checkout and
+            # prevents Done so the next tick cannot repeatedly run an already-failed release path.
+            return self._block_merge_path(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                action="cleanup-provenance-blocked",
+                reason=f"release cleanup refused: {scrub_host_output(str(exc))}",
+                step=step,
+                outcome="release cleanup refused",
+                decision=decision,
+            )
         self.terminal_effect(
             task,
             record,

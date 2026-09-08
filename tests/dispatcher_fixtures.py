@@ -509,6 +509,10 @@ class RecordingReviewHost(CommandHostRuntime):
         # pane ready for input.
         self.wait_answer: dict = {}
 
+    def _require_workspace_environment(self, workspace: str) -> None:
+        """Transport fixtures do not execute candidate Python tooling."""
+        return None
+
     def _transport_preflight(
         self,
         head: str,

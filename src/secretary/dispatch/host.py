@@ -32,6 +32,7 @@ from secretary.config import validate_instance
 from secretary.dispatch.head_vitality_episode import (
     VitalityVerdict as VitalityVerdict,
 )
+from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from secretary.dispatcher_gate import (
     GateResult,
 )
@@ -98,9 +99,6 @@ from secretary.dispatcher_observer import (
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
     ObserverLaunchAborted,
-)
-from secretary.dispatcher_observer import (
-    delivery_evidence_summary as _observer_delivery_evidence_summary,
 )
 from secretary.dispatcher_observer import (
     observer_launch_prompt as _observer_launch_prompt,
@@ -266,6 +264,7 @@ from triggered_agents.runtime.pane_host import (
 from triggered_agents.runtime.pane_host import (
     safe_command_label as _safe_command_label,
 )
+from triggered_agents.runtime.paths import configured_product_root
 from triggered_agents.runtime.prompt_document import (
     PromptDocumentError,
 )
@@ -771,13 +770,25 @@ def _durable_head_run(subject: Any) -> head_ops.HeadRun | None:
 
 
 class CommandHostRuntime:
-    def __init__(self, catalog: InstanceCatalog, data_dir: Path, *, mode: str = "real") -> None:
+    def __init__(
+        self,
+        catalog: InstanceCatalog,
+        data_dir: Path,
+        *,
+        mode: str = "real",
+        production_runtime: ProductionRuntime | None = None,
+    ) -> None:
         self.catalog = catalog
         self.data_dir = data_dir
         # TASK.md is a durable projection, so its feedback selector reads the same audit journal
         # as the dispatcher rather than depending on a live record or wall-clock ordering.
         self.audit = TaskAudit(data_dir)
         self.mode = mode
+        # Fixed once for this dispatcher process. Every lifecycle fence asks this same value rather
+        # than independently guessing an interpreter, checkout or workspace namespace.
+        self.production_runtime = production_runtime or ProductionRuntime.current(
+            configured_product_root()
+        )
         # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
         # save. Its durable-state owner installs this only while it holds the record's file: this
         # host has a record, not that file. Unset, a run reaches disk with the tick's records.
@@ -971,6 +982,7 @@ class CommandHostRuntime:
         failover: bool = False,
         heartbeat_run_id: str = "",
     ) -> dict[str, Any]:
+        self._require_production_runtime("worker-prepare")
         project = task["project"]
         self._require_project_available(project)
         base = self.catalog.integration_base(project, task.get("workspace", {}).get("base_branch"))
@@ -979,6 +991,10 @@ class CommandHostRuntime:
         reused = Path(workspace).exists()
         if reused:
             self._validate_resumable_workspace(task, workspace)
+            missing_environment = not self._workspace_python(workspace).is_file()
+            self._prepare_workspace_environment(workspace)
+            if missing_environment:
+                self._run_setup(project, workspace)
         else:
             if require_existing_workspace:
                 # The card was requeued onto the checkout its own last attempt preserved, and that
@@ -987,7 +1003,9 @@ class CommandHostRuntime:
                 raise HostError("resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
             workspace = self._create_workspace(project, worker_id, seed, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
+            self._prepare_workspace_environment(workspace)
             self._run_setup(project, workspace)
+        self._require_workspace_environment(workspace)
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id, generation)
@@ -1028,6 +1046,7 @@ class CommandHostRuntime:
             # Same family as the missing resume workspace above: the checkout this card's rework
             # continues in is not there, which is this card's own bring-up contract, not the host's.
             raise HostError("rework workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
+        self._require_workspace_environment(str(workspace))
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
@@ -1902,7 +1921,10 @@ class CommandHostRuntime:
         return True
 
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
-        return _gate_check(self, task, record)
+        self._require_production_runtime("candidate-gate-before")
+        result = _gate_check(self, task, record)
+        self._require_production_runtime("candidate-gate-after")
+        return result
 
     def rerun_failed_ci(self, task: dict[str, Any], record: DispatcherRecord, result: GateResult) -> None:
         """The gate owns the GitHub Actions write needed to retry its classified failed run."""
@@ -2026,6 +2048,7 @@ class CommandHostRuntime:
         raise HostError(f"project {project!r} repo {repo} is not registered with orca")
 
     def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        self._require_production_runtime("release-before")
         if self.mode == "noop" or not record.workspace:
             return
         if os.environ.get("SECRETARY_DISPATCHER_AUTOMERGE", "on").strip().lower() == "off":
@@ -2036,10 +2059,12 @@ class CommandHostRuntime:
             if self._no_diff_research_delivery_is_complete(task, record):
                 return
             self._merge_github_pr(task, record, branch, base)
+            self._require_production_runtime("release-after")
             return
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         if _same_repo(repo, Path(self.catalog.instance_dir)):
             self._complete_green_instance_repo(record, branch, base, repo)
+            self._require_production_runtime("release-after")
             return
         # Publish onto the card's integration base (a non-fast-forward push is rejected, never
         # force-landed), then fast-forward the checkout: that is how a merged self-modification
@@ -2050,6 +2075,7 @@ class CommandHostRuntime:
         self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:{base}"], "merge push")
         self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
+        self._require_production_runtime("release-after")
 
     def _no_diff_research_delivery_is_complete(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         """Whether a dispatcher-dispatched research candidate has no delivery effect left.
@@ -2627,10 +2653,12 @@ class CommandHostRuntime:
         """
         if self.mode == "noop" or not record.workspace:
             return
+        self._require_production_runtime("cleanup-before-stop")
         try:
             self.stop_workspace(record)
         except HostError:
             return
+        self._require_production_runtime("cleanup-before-worktree-remove")
         try:
             self._run_json(
                 ["orca", "worktree", "rm", "--worktree", f"path:{record.workspace}", "--force", "--json"]
@@ -2797,10 +2825,100 @@ class CommandHostRuntime:
             return
         adapter = self.catalog.adapter(project)
         for command in adapter.get("setup", {}).get("commands", []):
-            self._run_shell(str(command), Path(workspace), "setup command")
+            self._run_workspace_shell(str(command), Path(workspace), "setup command")
         smoke = adapter.get("smoke", {}).get("command")
         if smoke:
-            self._run_shell(str(smoke), Path(workspace), "smoke command")
+            self._run_workspace_shell(str(smoke), Path(workspace), "smoke command")
+
+    def _prepare_workspace_environment(self, workspace: str) -> None:
+        """Create the one disposable Python environment owned by this task checkout."""
+        if self.mode == "noop":
+            return
+        root = Path(workspace)
+        environment = root / ".venv"
+        if environment.exists():
+            self._require_workspace_environment(workspace)
+            self._share_production_dependencies(environment)
+            return
+        self._run(
+            [self.production_runtime.interpreter, "-m", "venv", "--system-site-packages", str(environment)],
+            "workspace Python environment",
+            cwd=root,
+        )
+        self._share_production_dependencies(environment)
+        self._require_workspace_environment(workspace)
+
+    def _share_production_dependencies(self, environment: Path) -> None:
+        """Expose installed dependencies read-only without lending pip the production prefix.
+
+        A venv made by a venv interpreter inherits the base OS site packages, not its parent's
+        site-packages. The production environment is the installation's dependency authority, so
+        the task environment may read that directory; its own prefix remains the only pip target.
+        Candidate provenance still refuses an import that resolves back to the production checkout.
+        """
+        located = self._run(
+            [
+                self.production_runtime.interpreter,
+                "-I",
+                "-c",
+                "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+            ],
+            "production dependency path",
+        ).stdout.strip()
+        candidates = sorted(environment.glob("lib/python*/site-packages"))
+        if not located or len(candidates) != 1:
+            raise HostError("workspace Python environment has no unambiguous site-packages directory")
+        # A plain path makes installed dependencies importable but does not recursively execute the
+        # production directory's editable ``.pth`` files. In particular it does not lend the task
+        # environment the production checkout's ``secretary`` import.
+        try:
+            write_text_atomic(candidates[0] / "_secretary_production_dependencies.pth", located + "\n")
+        except RuntimeError as exc:
+            raise HostError(f"workspace dependency boundary could not be written: {exc}") from None
+
+    @staticmethod
+    def _workspace_python(workspace: str | Path) -> Path:
+        return Path(workspace) / ".venv" / "bin" / "python3"
+
+    def _require_workspace_environment(self, workspace: str) -> None:
+        if self.mode == "noop":
+            return
+        python = self._workspace_python(workspace)
+        try:
+            environment = python.parent.parent.resolve(strict=True)
+            inside = environment.is_relative_to(Path(workspace).resolve(strict=True))
+        except (OSError, RuntimeError, ValueError):
+            inside = False
+        if not inside or not os.access(python, os.X_OK):
+            raise HostError(f"workspace Python environment is unavailable at {python.parent.parent}")
+
+    def _run_workspace_shell(self, command: str, cwd: Path, label: str) -> None:
+        environment = cwd / ".venv"
+        prefix = (
+            f"PATH={shlex.quote(str(environment / 'bin'))}${{PATH:+:$PATH}}; "
+            f"VIRTUAL_ENV={shlex.quote(str(environment))}; export PATH VIRTUAL_ENV; "
+        )
+        self._run_shell(prefix + command, cwd, label)
+
+    def production_runtime_provenance(self) -> RuntimeProvenance:
+        """Structured, secret-free observation used by every production runtime fence."""
+        return self.production_runtime.probe()
+
+    def _require_production_runtime(self, boundary: str) -> RuntimeProvenance:
+        if self.mode == "noop":
+            return RuntimeProvenance(
+                "valid",
+                self.production_runtime.interpreter,
+                self.production_runtime.product_root,
+                "noop",
+                (),
+            )
+        result = self.production_runtime_provenance()
+        if not result.valid:
+            error = HostError(result.refusal(boundary))
+            error.evidence = result.as_dict()
+            raise error
+        return result
 
     def _launch(
         self,
@@ -2819,6 +2937,9 @@ class CommandHostRuntime:
         heartbeat_run_id: str = "",
     ) -> LaunchedHead:
         """Bring one head up and hand back the pane together with the configuration it started with."""
+        if role in {WORKER_ROLE, REVIEW_ROLE, "reviewer"}:
+            self._require_production_runtime(f"{role}-launch")
+            self._require_workspace_environment(workspace)
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         task_ref = self._task_ref(task, role, prompt_document)
         run_id = heartbeat_run_id or head_ops.new_run_id()
@@ -3642,8 +3763,10 @@ class CommandHostRuntime:
             return "", ""
         arguments = "".join(f" --module-arg {shlex.quote(argument)}" for argument in contract.args)
         return (
-            f"python3 -m secretary check broad --reuse --module {contract.module}{arguments}",
-            f"python3 -m secretary check show --module {contract.module}{arguments}",
+            f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary check broad "
+            f"--reuse --module {contract.module}{arguments}",
+            f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary check show "
+            f"--module {contract.module}{arguments}",
         )
 
     def _worker_task_doc(

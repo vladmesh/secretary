@@ -83,7 +83,6 @@ from secretary.dispatcher_launcher import (
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
 )
-from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
 from secretary.dispatcher_production import _budget_event_type, production_adopt_attempt_id
 from secretary.dispatcher_review import (
     start_review as start_reviewer,
@@ -101,6 +100,7 @@ from secretary.projects.contract import (
     ContractVerdict,
     ModuleContract,
 )
+from triggered_agents.runtime.codex_preflight import ensure_codex_update_modal_dismissed
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
 from secretary.dispatcher_state import (
@@ -10157,9 +10157,9 @@ class HeadPromptTests(unittest.TestCase):
         """
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("python3 -m secretary check broad --reuse --module", doc)
+        self.assertIn("python3 -P -m secretary check broad --reuse --module", doc)
         self.assertNotIn("python3 -m secretary check broad --module", doc)
-        self.assertIn("python3 -m secretary check show --module", doc)
+        self.assertIn("python3 -P -m secretary check show --module", doc)
         # The shell shape is offered, with the promise it cannot keep spelled out.
         self.assertIn("never reused in place of a run", doc)
         self.assertIn("state/checks/broad-<digest>.json", doc)
@@ -10188,11 +10188,11 @@ class HeadPromptTests(unittest.TestCase):
 
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
+        self.assertIn("    PYTHONPATH=", doc)
         self.assertIn(
-            "    python3 -m secretary check broad --reuse --module tests.broad --module-arg -v",
-            doc,
+            "python3 -P -m secretary check broad --reuse --module tests.broad --module-arg -v", doc
         )
-        self.assertIn("python3 -m secretary check show --module tests.broad --module-arg -v", doc)
+        self.assertIn("python3 -P -m secretary check show --module tests.broad --module-arg -v", doc)
         self.assertNotIn("<this project's broad suite module>", doc)
         self.assertNotIn("<the same module>", doc)
 
@@ -10249,7 +10249,7 @@ class HeadPromptTests(unittest.TestCase):
 
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("python3 -m secretary check broad --reuse --module", doc)
+        self.assertIn("python3 -P -m secretary check broad --reuse --module", doc)
         self.assertIn("dispatcher-owned exact-SHA gate receipt", doc)
 
     def test_local_worker_keeps_the_reusable_broad_receipt_contract(self) -> None:
@@ -10257,7 +10257,7 @@ class HeadPromptTests(unittest.TestCase):
 
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("python3 -m secretary check broad --reuse --module", doc)
+        self.assertIn("python3 -P -m secretary check broad --reuse --module", doc)
 
     def test_worker_prompt_names_each_receipt_at_its_own_site(self) -> None:
         worker = self.host._worker_task_doc(self.task, "main", "attempt-1")
@@ -11482,7 +11482,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             catalog._heads = canonical_heads(repo)  # type: ignore[attr-defined]
             card = {"routing": {"review_head_override": "claude-default"}}
             probe = (
-                "python3 -c 'import json,sys;"
+                f"PYTHONPATH={shlex.quote(str(repo / 'src'))} python3 -c 'import json,sys;"
                 "from secretary.dispatcher_launcher import claude_launch_model;"
                 'print(json.dumps(claude_launch_model({"adapter": "claude"}, workspace=sys.argv[1])))\' '
                 + shlex.quote(str(workspace))
@@ -11496,7 +11496,10 @@ class DispatcherLauncherTests(unittest.TestCase):
                 # The wrapper binds names out of the launcher's own environment, so it has to be
                 # rendered inside it: rendered outside, a live host's SECRETARY_RUNTIME_ENV_FILE
                 # would reach the launched process and the fixture's runtime.env never would.
-                wrapped = wrap_role_command("reviewer", probe)
+                candidate_python = workspace / ".venv" / "bin" / "python3"
+                candidate_python.parent.mkdir(parents=True)
+                candidate_python.symlink_to("/usr/bin/python3")
+                wrapped = wrap_role_command("reviewer", probe, workspace=str(workspace))
 
             delivered = subprocess.run(
                 ["/bin/sh", "-c", wrapped],
@@ -11504,6 +11507,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 text=True,
                 env=env,
                 cwd=tmp,
+                check=False,
             )
 
         self.assertEqual(delivered.returncode, 0, delivered.stderr)
@@ -12721,7 +12725,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual(env["BOARD_ROLE"], "worker")
         self.assertNotIn("KANBOARD_API_TOKEN", env)
         self.assertNotIn("TA_CODEX_MODE", env)
-        self.assertEqual(env["PATH"], "/srv/secretary/.venv/bin:/usr/bin")
+        self.assertEqual(env["PATH"], "/usr/bin")
         self.assertNotIn("PANELMEM_KB_PAT", env)
         self.assertNotIn("GITHUB_TOKEN", env)
 

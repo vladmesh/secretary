@@ -625,6 +625,21 @@ blocker, uncovered external behaviour, or security/data-loss risk. Re-review
 packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path
 delta, so the next reviewer verifies the delta and closure rather than restarting at the original base.
 
+Worker and reviewer checks execute with `workspace/.venv/bin/python3`; `python`, `pip` and candidate
+setup resolve through that same workspace-owned environment. The general role environment removes
+the launcher's production `PYTHONPATH`. The module receipt records the check process's actual
+interpreter, environment prefix and import origin, and an origin outside the candidate remains a
+refusal. Product control-plane commands in task packets are a narrow exception: their command line
+explicitly names the registered production `src`, instead of lending every shell the production
+virtualenv.
+
+One production-runtime provenance probe fences workspace prepare, worker/reviewer launch, both
+sides of a gate query, both sides of release, and worktree removal. It invokes the fixed production
+interpreter in isolated mode and classifies `interpreter_unavailable`, `missing_import`, `wrong_root`
+and `workspace_targeted_editable`. The last class scans editable `.pth` and `direct_url.json` targets,
+including vanished paths beneath the dispatcher workspace root. Any refusal becomes durable blocked
+evidence and keeps the checkout; the dispatcher never repairs installation metadata implicitly.
+
 Before a card is given to a worker at all, the dispatcher asks whether the registered project's
 broad-check contract can attest that project, through the same implementation the worker's own
 `secretary check broad --module` resolves through, so a card is never issued on a contract the

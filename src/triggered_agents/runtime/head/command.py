@@ -155,7 +155,7 @@ def render_head_command(
         raise HeadCommandError(f"head has unknown adapter {adapter!r} (known: {known})")
     command = render(profile, prompt=prompt, workspace=workspace)
     if role:
-        command = wrap_role_command(role, command, identity=identity, binding=binding)
+        command = wrap_role_command(role, command, identity=identity, binding=binding, workspace=workspace)
     elif identity:
         raise HeadCommandError("an unwrapped head command carries no identity")
     return HeadCommand(
@@ -171,6 +171,7 @@ def wrap_role_command(
     *,
     identity: Mapping[str, str] | None = None,
     binding: str = SECRETARY_ROLE_ENV,
+    workspace: str = "",
 ) -> str:
     """Render one head's command under the role environment its launcher binds.
 
@@ -190,16 +191,17 @@ def wrap_role_command(
             raise HeadCommandError(
                 f"the {RUNTIME_ROLE_ENV} entry point renders no identity for role {role!r}"
             )
-        return role_env.wrap_shell_command(role, command)
+        return role_env.wrap_shell_command(role, command, workspace=workspace or None)
     unknown = sorted(set(identity or {}) - set(role_env.ROLE_ALLOWLIST.get(role, ())))
     if unknown:
         raise HeadCommandError(f"role {role!r} carries no binding named {', '.join(unknown)}")
     rendered = [f"{name}={shlex.quote(value)}" for name, value in sorted((identity or {}).items())]
     prefix = " ".join([*role_env.launch_binding(), *rendered])
-    command = role_env.role_shell_command(role, command)
+    command = role_env.role_shell_command(role, command, workspace=workspace or None)
+    workspace_arg = f" --workspace {shlex.quote(workspace)}" if workspace else ""
     return (
         f"{prefix} {pythonpath_prefix(os.environ)} python3 {PYTHON_SAFE_PATH_FLAG} "
-        f"-m {SECRETARY_ROLE_ENV} exec --role {shlex.quote(role)} -- /bin/sh -lc "
+        f"-m {SECRETARY_ROLE_ENV} exec --role {shlex.quote(role)}{workspace_arg} -- /bin/sh -lc "
         f"{shlex.quote(command)}"
     )
 
