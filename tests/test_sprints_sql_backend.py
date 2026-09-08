@@ -652,12 +652,13 @@ class SqlTransportNamespaceTests(SqlSprintFixture, shared.unittest.TestCase):
             reference="sprint:900", goal="cursor target", request_id="cursor-create"
         )
 
-        with self.assertRaises(TaskError):
+        with self.assertRaisesRegex(TaskError, "not a Card linked to sprint:900") as raised:
             writer.restore(
                 reference="sprint:900",
                 values={"sprint_current_task": "secretary-12"},
                 request_id="cursor-restore",
             )
+        self.assertEqual(raised.exception.code, "backend_error")
 
         self.assertEqual(
             self.client._query("SELECT sprint_ref FROM tasks WHERE task_ref='secretary-12'"),

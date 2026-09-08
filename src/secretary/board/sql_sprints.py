@@ -300,8 +300,15 @@ class SqlSprintRecords:
         }
         for key, column in scalar.items():
             if key in values:
-                assignments.append(f"{column} = %s")
                 text = str(values[key])
+                if key == "sprint_current_task" and text and not self.client._query(
+                    "SELECT 1 FROM tasks WHERE task_ref = %s AND sprint_ref = %s",
+                    (text, reference),
+                ):
+                    raise self._error(
+                        f"Sprint current task {text!r} is not a Card linked to {reference}"
+                    )
+                assignments.append(f"{column} = %s")
                 params.append(
                     (text or None)
                     if key in {"sprint_product", "sprint_current_task"}
