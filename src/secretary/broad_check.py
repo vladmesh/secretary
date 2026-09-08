@@ -125,7 +125,10 @@ import importlib, json, os, runpy, sys
 _record, _module, _package, _roots = sys.argv[1:5]
 sys.argv = [_module, *sys.argv[5:]]
 _import_roots = [_entry for _entry in _roots.split(os.pathsep) if _entry]
-sys.path[:0] = [_entry for _entry in _import_roots if _entry not in sys.path]
+for _entry in _import_roots:
+    while _entry in sys.path:
+        sys.path.remove(_entry)
+sys.path[:0] = _import_roots
 try:
     _project = importlib.import_module(_package)
     _imported = getattr(_project, "__file__", "") or ""
