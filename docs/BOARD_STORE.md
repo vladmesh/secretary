@@ -2631,3 +2631,29 @@ repository.
 - Any change to Kanboard or to the data now in it.
 - Updates to `ARCHITECTURE.md`, `PROTOCOLS.md`, `OPERATIONS.md` and `TESTING.md`. Those are updated
   when the mechanism exists, not from a design document.
+
+## Complete audit import
+
+`secretary board import --data-dir ...` treats `board/events.ndjson` as part of the source, not as
+a budget side channel. It streams every nonblank row, requires a JSON object with unique nonempty
+`event_id` and `request_id`, and preserves that object unchanged in `requests.intent`. The request
+operation is the journal `kind`; `protocol`, subject kind/reference and source timestamps are
+derived from the record. Generic records remain request rows only. A row declaring
+`record_type=board.protocol_event` must pass `Event.from_record`; only that closed vocabulary is
+projected into `board_events`.
+
+Budget charges link to the journal-owned request claim. They do not manufacture a second request
+row or replace its intent. A counter with no surviving journal row retains the documented
+synthetic, approximate claim. Any conflicting reuse of an installation-wide request id refuses the
+plan.
+
+A real import with `--data-dir` takes two complete observations of both Kanboard boards, registry,
+journal and transaction documents. The report records the before and after SHA-256 identities and
+the journal device, inode, size, mtime and content digest. Descriptor movement during streaming,
+path replacement, truncation, append, or any difference between the observations refuses before a
+database connection is opened. Retry reads a new pair of observations. This is a consistency fence,
+not a claim that a dispatcher pause is a write barrier.
+
+The current importer remains an empty-target operation. A second application refuses atomically
+and leaves the first import unchanged. This evidence does not switch the configured backend or
+perform live cutover.

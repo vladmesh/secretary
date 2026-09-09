@@ -29,8 +29,12 @@ import time
 import unittest
 
 from secretary.board import import_board, migrate, schema
+from secretary.board.events import BoardEventCanon
 from secretary.board.import_board import BoardImportError, BoardSource, RegistryEntry, SourceRow
+from secretary.board.sql_audit import SqlTaskAudit
+from secretary.board.sql_cards import SqlCardClient
 from secretary.board.store import BoardStoreConfig
+from secretary.tasks import TaskError
 
 IMAGE = "postgres:16"
 DATABASE = "board_import_test"
@@ -225,6 +229,28 @@ def synthetic_board() -> BoardSource:
             comments=(_comment("[po]\nthe archived twin's own journal", created=1_700_000_600),),
         ),
     )
+    budget_record = {
+        "kind": "budget_recorded",
+        "ref": "sprint:100",
+        "request_id": "sprint-budget-evt_1",
+        "event_id": "evt_1",
+        "occurred_at": "2026-08-01T10:00:00Z",
+        "payload": {"event_type": "red_review"},
+    }
+    typed_record = {
+        "schema_version": 2,
+        "record_type": "board.protocol_event",
+        "request_id": "typed-request-1",
+        "event_id": "typed-event-1",
+        "kind": "entity.updated",
+        "subject": {"kind": "card", "ref": "secretary-10"},
+        "ref": "secretary-10",
+        "actor": {"role": "worker", "id": "worker-1"},
+        "reason": "updated",
+        "related_refs": [],
+        "data": {"field": "value"},
+        "occurred_at": "2026-08-01T10:00:01Z",
+    }
     return BoardSource(
         pipeline=(product, *issues, *cards),
         sprints=sprints,
@@ -254,16 +280,8 @@ def synthetic_board() -> BoardSource:
                 curator_roots=(),
             ),
         ),
-        budget_records=(
-            {
-                "kind": "budget_recorded",
-                "ref": "sprint:100",
-                "request_id": "sprint-budget-evt_1",
-                "event_id": "evt_1",
-                "occurred_at": "2026-08-01T10:00:00Z",
-                "payload": {"event_type": "red_review"},
-            },
-        ),
+        budget_records=(budget_record,),
+        audit_records=(budget_record, typed_record),
         transaction_documents=(
             {
                 "version": 1,
@@ -308,6 +326,8 @@ def board_with_a_record_the_schema_cannot_carry() -> BoardSource:
         registry=board.registry,
         budget_records=board.budget_records,
         transaction_documents=board.transaction_documents,
+        audit_records=board.audit_records,
+        source_fence=board.source_fence,
     )
 
 
@@ -522,6 +542,48 @@ class BoardImportIntegrationTests(unittest.TestCase):
         claimed = {row["request_id"] for row in stored["requests"]}
         self.assertTrue({row["request_id"] for row in stored["sprint_budget_events"]} <= claimed)
         self.assertIn("sprint-budget-evt_1", claimed)
+
+    def test_complete_audit_history_is_queryable_and_typed_rows_are_projected(self) -> None:
+        _, stored = self.imported()
+        requests = {row["request_id"]: row for row in stored["requests"]}
+        self.assertEqual(requests["sprint-budget-evt_1"]["intent"], self.source.audit_records[0])
+        self.assertFalse(requests["sprint-budget-evt_1"]["protocol"])
+        self.assertEqual(
+            [(row["event_id"], row["request_id"]) for row in stored["board_events"]],
+            [("typed-event-1", "typed-request-1")],
+        )
+
+    def test_imported_history_uses_the_public_sql_audit_contract(self) -> None:
+        """AC 9: imported history retains lookup, filtering and request ownership semantics."""
+        self.imported()
+        client = SqlCardClient(self.credentials("app"), "/tmp/board-import-audit-contract")
+        self.addCleanup(client.close)
+        audit = SqlTaskAudit(client)
+        canon = BoardEventCanon("/tmp/unused-file-audit", audit=audit)
+        generic, typed = self.source.audit_records
+
+        # The generic record is complete history, queryable by request, ref and event owner.
+        self.assertEqual(audit.committed_event(generic["request_id"]), generic)
+        self.assertIn(generic, audit.events(reference=generic["ref"], kind=generic["kind"]))
+        self.assertEqual(audit.event_id_owner(generic["event_id"]), generic["request_id"])
+
+        # Typed lookup crosses Event.from_record, while typed history filters the generic row.
+        occurrence = canon.committed(typed["request_id"])
+        self.assertIsNotNone(occurrence)
+        self.assertEqual(occurrence.event_id, typed["event_id"])
+        self.assertEqual(audit.event_id_owner(typed["event_id"]), typed["request_id"])
+        typed_history = canon.events(ref=typed["ref"])
+        self.assertEqual([event.event_id for event in typed_history], [typed["event_id"]])
+        self.assertNotIn(generic["event_id"], {event.event_id for event in typed_history})
+
+        # An exact replay performs no second write; conflicting reuse keeps the released refusal.
+        self.assertEqual(audit.append(generic["request_id"], generic), generic["event_id"])
+        conflicting = {**generic, "kind": "conflicting-operation"}
+        with self.assertRaisesRegex(
+            TaskError, "request id belongs to another operation or payload"
+        ):
+            audit.append(generic["request_id"], conflicting)
+        self.assertEqual(audit.committed_event(generic["request_id"]), generic)
 
     def test_the_recovered_close_decisions_satisfy_both_scoped_keys(self) -> None:
         _, stored = self.imported()

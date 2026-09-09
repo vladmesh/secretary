@@ -658,3 +658,19 @@ offsite transfer and archive-age checks are not part of the product.
 - Moving configuration into a control-plane database.
 - Automating provider credentials and head authorisation.
 - A mandatory object-store transport, a full archive of transcripts and artifacts, a public plugin API.
+
+## Pre-cutover import retry and failure
+
+The board importer does not repair or mutate its Kanboard/journal source. Malformed or non-object
+journal lines, missing or duplicate event/request identities, an invalid declared protocol event,
+request ownership conflict, in-read journal movement, or differing complete source fingerprints
+all refuse before apply. The disposable destination is therefore still empty and may be reused for
+a new source read. If an apply reaches a database error, discard the disposable target and migrate
+a fresh one; the importer deliberately does not merge into a partial or occupied target.
+
+An occupied-target refusal on the second application is the documented replay behavior and leaves
+the first import unchanged. It is not a restore or rollback mechanism. Before live cutover, the
+later control card still must authorize quiescence, provision and back up the live PostgreSQL store,
+take a final fenced import, switch configuration, disable stale Kanboard-derived checkpoint writes,
+verify the live SQL backend, and establish the rollback window. None of those actions is performed
+by an import rehearsal.

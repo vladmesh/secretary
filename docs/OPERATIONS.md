@@ -3571,3 +3571,23 @@ The command only reads. It starts nothing, stops nothing and repairs nothing, an
 the dispatcher's state nor the head's: its transport carries no lifecycle call, the provider cursor
 comes from the run already persisted rather than being rebound, and a head whose channel cannot
 answer is reported `unproven` instead of being probed harder.
+
+## Rehearsing the complete board import
+
+Use a uniquely named disposable Compose project running `postgres:16`, publish PostgreSQL on a
+dynamically assigned loopback port, migrate the empty database to the current Alembic head, and
+pass only that app-role DSN to `secretary board import --apply`. Supply both `--instance` and
+`--data-dir`; omitting the latter omits the migration consistency fence and is not a rehearsal.
+
+The importer reads the complete source twice. A movement refusal is expected on a live source and
+is safe to retry against the same empty disposable target. Do not pause, quiesce or mutate live
+services to make it pass. A successful report must have `source_consistency.matched=true`, audit
+record/request parity, typed-event parity, exact budget reconciliation, no unnamed refusals, and
+all table/reference/comment parity axes green. Run the same apply command once more: the supported
+result is an occupied-target refusal, followed by unchanged destination counts.
+
+Remove the disposable Compose project and its volume after recording its project name, dynamic
+port, image, Alembic head, fence values, counts and rerun result. Do not edit `board-store.env`, set
+`SECRETARY_CARD_BACKEND`, reconcile the host, or start any lifecycle process. Live provisioning,
+quiescence, backend switch, checkpoint handoff, acceptance and rollback remain work for the later
+authorized cutover card.

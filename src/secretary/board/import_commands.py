@@ -30,7 +30,7 @@ def add_board_store_subcommands(board_subcommands) -> None:
     )
     importer.add_argument(
         "--data-dir",
-        help="secretary-data; read for §8.7's budget timestamps and §8.5's transaction documents",
+        help="secretary-data; strictly read the complete audit journal, budget timestamps and transactions",
     )
     importer.add_argument(
         "--dsn",
