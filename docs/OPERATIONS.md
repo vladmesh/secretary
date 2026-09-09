@@ -229,7 +229,7 @@ merely inactive.
 python3 -P -m secretary data init --instance INSTANCE
 python3 -P -m secretary data export --instance INSTANCE [--copy-transcripts]
 python3 -P -m secretary data raw-kanboard-dump --instance INSTANCE \
-  [--container cp-kanboard] [--source-path /var/www/app/data]
+  [--container CONTAINER] [--source-path /var/www/app/data]
 ```
 
 `data init` creates the local layout and manifest. The canon for memory facts is
@@ -237,6 +237,17 @@ python3 -P -m secretary data raw-kanboard-dump --instance INSTANCE \
 writes normalised board, memory, run and transcript exports; without `--copy-transcripts` only a
 transcript inventory is kept. `raw-kanboard-dump` creates a timestamped raw dump by copying out of the
 container; it writes nothing to the live container and does not use the board API.
+
+Without `--container` the container comes from the installation, not from a fixed name: the dump
+asks the Docker daemon for the container Compose created for the `kanboard` service of
+`/opt/secretary/kanboard-compose.yml`, the file `secretary bootstrap` writes and starts, and uses
+whatever that container is called on this host (`secretary-kanboard-1` on the current
+installation). If no such container exists, or it exists but is not running, the command refuses
+and names the Compose file and the service; it never falls back to a name and never starts,
+renames or restarts anything. `--container` is the operator override for the exceptional case; it
+is used verbatim and runs no resolution. The dump's `manifest.json` records the container that was
+actually used, its id, and whether it came from the override or from the Compose service, so the
+backup and cutover evidence says which container the archive was taken from.
 
 A dump is a copy of the whole Kanboard data directory, so its `data/db.sqlite` holds every project on
 the board, including the ones the Pipeline export does not cover. On this installation a dump is

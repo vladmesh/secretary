@@ -619,50 +619,91 @@ class CliTests(unittest.TestCase):
         self.assertIn("secretary data init: could not write data manifest", output)
         self.assertNotIn("Traceback", output)
 
-    def test_raw_kanboard_dump_command_uses_data_dir(self):
-        def fake_run(command, **_kwargs):
+    def _raw_dump_instance(self, tmpdir: str) -> Path:
+        instance_dir = Path(tmpdir) / "instance"
+        data_dir = Path(tmpdir) / "secretary-data"
+        instance_dir.mkdir()
+        (instance_dir / "instance.yaml").write_text(
+            "version: 1\n"
+            "name: example\n"
+            f"data_dir: {data_dir}\n"
+            "offsite:\n"
+            "  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
+        )
+        self.run_cli(["data", "init", "--instance", str(instance_dir)])
+        return instance_dir
+
+    @staticmethod
+    def _fake_docker(rows=(("7e163af91030", "secretary-kanboard-1", "running"),)):
+        """`docker ps` answers the Compose-label lookup; `docker cp` writes the dump."""
+
+        def run(command, **_kwargs):
+            if command[1] == "ps":
+                stdout = "".join("\t".join(row) + "\n" for row in rows)
+                return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
             destination = Path(command[-1])
             destination.mkdir(parents=True)
             (destination / "db.sqlite").write_bytes(b"sqlite")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
+        return run
+
+    def test_raw_kanboard_dump_command_uses_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            instance_dir = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
-            instance_dir.mkdir()
-            (instance_dir / "instance.yaml").write_text(
-                "version: 1\n"
-                "name: example\n"
-                f"data_dir: {data_dir}\n"
-                "offsite:\n"
-                "  instance_remote: git@example.invalid:x/y.git\n",
-                encoding="utf-8",
-            )
-            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            instance_dir = self._raw_dump_instance(tmpdir)
 
-            with mock.patch("secretary.data.subprocess.run", side_effect=fake_run) as run:
+            with mock.patch("secretary.data.subprocess.run", side_effect=self._fake_docker()) as run:
                 code, output = self.run_cli(["data", "raw-kanboard-dump", "--instance", str(instance_dir)])
                 docker_command = run.call_args.args[0]
 
         self.assertEqual(code, 0, output)
         self.assertIn("kanboard raw dump:", output)
+        self.assertIn("source: secretary-kanboard-1:/var/www/app/data", output)
         self.assertEqual(docker_command[0:2], ["docker", "cp"])
+
+    def test_raw_kanboard_dump_container_flag_overrides_the_resolution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self._raw_dump_instance(tmpdir)
+
+            with mock.patch("secretary.data.subprocess.run", side_effect=self._fake_docker()) as run:
+                code, output = self.run_cli(
+                    [
+                        "data",
+                        "raw-kanboard-dump",
+                        "--instance",
+                        str(instance_dir),
+                        "--container",
+                        "operator-chosen",
+                    ]
+                )
+                commands = [call.args[0] for call in run.call_args_list]
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("source: operator-chosen:/var/www/app/data", output)
+        self.assertEqual([command[0:2] for command in commands], [["docker", "cp"]])
+
+    def test_raw_kanboard_dump_reports_an_unresolvable_container(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self._raw_dump_instance(tmpdir)
+
+            with mock.patch("secretary.data.subprocess.run", side_effect=self._fake_docker(rows=())):
+                code, output = self.run_cli(["data", "raw-kanboard-dump", "--instance", str(instance_dir)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("secretary data raw-kanboard-dump: no container", output)
+        self.assertIn("/opt/secretary/kanboard-compose.yml", output)
+        self.assertNotIn("cp-kanboard", output)
+        self.assertNotIn("Traceback", output)
 
     def test_raw_kanboard_dump_reports_staging_prepare_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            instance_dir = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
-            instance_dir.mkdir()
-            (instance_dir / "instance.yaml").write_text(
-                "version: 1\n"
-                "name: example\n"
-                f"data_dir: {data_dir}\n"
-                "offsite:\n"
-                "  instance_remote: git@example.invalid:x/y.git\n",
-                encoding="utf-8",
-            )
-            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            instance_dir = self._raw_dump_instance(tmpdir)
 
-            with mock.patch("secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")):
+            with (
+                mock.patch("secretary.data.subprocess.run", side_effect=self._fake_docker()),
+                mock.patch("secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")),
+            ):
                 code, output = self.run_cli(["data", "raw-kanboard-dump", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1)

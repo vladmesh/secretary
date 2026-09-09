@@ -39,6 +39,10 @@ from secretary._fsutil import (
 )
 from secretary.board.backend import CARD, SPRINT, board_client
 from secretary.config import validate
+from secretary.infra.kanboard_compose import (
+    KANBOARD_COMPOSE_FILE,
+    KANBOARD_COMPOSE_SERVICE,
+)
 from secretary.memory_journal import export_memory_snapshot
 from secretary.tasks import TaskAudit, TaskError, TaskReader
 
@@ -62,6 +66,25 @@ class DataLayout:
 class KanboardDump:
     dump_dir: Path
     source: str
+
+
+@dataclass(frozen=True)
+class KanboardContainer:
+    """The Kanboard container a dump was taken from, and where the name came from."""
+
+    reference: str
+    origin: str
+    container_id: str | None = None
+
+
+# Compose stamps these on every container it creates.  They are how Compose itself finds the
+# containers of a project, and asking the daemon for them is the same lookup `docker compose ps`
+# performs -- with one difference that decides the matter here: `docker compose -f <file> ps`
+# parses the Compose file in the calling process, and the installed file is mode 0600 root:root
+# (`bootstrap._compose_file`), while the cutover controller and `backup create` run as the
+# unprivileged installation user.  The daemon holds the same fact and answers it over the socket.
+COMPOSE_CONFIG_FILES_LABEL = "com.docker.compose.project.config_files"
+COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
 
 @dataclass(frozen=True)
@@ -114,11 +137,85 @@ def init_layout(data_dir: Path) -> DataLayout:
     )
 
 
+def resolve_kanboard_container(
+    *,
+    compose_file: Path = KANBOARD_COMPOSE_FILE,
+    service: str = KANBOARD_COMPOSE_SERVICE,
+) -> KanboardContainer:
+    """The running container of `service` in the installed Compose project.
+
+    The name is never guessed from `<project>-<service>-1` and never falls back to a historical
+    literal: either the installation's own Compose labels name a running container, or this
+    refuses and says which file and service it looked for.
+    """
+
+    command = [
+        "docker",
+        "ps",
+        "--all",
+        "--no-trunc",
+        "--filter",
+        f"label={COMPOSE_CONFIG_FILES_LABEL}={compose_file}",
+        "--filter",
+        f"label={COMPOSE_SERVICE_LABEL}={service}",
+        "--format",
+        "{{.ID}}\t{{.Names}}\t{{.State}}",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("docker command not found") from None
+    except subprocess.CalledProcessError as exc:
+        reason = (exc.stderr or exc.stdout or "docker ps failed").strip().splitlines()
+        raise RuntimeError(
+            f"cannot list containers of Compose service {service!r} from {compose_file}: "
+            + (reason[-1] if reason else "docker ps failed")
+        ) from None
+
+    found: list[tuple[str, str, str]] = []
+    for line in completed.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or not fields[0]:
+            continue
+        found.append((fields[0], fields[1], fields[2]))
+
+    if not found:
+        raise RuntimeError(
+            f"no container of Compose service {service!r} from {compose_file} exists; "
+            "the installed Kanboard Compose project is not up"
+        )
+
+    running = [item for item in found if item[2] == "running"]
+    if not running:
+        states = ", ".join(f"{name} ({state})" for _, name, state in found)
+        raise RuntimeError(
+            f"the container of Compose service {service!r} from {compose_file} is not running: "
+            f"{states}"
+        )
+    if len(running) > 1:
+        names = ", ".join(name for _, name, _ in running)
+        raise RuntimeError(
+            f"Compose service {service!r} from {compose_file} has {len(running)} running "
+            f"containers ({names}); name the one to dump explicitly"
+        )
+
+    container_id, name, _ = running[0]
+    return KanboardContainer(reference=name, origin="compose-service", container_id=container_id)
+
+
 def raw_kanboard_dump(
     data_dir: Path,
     *,
-    container: str = "cp-kanboard",
+    container: str | None = None,
     source_path: str = KANBOARD_DATA_PATH,
+    compose_file: Path = KANBOARD_COMPOSE_FILE,
+    compose_service: str = KANBOARD_COMPOSE_SERVICE,
 ) -> KanboardDump:
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
@@ -127,13 +224,18 @@ def raw_kanboard_dump(
     except OSError as exc:
         raise RuntimeError(f"cannot prepare board data dir: {exc}") from None
 
+    if container is None:
+        resolved = resolve_kanboard_container(compose_file=compose_file, service=compose_service)
+    else:
+        resolved = KanboardContainer(reference=container, origin="override")
+
     staging_dir: Path | None = None
 
     try:
         staging_dir = Path(tempfile.mkdtemp(prefix=".kanboard-raw-", suffix=".tmp", dir=board_dir))
         destination = staging_dir / "data"
         subprocess.run(
-            ["docker", "cp", f"{container}:{source_path}", str(destination)],
+            ["docker", "cp", f"{resolved.reference}:{source_path}", str(destination)],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -144,9 +246,14 @@ def raw_kanboard_dump(
             "version": 1,
             "kind": "kanboard-raw",
             "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
-            "container": container,
+            "container": resolved.reference,
+            "container_origin": resolved.origin,
+            "container_id": resolved.container_id,
             "source_path": source_path,
         }
+        if resolved.origin == "compose-service":
+            metadata["compose_file"] = str(compose_file)
+            metadata["compose_service"] = compose_service
         (staging_dir / "manifest.json").write_text(
             json.dumps(metadata, indent=2, sort_keys=False) + "\n",
             encoding="utf-8",
@@ -163,7 +270,7 @@ def raw_kanboard_dump(
         _cleanup_staging_dir(staging_dir)
         raise RuntimeError(f"could not create raw dump: {exc}") from None
 
-    return KanboardDump(dump_dir=dump_dir, source=f"{container}:{source_path}")
+    return KanboardDump(dump_dir=dump_dir, source=f"{resolved.reference}:{source_path}")
 
 
 def export_board(

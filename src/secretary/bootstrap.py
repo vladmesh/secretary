@@ -34,6 +34,10 @@ from secretary.board.provision import provision as provision_board_store
 from secretary.board.provision import verify_roles as verify_board_store_roles
 from secretary.board_transport import ensure_from_runtime_values, transport_path
 from secretary.host_apply import pinned_orca_executable
+from secretary.infra.kanboard_compose import (
+    KANBOARD_COMPOSE_FILE,
+    KANBOARD_COMPOSE_SERVICE,
+)
 from secretary.installation import (
     InstallError,
     _clone_or_reuse,
@@ -299,7 +303,7 @@ def _compose_file(path: Path) -> None:
     write_text_atomic(
         path,
         f"""services:
-  kanboard:
+  {KANBOARD_COMPOSE_SERVICE}:
     image: {KANBOARD_IMAGE}
     restart: unless-stopped
     ports:
@@ -487,7 +491,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             _mark_bootstrap_checkout(target)
             _set_installation_owner(target, args.installation_user)
             _install_platform(dry_run=False, runtime_user=args.installation_user)
-            compose = Path("/opt/secretary/kanboard-compose.yml")
+            compose = KANBOARD_COMPOSE_FILE
             _compose_file(compose)
             _run(
                 [
