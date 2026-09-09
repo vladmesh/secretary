@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import cutover
+from secretary.cutover import successor
 
 REVISION = "a" * 40
 PLAN = {
@@ -92,6 +93,7 @@ class CutoverStateTests(CutoverFixture):
                 "resume_ready",
             ),
         )
+
 
     def test_selector_rewrite_preserves_other_entries_owner_and_mode(self) -> None:
         before = self.runtime.stat()
@@ -195,6 +197,390 @@ class CutoverStateTests(CutoverFixture):
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("writes are fenced", refused.stderr)
+
+
+class CutoverSuccessorTests(CutoverFixture):
+    def eligible_state(self):
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        report = {"parity": {"ok": True}}
+        report_path = self.paths.artifacts / f"import-{state['plan_id']}.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        state["expected_revision"] = "b" * 40
+        state["status"] = "recovered-frozen"
+        state["recovery"] = {"branch": "kanboard-before-first-write"}
+        state["phases"] = {
+            "final_fenced_import": {
+                "status": "complete",
+                "evidence": {"report": str(report_path), "import": report},
+            },
+            "full_parity": {
+                "status": "complete",
+                "evidence": {"parity": {"ok": True}},
+            },
+        }
+        return state
+
+    def test_successor_eligibility_is_exact_and_activation_always_refuses(self) -> None:
+        state = self.eligible_state()
+        self.assertTrue(successor.exact_eligibility(state, "kanboard")["eligible"])
+        state["phases"]["selector_activation"] = {"status": "running"}
+        proof = successor.exact_eligibility(state, "kanboard")
+        self.assertFalse(proof["eligible"])
+        self.assertEqual(proof["reason"], "selector-activation-entered")
+
+        for malformed in (None, {"parity": None}):
+            with self.subTest(malformed=malformed):
+                state = self.eligible_state()
+                state["phases"]["full_parity"]["evidence"] = malformed
+                proof = successor.exact_eligibility(state, "kanboard")
+                self.assertFalse(proof["eligible"])
+                self.assertEqual(proof["reason"], "full-parity-not-clean")
+
+        state = self.eligible_state()
+        with (
+            mock.patch.object(
+                successor, "parse", return_value=SimpleNamespace(dbname="secretary")
+            ),
+            mock.patch(
+                "secretary.head_registry.read_source", return_value={"revision": REVISION}
+            ),
+            mock.patch.object(
+                successor,
+                "inspect_database",
+                return_value={
+                    "oid": 41,
+                    "name": "secretary",
+                    "owner": "owner",
+                    "allow_connections": True,
+                },
+            ),
+            mock.patch.object(
+                successor,
+                "inspect_schema_revision",
+                return_value="0006_sprint_transport_key",
+            ),
+        ):
+            status = successor.status_probe(
+                self.paths.instance, state, "kanboard", artifacts=self.paths.artifacts
+            )
+        self.assertEqual(status["prerequisite"], successor.UPGRADE_PREREQUISITE)
+        self.assertEqual(
+            status["next_command"],
+            f"secretary upgrade --no-pull --instance {self.paths.instance}",
+        )
+
+        state["successor_preparation"] = {
+            "version": 1,
+            "status": "preparing",
+            "instance": str(self.paths.instance),
+            "actor": args().actor,
+            "reason": args().reason,
+            "expected_revision": REVISION,
+            "confirmation": "token",
+            "started_at": "2026-09-09T00:00:00Z",
+            "phases": {},
+            "database": {},
+            "dump": {},
+        }
+        cutover._write_state(self.paths, state)
+        before = self.paths.state.read_bytes()
+        run_args = args(confirm="token")
+        with (
+            mock.patch.object(cutover, "_provenance", return_value={}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(
+                successor, "resolve", return_value=SimpleNamespace(dbname="secretary")
+            ),
+            mock.patch.object(
+                successor,
+                "inspect_schema_revision",
+                return_value="0006_sprint_transport_key",
+            ),
+            self.assertRaisesRegex(cutover.CutoverError, successor.UPGRADE_PREREQUISITE),
+        ):
+            successor.prepare(run_args, self.paths)
+        self.assertEqual(self.paths.state.read_bytes(), before)
+
+    def test_status_keeps_next_command_while_the_target_is_fenced_or_unreachable(self) -> None:
+        state = self.eligible_state()
+        state["successor_preparation"] = {
+            "version": 1,
+            "status": "preparing",
+            "instance": str(self.paths.instance),
+            "actor": args().actor,
+            "reason": args().reason,
+            "expected_revision": REVISION,
+            "confirmation": "token",
+            "started_at": "2026-09-09T00:00:00Z",
+            "phases": {
+                "connection_fence": {"status": "complete"},
+                "database_rename": {"status": "complete"},
+            },
+            "database": {
+                "original_oid": 41,
+                "original_name": "secretary",
+                "archive_name": "secretary_archive",
+                "owner": "owner",
+            },
+            "dump": {},
+        }
+        token = successor.confirmation(state["plan_id"], 41, "secretary")
+        expected_command = (
+            f"secretary cutover prepare-successor --instance {self.paths.instance} "
+            f"--expected-revision {REVISION} --actor <actor> --reason <reason> --confirm {token}"
+        )
+        refused = RuntimeError("could not inspect PostgreSQL schema revision: connection refused")
+        with (
+            mock.patch.object(
+                successor, "parse", return_value=SimpleNamespace(dbname="secretary")
+            ),
+            mock.patch(
+                "secretary.head_registry.read_source", return_value={"revision": REVISION}
+            ),
+            mock.patch.object(successor, "inspect_database", side_effect=AssertionError("not read")),
+            mock.patch.object(successor, "inspect_schema_revision", side_effect=refused) as probe,
+        ):
+            # Mid-rotation: the configured name is fenced, absent or unmigrated, so status must
+            # not touch the database and must still render the identical retry command.
+            fenced = successor.status_probe(
+                self.paths.instance, state, "kanboard", artifacts=self.paths.artifacts
+            )
+            self.assertEqual(probe.call_count, 0)
+            self.assertEqual(fenced["database"]["oid"], 41)
+            self.assertEqual(fenced["confirmation"], token)
+            self.assertEqual(fenced["next_command"], expected_command)
+            self.assertIsNone(fenced["schema_revision"])
+            self.assertNotIn("probe_error", fenced)
+
+            # Before the fence an unreachable schema probe is reported, not allowed to swallow
+            # the identity, confirmation and next command.
+            state["successor_preparation"]["phases"] = {}
+            unreachable = successor.status_probe(
+                self.paths.instance, state, "kanboard", artifacts=self.paths.artifacts
+            )
+            self.assertEqual(probe.call_count, 1)
+            self.assertEqual(unreachable["database"]["oid"], 41)
+            self.assertEqual(unreachable["confirmation"], token)
+            self.assertEqual(unreachable["next_command"], expected_command)
+            self.assertIn("connection refused", unreachable["schema_probe_error"])
+            self.assertNotIn("probe_error", unreachable)
+
+    def test_prepare_successor_resumes_every_phase_without_repeating_completed_work(self) -> None:
+        state = self.eligible_state()
+        cutover._write_state(self.paths, state)
+        token = successor.confirmation(state["plan_id"], 41, "secretary")
+        run_args = args(confirm=token)
+        real_operations = successor.SuccessorOperations
+
+        for failed_phase in successor.PHASES:
+            with self.subTest(phase=failed_phase):
+                cutover._write_state(self.paths, self.eligible_state())
+                calls = []
+                failure = {"enabled": True}
+
+                class FakeOperations:
+                    def __init__(self, operation_paths, operation_state):
+                        self.real = real_operations(operation_paths, operation_state)
+
+                    def __getattr__(self, name):
+                        def operation(
+                            operation_name=name,
+                            operation_calls=calls,
+                            operation_failure=failure,
+                            operation_failed_phase=failed_phase,
+                        ):
+                            operation_calls.append(operation_name)
+                            if operation_name == operation_failed_phase and operation_failure["enabled"]:
+                                raise RuntimeError("injected crash")
+                            if operation_name == "dump_publication":
+                                return {"sha256": "d" * 64, "bytes": 10, "tool_version": "PostgreSQL 16"}
+                            if operation_name == "database_create":
+                                return {"oid": 42, "name": "secretary"}
+                            if operation_name in {"history_publication", "canonical_release"}:
+                                return getattr(self.real, operation_name)()
+                            if operation_name == "release_receipt":
+                                return successor.publish_release_receipt(
+                                    self.real.paths, self.real.state
+                                )
+                            return {"phase": operation_name}
+                        return operation
+
+                with (
+                    mock.patch.object(cutover, "_provenance", return_value={}),
+                    mock.patch.object(cutover, "_backend", return_value="kanboard"),
+                    mock.patch.object(successor, "resolve", return_value=SimpleNamespace(dbname="secretary")),
+                    mock.patch.object(successor, "inspect_database", return_value={"oid": 41, "name": "secretary", "owner": "owner", "allow_connections": True}),
+                    mock.patch.object(
+                        successor,
+                        "inspect_schema_revision",
+                        return_value="0007_card_transport_key",
+                    ),
+                    mock.patch.object(successor, "_verify_completed_targets", return_value=None),
+                    mock.patch.object(successor, "SuccessorOperations", FakeOperations),
+                ):
+                    with self.assertRaisesRegex(cutover.CutoverError, failed_phase):
+                        successor.prepare(run_args, self.paths)
+                    completed = tuple(successor.PHASES[: successor.PHASES.index(failed_phase)])
+                    before = {name: calls.count(name) for name in completed}
+                    failure["enabled"] = False
+                    result = successor.prepare(run_args, self.paths)
+
+                self.assertTrue(result["successor_ready"])
+                self.assertEqual(calls.count(failed_phase), 2)
+                self.assertEqual({name: calls.count(name) for name in completed}, before)
+                self.assertIsNone(cutover._read_state(self.paths))
+                archive = Path(result["archived_state"])
+                archive.chmod(0o600)
+                archive.unlink()
+                receipt = successor.release_receipt_path(self.paths, state["plan_id"])
+                receipt.chmod(0o600)
+                receipt.unlink()
+
+    def test_real_history_link_and_canonical_unlink_are_truthful_across_restart(self) -> None:
+        state = self.eligible_state()
+        state["successor_preparation"] = {
+            "version": 1,
+            "status": "preparing",
+            "instance": str(self.paths.instance),
+            "actor": "operator",
+            "reason": "filesystem interruption proof",
+            "expected_revision": REVISION,
+            "confirmation": "token",
+            "started_at": "2026-09-09T00:00:00Z",
+            "database": {
+                "original_oid": 41,
+                "original_name": "secretary",
+                "archive_name": "secretary_archive_test_41",
+                "owner": "owner",
+                "successor_oid": 42,
+            },
+            "dump": {"path": str(self.paths.artifacts / "successor.dump"), "sha256": "d" * 64},
+            "phases": {
+                **{
+                    name: {
+                        "status": "complete",
+                        "started_at": "2026-09-09T00:00:01Z",
+                        "completed_at": "2026-09-09T00:00:01Z",
+                        "evidence": {},
+                    }
+                    for name in successor.PHASES[
+                        : successor.PHASES.index("history_publication")
+                    ]
+                },
+                "history_publication": {
+                    "status": "intent",
+                    "started_at": "2026-09-09T00:00:01Z",
+                }
+            },
+        }
+        cutover._write_state(self.paths, state)
+        with mock.patch.object(successor, "resolve", return_value=SimpleNamespace(dbname="secretary")):
+            operations = successor.SuccessorOperations(self.paths, state)
+            operations.history_publication()
+
+            canonical = cutover._read_state(self.paths)
+            self.assertEqual(
+                canonical["successor_preparation"]["phases"]["history_publication"]["status"],
+                "intent",
+            )
+            history = cutover._read_recovered_history(self.paths)
+            self.assertEqual(
+                history[0]["state"]["successor_preparation"]["phases"]["history_publication"]["status"],
+                "complete",
+            )
+            self.assertEqual(
+                history[0]["state"]["successor_preparation"]["phases"]["canonical_release"]["status"],
+                "intent",
+            )
+
+            state["successor_preparation"]["phases"]["canonical_release"] = {
+                "status": "intent",
+                "started_at": "2026-09-09T00:00:02Z",
+            }
+            cutover._write_state(self.paths, state)
+            operations = successor.SuccessorOperations(self.paths, state)
+            real_unlink = Path.unlink
+            interrupted = {"pending": True}
+
+            def interrupted_unlink(path, *unlink_args, **unlink_kwargs):
+                if path == self.paths.state and interrupted["pending"]:
+                    interrupted["pending"] = False
+                    raise OSError("injected before canonical unlink")
+                return real_unlink(path, *unlink_args, **unlink_kwargs)
+
+            with mock.patch.object(Path, "unlink", new=interrupted_unlink):
+                with self.assertRaisesRegex(RuntimeError, "injected before canonical unlink"):
+                    operations.canonical_release()
+            self.assertTrue(self.paths.state.exists())
+            operations.canonical_release()
+
+        self.assertFalse(self.paths.state.exists())
+        pending = cutover._read_recovered_history(self.paths)[0]
+        self.assertEqual(pending["successor_release"]["status"], "pending")
+        self.assertEqual(
+            pending["state"]["successor_preparation"]["phases"]["canonical_release"]["status"],
+            "intent",
+        )
+        with (
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_provenance", return_value={"revision": REVISION}),
+            mock.patch.object(
+                cutover,
+                "_source_evidence",
+                return_value={"fingerprint": "new-source", "parity": {"ok": True}},
+            ),
+            self.assertRaisesRegex(cutover.CutoverError, "release receipt"),
+        ):
+            cutover.build_plan(self.paths, REVISION)
+        successor.publish_release_receipt(self.paths, pending["state"])
+        released_item = cutover._read_recovered_history(self.paths)[0]
+        released = released_item["state"]
+        self.assertEqual(
+            released["successor_preparation"]["phases"]["canonical_release"]["status"],
+            "complete",
+        )
+        self.assertTrue(
+            released["successor_preparation"]["phases"]["canonical_release"]["evidence"]["released"]
+        )
+        with (
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_provenance", return_value={"revision": REVISION}),
+            mock.patch.object(
+                cutover,
+                "_source_evidence",
+                return_value={"fingerprint": "new-source", "parity": {"ok": True}},
+            ),
+        ):
+            plan = cutover.build_plan(self.paths, REVISION)
+        cutover._write_state(self.paths, cutover._new_state(plan, "owner", "later cutover"))
+        self.assertEqual(cutover._read_recovered_history(self.paths)[0], released_item)
+        self.assertTrue(
+            successor.publish_release_receipt(self.paths, released_item["state"])["immutable"]
+        )
+        receipt = successor.release_receipt_path(self.paths, state["plan_id"])
+        receipt.chmod(0o600)
+        receipt.write_text("{}\n", encoding="utf-8")
+        receipt.chmod(0o444)
+        with self.assertRaisesRegex(cutover.CutoverError, "receipt does not match"):
+            cutover._read_recovered_history(self.paths)
+
+    def test_successor_history_and_receipt_malformed_evidence_refuses_cleanly(self) -> None:
+        state = self.eligible_state()
+        archive = self.paths.history / f"postgres-v1-{state['plan_id']}.json"
+        self.paths.history.mkdir(parents=True)
+        state["successor_preparation"] = {
+            "status": "preparing",
+            "phases": {
+                "history_publication": {"status": "complete", "evidence": None},
+                "canonical_release": {"status": "intent", "started_at": "time"},
+                "release_receipt": {"status": "intent", "started_at": "time"},
+            },
+        }
+        archive.write_text(json.dumps(state), encoding="utf-8")
+        archive.chmod(0o444)
+        with self.assertRaisesRegex(cutover.CutoverError, "malformed release evidence"):
+            cutover._read_recovered_history(self.paths)
 
 
 class CutoverCommandEvidenceTests(CutoverFixture):

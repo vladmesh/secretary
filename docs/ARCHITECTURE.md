@@ -865,10 +865,28 @@ product goal in [Vision](VISION.md).
 
 `secretary.cutover` is an orchestration boundary over existing product operations. It does not own a
 second migration, import, parity, backup, checkpoint, pause, or backend-selection implementation.
+
 Its durable ordered phases are: preflight; Kanboard backup/checkpoint; PostgreSQL provision and
 migration verification; global freeze; writer-quiescence proof; final fenced import; full parity;
 PostgreSQL recovery backup; selector activation; service reconciliation; installed-protocol
 acceptance; post-switch checkpoint; and resume-ready.
+
+The `prepare-successor` subcommand is a separate OID-driven state machine under the same
+installation-wide `CutoverLock`. It composes the store resolver, Alembic migration, PostgreSQL 16
+custom dump/verifier, role verifier, atomic controller writer and immutable recovered-history
+publisher. PostgreSQL database rename/create is the only new effect boundary. The process-wide board
+selector is deliberately bypassed for database proof and remains Kanboard throughout.
+
+The preserved target must already be externally upgraded to `0007_card_transport_key`; this state
+machine only migrates the newly created empty canonical database. Its terminal authority is one
+resolver over immutable recovered history plus a release receipt bound to the predecessor plan,
+archive identity and checksums. Canonical-file presence is not evidence about predecessor completion.
+
+Durable intent precedes every PostgreSQL effect. Completed evidence follows verification. This makes
+name transitions recoverable: before rename the configured name has the old OID, after rename the
+archive name has that OID, and after create the configured name has a new recorded OID. Any other
+mapping is an architectural refusal, not a reconciliation opportunity. Its twelve phases are listed
+in the successor protocol and are distinct from the cutover phases above.
 
 The state identity is the digest of the exact installed revision, runtime/source provenance,
 instance/data paths, source fingerprint, counts, parity and phase vocabulary. The confirmation token

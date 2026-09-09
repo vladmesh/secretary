@@ -719,8 +719,29 @@ slot for a Kanboard retry. An entered but incomplete import reports
 completion evidence, is what proves no controller import effect.
 
 The recovered 2026-09-09 target is intentionally preserved at revision `0006` with its imported
-population. Upgrade it in place to `0007_card_transport_key`: the migration backfills immutable Card
+population. The owner/operator must externally upgrade it in place to `0007_card_transport_key`
+before invoking `prepare-successor`: the migration backfills immutable Card
 transport keys without changing refs, per-project task numbers, ownership, archived rows, comments,
 links or audit. Do not wipe or reimport that occupied target, edit controller state, or infer authority
 to retry cutover. A new owner/operator maintenance window remains required after the repair is merged
 and installed.
+
+### Restarting successor preparation
+
+`prepare-successor` refuses read-only at `0006`; it never performs that preserved-target migration.
+Once the external upgrade is verified, it records intent before dump publication, connection
+fencing, rename, create, migration of the new empty database, role verification, empty verification,
+history publication, canonical release and release-receipt publication. Retry
+the exact command shown by status with the same revision, actor, reason and confirmation. Each retry
+resolves the imported and successor databases by their recorded OIDs. It never guesses from a name,
+reopens the archive, deletes a database, or releases canonical state while any identity, checksum,
+connection, privilege, schema, count or audit proof is uncertain.
+
+A crash after history publication is safe: the immutable recovered document is compared byte for
+byte and fsynced before the canonical file is unlinked. The unlink and its directory fsync precede a
+small immutable release receipt bound to the predecessor plan, history checksum, archived database
+OID/name and dump checksum. If the crash falls between unlink and receipt, status prints the exact
+resume command and planning remains refused. Retry revalidates both database OIDs plus the dump,
+publishes the one receipt, and produces no second archive, database, dump or history file. History
+plus receipt is the single completion authority; a later fresh plan and its unrelated canonical file
+cannot make predecessor completion revert.

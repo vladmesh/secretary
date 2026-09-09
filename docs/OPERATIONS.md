@@ -3600,6 +3600,38 @@ standing automation timers. It must therefore be invoked outside an observer tur
 controller change is merged, installed, and the installed head source pin reports the candidate
 revision. This implementation card did not run the live cutover.
 
+### Preparing a successor after a completed import
+
+An import that completed before recovery has occupied its PostgreSQL target even when selector
+activation was never entered and no application SQL write exists. It cannot be imported again or
+updated in place: generated request, comment, resume and decision identities do not provide a safe
+merge key. After installing the revision that understands the imported schema, inspect
+`secretary cutover status --instance /absolute/instance`. For the single supported
+`recovered-frozen / kanboard-before-first-write` shape, status prints an identity-bound
+`PREPARE-SUCCESSOR-...` token and the exact credential-free command.
+
+If the preserved target is still at `0006_sprint_transport_key`, status instead prints
+`secretary upgrade --no-pull --instance /absolute/instance`. The owner/operator must run that
+external upgrade and verify `0007_card_transport_key` before preparing a successor. A refused
+`prepare-successor` does not migrate the preserved target or touch a board row.
+
+`prepare-successor` is an outage-level database administration operation. At `0007` it verifies the
+database OID, import report, every table count including requests/events, the cross-project card
+collision, audit boundary, zero foreign connections and archive-name availability before any
+effect. It creates and verifies the native PostgreSQL dump before the first database mutation. It
+then disables new connections, renames the imported database by OID, creates the unchanged
+configured name with the same owner, migrates that new empty database, verifies all three logins and late-created
+sequence/default privileges, and proves every importer table empty. `board-store.env`, the Compose
+volume and Kanboard selector do not change. The archived database remains `ALLOW_CONNECTIONS false`;
+its verified custom-format dump in `cutover/artifacts` is the supported access copy. Do not reconnect,
+drop, truncate, rename, overwrite or reimport the archive.
+
+The later owner/operator order is: install, externally upgrade the preserved target and verify
+`0007_card_transport_key`; run
+`prepare-successor` with the status token; inspect status and immutable history; create a fresh
+`cutover plan`; then schedule a separate maintenance window for `cutover apply`. Preparing the target
+does not activate PostgreSQL and this implementation card performed no live action.
+
 The 2026-09-09 authorized attempt recovered safely before the first SQL application write after its
 preserved imported target exposed duplicate public suffixes (`butler-1` and
 `codegen-product-kit-1`). Revision `0007_card_transport_key` is the in-place schema repair for that

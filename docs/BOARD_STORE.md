@@ -2701,3 +2701,20 @@ surfaces and an isolated dispatcher tick. The post-switch checkpoint and full ba
 the acceptance task, contain a `postgres_dump` component and contain no `raw_board` component.
 These are requirements on each external cutover's evidence, not a claim that the live installation
 has already been cut over.
+
+### Successor target generation
+
+The only supported successor for an occupied completed import is database rotation inside the same
+PostgreSQL cluster and volume. The imported database is fenced and renamed to a bounded name derived
+from its controller plan and stable database OID. A distinct empty database is created under the
+unchanged configured name and owner. The cluster-wide app/read roles and credentials are reused only
+after their attributes are verified; schema grants and owner default privileges are installed again
+for the new database, including sequence `USAGE`. No row-level merge/upsert importer exists.
+
+The archive is evidence, not a fallback backend. Ordinary roles cannot connect to it, the selector
+continues to name Kanboard, and the configured PostgreSQL name can only denote the new empty OID. Its
+native dump, checksum, old/new OIDs, schema, import counts and audit boundary live in immutable cutover
+history. The preserved database must be externally upgraded from `0006` and verified at `0007` before
+rotation; the successor lifecycle does not migrate its rows. An immutable release receipt binds that
+history checksum, predecessor plan, archive OID/name and dump checksum before the evidence can become
+a predecessor in the next plan.

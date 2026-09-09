@@ -1105,20 +1105,30 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         self.runtime = LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, **options)
 
     def _fill_the_terminal(self, run: HeadRun) -> int:
-        """Stall one payload against this head's pty from outside the runtime, and say how much landed.
+        """Fill this head's pty from outside the runtime, and say how much landed.
 
         Straight at the socket on purpose: it leaves the pty's buffer full and the head's terminal
         carrying a fragment, without the runtime having made the delivery and so without the
-        runtime knowing anything about it. That is the only way to reach the next delivery's
-        "the kernel took nothing at all" with a real kernel.
+        runtime knowing anything about it. A stalled large write is not by itself proof that no
+        smaller write can land next: the pty can expose another small pocket of capacity after the
+        large write first met ``EAGAIN``. Top it off until one whole delivery bound records zero;
+        that is the real-kernel precondition for the runtime delivery below to land nothing.
         """
         address = self.runtime._address(run)
         with SupervisorClient.connect(address.socket_path, timeout=5.0) as client:
-            answer = client.send_input(b"x" * (protocol.INPUT_MAX_BYTES - 1))
-            self.assertTrue(answer["ok"], answer)
-            final = client.wait_for_delivery(answer["delivery"]["id"], timeout=15.0)
-        self.assertEqual(final["state"], protocol.DELIVERY_STALLED, final)
-        self.assertGreater(final["written_bytes"], 0, "the pty took nothing, so it is not full")
+            written = 0
+            for _attempt in range(4):
+                answer = client.send_input(b"x" * (protocol.INPUT_MAX_BYTES - 1))
+                self.assertTrue(answer["ok"], answer)
+                final = client.wait_for_delivery(answer["delivery"]["id"], timeout=15.0)
+                self.assertEqual(final["state"], protocol.DELIVERY_STALLED, final)
+                landed = int(final["written_bytes"])
+                written += landed
+                if not landed:
+                    break
+            else:
+                self.fail("the pty still accepted bytes after four full delivery bounds")
+        self.assertGreater(written, 0, "the pty took nothing, so it was never filled")
         # And then until the head has gone quiet again. The payload above was accepted, so the
         # supervisor opened a turn for it; a runtime asking the head what it is doing while that
         # turn is open is answered "a turn is running" — correctly, and this fixture is not the
@@ -1129,7 +1139,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
             lambda: not self._status(address.socket_path).get("turn_open", True),
             message="the turn the fill opened never closed",
         )
-        return int(final["written_bytes"])
+        return written
 
     def _stop_supervisor_once(self, run: HeadRun, ready) -> None:
         """Stop this head's supervisor with `SIGSTOP` the moment `ready()` holds, from a thread.

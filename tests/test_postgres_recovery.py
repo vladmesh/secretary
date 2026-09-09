@@ -9,7 +9,9 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from secretary import cutover
@@ -21,6 +23,7 @@ from secretary.board.import_board import BoardSource, RegistryEntry, SourceRow
 from secretary.board.postgres_recovery import PostgresRecoveryError, restore_dump
 from secretary.board.sql_cards import SqlCardClient
 from secretary.board.store import BoardStoreConfig, BoardStoreError
+from secretary.cutover import successor
 from secretary.data import DataExport, export_board, init_layout
 from secretary.restore import restore_postgres_backup
 from secretary.sprint_observer import none_choice
@@ -210,7 +213,9 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.addCleanup(reset_card_backend)
         self.addCleanup(self.environment.stop)
 
-    def _store(self, name: str) -> tuple[Path, BoardStoreConfig]:
+    def _store(
+        self, name: str, *, revision: str | None = None
+    ) -> tuple[Path, BoardStoreConfig]:
         instance = self.root / name
         data_dir = self.root / f"{name}-data"
         instance.mkdir()
@@ -258,7 +263,25 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         project = f"secretary-recovery-{name}-{os.getpid()}"
         self.projects.append((instance, project))
         provision.provision(instance, compose_path=compose, project=project)
-        migrate.migrate_instance(instance)
+        if revision is None:
+            migrate.migrate_instance(instance)
+        else:
+            import sqlalchemy as sa
+            from alembic import command
+
+            engine = sa.create_engine(migrate.sqlalchemy_url(config.for_role("owner")))
+            try:
+                with engine.connect() as connection:
+                    command.upgrade(
+                        migrate.alembic_config(
+                            connection=connection,
+                            passwords=migrate.passwords_for(config),
+                        ),
+                        revision,
+                    )
+                    connection.commit()
+            finally:
+                engine.dispose()
         provision.verify_roles(instance)
         return instance, config
 
@@ -633,6 +656,287 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 sort_keys=True,
             )
         )
+
+    def test_real_successor_preserves_import_oid_and_builds_empty_distinct_plan(self) -> None:
+        import psycopg
+        import psycopg.sql
+
+        instance, original = self._store(
+            "successor", revision="0006_sprint_transport_key"
+        )
+        data = self.root / "successor-data"
+        init_layout(data)
+        paths = cutover.Paths(instance, data)
+        (instance / "runtime.env").write_text("SECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8")
+        with psycopg.connect(original.for_role("owner").conninfo()) as connection:
+            connection.execute(
+                "INSERT INTO projects (project_id, enabled, registry_present) VALUES "
+                "('butler', true, true), ('codegen-product-kit', true, true)"
+            )
+            connection.execute(
+                "INSERT INTO tasks (task_ref, project_id, task_number, title, task_type, state, "
+                "created_at, updated_at) VALUES "
+                "('butler-1', 'butler', 1, 'Butler collision', 'code', 'done', now(), now()), "
+                "('codegen-product-kit-1', 'codegen-product-kit', 1, 'Kit collision', 'code', "
+                "'ready', now(), now())"
+            )
+            connection.execute(
+                "INSERT INTO task_comments (task_ref, marker, body, actor_role, created_at) "
+                "VALUES ('butler-1', 'note', 'butler collision comment', 'worker', now()), "
+                "('codegen-product-kit-1', 'note', 'kit collision comment', 'worker', now())"
+            )
+            connection.execute(
+                "INSERT INTO task_dependencies (task_ref, depends_on, depends_on_task) VALUES "
+                "('codegen-product-kit-1', 'butler-1', 'butler-1')"
+            )
+            connection.execute(
+                "INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, "
+                "ref, created_at, settled_at) VALUES ('collision-audit', 'card.comment', '{}'::jsonb, "
+                "'committed', true, 'card', 'butler-1', now(), now())"
+            )
+            connection.execute(
+                "INSERT INTO board_events (event_id, request_id, kind, entity_kind, ref, actor_role, "
+                "actor_id, reason, occurred_at, committed, committed_at) VALUES "
+                "('collision-event', 'collision-audit', 'entity.updated', 'card', 'butler-1', "
+                "'worker', 'fixture', 'commented', now(), true, now())"
+            )
+
+        def content_snapshot(config: BoardStoreConfig) -> dict[str, list[tuple[object, ...]]]:
+            with psycopg.connect(config.for_role("owner").conninfo()) as connection:
+                return {
+                    "refs_numbers_board_keys": connection.execute(
+                        "SELECT task_ref, project_id, task_number, board_key FROM tasks ORDER BY task_ref"
+                    ).fetchall(),
+                    "comments": connection.execute(
+                        "SELECT task_ref, marker, body, request_id FROM task_comments "
+                        "ORDER BY task_ref, comment_id"
+                    ).fetchall(),
+                    "links": connection.execute(
+                        "SELECT task_ref, depends_on, depends_on_task FROM task_dependencies "
+                        "ORDER BY task_ref, depends_on"
+                    ).fetchall(),
+                    "requests": connection.execute(
+                        "SELECT request_id, operation, status, ref FROM requests ORDER BY request_id"
+                    ).fetchall(),
+                    "board_events": connection.execute(
+                        "SELECT event_id, request_id, kind, ref, committed FROM board_events "
+                        "ORDER BY event_id"
+                    ).fetchall(),
+                }
+
+        from secretary.board import postgres_recovery
+
+        with psycopg.connect(original.for_role("owner").conninfo()) as connection:
+            predecessor_counts = postgres_recovery._table_counts(connection)
+            pre_upgrade_content = {
+                "refs_and_numbers": connection.execute(
+                    "SELECT task_ref, project_id, task_number FROM tasks ORDER BY task_ref"
+                ).fetchall(),
+                "comments": connection.execute(
+                    "SELECT task_ref, marker, body, request_id FROM task_comments "
+                    "ORDER BY task_ref, comment_id"
+                ).fetchall(),
+                "links": connection.execute(
+                    "SELECT task_ref, depends_on, depends_on_task FROM task_dependencies "
+                    "ORDER BY task_ref, depends_on"
+                ).fetchall(),
+                "requests": connection.execute(
+                    "SELECT request_id, operation, status, ref FROM requests ORDER BY request_id"
+                ).fetchall(),
+                "board_events": connection.execute(
+                    "SELECT event_id, request_id, kind, ref, committed FROM board_events "
+                    "ORDER BY event_id"
+                ).fetchall(),
+            }
+        predecessor_metadata = {
+            "source_schema": "0006_sprint_transport_key",
+            "table_counts": predecessor_counts,
+        }
+        original_identity = successor.inspect_database(original)
+        with psycopg.connect(
+            original.for_role("owner").conninfo().replace("dbname='secretary'", "dbname='postgres'")
+        ) as admin:
+            admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datid=%s AND pid<>pg_backend_pid()",
+                (original_identity["oid"],),
+            ).fetchall()
+        report = {
+            "counts": predecessor_metadata["table_counts"],
+            "parity": {"ok": True},
+            "schema_revision": "0006_sprint_transport_key",
+            "source_consistency": {"matched": True},
+        }
+        report_path = data / "cutover" / "artifacts" / ("import-" + "e" * 64 + ".json")
+        report_path.parent.mkdir(parents=True)
+        report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        state = {
+            "version": 1,
+            "identity": "postgres-" + "e" * 20,
+            "plan_id": "e" * 64,
+            "expected_revision": "b" * 40,
+            "actor": "owner",
+            "reason": "failed import rehearsal",
+            "created_at": "2026-09-09T00:00:00Z",
+            "updated_at": "2026-09-09T00:00:00Z",
+            "status": "recovered-frozen",
+            "backend_before": "kanboard",
+            "first_sql_write": None,
+            "recovery": {"branch": "kanboard-before-first-write"},
+            "phases": {
+                "final_fenced_import": {
+                    "status": "complete", "evidence": {"report": str(report_path), "import": report}
+                },
+                "full_parity": {
+                    "status": "complete",
+                    "evidence": {"parity": {"ok": True}, "counts": predecessor_metadata["table_counts"]},
+                },
+            },
+        }
+        cutover._write_state(paths, state)
+        token = successor.confirmation(state["plan_id"], original_identity["oid"], original.dbname)
+        prepare_args = SimpleNamespace(
+            expected_revision="a" * 40,
+            actor="operator",
+            reason="prepare a clean later target",
+            confirm=token,
+        )
+        original_state_bytes = paths.state.read_bytes()
+        with (
+            mock.patch.object(cutover, "_provenance", return_value={"installed_revision": "a" * 40}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            self.assertRaisesRegex(cutover.CutoverError, successor.UPGRADE_PREREQUISITE),
+        ):
+            successor.prepare(prepare_args, paths)
+        self.assertEqual(paths.state.read_bytes(), original_state_bytes)
+        self.assertEqual(successor.inspect_schema_revision(original), "0006_sprint_transport_key")
+        with psycopg.connect(original.for_role("owner").conninfo()) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT task_ref, project_id, task_number FROM tasks ORDER BY task_ref"
+                ).fetchall(),
+                pre_upgrade_content["refs_and_numbers"],
+            )
+
+        applied_upgrade = migrate.migrate_instance(instance, reuse_existing_roles=True)
+        provision.verify_roles(instance)
+        self.assertEqual(applied_upgrade, ("0007_card_transport_key",))
+        before_content = content_snapshot(original)
+        injected = {name: True for name in (
+            "database_rename", "database_create", "migration", "empty_verification",
+            "history_publication", "canonical_release", "release_receipt",
+        )}
+        real_methods = {
+            name: getattr(successor.SuccessorOperations, name) for name in injected
+        }
+
+        def interrupted(name: str):
+            def operation(operation_self):
+                evidence = real_methods[name](operation_self)
+                if injected[name]:
+                    injected[name] = False
+                    raise RuntimeError(f"injected after real {name} effect")
+                return evidence
+            return operation
+
+        attempts = 0
+        with (
+            mock.patch.object(cutover, "_provenance", return_value={"installed_revision": "a" * 40}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_source_evidence", return_value={"fingerprint": "later-kanboard", "parity": {"ok": True}}),
+            mock.patch.multiple(
+                successor.SuccessorOperations,
+                **{name: interrupted(name) for name in injected},
+            ),
+        ):
+            while True:
+                attempts += 1
+                try:
+                    result = successor.prepare(prepare_args, paths)
+                except cutover.CutoverError as exc:
+                    self.assertTrue(
+                        "injected after real" in str(exc) or "release_receipt remains pending" in str(exc)
+                    )
+                else:
+                    break
+                if attempts > len(injected) + 2:
+                    self.fail("successor interruption sequence did not converge")
+            replay = successor.prepare(prepare_args, paths)
+            status_before_plan = cutover._read_recovered_history(paths)
+            successor_plan = cutover.build_plan(paths, "a" * 40)
+            cutover._write_state(
+                paths,
+                cutover._new_state(successor_plan, "later-operator", "separate future cutover"),
+            )
+            status_after_plan = cutover._read_recovered_history(paths)
+            replay_after_plan = successor.prepare(prepare_args, paths)
+
+        self.assertEqual(attempts, len(injected) + 1)
+        self.assertTrue(all(not pending for pending in injected.values()))
+        self.assertEqual(
+            list(paths.history.glob(f"postgres-v1-{state['plan_id']}.json")),
+            [paths.history / f"postgres-v1-{state['plan_id']}.json"],
+        )
+        self.assertEqual(
+            list(paths.history.glob(f"successor-release-{state['plan_id']}.json")),
+            [successor.release_receipt_path(paths, state["plan_id"])],
+        )
+        self.assertEqual(
+            list(paths.artifacts.glob(f"successor-{state['plan_id']}-*.dump")),
+            [Path(result["successor_preparation"]["dump"]["path"])],
+        )
+
+        database = result["successor_preparation"]["database"]
+        archived = successor.inspect_database(original, name=database["archive_name"])
+        configured = successor.inspect_database(original)
+        _, fresh = __import__(
+            "secretary.board.postgres_recovery", fromlist=["inspect_source"]
+        ).inspect_source(instance)
+        self.assertEqual(archived["oid"], original_identity["oid"])
+        self.assertFalse(archived["allow_connections"])
+        self.assertNotEqual(configured["oid"], original_identity["oid"])
+        self.assertTrue(all(count == 0 for count in fresh["table_counts"].values()))
+        self.assertEqual(fresh["source_schema"], migrate.head_revision())
+        occupied = result["successor_preparation"]["phases"]["occupied_verification"]["evidence"]
+        self.assertEqual(occupied["schema_before"], "0007_card_transport_key")
+        self.assertEqual(occupied["forward_migrations"], [])
+
+        copy_name = "successor_archive_readback"
+        with psycopg.connect(
+            original.for_role("owner").conninfo().replace("dbname='secretary'", "dbname='postgres'"),
+            autocommit=True,
+        ) as admin:
+            admin.execute(
+                psycopg.sql.SQL("CREATE DATABASE {} OWNER {} TEMPLATE {}").format(
+                    psycopg.sql.Identifier(copy_name),
+                    psycopg.sql.Identifier(original.owner_user),
+                    psycopg.sql.Identifier(database["archive_name"]),
+                )
+            )
+        access_copy = replace(original, dbname=copy_name)
+        after_content = content_snapshot(access_copy)
+        self.assertEqual(after_content, before_content)
+        self.assertEqual(status_after_plan, status_before_plan)
+        self.assertTrue(replay_after_plan["idempotent_replay"])
+        self.assertEqual(
+            replay_after_plan["successor_preparation"]["status"], "complete"
+        )
+        self.assertNotEqual(successor_plan["plan_id"], state["plan_id"])
+        self.assertTrue(replay["idempotent_replay"])
+        predecessor = successor_plan["recovered_predecessors"][0]["successor_preparation"]
+        self.assertEqual(predecessor["archived_database"]["original_oid"], original_identity["oid"])
+        self.assertEqual(predecessor["archived_database"]["successor_oid"], configured["oid"])
+        print("successor evidence:", json.dumps({
+            "original_oid": original_identity["oid"], "archive_name": archived["name"],
+            "successor_oid": configured["oid"], "schema_head": fresh["source_schema"],
+            "original_schema_head": "0006_sprint_transport_key",
+            "external_upgrade": list(applied_upgrade),
+            "counts": predecessor_metadata["table_counts"],
+            "dump_sha256": result["successor_preparation"]["dump"]["sha256"],
+            "real_postgres_failure_injections": list(injected),
+            "post_rotation_content_comparison": sorted(after_content),
+            "successor_plan_id": successor_plan["plan_id"],
+        }, sort_keys=True))
 
     def test_full_backup_destroy_source_restore_target_and_rerun(self) -> None:
         self._seed()

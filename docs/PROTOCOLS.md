@@ -4171,6 +4171,7 @@ that work resumed.
 
 A successful pre-import `recover` publishes its exact `recovered-frozen` JSON under the
 installation's cutover history and fsyncs that archive before releasing the canonical state slot.
+
 Repeating recovery after an interrupted publication verifies the same archive and completes the
 release without replaying service recovery. The next `plan` includes predecessor identities and
 archive digests in its input, so its confirmation and identity differ and the recovered token cannot
@@ -4180,6 +4181,24 @@ a first SQL write and audit uncertainty remain terminal as well. Public planning
 canonical identity exists; `status.successor_eligibility` supplies the shared phase-based reason.
 An entered but failed/running final import is conservatively terminal with uncertain occupancy; only
 absence of that phase admits the two pre-import successor branches.
+
+`secretary cutover prepare-successor` accepts only the exact terminal identity whose final import
+and full parity completed, recovery branch is `kanboard-before-first-write`, selector activation is
+absent, `first_sql_write` is null, backend remains Kanboard, and matching import evidence is readable.
+It requires an absolute explicit instance, exact installed revision, non-empty actor/reason and a
+confirmation derived from plan ID, configured database name and current database OID. Status renders
+the token, phase evidence and exact next command without credentials. At
+`0006_sprint_transport_key` that command is the external owner/operator upgrade; preparation is a
+read-only refusal until the configured preserved database is verified at `0007_card_transport_key`.
+
+The subprotocol records `eligibility`, `occupied_verification`, `dump_publication`,
+`connection_fence`, `database_rename`, `database_create`, `migration`, `role_verification`,
+`empty_verification`, `history_publication`, `canonical_release` and `release_receipt`. Migration here
+applies only to the new empty canonical database. Every effect has a durable intent record and
+OID-based replay. History is fsynced before canonical unlink and directory fsync; only a matching
+immutable receipt then proves terminal release. The shared resolver makes status, replay and planning
+consume that pair monotonically. Old cutover, recovery and successor tokens do not authorize a new
+plan or apply.
 
 Each product subprocess must exit successfully and return a nonempty JSON object or array. Empty,
 non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public
