@@ -69,7 +69,15 @@ def runtime_pythonpath() -> str:
 # data dir through that file moves the WRITER. A role stripped of the same name would fall back to
 # instance.yaml and read a production-state.json nobody writes, calling that silence healthy
 # (secretary-833 review, round 3).
-NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO")
+NONSECRET_ENV = (
+    "SECRETARY_INSTANCE",
+    "SECRETARY_DATA_DIR",
+    "TA_SECRETARY_REPO",
+    # The process-wide board selector is ordinary routing configuration.  Every
+    # role must receive the same value as the dispatcher and web units or a
+    # cutover would create two simultaneous stores.
+    "SECRETARY_CARD_BACKEND",
+)
 # Bound by whoever launched the role (the rendered unit), and not retractable by the runtime env
 # file, which is itself a file inside one installation.
 OBSERVER_SPRINT_ENV = "SECRETARY_OBSERVER_SPRINT"

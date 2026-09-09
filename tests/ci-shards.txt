@@ -25,6 +25,7 @@ unit tests/test_broad_check.py
 unit tests/test_broad_suite.py
 unit tests/test_candidate_history.py
 integration-recovery tests/test_checkpoint.py
+integration-recovery tests/test_cutover.py
 integration-recovery tests/test_postgres_recovery.py
 unit tests/test_ci_shards.py
 component tests/test_cli.py

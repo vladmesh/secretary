@@ -674,3 +674,20 @@ later control card still must authorize quiescence, provision and back up the li
 take a final fenced import, switch configuration, disable stale Kanboard-derived checkpoint writes,
 verify the live SQL backend, and establish the rollback window. None of those actions is performed
 by an import rehearsal.
+# Cutover recovery boundary
+
+The versioned state document is `<data_dir>/cutover/postgres-v1.json`; the sibling lock is the one
+installation-wide controller lock. Each phase records start/completion timestamps, exact revision,
+and non-secret evidence before the next phase starts. Import reports are retained under
+`<data_dir>/cutover/artifacts`. Preserve these files and both backend backups during an incident.
+
+Recovery policy is determined by committed `requests`/`board_events` evidence, not by which service
+appears healthy. `selector_activation` records the imported SQL audit baseline. Before any later
+committed SQL event, `recover` may restore the Kanboard selector only after the frozen Kanboard
+fingerprint is unchanged. At or after the first committed event, recovery is PostgreSQL-only: repair
+or restart PostgreSQL, or restore the verified PostgreSQL recovery backup. It never points writers at
+the stale Kanboard archive. No recovery branch resumes the pipeline automatically.
+
+An uncertain phase at or after `global_freeze` stays frozen. Do not remove the freeze, hand-edit
+`runtime.env`, rerun the importer, or start an individual consumer. Inspect `secretary cutover status`
+and retry the same cutover identity or use its `RECOVER-...` token.

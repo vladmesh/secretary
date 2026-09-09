@@ -3591,3 +3591,41 @@ port, image, Alembic head, fence values, counts and rerun result. Do not edit `b
 `SECRETARY_CARD_BACKEND`, reconcile the host, or start any lifecycle process. Live provisioning,
 quiescence, backend switch, checkpoint handoff, acceptance and rollback remain work for the later
 authorized cutover card.
+# PostgreSQL board-store cutover
+
+`secretary cutover` is the only supported Kanboard to PostgreSQL activation boundary. Run it from
+the installed product environment, never from a task workspace. The operation stops every sprint
+observer, worker and reviewer, the public and loopback web services, the dispatcher timer, and all
+standing automation timers. It must therefore be invoked outside an observer turn, after the
+controller change is merged, installed, and the installed head source pin reports the candidate
+revision. This implementation card did not run the live cutover.
+
+The expected outage begins at `global_freeze` and ends only after an operator inspects
+`resume_ready` and explicitly runs `secretary resume`. Budget a full maintenance window. First run:
+
+```
+secretary cutover plan --instance /absolute/instance --expected-revision <40-char-sha>
+```
+
+`plan` is read-only. Save its `confirmation`, inspect its source fence and parity, then use the exact
+token, revision, actor and reason:
+
+```
+secretary cutover apply --instance /absolute/instance --expected-revision <sha> \
+  --actor <operator> --reason <change-record> --confirm CUTOVER-<plan-id-prefix>
+secretary cutover status --instance /absolute/instance
+```
+
+Rerun the identical `apply` command after a crash. Never delete or edit the state document. A failed
+phase remains failed and frozen; completed phases are not repeated. `status` prints the recovery
+token. Recovery is similarly explicit:
+
+```
+secretary cutover recover --instance /absolute/instance --expected-revision <sha> \
+  --actor <operator> --reason <incident-record> --confirm RECOVER-<plan-id-prefix>
+```
+
+The operator needs ownership of the instance and data directories, permission to control the named
+systemd units and Docker PostgreSQL service, and access to the installed virtual environment. The
+controller rejects symlinked or broadly writable configuration/state and does not print database
+credentials.

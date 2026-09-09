@@ -338,3 +338,17 @@ destination counts, fence identities, Alembic head, duration, request replay/own
 history lookup probes. It is migration evidence only. The dispatcher-owned exact-SHA gate remains
 the authoritative broad test result, and neither the rehearsal nor a worker-local broad receipt is
 live cutover acceptance.
+# PostgreSQL cutover rehearsal
+
+`tests.test_cutover` is the controller failure matrix. It interrupts each durable phase, retries the
+same identity, and asserts earlier phases execute once. It also covers atomic selector preservation,
+private/symlink-safe state, backend/phase disagreement, source movement, both recovery branches, and
+selector propagation to every launched role without inference from `board-store.env`.
+
+The full external rehearsal must use disposable Kanboard source data, an empty PostgreSQL 16 target,
+isolated instance/data directories, and fake or isolated service/head controls. Missing Docker,
+psycopg, SQLAlchemy, Alembic or PostgreSQL is a red prerequisite failure, never a skip. Record source
+and target identities, migration head, per-table import/parity counts, protocol acceptance counts,
+archive/checkpoint identities, failure-injection results and exact installed provenance. Never point a
+rehearsal at `/home/dev/secretary-data`, `/home/dev/secretary-instance`, production systemd or a live
+observer.

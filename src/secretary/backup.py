@@ -67,6 +67,7 @@ def create_backups(
     caller_workspace: Path | None = None,
     pipeline_command: list[str] | None = None,
     backup_kinds: tuple[BackupKind, ...] = ("full",),
+    existing_freeze_actor: str | None = None,
 ) -> list[BackupResult]:
     kinds = tuple(dict.fromkeys(backup_kinds))
     invalid = [kind for kind in kinds if kind not in BACKUP_KINDS]
@@ -119,16 +120,22 @@ def create_backups(
         try:
             pre_pause = _pipeline_status(instance_file=instance_file, command=pipeline_command)
             if pre_pause.get("paused"):
-                raise RuntimeError("pipeline is already paused; backup create must own the freeze")
-            pause_status = _pipeline_action(
-                "pause",
-                instance_file=instance_file,
-                command=pipeline_command,
-                exclude_workspace=exclude_workspace,
-            )
-            paused_by_us = pause_status is None or _pause_owned_by_backup(pause_status)
-            if not paused_by_us:
-                raise RuntimeError("pipeline pause was not owned by backup create")
+                if not existing_freeze_actor:
+                    raise RuntimeError("pipeline is already paused; backup create must own the freeze")
+                if pre_pause.get("mode") != "freeze" or pre_pause.get("actor") != existing_freeze_actor:
+                    raise RuntimeError("pipeline freeze is not owned by the declared backup caller")
+            else:
+                if existing_freeze_actor:
+                    raise RuntimeError("the declared caller-owned pipeline freeze is absent")
+                pause_status = _pipeline_action(
+                    "pause",
+                    instance_file=instance_file,
+                    command=pipeline_command,
+                    exclude_workspace=exclude_workspace,
+                )
+                paused_by_us = pause_status is None or _pause_owned_by_backup(pause_status)
+                if not paused_by_us:
+                    raise RuntimeError("pipeline pause was not owned by backup create")
 
             init_layout(data_dir)
             raw_dump = raw_kanboard_dump(data_dir) if backend == "kanboard" and "full" in kinds else None

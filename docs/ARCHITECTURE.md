@@ -861,3 +861,18 @@ needed and it does not race the tick writer.
 
 Command contracts are in [Protocols](PROTOCOLS.md), runbooks in [Operations](OPERATIONS.md), and the
 product goal in [Vision](VISION.md).
+# Cutover controller
+
+`secretary.cutover` is an orchestration boundary over existing product operations. It does not own a
+second migration, import, parity, backup, checkpoint, pause, or backend-selection implementation.
+Its durable ordered phases are: preflight; Kanboard backup/checkpoint; PostgreSQL provision and
+migration verification; global freeze; writer-quiescence proof; final fenced import; full parity;
+PostgreSQL recovery backup; selector activation; service reconciliation; installed-protocol
+acceptance; post-switch checkpoint; and resume-ready.
+
+The state identity is the digest of the exact installed revision, runtime/source provenance,
+instance/data paths, source fingerprint, counts, parity and phase vocabulary. The confirmation token
+is derived from that digest. An exclusive lock serializes mutation, atomic private state files make
+phase completion restart-safe, and retries accept only the original actor, reason, revision and
+identity. The irreversible-policy marker is derived from committed SQL audit growth after the
+activation baseline.

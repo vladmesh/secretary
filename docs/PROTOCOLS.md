@@ -4151,3 +4151,19 @@ The import report accounts for total journal records, generic and typed records,
 event rows, budget-linked requests, refusals and reasons. Its before/after source identities are a
 read fence over the complete source, not a control-plane pause protocol. A mismatch has no admitted
 snapshot and no apply phase.
+# `secretary cutover`
+
+The lifecycle has four machine-readable JSON commands:
+
+* `plan --instance PATH --expected-revision SHA` performs only reads and returns `plan_id` and
+  `confirmation`.
+* `status --instance PATH` reads backend, durable phases and the recovery confirmation token.
+* `apply --instance PATH --expected-revision SHA --actor ACTOR --reason REASON --confirm TOKEN`
+  creates or resumes exactly one identity.
+* `recover` takes the same mutation arguments and the `RECOVER-...` token printed by status.
+
+Mutations reject the default instance guess, unsafe configuration/state, concurrent control,
+revision/provenance disagreement, stale identity, backend disagreement and out-of-order continuation.
+Every phase has `running`, `failed` or `complete` evidence. A failed phase cannot be relabelled; the
+same command retries it. `resume_ready` means probes and SQL-sourced recovery artifacts passed, not
+that work resumed.

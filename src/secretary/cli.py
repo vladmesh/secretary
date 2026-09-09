@@ -16,6 +16,7 @@ from secretary.checkpoint import (
     render_checkpoint_lines,
 )
 from secretary.config import DataDirError, instance_data_dir, load_config, validate, validate_instance
+from secretary.cutover import add_cutover_subcommands
 from secretary.data import (
     KANBOARD_DATA_PATH,
     export_all,
@@ -133,7 +134,42 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         parser.print_help()
         return 2
-    return handler(args)
+    backend_was_bound = "SECRETARY_CARD_BACKEND" in os.environ
+    if not _bind_instance_card_backend(args):
+        return 1
+    try:
+        return handler(args)
+    finally:
+        if not backend_was_bound and getattr(args, "_instance_card_backend_bound", False):
+            from secretary.board.backend import reset_card_backend
+
+            os.environ.pop("SECRETARY_CARD_BACKEND", None)
+            reset_card_backend()
+
+
+def _bind_instance_card_backend(args: argparse.Namespace) -> bool:
+    """Bind an operator CLI to the same selector its instance units consume."""
+    if "SECRETARY_CARD_BACKEND" in os.environ or not getattr(args, "instance", None):
+        return True
+    from secretary.board.backend import BoardBackendError, parse_card_backend, reset_card_backend
+    from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
+
+    instance = Path(args.instance).expanduser()
+    if not instance.is_dir():
+        instance = instance.parent
+    try:
+        values = read_runtime_env(instance)
+        backend = parse_card_backend(values.get("SECRETARY_CARD_BACKEND"))
+    except RuntimeEnvMissing:
+        return True
+    except (RuntimeEnvError, BoardBackendError) as exc:
+        print(json.dumps({"error": {"code": "backend_error", "message": str(exc)}}))
+        return False
+    if "SECRETARY_CARD_BACKEND" in values:
+        os.environ["SECRETARY_CARD_BACKEND"] = backend
+        reset_card_backend()
+        args._instance_card_backend_bound = True
+    return True
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -147,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_web_run_subcommands(subparsers)
     add_web_serve_subcommands(subparsers)
     add_web_front_subcommands(subparsers)
+    add_cutover_subcommands(subparsers)
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
     doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
