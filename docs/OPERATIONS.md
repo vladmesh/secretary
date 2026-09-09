@@ -3683,6 +3683,37 @@ The controller checks these preconditions and performs neither of them: writing 
 sudoers rule and any unit remains operator work outside the command. Its probe of the sudo rule is
 read-only (`sudo -n systemctl show --property=Version`) and changes no unit.
 
+### The units of the window come from the installation
+
+The controller acts on the units this installation actually has. Before it takes the lock it reads
+`systemctl show <unit> --property=LoadState` for every declared unit — read-only, without `sudo`,
+and without changing anything — and `LoadState=not-found` means the unit was never installed here.
+The instance configuration (`host.components` in `instance.yaml`) is not consulted: it can disagree
+with what is installed, and only what is installed can be stopped, started or proven.
+
+| units | declared | absent unit |
+| --- | --- | --- |
+| `secretary-web.service`, `secretary-web-front.service` | required | `apply` refuses |
+| `secretary-dispatcher-production.timer`, `.service` | required | `apply` refuses |
+| `secretary-curator.timer`, `.service` | required | `apply` refuses |
+| `secretary-steward.timer`, `.service` | optional | excluded, recorded in evidence |
+| `secretary-steward-deep-sweep.timer`, `.service` | optional | excluded, recorded in evidence |
+| `secretary-retro.timer`, `.service` | optional | excluded, recorded in evidence |
+
+A missing required unit refuses on the same seam as the two root steps above: before the lock, the
+state document and the first phase, so the refusal has no durable effect and the identical `apply`
+succeeds once the unit is installed. A missing optional unit is not a refusal. It is excluded from
+the freeze `stop`, from the reconciliation `start`, from all three `recover` restarts, and from the
+loaded/active unit proof — no `systemctl` command names it at all.
+
+Nothing is skipped silently. `plan` prints the same read-only inventory under
+`privileged_preconditions.units`, and each phase records its own under `inventory` in the phase
+evidence: `load_states` for every declared unit, the `stop` and `start` composition the phase used,
+and `excluded` naming each unit left out with the `LoadState` that excluded it and whether it was
+required. `recover` records the same document beside the restarted services. That evidence is the
+answer to "why did the steward not come back": no hand-maintained inventory file is involved, and
+an operator neither edits the lists nor removes units before the window.
+
 The expected outage begins at `global_freeze` and ends only after an operator inspects
 `resume_ready` and explicitly runs `secretary resume`. Budget a full maintenance window. First run:
 

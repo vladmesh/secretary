@@ -696,6 +696,16 @@ before its first phase are described once under *Privileged preconditions instal
 the window* in `docs/OPERATIONS.md`; a refusal there is durable-effect-free and does not need
 recovery, only the root step and the identical rerun.
 
+Which consumers those are is read from the installation, not from a fixed list: a declared unit that
+systemd reports as `LoadState=not-found` is excluded from every stop, start and restart, including
+all three `recover` branches, and each branch records the inventory it used under
+`recovery.evidence.inventory` beside `recovery.evidence.services`. An installation without the
+optional steward, steward deep-sweep and retro units therefore recovers without operator
+intervention, while a missing required unit (web, dispatcher, curator) refuses `apply` before its
+first phase and leaves nothing to recover. Which units are required, which are optional and how to
+read that evidence is described once under *The units of the window come from the installation* in
+`docs/OPERATIONS.md`.
+
 An uncertain phase at or after `global_freeze` stays frozen. Do not remove the freeze, hand-edit
 `runtime.env`, rerun the importer, or start an individual consumer. Inspect `secretary cutover status`
 and retry the same cutover identity or use its `RECOVER-...` token.

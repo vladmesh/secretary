@@ -31,6 +31,58 @@ PLAN = {
     "confirmation": "CUTOVER-" + "1" * 16,
     "expected_revision": REVISION,
 }
+PRODUCT_ROOT = "/opt/secretary/product"
+# The components this installation deliberately leaves out: their units were
+# never installed, so systemd answers LoadState=not-found for each of them.
+ABSENT_OPTIONAL = (
+    "secretary-steward.timer",
+    "secretary-steward.service",
+    "secretary-steward-deep-sweep.timer",
+    "secretary-steward-deep-sweep.service",
+    "secretary-retro.timer",
+    "secretary-retro.service",
+)
+
+
+def inventory(absent: tuple[str, ...] = ()) -> cutover.UnitInventory:
+    return cutover.UnitInventory(
+        {
+            declaration.name: (
+                cutover.ABSENT_LOAD_STATE if declaration.name in absent else "loaded"
+            )
+            for declaration in cutover.DECLARED_UNITS
+        }
+    )
+
+
+def systemd_installation(commands: list[list[str]], absent: tuple[str, ...] = ()):
+    """A stand-in systemd: declared units answer, the absent ones as not-found.
+
+    Every command the controller issues is recorded, so a test can prove which
+    units were read, stopped, started and restarted without a live systemd,
+    a live sudo or a mutation of either.
+    """
+
+    def run(argv, **_kwargs):
+        commands.append(list(argv))
+        command = [item for item in argv if item not in ("sudo", "-n")]
+        if Path(command[0]).name != "systemctl":
+            return subprocess.CompletedProcess(argv, 0, '{"status":"ok"}\n', "")
+        if command[1] == "show" and command[-1] == "--property=Version":
+            return subprocess.CompletedProcess(argv, 0, "Version=255.4\n", "")
+        if command[1] == "show":
+            if command[2] in absent:
+                return subprocess.CompletedProcess(argv, 0, "LoadState=not-found\n", "")
+            return subprocess.CompletedProcess(
+                argv, 0, "LoadState=loaded\nActiveState=active\nSubState=running\n", ""
+            )
+        if command[1] == "cat":
+            return subprocess.CompletedProcess(
+                argv, 0, f"ExecStart={PRODUCT_ROOT}/bin/secretary\n", ""
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    return run
 
 
 def args(**overrides):
@@ -85,12 +137,24 @@ class CutoverFixture(unittest.TestCase):
         )
         self._preconditions.start()
         self.addCleanup(self.host_preconditions)
+        # What systemd has installed is a fact about the host as well.  The
+        # fixture answers it with a complete installation and
+        # InstalledUnitInventoryTests drives the real reader instead.
+        self._inventory = mock.patch.object(cutover, "inventory_units", return_value=inventory())
+        self._inventory.start()
+        self.addCleanup(self.host_unit_inventory)
 
     def host_preconditions(self) -> None:
         """Stop answering for the host so a test can drive the real predicate."""
         if self._preconditions is not None:
             self._preconditions.stop()
             self._preconditions = None
+
+    def host_unit_inventory(self) -> None:
+        """Stop answering for systemd so a test can inventory the declared units."""
+        if self._inventory is not None:
+            self._inventory.stop()
+            self._inventory = None
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -1511,6 +1575,215 @@ class PrivilegedPreconditionTests(CutoverFixture):
         self.assertEqual(len(commands), len(cutover.START_UNITS))
         for command, unit in zip(commands, cutover.START_UNITS, strict=True):
             self.assertEqual(command, ["sudo", "-n", "systemctl", "restart", unit])
+
+
+class InstalledUnitInventoryTests(CutoverFixture):
+    """What the installation has decides what a phase acts on, not a fixed list."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host_preconditions()
+        self.host_unit_inventory()
+        self.compose = Path(self.temporary.name) / "opt" / "postgres-compose.yml"
+        self.compose.parent.mkdir(mode=0o755)
+        self.compose.write_text(provision.COMPOSE_TEXT, encoding="utf-8")
+        self.compose.chmod(0o600)
+        self.commands: list[list[str]] = []
+
+    def systemd(self, *, absent: tuple[str, ...] = ()):
+        return mock.patch.object(
+            cutover.subprocess, "run", side_effect=systemd_installation(self.commands, absent)
+        )
+
+    def acted(self) -> list[list[str]]:
+        """Every command that changes a unit, as issued."""
+        return [command for command in self.commands if {"stop", "start", "restart"} & set(command)]
+
+    def units_of(self, action: str) -> list[str]:
+        return [command[-1] for command in self.commands if action in command]
+
+    def phases(self, absent: tuple[str, ...] = ()):
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        with (
+            self.systemd(absent=absent),
+            mock.patch.object(
+                cutover,
+                "_provenance",
+                return_value={"product_root": PRODUCT_ROOT, "installed_revision": REVISION},
+            ),
+            mock.patch.object(
+                cutover, "_service_evidence", side_effect=cutover._service_evidence
+            ) as service_evidence,
+        ):
+            operations = cutover.Operations(self.paths, state)
+            freeze = operations.global_freeze()
+            reconciliation = operations.service_reconciliation()
+        return freeze, reconciliation, service_evidence
+
+    def test_load_state_of_every_declared_unit_is_read_without_sudo_and_without_mutation(self) -> None:
+        with self.systemd(absent=ABSENT_OPTIONAL):
+            found = cutover.inventory_units()
+
+        self.assertEqual(
+            [command for command in self.commands],
+            [
+                ["systemctl", "show", declaration.name, "--property=LoadState"]
+                for declaration in cutover.DECLARED_UNITS
+            ],
+        )
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(found.absent, ABSENT_OPTIONAL)
+        self.assertEqual(
+            found.present,
+            tuple(name for name in cutover.STOP_UNITS if name not in ABSENT_OPTIONAL),
+        )
+        self.assertEqual(found.missing_required, ())
+        self.assertEqual({found.state(name) for name in ABSENT_OPTIONAL}, {cutover.ABSENT_LOAD_STATE})
+
+    def test_unreadable_systemd_is_not_an_absence_and_keeps_the_declared_composition(self) -> None:
+        with mock.patch.object(cutover.subprocess, "run", side_effect=OSError("no systemd")):
+            found = cutover.inventory_units()
+
+        self.assertEqual(found.absent, ())
+        self.assertEqual(found.missing_required, ())
+        self.assertEqual(found.stop_units(), cutover.STOP_UNITS)
+        self.assertEqual(found.start_units(), cutover.START_UNITS)
+        self.assertTrue(
+            all(state.startswith("unreadable: ") for state in found.load_states.values())
+        )
+
+    def test_installation_without_steward_and_retro_never_touches_the_absent_units(self) -> None:
+        freeze, reconciliation, service_evidence = self.phases(absent=ABSENT_OPTIONAL)
+
+        expected_stop = [name for name in cutover.STOP_UNITS if name not in ABSENT_OPTIONAL]
+        expected_start = [name for name in cutover.START_UNITS if name not in ABSENT_OPTIONAL]
+        self.assertEqual(self.units_of("stop"), expected_stop)
+        self.assertEqual(self.units_of("start"), expected_start)
+        for command in self.acted():
+            self.assertFalse(set(command) & set(ABSENT_OPTIONAL), command)
+        # The absent optional units are not silently dropped: the phase evidence
+        # names each one with the LoadState that excluded it.
+        for evidence in (freeze["inventory"], reconciliation["inventory"]):
+            self.assertEqual(
+                evidence["excluded"],
+                [{"unit": name, "load_state": "not-found", "required": False} for name in ABSENT_OPTIONAL],
+            )
+            self.assertEqual(evidence["source"], "systemctl show --property=LoadState")
+            self.assertEqual(evidence["stop"], expected_stop)
+            self.assertEqual(evidence["start"], expected_start)
+        self.assertEqual(freeze["services"]["units"], expected_stop)
+        self.assertEqual(reconciliation["services"]["units"], expected_start)
+        # An absent unit is never proven either: _service_evidence requires
+        # LoadState=loaded and would refuse the whole phase over it.
+        self.assertEqual(list(service_evidence.call_args.args[0]), expected_start)
+        self.assertEqual([item["unit"] for item in reconciliation["units"]], expected_start)
+
+    def test_complete_installation_issues_exactly_the_declared_commands(self) -> None:
+        freeze, reconciliation, service_evidence = self.phases()
+
+        self.assertEqual(
+            [command for command in self.acted() if "stop" in command],
+            [["sudo", "-n", "systemctl", "stop", name] for name in cutover.STOP_UNITS],
+        )
+        self.assertEqual(
+            [command for command in self.acted() if "start" in command],
+            [["sudo", "-n", "systemctl", "start", name] for name in cutover.START_UNITS],
+        )
+        self.assertEqual(freeze["inventory"]["excluded"], [])
+        self.assertEqual(reconciliation["inventory"]["excluded"], [])
+        self.assertEqual(list(service_evidence.call_args.args[0]), list(cutover.START_UNITS))
+
+    def test_absent_required_unit_refuses_apply_before_the_first_mutation(self) -> None:
+        for unit in (
+            "secretary-web.service",
+            "secretary-dispatcher-production.timer",
+            "secretary-curator.timer",
+        ):
+            with self.subTest(unit=unit):
+                self.commands.clear()
+                with (
+                    self.systemd(absent=(unit,)),
+                    mock.patch.object(provision, "DEFAULT_COMPOSE_PATH", self.compose),
+                    mock.patch.object(cutover, "build_plan") as plan,
+                    mock.patch.object(cutover, "Operations") as operations,
+                    self.assertRaisesRegex(
+                        cutover.CutoverError, f"required units are not installed: {unit}"
+                    ),
+                ):
+                    cutover.apply_cutover(args(), self.paths)
+
+                plan.assert_not_called()
+                operations.assert_not_called()
+                self.assertEqual(self.acted(), [])
+                self.assertFalse(self.paths.state.exists())
+                self.assertIsNone(cutover._read_state(self.paths))
+
+    def test_absent_optional_units_are_a_reported_precondition_and_not_a_refusal(self) -> None:
+        with self.systemd(absent=ABSENT_OPTIONAL):
+            report = cutover._require_privileged_preconditions(self.compose)
+
+        units = report["units"]
+        self.assertTrue(report["satisfied"])
+        self.assertTrue(units["satisfied"])
+        self.assertEqual(units["requirement"], "installed required consumer units")
+        for name in ABSENT_OPTIONAL:
+            self.assertIn(name, units["detail"])
+        self.assertEqual([item["unit"] for item in units["excluded"]], list(ABSENT_OPTIONAL))
+        self.assertEqual(self.acted(), [])
+
+    def test_every_recovery_branch_restarts_only_the_installed_consumers(self) -> None:
+        expected = [name for name in cutover.START_UNITS if name not in ABSENT_OPTIONAL]
+        branches = ("kanboard-before-fingerprint", "kanboard-before-first-write", "postgres-only")
+        for branch in branches:
+            with self.subTest(branch=branch), tempfile.TemporaryDirectory() as raw:
+                self.commands.clear()
+                root = Path(raw)
+                paths = cutover.Paths(root / "instance", root / "data")
+                paths.instance.mkdir(mode=0o700)
+                paths.data.mkdir(mode=0o700)
+                state = cutover._new_state(PLAN, args().actor, args().reason)
+                if branch == "kanboard-before-fingerprint":
+                    state["status"] = "failed-frozen"
+                    state["phases"]["global_freeze"] = {"status": "complete"}
+                else:
+                    state["phases"]["writer_quiescence_proof"] = {
+                        "status": "complete",
+                        "evidence": {"source": {"fingerprint": "source-one"}},
+                    }
+                    state["phases"]["selector_activation"] = {
+                        "status": "complete",
+                        "evidence": {"sql_audit_baseline": {"committed_events": 10}},
+                    }
+                    state["phases"]["final_fenced_import"] = {"status": "complete"}
+                cutover._write_state(paths, state)
+                committed = 11 if branch == "postgres-only" else 10
+
+                with (
+                    self.systemd(absent=ABSENT_OPTIONAL),
+                    mock.patch.object(cutover, "_provenance", return_value={}),
+                    mock.patch.object(cutover, "_backend", return_value="kanboard"),
+                    mock.patch.object(cutover, "_set_backend", return_value={}),
+                    mock.patch.object(cutover, "_reconcile_postgres", return_value={}),
+                    mock.patch.object(
+                        cutover, "_sql_event_count", return_value={"committed_events": committed}
+                    ),
+                    mock.patch.object(
+                        cutover, "_source_evidence", return_value={"fingerprint": "source-one"}
+                    ),
+                ):
+                    result = cutover.recover_cutover(args(confirm="RECOVER-" + "1" * 16), paths)
+
+                self.assertEqual(result["recovery"]["branch"], branch)
+                evidence = result["recovery"]["evidence"]
+                self.assertEqual(evidence["services"]["units"], expected)
+                self.assertEqual(
+                    [item["unit"] for item in evidence["inventory"]["excluded"]],
+                    list(ABSENT_OPTIONAL),
+                )
+                self.assertEqual(
+                    [command for command in self.acted()],
+                    [["sudo", "-n", "systemctl", "restart", name] for name in expected],
+                )
 
 
 if __name__ == "__main__":

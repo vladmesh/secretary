@@ -64,28 +64,55 @@ PHASES = (
     "resume_ready",
 )
 
-STOP_UNITS = (
-    "secretary-dispatcher-production.timer",
-    "secretary-dispatcher-production.service",
-    "secretary-web-front.service",
-    "secretary-web.service",
-    "secretary-steward.timer",
-    "secretary-steward.service",
-    "secretary-steward-deep-sweep.timer",
-    "secretary-steward-deep-sweep.service",
-    "secretary-retro.timer",
-    "secretary-retro.service",
-    "secretary-curator.timer",
-    "secretary-curator.service",
+ABSENT_LOAD_STATE = "not-found"
+
+
+@dataclass(frozen=True)
+class UnitDeclaration:
+    """One consumer unit of the installation, declared once for every phase.
+
+    ``required`` is a property of the unit and not of a phase: freeze, resume,
+    recovery and unit evidence all read this one table, so a unit cannot be
+    mandatory where it is stopped and optional where it is started.  A component
+    the installation deliberately leaves out (``host.components`` in
+    ``instance.yaml``) is declared optional here; its absence is a fact this
+    controller reads from systemd, never from that configuration.
+
+    ``freeze`` and ``resume`` are the positions the unit takes in the two orders.
+    They differ on purpose: the freeze stops the dispatcher before the web tier,
+    and the resume brings the web tier up before the timers that write through it.
+    A unit with no ``resume`` position is only stopped, because its timer starts it.
+    """
+
+    name: str
+    required: bool
+    freeze: int
+    resume: int | None
+
+
+DECLARED_UNITS = (
+    UnitDeclaration("secretary-dispatcher-production.timer", required=True, freeze=1, resume=3),
+    UnitDeclaration("secretary-dispatcher-production.service", required=True, freeze=2, resume=None),
+    UnitDeclaration("secretary-web-front.service", required=True, freeze=3, resume=2),
+    UnitDeclaration("secretary-web.service", required=True, freeze=4, resume=1),
+    UnitDeclaration("secretary-steward.timer", required=False, freeze=5, resume=4),
+    UnitDeclaration("secretary-steward.service", required=False, freeze=6, resume=None),
+    UnitDeclaration("secretary-steward-deep-sweep.timer", required=False, freeze=7, resume=5),
+    UnitDeclaration("secretary-steward-deep-sweep.service", required=False, freeze=8, resume=None),
+    UnitDeclaration("secretary-retro.timer", required=False, freeze=9, resume=6),
+    UnitDeclaration("secretary-retro.service", required=False, freeze=10, resume=None),
+    UnitDeclaration("secretary-curator.timer", required=True, freeze=11, resume=7),
+    UnitDeclaration("secretary-curator.service", required=True, freeze=12, resume=None),
 )
-START_UNITS = (
-    "secretary-web.service",
-    "secretary-web-front.service",
-    "secretary-dispatcher-production.timer",
-    "secretary-steward.timer",
-    "secretary-steward-deep-sweep.timer",
-    "secretary-retro.timer",
-    "secretary-curator.timer",
+STOP_UNITS = tuple(
+    declaration.name for declaration in sorted(DECLARED_UNITS, key=lambda item: item.freeze)
+)
+START_UNITS = tuple(
+    declaration.name
+    for declaration in sorted(
+        (item for item in DECLARED_UNITS if item.resume is not None),
+        key=lambda item: item.resume,
+    )
 )
 WRITER_COMMANDS = (
     " web-run ",
@@ -331,12 +358,14 @@ def _root_commands(compose: dict[str, Any], probe: dict[str, Any]) -> list[str]:
 
 
 def _privileged_preconditions(compose_path: Path | None = None) -> dict[str, Any]:
-    """Read-only report on the two install steps only root can take.
+    """Read-only report on what apply needs the installation to already have.
 
-    The controller owns neither of them: it proves the Compose definition that
-    provisioning needs is already installed as shipped, and that its own
-    systemd calls will be authorised, then prints the root commands for
-    whatever is missing.  It never writes the file or the sudo rule.
+    The controller owns none of it: it proves the Compose definition that
+    provisioning needs is already installed as shipped, that its own systemd
+    calls will be authorised, and that every unit it must not run without is
+    installed, then prints the root commands for whatever is missing.  It never
+    writes the file, the sudo rule or a unit, and reading a LoadState changes
+    nothing.
     """
     from secretary.board.provision import DEFAULT_COMPOSE_PATH, inspect_compose
 
@@ -350,10 +379,18 @@ def _privileged_preconditions(compose_path: Path | None = None) -> dict[str, Any
         "detail": installed.describe(),
     }
     probe = _sudo_systemctl_probe()
+    inventory = inventory_units()
+    units = {
+        "requirement": "installed required consumer units",
+        "satisfied": not inventory.missing_required,
+        "detail": inventory.describe(),
+        **inventory.evidence(),
+    }
     report: dict[str, Any] = {
-        "satisfied": bool(compose["satisfied"] and probe["satisfied"]),
+        "satisfied": bool(compose["satisfied"] and probe["satisfied"] and units["satisfied"]),
         "compose": compose,
         "sudo_systemctl": probe,
+        "units": units,
     }
     report["root_commands"] = _root_commands(compose, probe)
     return report
@@ -364,15 +401,19 @@ def _require_privileged_preconditions(compose_path: Path | None = None) -> dict[
     if report["satisfied"]:
         return report
     missing = [
-        item["detail"] for item in (report["compose"], report["sudo_systemctl"]) if not item["satisfied"]
+        item["detail"]
+        for item in (report["compose"], report["sudo_systemctl"], report["units"])
+        if not item["satisfied"]
     ]
-    raise CutoverError(
+    message = (
         "privileged apply preconditions are not installed; the controller verifies them and "
-        "performs no root step:\n"
-        + "\n".join(f"- {detail}" for detail in missing)
-        + "\nRun as root, then rerun the identical apply command:\n"
-        + "\n".join(report["root_commands"])
+        "performs no root step:\n" + "\n".join(f"- {detail}" for detail in missing)
     )
+    if report["root_commands"]:
+        message += "\nRun as root, then rerun the identical apply command:\n" + "\n".join(
+            report["root_commands"]
+        )
+    raise CutoverError(message)
 
 
 def build_plan(
@@ -801,6 +842,112 @@ def _systemctl(action: str, units: tuple[str, ...]) -> dict[str, Any]:
     return {"action": action, "units": list(units), "privileged": "sudo -n", "results": evidence}
 
 
+def _unit_load_state(unit: str) -> str:
+    """Ask systemd what it has installed for one unit: read-only and without sudo.
+
+    A read that fails is not an absence.  The unit keeps its place in the freeze
+    and resume composition and the failure becomes its recorded state, so an
+    unreadable systemd fails loudly on the command that needs the unit instead
+    of quietly shrinking the window.
+    """
+    try:
+        status = _run(["systemctl", "show", unit, "--property=LoadState"])
+    except CutoverError as exc:
+        return f"unreadable: {exc}"[:200]
+    for line in status["output"].splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "LoadState":
+            return value.strip() or "unknown"
+    return "unknown"
+
+
+@dataclass(frozen=True)
+class UnitInventory:
+    """The LoadState of every declared unit, as this installation actually has it.
+
+    The installed units are the truth about what may be stopped, started and
+    proven; an instance configuration that disabled a component is not consulted,
+    because the two can disagree.  Nothing here mutates a unit.
+    """
+
+    load_states: dict[str, str]
+
+    def state(self, unit: str) -> str:
+        return self.load_states.get(unit, "unknown")
+
+    @property
+    def absent(self) -> tuple[str, ...]:
+        return tuple(
+            declaration.name
+            for declaration in DECLARED_UNITS
+            if self.state(declaration.name) == ABSENT_LOAD_STATE
+        )
+
+    @property
+    def present(self) -> tuple[str, ...]:
+        return tuple(
+            declaration.name
+            for declaration in DECLARED_UNITS
+            if self.state(declaration.name) != ABSENT_LOAD_STATE
+        )
+
+    @property
+    def missing_required(self) -> tuple[str, ...]:
+        absent = set(self.absent)
+        return tuple(
+            declaration.name
+            for declaration in DECLARED_UNITS
+            if declaration.required and declaration.name in absent
+        )
+
+    def installed(self, units: tuple[str, ...]) -> tuple[str, ...]:
+        """A declared order, minus every unit this installation does not have."""
+        return tuple(unit for unit in units if self.state(unit) != ABSENT_LOAD_STATE)
+
+    def stop_units(self) -> tuple[str, ...]:
+        return self.installed(STOP_UNITS)
+
+    def start_units(self) -> tuple[str, ...]:
+        return self.installed(START_UNITS)
+
+    def describe(self) -> str:
+        if self.missing_required:
+            return "required units are not installed: " + ", ".join(self.missing_required)
+        if self.absent:
+            return "optional units absent from this installation: " + ", ".join(self.absent)
+        return "every declared unit is installed"
+
+    def evidence(self) -> dict[str, Any]:
+        """Why a unit did not take part in a phase, recorded beside what did."""
+        required = {declaration.name: declaration.required for declaration in DECLARED_UNITS}
+        return {
+            "source": "systemctl show --property=LoadState",
+            "load_states": dict(self.load_states),
+            "stop": list(self.stop_units()),
+            "start": list(self.start_units()),
+            "excluded": [
+                {"unit": name, "load_state": self.state(name), "required": required[name]}
+                for name in self.absent
+            ],
+        }
+
+
+def inventory_units() -> UnitInventory:
+    """Read the LoadState of every declared unit; the one way phases learn what exists."""
+    return UnitInventory(
+        {declaration.name: _unit_load_state(declaration.name) for declaration in DECLARED_UNITS}
+    )
+
+
+def _restart_consumers() -> dict[str, Any]:
+    """Every recovery branch reconciles the installed consumers, not a fixed list."""
+    inventory = inventory_units()
+    return {
+        "services": _systemctl("restart", inventory.start_units()),
+        "inventory": inventory.evidence(),
+    }
+
+
 def _service_evidence(units: tuple[str, ...], product_root: str) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for unit in units:
@@ -921,8 +1068,9 @@ class Operations:
             "--reason",
             self.state["reason"],
         )
-        stopped = _systemctl("stop", STOP_UNITS)
-        return {"pause": frozen, "services": stopped}
+        inventory = inventory_units()
+        stopped = _systemctl("stop", inventory.stop_units())
+        return {"pause": frozen, "services": stopped, "inventory": inventory.evidence()}
 
     def writer_quiescence_proof(self) -> dict[str, Any]:
         survivors = _writer_processes()
@@ -1009,10 +1157,16 @@ class Operations:
         return {**activated, "sql_audit_baseline": baseline}
 
     def service_reconciliation(self) -> dict[str, Any]:
-        started = _systemctl("start", START_UNITS)
+        inventory = inventory_units()
+        started = _systemctl("start", inventory.start_units())
         provenance = _provenance(self.paths, self.state["expected_revision"])
-        units = _service_evidence(START_UNITS, provenance["product_root"])
-        return {"services": started, "units": units, "provenance": provenance}
+        units = _service_evidence(inventory.start_units(), provenance["product_root"])
+        return {
+            "services": started,
+            "units": units,
+            "provenance": provenance,
+            "inventory": inventory.evidence(),
+        }
 
     def installed_protocol_acceptance(self) -> dict[str, Any]:
         # Every operation below is a public executable boundary and every write
@@ -1605,7 +1759,7 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
                 "evidence": {
                     "source": source,
                     "freeze_phase_status": freeze_status,
-                    "services": _systemctl("restart", START_UNITS),
+                    **_restart_consumers(),
                 },
             }
             state["status"] = "recovered-frozen"
@@ -1632,15 +1786,12 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
         if state.get("first_sql_write") is not None:
             if _backend(paths) != "postgres":
                 _set_backend(paths, "postgres")
-            evidence = {
-                "postgresql": _reconcile_postgres(paths),
-                "services": _systemctl("restart", START_UNITS),
-            }
+            evidence = {"postgresql": _reconcile_postgres(paths), **_restart_consumers()}
             branch = "postgres-only"
         else:
             source = _frozen_source_unchanged(paths, state)
             _set_backend(paths, "kanboard")
-            evidence = {"source": source, "services": _systemctl("restart", START_UNITS)}
+            evidence = {"source": source, **_restart_consumers()}
             branch = "kanboard-before-first-write"
         state["recovery"] = {
             "branch": branch,
