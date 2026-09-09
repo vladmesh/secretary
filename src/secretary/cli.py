@@ -246,7 +246,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to an instance dir or instance.yaml",
         data_dir_help="override instance.yaml data_dir",
     )
-    raw_dump.add_argument("--container", default="cp-kanboard")
+    raw_dump.add_argument(
+        "--container",
+        default=None,
+        help=(
+            "operator override; by default the container of the kanboard service of the "
+            "installed Compose project is resolved from the installation"
+        ),
+    )
     raw_dump.add_argument("--source-path", default=KANBOARD_DATA_PATH)
     raw_dump.set_defaults(handler=run_raw_kanboard_dump)
 
