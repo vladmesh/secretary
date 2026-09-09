@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -212,7 +213,9 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.addCleanup(reset_card_backend)
         self.addCleanup(self.environment.stop)
 
-    def _store(self, name: str) -> tuple[Path, BoardStoreConfig]:
+    def _store(
+        self, name: str, *, revision: str | None = None
+    ) -> tuple[Path, BoardStoreConfig]:
         instance = self.root / name
         data_dir = self.root / f"{name}-data"
         instance.mkdir()
@@ -260,7 +263,25 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         project = f"secretary-recovery-{name}-{os.getpid()}"
         self.projects.append((instance, project))
         provision.provision(instance, compose_path=compose, project=project)
-        migrate.migrate_instance(instance)
+        if revision is None:
+            migrate.migrate_instance(instance)
+        else:
+            import sqlalchemy as sa
+            from alembic import command
+
+            engine = sa.create_engine(migrate.sqlalchemy_url(config.for_role("owner")))
+            try:
+                with engine.connect() as connection:
+                    command.upgrade(
+                        migrate.alembic_config(
+                            connection=connection,
+                            passwords=migrate.passwords_for(config),
+                        ),
+                        revision,
+                    )
+                    connection.commit()
+            finally:
+                engine.dispose()
         provision.verify_roles(instance)
         return instance, config
 
@@ -637,16 +658,82 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         )
 
     def test_real_successor_preserves_import_oid_and_builds_empty_distinct_plan(self) -> None:
-        self._seed()
-        instance = self.source_instance
-        data = self.root / "source-data"
+        import psycopg
+        import psycopg.sql
+
+        instance, original = self._store(
+            "successor", revision="0006_sprint_transport_key"
+        )
+        data = self.root / "successor-data"
+        init_layout(data)
         paths = cutover.Paths(instance, data)
         (instance / "runtime.env").write_text("SECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8")
-        original, metadata = __import__(
-            "secretary.board.postgres_recovery", fromlist=["inspect_source"]
-        ).inspect_source(instance)
+        with psycopg.connect(original.for_role("owner").conninfo()) as connection:
+            connection.execute(
+                "INSERT INTO projects (project_id, enabled, registry_present) VALUES "
+                "('butler', true, true), ('codegen-product-kit', true, true)"
+            )
+            connection.execute(
+                "INSERT INTO tasks (task_ref, project_id, task_number, title, task_type, state, "
+                "created_at, updated_at) VALUES "
+                "('butler-1', 'butler', 1, 'Butler collision', 'code', 'done', now(), now()), "
+                "('codegen-product-kit-1', 'codegen-product-kit', 1, 'Kit collision', 'code', "
+                "'ready', now(), now())"
+            )
+            connection.execute(
+                "INSERT INTO task_comments (task_ref, marker, body, actor_role, created_at) "
+                "VALUES ('butler-1', 'note', 'butler collision comment', 'worker', now()), "
+                "('codegen-product-kit-1', 'note', 'kit collision comment', 'worker', now())"
+            )
+            connection.execute(
+                "INSERT INTO task_dependencies (task_ref, depends_on, depends_on_task) VALUES "
+                "('codegen-product-kit-1', 'butler-1', 'butler-1')"
+            )
+            connection.execute(
+                "INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, "
+                "ref, created_at, settled_at) VALUES ('collision-audit', 'card.comment', '{}'::jsonb, "
+                "'committed', true, 'card', 'butler-1', now(), now())"
+            )
+            connection.execute(
+                "INSERT INTO board_events (event_id, request_id, kind, entity_kind, ref, actor_role, "
+                "actor_id, reason, occurred_at, committed, committed_at) VALUES "
+                "('collision-event', 'collision-audit', 'entity.updated', 'card', 'butler-1', "
+                "'worker', 'fixture', 'commented', now(), true, now())"
+            )
+
+        def content_snapshot(config: BoardStoreConfig) -> dict[str, list[tuple[object, ...]]]:
+            with psycopg.connect(config.for_role("owner").conninfo()) as connection:
+                return {
+                    "refs_and_numbers": connection.execute(
+                        "SELECT task_ref, project_id, task_number FROM tasks ORDER BY task_ref"
+                    ).fetchall(),
+                    "comments": connection.execute(
+                        "SELECT task_ref, marker, body, request_id FROM task_comments "
+                        "ORDER BY task_ref, comment_id"
+                    ).fetchall(),
+                    "links": connection.execute(
+                        "SELECT task_ref, depends_on, depends_on_task FROM task_dependencies "
+                        "ORDER BY task_ref, depends_on"
+                    ).fetchall(),
+                    "requests": connection.execute(
+                        "SELECT request_id, operation, status, ref FROM requests ORDER BY request_id"
+                    ).fetchall(),
+                    "board_events": connection.execute(
+                        "SELECT event_id, request_id, kind, ref, committed FROM board_events "
+                        "ORDER BY event_id"
+                    ).fetchall(),
+                }
+
+        before_content = content_snapshot(original)
+        from secretary.board import postgres_recovery
+
+        with psycopg.connect(original.for_role("owner").conninfo()) as connection:
+            predecessor_counts = postgres_recovery._table_counts(connection)
+        predecessor_metadata = {
+            "source_schema": "0006_sprint_transport_key",
+            "table_counts": predecessor_counts,
+        }
         original_identity = successor.inspect_database(original)
-        import psycopg
         with psycopg.connect(
             original.for_role("owner").conninfo().replace("dbname='secretary'", "dbname='postgres'")
         ) as admin:
@@ -656,7 +743,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 (original_identity["oid"],),
             ).fetchall()
         report = {
-            "counts": metadata["table_counts"],
+            "counts": predecessor_metadata["table_counts"],
             "parity": {"ok": True},
             "schema_revision": "0006_sprint_transport_key",
             "source_consistency": {"matched": True},
@@ -683,7 +770,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 },
                 "full_parity": {
                     "status": "complete",
-                    "evidence": {"parity": {"ok": True}, "counts": metadata["table_counts"]},
+                    "evidence": {"parity": {"ok": True}, "counts": predecessor_metadata["table_counts"]},
                 },
             },
         }
@@ -695,14 +782,54 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             reason="prepare a clean later target",
             confirm=token,
         )
+        injected = {name: True for name in (
+            "database_rename", "database_create", "migration", "empty_verification",
+            "history_publication", "canonical_release",
+        )}
+        real_methods = {
+            name: getattr(successor.SuccessorOperations, name) for name in injected
+        }
+
+        def interrupted(name: str):
+            def operation(operation_self):
+                evidence = real_methods[name](operation_self)
+                if injected[name]:
+                    injected[name] = False
+                    raise RuntimeError(f"injected after real {name} effect")
+                return evidence
+            return operation
+
+        attempts = 0
         with (
             mock.patch.object(cutover, "_provenance", return_value={"installed_revision": "a" * 40}),
             mock.patch.object(cutover, "_backend", return_value="kanboard"),
             mock.patch.object(cutover, "_source_evidence", return_value={"fingerprint": "later-kanboard", "parity": {"ok": True}}),
+            mock.patch.multiple(
+                successor.SuccessorOperations,
+                **{name: interrupted(name) for name in injected},
+            ),
         ):
-            result = successor.prepare(prepare_args, paths)
+            while paths.state.exists():
+                attempts += 1
+                try:
+                    result = successor.prepare(prepare_args, paths)
+                except cutover.CutoverError as exc:
+                    self.assertIn("injected after real", str(exc))
+                if attempts > len(injected) + 1:
+                    self.fail("successor interruption sequence did not converge")
             replay = successor.prepare(prepare_args, paths)
             successor_plan = cutover.build_plan(paths, "a" * 40)
+
+        self.assertEqual(attempts, len(injected))
+        self.assertTrue(all(not pending for pending in injected.values()))
+        self.assertEqual(
+            list(paths.history.glob(f"postgres-v1-{state['plan_id']}.json")),
+            [paths.history / f"postgres-v1-{state['plan_id']}.json"],
+        )
+        self.assertEqual(
+            list(paths.artifacts.glob(f"successor-{state['plan_id']}-*.dump")),
+            [Path(result["successor_preparation"]["dump"]["path"])],
+        )
 
         database = result["successor_preparation"]["database"]
         archived = successor.inspect_database(original, name=database["archive_name"])
@@ -715,6 +842,25 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertNotEqual(configured["oid"], original_identity["oid"])
         self.assertTrue(all(count == 0 for count in fresh["table_counts"].values()))
         self.assertEqual(fresh["source_schema"], migrate.head_revision())
+        occupied = result["successor_preparation"]["phases"]["occupied_verification"]["evidence"]
+        self.assertEqual(occupied["schema_before"], "0006_sprint_transport_key")
+        self.assertEqual(occupied["forward_migrations"], ["0007_card_transport_key"])
+
+        copy_name = "successor_archive_readback"
+        with psycopg.connect(
+            original.for_role("owner").conninfo().replace("dbname='secretary'", "dbname='postgres'"),
+            autocommit=True,
+        ) as admin:
+            admin.execute(
+                psycopg.sql.SQL("CREATE DATABASE {} OWNER {} TEMPLATE {}").format(
+                    psycopg.sql.Identifier(copy_name),
+                    psycopg.sql.Identifier(original.owner_user),
+                    psycopg.sql.Identifier(database["archive_name"]),
+                )
+            )
+        access_copy = replace(original, dbname=copy_name)
+        after_content = content_snapshot(access_copy)
+        self.assertEqual(after_content, before_content)
         self.assertNotEqual(successor_plan["plan_id"], state["plan_id"])
         self.assertTrue(replay["idempotent_replay"])
         predecessor = successor_plan["recovered_predecessors"][0]["successor_preparation"]
@@ -723,8 +869,12 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         print("successor evidence:", json.dumps({
             "original_oid": original_identity["oid"], "archive_name": archived["name"],
             "successor_oid": configured["oid"], "schema_head": fresh["source_schema"],
-            "counts": metadata["table_counts"], "dump_sha256": result["successor_preparation"]["dump"]["sha256"],
-            "failure_injections": list(successor.PHASES), "successor_plan_id": successor_plan["plan_id"],
+            "original_schema_head": "0006_sprint_transport_key",
+            "counts": predecessor_metadata["table_counts"],
+            "dump_sha256": result["successor_preparation"]["dump"]["sha256"],
+            "real_postgres_failure_injections": list(injected),
+            "post_rotation_content_comparison": sorted(after_content),
+            "successor_plan_id": successor_plan["plan_id"],
         }, sort_keys=True))
 
     def test_full_backup_destroy_source_restore_target_and_rerun(self) -> None:

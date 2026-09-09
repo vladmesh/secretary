@@ -4172,6 +4172,16 @@ that work resumed.
 A successful pre-import `recover` publishes its exact `recovered-frozen` JSON under the
 installation's cutover history and fsyncs that archive before releasing the canonical state slot.
 
+Repeating recovery after an interrupted publication verifies the same archive and completes the
+release without replaying service recovery. The next `plan` includes predecessor identities and
+archive digests in its input, so its confirmation and identity differ and the recovered token cannot
+be reused. A completed final import also keeps its canonical identity because its target is occupied,
+regardless of whether a later application write exists. Completed cutovers, PostgreSQL-only recovery,
+a first SQL write and audit uncertainty remain terminal as well. Public planning refuses whenever a
+canonical identity exists; `status.successor_eligibility` supplies the shared phase-based reason.
+An entered but failed/running final import is conservatively terminal with uncertain occupancy; only
+absence of that phase admits the two pre-import successor branches.
+
 `secretary cutover prepare-successor` accepts only the exact terminal identity whose final import
 and full parity completed, recovery branch is `kanboard-before-first-write`, selector activation is
 absent, `first_sql_write` is null, backend remains Kanboard, and matching import evidence is readable.
@@ -4184,15 +4194,6 @@ The subprotocol records `eligibility`, `occupied_verification`, `dump_publicatio
 `empty_verification`, `history_publication` and `canonical_release`. Every effect has a durable intent
 record and OID-based replay. Only the final immutable-history/fsync/canonical-unlink ordering releases
 the slot. Old cutover, recovery and successor tokens do not authorize a new plan or apply.
-Repeating recovery after an interrupted publication verifies the same archive and completes the
-release without replaying service recovery. The next `plan` includes predecessor identities and
-archive digests in its input, so its confirmation and identity differ and the recovered token cannot
-be reused. A completed final import also keeps its canonical identity because its target is occupied,
-regardless of whether a later application write exists. Completed cutovers, PostgreSQL-only recovery,
-a first SQL write and audit uncertainty remain terminal as well. Public planning refuses whenever a
-canonical identity exists; `status.successor_eligibility` supplies the shared phase-based reason.
-An entered but failed/running final import is conservatively terminal with uncertain occupancy; only
-absence of that phase admits the two pre-import successor branches.
 
 Each product subprocess must exit successfully and return a nonempty JSON object or array. Empty,
 non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public

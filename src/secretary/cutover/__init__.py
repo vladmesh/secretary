@@ -367,6 +367,10 @@ def _read_recovered_history(paths: Paths) -> list[dict[str, Any]]:
             raise CutoverError("recovered cutover state has an unsupported version or shape")
         if path != _recovered_archive_path(paths, state):
             raise CutoverError("recovered cutover archive name does not match its plan identity")
+        if not paths.state.exists():
+            from secretary.cutover.successor import released_history_state
+
+            state = released_history_state(state)
         history.append(
             {
                 "path": str(path),

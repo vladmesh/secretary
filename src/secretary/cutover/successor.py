@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -56,7 +57,7 @@ def exact_eligibility(
         reason = "canonical-state-missing-or-invalid"
     elif state.get("status") != "recovered-frozen":
         reason = "canonical-state-not-recovered-frozen"
-    elif state.get("recovery", {}).get("branch") != "kanboard-before-first-write":
+    elif not isinstance(state.get("recovery"), dict) or state["recovery"].get("branch") != "kanboard-before-first-write":
         reason = "recovery-branch-not-kanboard-before-first-write"
     elif state.get("first_sql_write") is not None:
         reason = "sql-write-or-audit-uncertainty"
@@ -70,16 +71,22 @@ def exact_eligibility(
             reason = "final-import-not-complete"
         elif not isinstance(parity, dict) or parity.get("status") != "complete":
             reason = "full-parity-not-complete"
-        elif not parity.get("evidence", {}).get("parity", {}).get("ok"):
-            reason = "full-parity-not-clean"
-        elif "selector_activation" in phases:
-            reason = "selector-activation-entered"
-        elif imported.get("evidence", {}).get("import", {}).get("parity", {}).get("ok") is not True:
-            reason = "import-parity-not-clean"
+        else:
+            parity_evidence = parity.get("evidence")
+            imported_evidence = imported.get("evidence")
+            parity_result = parity_evidence.get("parity") if isinstance(parity_evidence, dict) else None
+            import_result = imported_evidence.get("import") if isinstance(imported_evidence, dict) else None
+            import_parity = import_result.get("parity") if isinstance(import_result, dict) else None
+            if not isinstance(parity_result, dict) or parity_result.get("ok") is not True:
+                reason = "full-parity-not-clean"
+            elif "selector_activation" in phases:
+                reason = "selector-activation-entered"
+            elif not isinstance(import_parity, dict) or import_parity.get("ok") is not True:
+                reason = "import-parity-not-clean"
     if reason == "eligible-post-import-kanboard-recovery" and artifacts is not None:
         try:
             _report(state, artifacts)
-        except RuntimeError:
+        except (KeyError, RuntimeError, TypeError, ValueError):
             reason = "import-report-unreadable-or-mismatched"
     return {"eligible": reason == "eligible-post-import-kanboard-recovery", "reason": reason}
 
@@ -115,10 +122,25 @@ def inspect_database(config: BoardStoreConfig, *, name: str | None = None) -> di
     return {"oid": int(row[0]), "name": str(row[1]), "owner": str(row[2]), "allow_connections": bool(row[3])}
 
 
+def inspect_schema_revision(config: BoardStoreConfig) -> str:
+    try:
+        with _connect(config) as connection:
+            row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    except Exception as exc:  # noqa: BLE001 - normalize driver/schema failures at the boundary
+        raise RuntimeError(f"could not inspect PostgreSQL schema revision: {exc}") from None
+    if row is None or not isinstance(row[0], str):
+        raise RuntimeError("PostgreSQL database has no readable Alembic revision")
+    return row[0]
+
+
 def _report(
     state: dict[str, Any], artifacts: Path | None = None
 ) -> tuple[Path, dict[str, Any], str]:
-    imported = state["phases"]["final_fenced_import"]["evidence"]
+    phases = state.get("phases")
+    imported_phase = phases.get("final_fenced_import") if isinstance(phases, dict) else None
+    imported = imported_phase.get("evidence") if isinstance(imported_phase, dict) else None
+    if not isinstance(imported, dict):
+        raise TypeError("canonical imported evidence is malformed")
     path = Path(str(imported.get("report") or ""))
     if not path.is_absolute() or not path.is_file() or path.is_symlink():
         raise RuntimeError("matching import report is not a readable regular file")
@@ -158,8 +180,7 @@ def _occupied_proof(
     try:
         cards = TaskReader(client).export()
     finally:
-        if client._connection is not None:
-            client._connection.close()
+        client.close()
     by_ref = {str(card.get("reference")): card for card in cards}
     collision = {ref: by_ref.get(ref) for ref in ("butler-1", "codegen-product-kit-1")}
     if any(value is None for value in collision.values()):
@@ -201,7 +222,9 @@ def status_probe(
     instance: Path, state: dict[str, Any], backend: str, *, artifacts: Path | None = None
 ) -> dict[str, Any]:
     eligible = exact_eligibility(state, backend, artifacts=artifacts)
-    result: dict[str, Any] = {"eligibility": eligible, "phases": state.get("successor_preparation", {}).get("phases", {})}
+    preparation = state.get("successor_preparation")
+    phases = preparation.get("phases", {}) if isinstance(preparation, dict) else {}
+    result: dict[str, Any] = {"eligibility": eligible, "phases": phases}
     if not eligible["eligible"]:
         return result
     try:
@@ -212,7 +235,7 @@ def status_probe(
         revision = str(pin.get("revision") or "") if isinstance(pin, dict) else ""
         if len(revision) != 40:
             raise RuntimeError("installed head registry has no exact product revision")
-        saved = state.get("successor_preparation", {}).get("database", {})
+        saved = preparation.get("database", {}) if isinstance(preparation, dict) else {}
         if saved.get("original_oid") is not None:
             identity = {
                 "oid": int(saved["original_oid"]),
@@ -264,11 +287,22 @@ class SuccessorOperations:
             raise RuntimeError(
                 "archival database name is already occupied by OID " + str(conflict["oid"])
             )
+        before_revision = inspect_schema_revision(self.config)
+        allowed = {"0006_sprint_transport_key", migrate.head_revision()}
+        if before_revision not in allowed:
+            raise RuntimeError(
+                "occupied PostgreSQL database is not at the imported or approved forward schema"
+            )
+        applied = migrate.migrate_instance(self.paths.instance, reuse_existing_roles=True)
         proof = _occupied_proof(self.config, self.state, self.paths.artifacts)
         intended = self.prep["database"]
         if proof["database"]["oid"] != intended["original_oid"]:
             raise RuntimeError("configured database OID changed after successor confirmation")
-        return proof
+        return {
+            **proof,
+            "schema_before": before_revision,
+            "forward_migrations": list(applied),
+        }
 
     def dump_publication(self) -> dict[str, Any]:
         occupied = self.prep["phases"]["occupied_verification"]["evidence"]
@@ -364,11 +398,105 @@ class SuccessorOperations:
         return {"database": successor, "schema_head": metadata["source_schema"], "table_counts": metadata["table_counts"], "archived_database": archived}
 
     def history_publication(self) -> dict[str, Any]:
-        # The driver performs publication after it has made this terminal phase durable.
-        return {"archive": str(self.paths.history / f"postgres-v1-{self.state['plan_id']}.json"), "immutable": True}
+        from secretary.cutover import _publish_recovered_archive
+
+        evidence = {
+            "archive": str(self.paths.history / f"postgres-v1-{self.state['plan_id']}.json"),
+            "immutable": True,
+            "directory_fsync": True,
+        }
+        # Publish the verified completion document, while the canonical path still
+        # durably carries intent.  A crash after link/fsync therefore resumes from
+        # the linked document without claiming release of the canonical slot.
+        published = deepcopy(self.state)
+        prep = published["successor_preparation"]
+        started_at = prep["phases"]["history_publication"]["started_at"]
+        prep["phases"]["history_publication"] = {
+            "status": "complete",
+            "started_at": started_at,
+            "completed_at": started_at,
+            "evidence": evidence,
+        }
+        prep["phases"].setdefault(
+            "canonical_release",
+            {"status": "intent", "started_at": started_at},
+        )
+        prep["status"] = "preparing"
+        published["updated_at"] = started_at
+        archive = _publish_recovered_archive(self.paths, published)
+        if not archive.is_file():
+            raise RuntimeError("recovered history link was not published")
+        published_prep = published.pop("successor_preparation")
+        self.state.clear()
+        self.state.update(published)
+        self.prep.clear()
+        self.prep.update(published_prep)
+        self.state["successor_preparation"] = self.prep
+        return evidence
 
     def canonical_release(self) -> dict[str, Any]:
-        return {"ordering": "history-fsync-before-canonical-unlink", "released": True}
+        from secretary.cutover import _read_state
+
+        current = _read_state(self.paths)
+        if current != self.state:
+            raise RuntimeError("canonical cutover state changed before successor release")
+        try:
+            self.paths.state.unlink()
+            descriptor = os.open(self.paths.state.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise RuntimeError(f"could not release recovered canonical cutover state: {exc}") from None
+        if self.paths.state.exists():
+            raise RuntimeError("canonical cutover state remains after successor release")
+        return {
+            "ordering": "history-fsync-before-canonical-unlink",
+            "released": True,
+            "directory_fsync": True,
+        }
+
+
+def released_history_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Project the release fact that is durable only as canonical-path absence."""
+    prep = state.get("successor_preparation")
+    phases = prep.get("phases") if isinstance(prep, dict) else None
+    history = phases.get("history_publication") if isinstance(phases, dict) else None
+    release = phases.get("canonical_release") if isinstance(phases, dict) else None
+    if (
+        not isinstance(history, dict)
+        or history.get("status") != "complete"
+        or not isinstance(release, dict)
+        or release.get("status") != "intent"
+    ):
+        return state
+    completed = deepcopy(state)
+    prep = completed["successor_preparation"]
+    completed_at = release.get("started_at")
+    prep["phases"]["canonical_release"] = {
+        "status": "complete",
+        "started_at": completed_at,
+        "completed_at": completed_at,
+        "evidence": {
+            "ordering": "history-fsync-before-canonical-unlink",
+            "released": True,
+            "directory_fsync": True,
+            "verified_by": "canonical-path-absent-after-history-publication",
+        },
+    }
+    prep["status"] = "complete"
+    prep["completed_at"] = completed_at
+    completed["successor_eligibility"] = {
+        "eligible": True,
+        "reason": "successor-target-prepared",
+    }
+    completed["successor"] = {
+        "archive": history["evidence"]["archive"],
+        "prepared_at": completed_at,
+        "canonical_slot": "released-after-archive",
+    }
+    return completed
 
 
 def prepare(args: Any, paths: Any) -> dict[str, Any]:
@@ -378,7 +506,6 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
         _backend,
         _now,
         _provenance,
-        _publish_recovered_archive,
         _read_recovered_history,
         _read_state,
         _write_state,
@@ -426,7 +553,7 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
                 "idempotent_replay": True,
             }
         if state.get("expected_revision") == args.expected_revision:
-            raise CutoverError("prepare-successor requires a later installed revision than the recovered attempt")
+            raise CutoverError("prepare-successor requires an installed revision distinct from the recovered attempt")
         eligible = exact_eligibility(
             state, _backend(paths), artifacts=paths.artifacts
         )
@@ -463,34 +590,28 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
             try:
                 evidence = getattr(operations, name)()
             except Exception as exc:  # noqa: BLE001 - every failed effect must become durable evidence
+                if name == "canonical_release" and not paths.state.exists():
+                    state = released_history_state(state)
+                    prep = state["successor_preparation"]
+                    break
                 reason_text = str(exc) if isinstance(exc, (RuntimeError, BoardStoreError)) else f"{type(exc).__name__}: {exc}"
                 prep["phases"][name].update({"status": "failed", "failed_at": _now(), "reason": reason_text[:1000]})
                 prep["status"] = "failed"
                 _write_state(paths, state)
                 raise CutoverError(f"successor phase {name} failed: {reason_text}") from None
-            prep["phases"][name].update({"status": "complete", "completed_at": _now(), "evidence": evidence})
+            # history_publication constructs and publishes its exact completion
+            # document itself, so do not replace its timestamps after the link.
+            if prep["phases"][name].get("status") != "complete":
+                prep["phases"][name].update({"status": "complete", "completed_at": _now(), "evidence": evidence})
             if name == "dump_publication":
                 prep["dump"].update({"sha256": evidence["sha256"], "bytes": evidence["bytes"], "tool_version": evidence["tool_version"]})
             if name == "database_create":
                 prep["database"]["successor_oid"] = evidence["oid"]
+            if name == "canonical_release":
+                state = released_history_state(state)
+                prep = state["successor_preparation"]
+                break
             prep["status"] = "preparing"
             _write_state(paths, state)
-        prep["status"] = "complete"
-        prep.setdefault("completed_at", _now())
-        state["successor_eligibility"] = {"eligible": True, "reason": "successor-target-prepared"}
-        state["successor"] = {"archive": str(paths.history / f"postgres-v1-{state['plan_id']}.json"), "prepared_at": prep["completed_at"], "canonical_slot": "released-after-archive"}
-        _write_state(paths, state)
-        archive = _publish_recovered_archive(paths, state)
-        current = _read_state(paths)
-        if current != state:
-            raise CutoverError("canonical cutover state changed before successor release")
-        try:
-            paths.state.unlink()
-            descriptor = os.open(paths.state.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        except OSError as exc:
-            raise CutoverError(f"could not release recovered canonical cutover state: {exc}") from None
+        archive = paths.history / f"postgres-v1-{state['plan_id']}.json"
         return {**state, "archived_state": str(archive), "successor_ready": True}

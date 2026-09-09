@@ -229,11 +229,20 @@ class CutoverSuccessorTests(CutoverFixture):
         self.assertFalse(proof["eligible"])
         self.assertEqual(proof["reason"], "selector-activation-entered")
 
+        for malformed in (None, {"parity": None}):
+            with self.subTest(malformed=malformed):
+                state = self.eligible_state()
+                state["phases"]["full_parity"]["evidence"] = malformed
+                proof = successor.exact_eligibility(state, "kanboard")
+                self.assertFalse(proof["eligible"])
+                self.assertEqual(proof["reason"], "full-parity-not-clean")
+
     def test_prepare_successor_resumes_every_phase_without_repeating_completed_work(self) -> None:
         state = self.eligible_state()
         cutover._write_state(self.paths, state)
         token = successor.confirmation(state["plan_id"], 41, "secretary")
         run_args = args(confirm=token)
+        real_operations = successor.SuccessorOperations
 
         for failed_phase in successor.PHASES:
             with self.subTest(phase=failed_phase):
@@ -242,8 +251,8 @@ class CutoverSuccessorTests(CutoverFixture):
                 failure = {"enabled": True}
 
                 class FakeOperations:
-                    def __init__(self, _paths, _state):
-                        pass
+                    def __init__(self, operation_paths, operation_state):
+                        self.real = real_operations(operation_paths, operation_state)
 
                     def __getattr__(self, name):
                         def operation(
@@ -259,6 +268,8 @@ class CutoverSuccessorTests(CutoverFixture):
                                 return {"sha256": "d" * 64, "bytes": 10, "tool_version": "PostgreSQL 16"}
                             if operation_name == "database_create":
                                 return {"oid": 42, "name": "secretary"}
+                            if operation_name in {"history_publication", "canonical_release"}:
+                                return getattr(self.real, operation_name)()
                             return {"phase": operation_name}
                         return operation
 
@@ -283,6 +294,83 @@ class CutoverSuccessorTests(CutoverFixture):
                 archive = Path(result["archived_state"])
                 archive.chmod(0o600)
                 archive.unlink()
+
+    def test_real_history_link_and_canonical_unlink_are_truthful_across_restart(self) -> None:
+        state = self.eligible_state()
+        state["successor_preparation"] = {
+            "version": 1,
+            "status": "preparing",
+            "instance": str(self.paths.instance),
+            "actor": "operator",
+            "reason": "filesystem interruption proof",
+            "expected_revision": REVISION,
+            "confirmation": "token",
+            "started_at": "2026-09-09T00:00:00Z",
+            "database": {
+                "original_oid": 41,
+                "original_name": "secretary",
+                "archive_name": "secretary_archive_test_41",
+                "owner": "owner",
+                "successor_oid": 42,
+            },
+            "dump": {"path": str(self.paths.artifacts / "successor.dump"), "sha256": "d" * 64},
+            "phases": {
+                "history_publication": {
+                    "status": "intent",
+                    "started_at": "2026-09-09T00:00:01Z",
+                }
+            },
+        }
+        cutover._write_state(self.paths, state)
+        with mock.patch.object(successor, "resolve", return_value=SimpleNamespace(dbname="secretary")):
+            operations = successor.SuccessorOperations(self.paths, state)
+            operations.history_publication()
+
+            canonical = cutover._read_state(self.paths)
+            self.assertEqual(
+                canonical["successor_preparation"]["phases"]["history_publication"]["status"],
+                "intent",
+            )
+            history = cutover._read_recovered_history(self.paths)
+            self.assertEqual(
+                history[0]["state"]["successor_preparation"]["phases"]["history_publication"]["status"],
+                "complete",
+            )
+            self.assertEqual(
+                history[0]["state"]["successor_preparation"]["phases"]["canonical_release"]["status"],
+                "intent",
+            )
+
+            state["successor_preparation"]["phases"]["canonical_release"] = {
+                "status": "intent",
+                "started_at": "2026-09-09T00:00:02Z",
+            }
+            cutover._write_state(self.paths, state)
+            operations = successor.SuccessorOperations(self.paths, state)
+            real_unlink = Path.unlink
+            interrupted = {"pending": True}
+
+            def interrupted_unlink(path, *unlink_args, **unlink_kwargs):
+                if path == self.paths.state and interrupted["pending"]:
+                    interrupted["pending"] = False
+                    raise OSError("injected before canonical unlink")
+                return real_unlink(path, *unlink_args, **unlink_kwargs)
+
+            with mock.patch.object(Path, "unlink", new=interrupted_unlink):
+                with self.assertRaisesRegex(RuntimeError, "injected before canonical unlink"):
+                    operations.canonical_release()
+            self.assertTrue(self.paths.state.exists())
+            operations.canonical_release()
+
+        self.assertFalse(self.paths.state.exists())
+        released = cutover._read_recovered_history(self.paths)[0]["state"]
+        self.assertEqual(
+            released["successor_preparation"]["phases"]["canonical_release"]["status"],
+            "complete",
+        )
+        self.assertTrue(
+            released["successor_preparation"]["phases"]["canonical_release"]["evidence"]["released"]
+        )
 
 
 class CutoverCommandEvidenceTests(CutoverFixture):
