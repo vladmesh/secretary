@@ -227,6 +227,7 @@ class TwoWriterTests(unittest.TestCase):
             '{"id": 1, "reference": "secretary-1"}\n', encoding="utf-8"
         )
         (board / "sprints.ndjson").write_text("", encoding="utf-8")
+        (board / "audit.ndjson").write_text("", encoding="utf-8")
         (board / "export.json").write_text('{"card_count": 1, "sprint_count": 0}\n', encoding="utf-8")
         runs = self.data_dir / "runs"
         (runs / "runs.ndjson").write_text("", encoding="utf-8")
