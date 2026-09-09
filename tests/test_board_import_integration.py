@@ -29,8 +29,12 @@ import time
 import unittest
 
 from secretary.board import import_board, migrate, schema
+from secretary.board.events import BoardEventCanon
 from secretary.board.import_board import BoardImportError, BoardSource, RegistryEntry, SourceRow
+from secretary.board.sql_audit import SqlTaskAudit
+from secretary.board.sql_cards import SqlCardClient
 from secretary.board.store import BoardStoreConfig
+from secretary.tasks import TaskError
 
 IMAGE = "postgres:16"
 DATABASE = "board_import_test"
@@ -548,6 +552,38 @@ class BoardImportIntegrationTests(unittest.TestCase):
             [(row["event_id"], row["request_id"]) for row in stored["board_events"]],
             [("typed-event-1", "typed-request-1")],
         )
+
+    def test_imported_history_uses_the_public_sql_audit_contract(self) -> None:
+        """AC 9: imported history retains lookup, filtering and request ownership semantics."""
+        self.imported()
+        client = SqlCardClient(self.credentials("app"), "/tmp/board-import-audit-contract")
+        self.addCleanup(client.close)
+        audit = SqlTaskAudit(client)
+        canon = BoardEventCanon("/tmp/unused-file-audit", audit=audit)
+        generic, typed = self.source.audit_records
+
+        # The generic record is complete history, queryable by request, ref and event owner.
+        self.assertEqual(audit.committed_event(generic["request_id"]), generic)
+        self.assertIn(generic, audit.events(reference=generic["ref"], kind=generic["kind"]))
+        self.assertEqual(audit.event_id_owner(generic["event_id"]), generic["request_id"])
+
+        # Typed lookup crosses Event.from_record, while typed history filters the generic row.
+        occurrence = canon.committed(typed["request_id"])
+        self.assertIsNotNone(occurrence)
+        self.assertEqual(occurrence.event_id, typed["event_id"])
+        self.assertEqual(audit.event_id_owner(typed["event_id"]), typed["request_id"])
+        typed_history = canon.events(ref=typed["ref"])
+        self.assertEqual([event.event_id for event in typed_history], [typed["event_id"]])
+        self.assertNotIn(generic["event_id"], {event.event_id for event in typed_history})
+
+        # An exact replay performs no second write; conflicting reuse keeps the released refusal.
+        self.assertEqual(audit.append(generic["request_id"], generic), generic["event_id"])
+        conflicting = {**generic, "kind": "conflicting-operation"}
+        with self.assertRaisesRegex(
+            TaskError, "request id belongs to another operation or payload"
+        ):
+            audit.append(generic["request_id"], conflicting)
+        self.assertEqual(audit.committed_event(generic["request_id"]), generic)
 
     def test_the_recovered_close_decisions_satisfy_both_scoped_keys(self) -> None:
         _, stored = self.imported()
