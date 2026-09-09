@@ -75,10 +75,17 @@ def card_backend() -> str:
 
 
 def reset_card_backend() -> None:
-    """Forget the per-process decision.
+    """Forget the per-process decision, for the two callers that legitimately revise it.
 
-    Only a test harness that runs both backends in one interpreter has a reason to call this;
-    product code never does, which is what keeps "decided once per process" true where it matters.
+    Ordinary product code never revises the decision — that is what keeps "decided once per
+    process" true where it matters — but two sites are not ordinary readers of the switch, and
+    both say so by calling this rather than by re-exporting the name behind `card_backend()`'s
+    back.  `secretary.cli.main` binds an operator command to the selector its instance units
+    consume before the handler runs, and unbinds it afterwards when it did the binding.
+    `secretary.cutover._serve_backend` is the controller performing the switch itself: it is the
+    thing that changes which backend the installation serves, on both of its entrances, apply and
+    recover.  A test harness that runs both backends in one interpreter calls it for the same
+    reason: the decision it forgets was made for a different case.
     """
     global _decided
     _decided = None

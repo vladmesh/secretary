@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,10 +19,47 @@ from secretary.board import provision
 from secretary.cutover import successor
 
 REVISION = "a" * 40
+
+
+def inventory(absent: tuple[str, ...] = ()) -> cutover.UnitInventory:
+    return cutover.UnitInventory(
+        {
+            declaration.name: (
+                cutover.ABSENT_LOAD_STATE if declaration.name in absent else "loaded"
+            )
+            for declaration in cutover.DECLARED_UNITS
+        }
+    )
+
+
+# A host that has every precondition installed, in the shape the real
+# `_privileged_preconditions` reports it — including the `units` section, which is a fact
+# about systemd the fixture answers so no unit test consults the machine it runs on.
+# `PrivilegedPreconditionTests` compares this against the real report so the two cannot
+# drift again: a fixture that omits a key the product returns is a test passing on a report
+# the product never produces.
 INSTALLED_PRECONDITIONS = {
     "satisfied": True,
-    "compose": {"requirement": "compose", "satisfied": True, "detail": "installed", "status": "ok"},
-    "sudo_systemctl": {"requirement": "sudo", "satisfied": True, "detail": "works"},
+    "compose": {
+        "requirement": "compose",
+        "path": str(provision.DEFAULT_COMPOSE_PATH),
+        "satisfied": True,
+        "detail": "installed",
+        "status": "ok",
+    },
+    "sudo_systemctl": {
+        "requirement": "sudo",
+        "command": ["sudo", "-n", "systemctl", "show", "--property=Version"],
+        "user": "secretary",
+        "satisfied": True,
+        "detail": "works",
+    },
+    "units": {
+        "requirement": "installed required consumer units",
+        "satisfied": True,
+        "detail": "every declared unit is installed",
+        **inventory().evidence(),
+    },
     "root_commands": [],
 }
 PLAN = {
@@ -44,15 +81,13 @@ ABSENT_OPTIONAL = (
 )
 
 
-def inventory(absent: tuple[str, ...] = ()) -> cutover.UnitInventory:
-    return cutover.UnitInventory(
-        {
-            declaration.name: (
-                cutover.ABSENT_LOAD_STATE if declaration.name in absent else "loaded"
-            )
-            for declaration in cutover.DECLARED_UNITS
-        }
-    )
+def shape(value):
+    """The keys of a report and the types under them, recursively, without its values."""
+    if isinstance(value, dict):
+        return {key: shape(item) for key, item in sorted(value.items())}
+    if isinstance(value, list):
+        return [shape(item) for item in value]
+    return type(value).__name__
 
 
 def systemd_installation(commands: list[list[str]], absent: tuple[str, ...] = ()):
@@ -143,6 +178,15 @@ class CutoverFixture(unittest.TestCase):
         self._inventory = mock.patch.object(cutover, "inventory_units", return_value=inventory())
         self._inventory.start()
         self.addCleanup(self.host_unit_inventory)
+        # `_serve_backend` is a real process-wide switch, and both controller entrances now
+        # reach it.  A case that runs one must not leave the name exported or the decision
+        # made for the next case in this interpreter.
+        from secretary.board.backend import reset_card_backend
+
+        environment = mock.patch.dict(os.environ, {}, clear=False)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.addCleanup(reset_card_backend)
 
     def host_preconditions(self) -> None:
         """Stop answering for the host so a test can drive the real predicate."""
@@ -1100,6 +1144,51 @@ class CutoverRecoveryTests(CutoverFixture):
         cutover._write_state(self.paths, state)
         return state
 
+    def test_both_recovery_branches_move_the_decision_through_the_one_named_switch(self) -> None:
+        """Recovery is the controller's second entrance and it changes the backend the same way.
+
+        It used to move only the durable selector in `runtime.env`.  Nothing it does afterwards
+        asks `card_backend()` today, so the two did not visibly disagree — but "one named switch"
+        has to be true on both entrances, or the next step added to a recovery branch inherits a
+        process decision the selector it just wrote contradicts.  That is the defect apply had
+        removed one card earlier, reappearing here.
+        """
+        from secretary.board.backend import card_backend, reset_card_backend
+
+        # Each case starts the process serving the backend the branch has to move it off, which
+        # is the realistic one: the operator's recover command binds to the selector apply left
+        # behind, and the branch is the thing that revises it.
+        for branch, committed, served, backend in (
+            ("kanboard-before-first-write", 10, "postgres", "kanboard"),
+            ("postgres-only", 11, "kanboard", "postgres"),
+        ):
+            with self.subTest(branch=branch):
+                os.environ[cutover.BACKEND_ENV] = served
+                reset_card_backend()
+                self.assertEqual(card_backend(), served)
+                self.state()
+                with (
+                    mock.patch.object(cutover, "_provenance", return_value={}),
+                    mock.patch.object(
+                        cutover, "_sql_event_count", return_value={"committed_events": committed}
+                    ),
+                    mock.patch.object(
+                        cutover, "_source_evidence", return_value={"fingerprint": "source-one"}
+                    ),
+                    mock.patch.object(cutover, "_reconcile_postgres", return_value={}),
+                    mock.patch.object(cutover, "_backend", return_value="kanboard"),
+                    mock.patch.object(cutover, "_set_backend", return_value={}) as selector,
+                    mock.patch.object(cutover, "_systemctl", return_value={}),
+                ):
+                    result = cutover.recover_cutover(
+                        args(confirm="RECOVER-" + "1" * 16), self.paths
+                    )
+
+                self.assertEqual(result["recovery"]["branch"], branch)
+                selector.assert_called_once_with(self.paths, backend)
+                self.assertEqual(os.environ[cutover.BACKEND_ENV], backend)
+                self.assertEqual(card_backend(), backend)
+
     def test_post_import_before_first_write_recovery_restores_kanboard_but_stays_terminal(self) -> None:
         self.state()
         recovery_args = args(confirm="RECOVER-" + "1" * 16)
@@ -1599,6 +1688,24 @@ class PrivilegedPreconditionTests(CutoverFixture):
         self.assertEqual(result["status"], "resume-ready")
         self.assertEqual(calls, list(cutover.PHASES))
 
+    def test_the_installed_fixture_reports_the_shape_the_real_predicate_returns(self) -> None:
+        """A key the fixture omits is a report no installation ever produces.
+
+        `INSTALLED_PRECONDITIONS` answers for the host in every case built on `CutoverFixture`,
+        and it lost a whole section when secretary-1609 added `units` to the real report: the
+        suite went on reading a two-section report while apply refused on a three-section one.
+        Nothing failed, because only the unsatisfied branch reaches the missing key — which is
+        exactly why the agreement is asserted here rather than read off the two literals.  The
+        comparison is on the keys and the value types, recursively; the values themselves are
+        facts about a host and legitimately differ.
+        """
+        self.install_compose()
+        with self.sudo(allowed=True):
+            report = cutover._privileged_preconditions(self.compose)
+
+        self.assertTrue(report["satisfied"])
+        self.assertEqual(shape(INSTALLED_PRECONDITIONS), shape(report))
+
     def test_plan_shows_both_preconditions_and_the_root_commands_without_failing(self) -> None:
         buffer = StringIO()
         with (
@@ -1824,6 +1931,96 @@ class InstalledUnitInventoryTests(CutoverFixture):
             self.assertIn(name, units["detail"])
         self.assertEqual([item["unit"] for item in units["excluded"]], list(ABSENT_OPTIONAL))
         self.assertEqual(self.acted(), [])
+
+    def recovering(self, absent: tuple[str, ...] = ()):
+        """Every host fact a recovery reads, answered: systemd, provenance, SQL audit, source."""
+        stack = ExitStack()
+        stack.enter_context(self.systemd(absent=absent))
+        stack.enter_context(mock.patch.object(cutover, "_provenance", return_value={}))
+        stack.enter_context(
+            mock.patch.object(cutover, "_sql_event_count", return_value={"committed_events": 10})
+        )
+        stack.enter_context(
+            mock.patch.object(
+                cutover, "_source_evidence", return_value={"fingerprint": "source-one"}
+            )
+        )
+        return stack
+
+    def test_absent_required_unit_refuses_recovery_without_restarting_or_writing_state(self) -> None:
+        """Recovery is the second entrance, and the apply seam's gate is behind it, not in front.
+
+        A unit installed when `_require_privileged_preconditions` passed can be gone by the time
+        the operator runs `recover` after the apply that failed.  Inventorying excludes every
+        `not-found` unit, so the required one was excluded silently and recovery reported success
+        with the web tier still down; before secretary-1609 the fixed list failed loudly on
+        `systemctl restart` instead.  What the refusal does with the state document is the other
+        half of the answer: it is raised before the first restart, so no unit is touched and no
+        state is written, the durable selector the branch had already moved stands, and the
+        identical rerun takes the same branch and completes.
+        """
+        self.runtime.write_text(
+            "UNRELATED=kept\nSECRETARY_CARD_BACKEND=postgres\n", encoding="utf-8"
+        )
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        state["phases"]["writer_quiescence_proof"] = {
+            "status": "complete",
+            "evidence": {"source": {"fingerprint": "source-one"}},
+        }
+        state["phases"]["selector_activation"] = {
+            "status": "complete",
+            "evidence": {"sql_audit_baseline": {"committed_events": 10}},
+        }
+        state["phases"]["final_fenced_import"] = {"status": "complete"}
+        cutover._write_state(self.paths, state)
+        before = self.paths.state.read_bytes()
+        stamp = self.paths.state.stat().st_mtime_ns
+        recovery = args(confirm="RECOVER-" + "1" * 16)
+
+        with self.recovering(absent=("secretary-web.service",)):
+            with self.assertRaises(cutover.CutoverError) as refusal:
+                cutover.recover_cutover(recovery, self.paths)
+
+        message = str(refusal.exception)
+        self.assertIn("missing a required unit", message)
+        self.assertIn("secretary-web.service: LoadState=not-found", message)
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(self.paths.state.read_bytes(), before)
+        self.assertEqual(self.paths.state.stat().st_mtime_ns, stamp)
+        self.assertEqual(cutover._read_state(self.paths)["status"], state["status"])
+        # The durable effect this branch had already written is not undone by the refusal.
+        self.assertEqual(
+            self.runtime.read_text(encoding="utf-8"),
+            "UNRELATED=kept\nSECRETARY_CARD_BACKEND=kanboard\n",
+        )
+
+        self.commands.clear()
+        with self.recovering():
+            result = cutover.recover_cutover(recovery, self.paths)
+
+        self.assertEqual(result["recovery"]["branch"], "kanboard-before-first-write")
+        self.assertEqual(
+            self.acted(),
+            [["sudo", "-n", "systemctl", "restart", name] for name in cutover.START_UNITS],
+        )
+        self.assertEqual(cutover._read_state(self.paths), result)
+
+    def test_absent_optional_unit_is_still_only_an_exclusion_for_recovery(self) -> None:
+        """The gate is on required units; an absent optional one recovers exactly as before."""
+        self.runtime.chmod(0o600)
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        state["status"] = "failed-frozen"
+        state["phases"]["global_freeze"] = {"status": "complete"}
+        cutover._write_state(self.paths, state)
+
+        with self.recovering(absent=ABSENT_OPTIONAL):
+            result = cutover.recover_cutover(args(confirm="RECOVER-" + "1" * 16), self.paths)
+
+        self.assertEqual(result["recovery"]["branch"], "kanboard-before-fingerprint")
+        self.assertEqual(
+            [item["unit"] for item in result["recovery"]["evidence"]["inventory"]["excluded"]],
+            list(ABSENT_OPTIONAL),
+        )
 
     def test_every_recovery_branch_restarts_only_the_installed_consumers(self) -> None:
         expected = [name for name in cutover.START_UNITS if name not in ABSENT_OPTIONAL]
