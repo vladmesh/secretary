@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import cutover
+from secretary.cutover import successor
 
 REVISION = "a" * 40
 PLAN = {
@@ -92,6 +93,7 @@ class CutoverStateTests(CutoverFixture):
                 "resume_ready",
             ),
         )
+
 
     def test_selector_rewrite_preserves_other_entries_owner_and_mode(self) -> None:
         before = self.runtime.stat()
@@ -195,6 +197,92 @@ class CutoverStateTests(CutoverFixture):
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("writes are fenced", refused.stderr)
+
+
+class CutoverSuccessorTests(CutoverFixture):
+    def eligible_state(self):
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        report = {"parity": {"ok": True}}
+        report_path = self.paths.artifacts / f"import-{state['plan_id']}.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        state["expected_revision"] = "b" * 40
+        state["status"] = "recovered-frozen"
+        state["recovery"] = {"branch": "kanboard-before-first-write"}
+        state["phases"] = {
+            "final_fenced_import": {
+                "status": "complete",
+                "evidence": {"report": str(report_path), "import": report},
+            },
+            "full_parity": {
+                "status": "complete",
+                "evidence": {"parity": {"ok": True}},
+            },
+        }
+        return state
+
+    def test_successor_eligibility_is_exact_and_activation_always_refuses(self) -> None:
+        state = self.eligible_state()
+        self.assertTrue(successor.exact_eligibility(state, "kanboard")["eligible"])
+        state["phases"]["selector_activation"] = {"status": "running"}
+        proof = successor.exact_eligibility(state, "kanboard")
+        self.assertFalse(proof["eligible"])
+        self.assertEqual(proof["reason"], "selector-activation-entered")
+
+    def test_prepare_successor_resumes_every_phase_without_repeating_completed_work(self) -> None:
+        state = self.eligible_state()
+        cutover._write_state(self.paths, state)
+        token = successor.confirmation(state["plan_id"], 41, "secretary")
+        run_args = args(confirm=token)
+
+        for failed_phase in successor.PHASES:
+            with self.subTest(phase=failed_phase):
+                cutover._write_state(self.paths, self.eligible_state())
+                calls = []
+                failure = {"enabled": True}
+
+                class FakeOperations:
+                    def __init__(self, _paths, _state):
+                        pass
+
+                    def __getattr__(self, name):
+                        def operation(
+                            operation_name=name,
+                            operation_calls=calls,
+                            operation_failure=failure,
+                            operation_failed_phase=failed_phase,
+                        ):
+                            operation_calls.append(operation_name)
+                            if operation_name == operation_failed_phase and operation_failure["enabled"]:
+                                raise RuntimeError("injected crash")
+                            if operation_name == "dump_publication":
+                                return {"sha256": "d" * 64, "bytes": 10, "tool_version": "PostgreSQL 16"}
+                            if operation_name == "database_create":
+                                return {"oid": 42, "name": "secretary"}
+                            return {"phase": operation_name}
+                        return operation
+
+                with (
+                    mock.patch.object(cutover, "_provenance", return_value={}),
+                    mock.patch.object(cutover, "_backend", return_value="kanboard"),
+                    mock.patch.object(successor, "resolve", return_value=SimpleNamespace(dbname="secretary")),
+                    mock.patch.object(successor, "inspect_database", return_value={"oid": 41, "name": "secretary", "owner": "owner", "allow_connections": True}),
+                    mock.patch.object(successor, "SuccessorOperations", FakeOperations),
+                ):
+                    with self.assertRaisesRegex(cutover.CutoverError, failed_phase):
+                        successor.prepare(run_args, self.paths)
+                    completed = tuple(successor.PHASES[: successor.PHASES.index(failed_phase)])
+                    before = {name: calls.count(name) for name in completed}
+                    failure["enabled"] = False
+                    result = successor.prepare(run_args, self.paths)
+
+                self.assertTrue(result["successor_ready"])
+                self.assertEqual(calls.count(failed_phase), 2)
+                self.assertEqual({name: calls.count(name) for name in completed}, before)
+                self.assertIsNone(cutover._read_state(self.paths))
+                archive = Path(result["archived_state"])
+                archive.chmod(0o600)
+                archive.unlink()
 
 
 class CutoverCommandEvidenceTests(CutoverFixture):

@@ -342,6 +342,13 @@ live cutover acceptance.
 
 `tests.test_cutover` is the controller failure matrix. It interrupts each durable phase, retries the
 same identity, and asserts earlier phases execute once. It also covers atomic selector preservation,
+
+The successor matrix interrupts every successor phase and asserts that completed phases do not run
+again. The PostgreSQL 16 integration preserves a populated collision-bearing database under its
+original OID and derived archive name, verifies its dump and connection fence, creates a distinct
+schema-current empty OID at the configured name, checks roles/default privileges, repeats the command
+idempotently and builds a plan with a distinct identity carrying predecessor database evidence.
+Missing Docker, psycopg, SQLAlchemy or Alembic is a red test failure, not a skip.
 runtime-readable/symlink-safe state, backend/phase disagreement, source movement, both recovery
 branches, actual service/import/parity/backup/checkpoint/first-write seams, controller identity
 across process uids, terminal release during a later freeze, and selector propagation to every

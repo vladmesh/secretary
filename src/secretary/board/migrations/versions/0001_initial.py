@@ -485,8 +485,18 @@ def _roles_and_grants() -> None:
     app_password = quote(passwords["app_password"])
     read_password = quote(passwords["read_password"])
 
-    bind.exec_driver_sql(f"CREATE ROLE {APP_ROLE}  LOGIN PASSWORD {app_password}")
-    bind.exec_driver_sql(f"CREATE ROLE {READ_ROLE} LOGIN PASSWORD {read_password}")
+    if attributes.get("reuse_existing_roles"):
+        rows = bind.exec_driver_sql(
+            "SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole "
+            "FROM pg_roles WHERE rolname IN (%s, %s)",
+            (APP_ROLE, READ_ROLE),
+        ).fetchall()
+        expected = {(APP_ROLE, True, False, False, False), (READ_ROLE, True, False, False, False)}
+        if set(rows) != expected:
+            raise RuntimeError("the successor database requires the existing app/read role boundary")
+    else:
+        bind.exec_driver_sql(f"CREATE ROLE {APP_ROLE}  LOGIN PASSWORD {app_password}")
+        bind.exec_driver_sql(f"CREATE ROLE {READ_ROLE} LOGIN PASSWORD {read_password}")
     for statement in (
         f"GRANT USAGE ON SCHEMA public TO {APP_ROLE}, {READ_ROLE}",
         f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {APP_ROLE}",

@@ -68,7 +68,12 @@ def sqlalchemy_url(credentials: Any) -> Any:
     )
 
 
-def alembic_config(*, connection: Any = None, passwords: dict[str, str] | None = None) -> Any:
+def alembic_config(
+    *,
+    connection: Any = None,
+    passwords: dict[str, str] | None = None,
+    reuse_existing_roles: bool = False,
+) -> Any:
     """Alembic's `Config`, built in code and carrying no connection string of its own.
 
     There is no ``alembic.ini`` in this product on purpose: the only URL an installation has is
@@ -84,6 +89,8 @@ def alembic_config(*, connection: Any = None, passwords: dict[str, str] | None =
         config.attributes["connection"] = connection
     if passwords is not None:
         config.attributes["passwords"] = dict(passwords)
+    if reuse_existing_roles:
+        config.attributes["reuse_existing_roles"] = True
     return config
 
 
@@ -139,7 +146,13 @@ def assert_schema_revision(connection: Any, expected: str | None = None) -> str:
     return revision
 
 
-def apply(connection: Any, *, passwords: dict[str, str], dry_run: bool = False) -> tuple[str, ...]:
+def apply(
+    connection: Any,
+    *,
+    passwords: dict[str, str],
+    dry_run: bool = False,
+    reuse_existing_roles: bool = False,
+) -> tuple[str, ...]:
     """Upgrade one owner connection to head under the advisory lock.  Returns what it applied.
 
     The lock is session-level, so it spans Alembic's per-revision transactions and is released
@@ -155,7 +168,14 @@ def apply(connection: Any, *, passwords: dict[str, str], dry_run: bool = False) 
         connection.commit()
         if dry_run or not owed:
             return owed
-        command.upgrade(alembic_config(connection=connection, passwords=passwords), "heads")
+        command.upgrade(
+            alembic_config(
+                connection=connection,
+                passwords=passwords,
+                reuse_existing_roles=reuse_existing_roles,
+            ),
+            "heads",
+        )
         connection.commit()
         return owed
     finally:
@@ -168,7 +188,12 @@ def passwords_for(config: Any) -> dict[str, str]:
     return {"app_password": config.app_password, "read_password": config.read_password}
 
 
-def migrate_instance(instance_dir: Path | str, *, dry_run: bool = False) -> tuple[str, ...]:
+def migrate_instance(
+    instance_dir: Path | str,
+    *,
+    dry_run: bool = False,
+    reuse_existing_roles: bool = False,
+) -> tuple[str, ...]:
     """Bring one installation's configured board store to the schema this build ships.
 
     Returns the revisions applied, or — under ``dry_run`` — the revisions that *would* be applied,
@@ -198,7 +223,12 @@ def migrate_instance(instance_dir: Path | str, *, dry_run: bool = False) -> tupl
     engine = sa.create_engine(sqlalchemy_url(config.for_role("owner")))
     try:
         with engine.connect() as connection:
-            return apply(connection, passwords=passwords_for(config), dry_run=dry_run)
+            return apply(
+                connection,
+                passwords=passwords_for(config),
+                dry_run=dry_run,
+                reuse_existing_roles=reuse_existing_roles,
+            )
     except sa.exc.SQLAlchemyError as exc:
         raise BoardStoreError(f"the board store did not accept the migration run: {exc}") from exc
     finally:

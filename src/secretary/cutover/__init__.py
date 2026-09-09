@@ -292,6 +292,16 @@ def build_plan(
                 "identity": item["state"]["identity"],
                 "plan_id": item["state"]["plan_id"],
                 "archive_sha256": item["archive_sha256"],
+                **(
+                    {
+                        "successor_preparation": {
+                            "archived_database": item["state"]["successor_preparation"]["database"],
+                            "dump": item["state"]["successor_preparation"]["dump"],
+                        }
+                    }
+                    if isinstance(item["state"].get("successor_preparation"), dict)
+                    else {}
+                ),
             }
             for item in _read_recovered_history(paths)
         ],
@@ -1439,7 +1449,6 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
             return _finish_recovery(paths, state)
         activated = state.get("phases", {}).get("selector_activation", {}).get("status") == "complete"
         freeze_status = state.get("phases", {}).get("global_freeze", {}).get("status")
-        import_phase = state.get("phases", {}).get("final_fenced_import")
         import_entered = "final_fenced_import" in state.get("phases", {})
         if freeze_status is None and not import_entered and not activated:
             # No old writer was durably declared stopped, no target was imported
@@ -1521,17 +1530,27 @@ def _render(payload: dict[str, Any], *, pretty: bool = True) -> None:
 
 def run_cutover(args: argparse.Namespace) -> int:
     try:
+        if args.cutover_command == "prepare-successor" and not Path(args.instance).is_absolute():
+            raise CutoverError("prepare-successor requires an absolute --instance path")
         paths = resolve_paths(args.instance)
         if args.cutover_command == "plan":
             _render(build_plan(paths, args.expected_revision))
         elif args.cutover_command == "status":
             state = _read_state(paths)
+            successor_preparation = None
+            if state is not None:
+                from secretary.cutover.successor import status_probe
+
+                successor_preparation = status_probe(
+                    paths.instance, state, _backend(paths), artifacts=paths.artifacts
+                )
             _render(
                 {
                     "state": state,
                     "recovered_history": _read_recovered_history(paths),
                     "successor_eligibility": _successor_eligibility(state),
                     "backend": _backend(paths),
+                    "successor_preparation": successor_preparation,
                     "recovery_confirmation": (
                         f"RECOVER-{state['plan_id'][:16]}" if state is not None else None
                     ),
@@ -1541,6 +1560,10 @@ def run_cutover(args: argparse.Namespace) -> int:
             _render(apply_cutover(args, paths))
         elif args.cutover_command == "recover":
             _render(recover_cutover(args, paths))
+        elif args.cutover_command == "prepare-successor":
+            from secretary.cutover.successor import prepare
+
+            _render(prepare(args, paths))
         else:
             raise CutoverError("cutover subcommand required")
     except CutoverError as exc:
@@ -1551,15 +1574,16 @@ def run_cutover(args: argparse.Namespace) -> int:
 
 def add_cutover_subcommands(subparsers: Any) -> None:
     cutover = subparsers.add_parser(
-        "cutover", help="plan, inspect, apply or recover the PostgreSQL board-store cutover"
+        "cutover",
+        help="plan, inspect, apply, recover or prepare a successor PostgreSQL board-store target",
     )
     commands = cutover.add_subparsers(dest="cutover_command")
-    for name in ("plan", "status", "apply", "recover"):
+    for name in ("plan", "status", "apply", "recover", "prepare-successor"):
         command = commands.add_parser(name)
         command.add_argument("--instance", required=True)
         if name != "status":
             command.add_argument("--expected-revision", required=True)
-        if name in ("apply", "recover"):
+        if name in ("apply", "recover", "prepare-successor"):
             command.add_argument("--actor", required=True)
             command.add_argument("--reason", required=True)
             command.add_argument("--confirm", required=True)

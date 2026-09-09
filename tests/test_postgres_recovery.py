@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from secretary import cutover
@@ -21,6 +22,7 @@ from secretary.board.import_board import BoardSource, RegistryEntry, SourceRow
 from secretary.board.postgres_recovery import PostgresRecoveryError, restore_dump
 from secretary.board.sql_cards import SqlCardClient
 from secretary.board.store import BoardStoreConfig, BoardStoreError
+from secretary.cutover import successor
 from secretary.data import DataExport, export_board, init_layout
 from secretary.restore import restore_postgres_backup
 from secretary.sprint_observer import none_choice
@@ -633,6 +635,97 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 sort_keys=True,
             )
         )
+
+    def test_real_successor_preserves_import_oid_and_builds_empty_distinct_plan(self) -> None:
+        self._seed()
+        instance = self.source_instance
+        data = self.root / "source-data"
+        paths = cutover.Paths(instance, data)
+        (instance / "runtime.env").write_text("SECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8")
+        original, metadata = __import__(
+            "secretary.board.postgres_recovery", fromlist=["inspect_source"]
+        ).inspect_source(instance)
+        original_identity = successor.inspect_database(original)
+        import psycopg
+        with psycopg.connect(
+            original.for_role("owner").conninfo().replace("dbname='secretary'", "dbname='postgres'")
+        ) as admin:
+            admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datid=%s AND pid<>pg_backend_pid()",
+                (original_identity["oid"],),
+            ).fetchall()
+        report = {
+            "counts": metadata["table_counts"],
+            "parity": {"ok": True},
+            "schema_revision": "0006_sprint_transport_key",
+            "source_consistency": {"matched": True},
+        }
+        report_path = data / "cutover" / "artifacts" / ("import-" + "e" * 64 + ".json")
+        report_path.parent.mkdir(parents=True)
+        report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        state = {
+            "version": 1,
+            "identity": "postgres-" + "e" * 20,
+            "plan_id": "e" * 64,
+            "expected_revision": "b" * 40,
+            "actor": "owner",
+            "reason": "failed import rehearsal",
+            "created_at": "2026-09-09T00:00:00Z",
+            "updated_at": "2026-09-09T00:00:00Z",
+            "status": "recovered-frozen",
+            "backend_before": "kanboard",
+            "first_sql_write": None,
+            "recovery": {"branch": "kanboard-before-first-write"},
+            "phases": {
+                "final_fenced_import": {
+                    "status": "complete", "evidence": {"report": str(report_path), "import": report}
+                },
+                "full_parity": {
+                    "status": "complete",
+                    "evidence": {"parity": {"ok": True}, "counts": metadata["table_counts"]},
+                },
+            },
+        }
+        cutover._write_state(paths, state)
+        token = successor.confirmation(state["plan_id"], original_identity["oid"], original.dbname)
+        prepare_args = SimpleNamespace(
+            expected_revision="a" * 40,
+            actor="operator",
+            reason="prepare a clean later target",
+            confirm=token,
+        )
+        with (
+            mock.patch.object(cutover, "_provenance", return_value={"installed_revision": "a" * 40}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_source_evidence", return_value={"fingerprint": "later-kanboard", "parity": {"ok": True}}),
+        ):
+            result = successor.prepare(prepare_args, paths)
+            replay = successor.prepare(prepare_args, paths)
+            successor_plan = cutover.build_plan(paths, "a" * 40)
+
+        database = result["successor_preparation"]["database"]
+        archived = successor.inspect_database(original, name=database["archive_name"])
+        configured = successor.inspect_database(original)
+        _, fresh = __import__(
+            "secretary.board.postgres_recovery", fromlist=["inspect_source"]
+        ).inspect_source(instance)
+        self.assertEqual(archived["oid"], original_identity["oid"])
+        self.assertFalse(archived["allow_connections"])
+        self.assertNotEqual(configured["oid"], original_identity["oid"])
+        self.assertTrue(all(count == 0 for count in fresh["table_counts"].values()))
+        self.assertEqual(fresh["source_schema"], migrate.head_revision())
+        self.assertNotEqual(successor_plan["plan_id"], state["plan_id"])
+        self.assertTrue(replay["idempotent_replay"])
+        predecessor = successor_plan["recovered_predecessors"][0]["successor_preparation"]
+        self.assertEqual(predecessor["archived_database"]["original_oid"], original_identity["oid"])
+        self.assertEqual(predecessor["archived_database"]["successor_oid"], configured["oid"])
+        print("successor evidence:", json.dumps({
+            "original_oid": original_identity["oid"], "archive_name": archived["name"],
+            "successor_oid": configured["oid"], "schema_head": fresh["source_schema"],
+            "counts": metadata["table_counts"], "dump_sha256": result["successor_preparation"]["dump"]["sha256"],
+            "failure_injections": list(successor.PHASES), "successor_plan_id": successor_plan["plan_id"],
+        }, sort_keys=True))
 
     def test_full_backup_destroy_source_restore_target_and_rerun(self) -> None:
         self._seed()

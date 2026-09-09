@@ -865,6 +865,17 @@ product goal in [Vision](VISION.md).
 
 `secretary.cutover` is an orchestration boundary over existing product operations. It does not own a
 second migration, import, parity, backup, checkpoint, pause, or backend-selection implementation.
+
+The `prepare-successor` subcommand is a separate OID-driven state machine under the same
+installation-wide `CutoverLock`. It composes the store resolver, Alembic migration, PostgreSQL 16
+custom dump/verifier, role verifier, atomic controller writer and immutable recovered-history
+publisher. PostgreSQL database rename/create is the only new effect boundary. The process-wide board
+selector is deliberately bypassed for database proof and remains Kanboard throughout.
+
+Durable intent precedes every PostgreSQL effect. Completed evidence follows verification. This makes
+name transitions recoverable: before rename the configured name has the old OID, after rename the
+archive name has that OID, and after create the configured name has a new recorded OID. Any other
+mapping is an architectural refusal, not a reconciliation opportunity.
 Its durable ordered phases are: preflight; Kanboard backup/checkpoint; PostgreSQL provision and
 migration verification; global freeze; writer-quiescence proof; final fenced import; full parity;
 PostgreSQL recovery backup; selector activation; service reconciliation; installed-protocol

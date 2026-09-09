@@ -724,3 +724,17 @@ transport keys without changing refs, per-project task numbers, ownership, archi
 links or audit. Do not wipe or reimport that occupied target, edit controller state, or infer authority
 to retry cutover. A new owner/operator maintenance window remains required after the repair is merged
 and installed.
+
+### Restarting successor preparation
+
+`prepare-successor` records intent before dump publication, connection fencing, rename, create,
+migration, role verification, empty verification, history publication and canonical release. Retry
+the exact command shown by status with the same revision, actor, reason and confirmation. Each retry
+resolves the imported and successor databases by their recorded OIDs. It never guesses from a name,
+reopens the archive, deletes a database, or releases canonical state while any identity, checksum,
+connection, privilege, schema, count or audit proof is uncertain.
+
+A crash after history publication is safe: the immutable recovered document is compared byte for
+byte and fsynced before the canonical file is unlinked. A retry after unlink finds that one history
+identity and revalidates both database OIDs plus the dump checksum without producing another archive,
+database, dump or history file. Until canonical unlink succeeds, ordinary plan/apply remain refused.
