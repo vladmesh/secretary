@@ -2714,4 +2714,7 @@ for the new database, including sequence `USAGE`. No row-level merge/upsert impo
 The archive is evidence, not a fallback backend. Ordinary roles cannot connect to it, the selector
 continues to name Kanboard, and the configured PostgreSQL name can only denote the new empty OID. Its
 native dump, checksum, old/new OIDs, schema, import counts and audit boundary live in immutable cutover
-history and become predecessor evidence in the next plan.
+history. The preserved database must be externally upgraded from `0006` and verified at `0007` before
+rotation; the successor lifecycle does not migrate its rows. An immutable release receipt binds that
+history checksum, predecessor plan, archive OID/name and dump checksum before the evidence can become
+a predecessor in the next plan.

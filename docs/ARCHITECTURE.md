@@ -877,10 +877,15 @@ custom dump/verifier, role verifier, atomic controller writer and immutable reco
 publisher. PostgreSQL database rename/create is the only new effect boundary. The process-wide board
 selector is deliberately bypassed for database proof and remains Kanboard throughout.
 
+The preserved target must already be externally upgraded to `0007_card_transport_key`; this state
+machine only migrates the newly created empty canonical database. Its terminal authority is one
+resolver over immutable recovered history plus a release receipt bound to the predecessor plan,
+archive identity and checksums. Canonical-file presence is not evidence about predecessor completion.
+
 Durable intent precedes every PostgreSQL effect. Completed evidence follows verification. This makes
 name transitions recoverable: before rename the configured name has the old OID, after rename the
 archive name has that OID, and after create the configured name has a new recorded OID. Any other
-mapping is an architectural refusal, not a reconciliation opportunity. Its eleven phases are listed
+mapping is an architectural refusal, not a reconciliation opportunity. Its twelve phases are listed
 in the successor protocol and are distinct from the cutover phases above.
 
 The state identity is the digest of the exact installed revision, runtime/source provenance,

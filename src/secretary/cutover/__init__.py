@@ -278,6 +278,17 @@ def build_plan(
     backend = _backend(paths)
     if backend != "kanboard":
         raise CutoverError(f"new cutover plan requires backend kanboard, found {backend}")
+    recovered_history = _read_recovered_history(paths)
+    pending_release = [
+        item
+        for item in recovered_history
+        if item.get("successor_release", {}).get("status") == "pending"
+    ]
+    if pending_release:
+        raise CutoverError(
+            "successor canonical release is awaiting its immutable release receipt; "
+            "rerun the exact prepare-successor command shown by status"
+        )
     evidence = {
         "version": STATE_VERSION,
         "instance": str(paths.instance),
@@ -303,7 +314,7 @@ def build_plan(
                     else {}
                 ),
             }
-            for item in _read_recovered_history(paths)
+            for item in recovered_history
         ],
     }
     plan_id = _sha(evidence)
@@ -367,10 +378,6 @@ def _read_recovered_history(paths: Paths) -> list[dict[str, Any]]:
             raise CutoverError("recovered cutover state has an unsupported version or shape")
         if path != _recovered_archive_path(paths, state):
             raise CutoverError("recovered cutover archive name does not match its plan identity")
-        if not paths.state.exists():
-            from secretary.cutover.successor import released_history_state
-
-            state = released_history_state(state)
         history.append(
             {
                 "path": str(path),
@@ -378,7 +385,9 @@ def _read_recovered_history(paths: Paths) -> list[dict[str, Any]]:
                 "state": state,
             }
         )
-    return history
+    from secretary.cutover.successor import resolve_history
+
+    return resolve_history(paths, history)
 
 
 def _recovered_archive_path(paths: Paths, state: dict[str, Any]) -> Path:
@@ -1541,6 +1550,7 @@ def run_cutover(args: argparse.Namespace) -> int:
             _render(build_plan(paths, args.expected_revision))
         elif args.cutover_command == "status":
             state = _read_state(paths)
+            recovered_history = _read_recovered_history(paths)
             successor_preparation = None
             if state is not None:
                 from secretary.cutover.successor import status_probe
@@ -1548,10 +1558,20 @@ def run_cutover(args: argparse.Namespace) -> int:
                 successor_preparation = status_probe(
                     paths.instance, state, _backend(paths), artifacts=paths.artifacts
                 )
+            else:
+                pending = [
+                    item
+                    for item in recovered_history
+                    if item.get("successor_release", {}).get("status") == "pending"
+                ]
+                if len(pending) == 1:
+                    from secretary.cutover.successor import history_status
+
+                    successor_preparation = history_status(pending[0])
             _render(
                 {
                     "state": state,
-                    "recovered_history": _read_recovered_history(paths),
+                    "recovered_history": recovered_history,
                     "successor_eligibility": _successor_eligibility(state),
                     "backend": _backend(paths),
                     "successor_preparation": successor_preparation,

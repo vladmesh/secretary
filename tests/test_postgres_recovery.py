@@ -704,8 +704,8 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         def content_snapshot(config: BoardStoreConfig) -> dict[str, list[tuple[object, ...]]]:
             with psycopg.connect(config.for_role("owner").conninfo()) as connection:
                 return {
-                    "refs_and_numbers": connection.execute(
-                        "SELECT task_ref, project_id, task_number FROM tasks ORDER BY task_ref"
+                    "refs_numbers_board_keys": connection.execute(
+                        "SELECT task_ref, project_id, task_number, board_key FROM tasks ORDER BY task_ref"
                     ).fetchall(),
                     "comments": connection.execute(
                         "SELECT task_ref, marker, body, request_id FROM task_comments "
@@ -724,11 +724,30 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                     ).fetchall(),
                 }
 
-        before_content = content_snapshot(original)
         from secretary.board import postgres_recovery
 
         with psycopg.connect(original.for_role("owner").conninfo()) as connection:
             predecessor_counts = postgres_recovery._table_counts(connection)
+            pre_upgrade_content = {
+                "refs_and_numbers": connection.execute(
+                    "SELECT task_ref, project_id, task_number FROM tasks ORDER BY task_ref"
+                ).fetchall(),
+                "comments": connection.execute(
+                    "SELECT task_ref, marker, body, request_id FROM task_comments "
+                    "ORDER BY task_ref, comment_id"
+                ).fetchall(),
+                "links": connection.execute(
+                    "SELECT task_ref, depends_on, depends_on_task FROM task_dependencies "
+                    "ORDER BY task_ref, depends_on"
+                ).fetchall(),
+                "requests": connection.execute(
+                    "SELECT request_id, operation, status, ref FROM requests ORDER BY request_id"
+                ).fetchall(),
+                "board_events": connection.execute(
+                    "SELECT event_id, request_id, kind, ref, committed FROM board_events "
+                    "ORDER BY event_id"
+                ).fetchall(),
+            }
         predecessor_metadata = {
             "source_schema": "0006_sprint_transport_key",
             "table_counts": predecessor_counts,
@@ -782,9 +801,30 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             reason="prepare a clean later target",
             confirm=token,
         )
+        original_state_bytes = paths.state.read_bytes()
+        with (
+            mock.patch.object(cutover, "_provenance", return_value={"installed_revision": "a" * 40}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            self.assertRaisesRegex(cutover.CutoverError, successor.UPGRADE_PREREQUISITE),
+        ):
+            successor.prepare(prepare_args, paths)
+        self.assertEqual(paths.state.read_bytes(), original_state_bytes)
+        self.assertEqual(successor.inspect_schema_revision(original), "0006_sprint_transport_key")
+        with psycopg.connect(original.for_role("owner").conninfo()) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT task_ref, project_id, task_number FROM tasks ORDER BY task_ref"
+                ).fetchall(),
+                pre_upgrade_content["refs_and_numbers"],
+            )
+
+        applied_upgrade = migrate.migrate_instance(instance, reuse_existing_roles=True)
+        provision.verify_roles(instance)
+        self.assertEqual(applied_upgrade, ("0007_card_transport_key",))
+        before_content = content_snapshot(original)
         injected = {name: True for name in (
             "database_rename", "database_create", "migration", "empty_verification",
-            "history_publication", "canonical_release",
+            "history_publication", "canonical_release", "release_receipt",
         )}
         real_methods = {
             name: getattr(successor.SuccessorOperations, name) for name in injected
@@ -809,22 +849,37 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 **{name: interrupted(name) for name in injected},
             ),
         ):
-            while paths.state.exists():
+            while True:
                 attempts += 1
                 try:
                     result = successor.prepare(prepare_args, paths)
                 except cutover.CutoverError as exc:
-                    self.assertIn("injected after real", str(exc))
-                if attempts > len(injected) + 1:
+                    self.assertTrue(
+                        "injected after real" in str(exc) or "release_receipt remains pending" in str(exc)
+                    )
+                else:
+                    break
+                if attempts > len(injected) + 2:
                     self.fail("successor interruption sequence did not converge")
             replay = successor.prepare(prepare_args, paths)
+            status_before_plan = cutover._read_recovered_history(paths)
             successor_plan = cutover.build_plan(paths, "a" * 40)
+            cutover._write_state(
+                paths,
+                cutover._new_state(successor_plan, "later-operator", "separate future cutover"),
+            )
+            status_after_plan = cutover._read_recovered_history(paths)
+            replay_after_plan = successor.prepare(prepare_args, paths)
 
-        self.assertEqual(attempts, len(injected))
+        self.assertEqual(attempts, len(injected) + 1)
         self.assertTrue(all(not pending for pending in injected.values()))
         self.assertEqual(
             list(paths.history.glob(f"postgres-v1-{state['plan_id']}.json")),
             [paths.history / f"postgres-v1-{state['plan_id']}.json"],
+        )
+        self.assertEqual(
+            list(paths.history.glob(f"successor-release-{state['plan_id']}.json")),
+            [successor.release_receipt_path(paths, state["plan_id"])],
         )
         self.assertEqual(
             list(paths.artifacts.glob(f"successor-{state['plan_id']}-*.dump")),
@@ -843,8 +898,8 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertTrue(all(count == 0 for count in fresh["table_counts"].values()))
         self.assertEqual(fresh["source_schema"], migrate.head_revision())
         occupied = result["successor_preparation"]["phases"]["occupied_verification"]["evidence"]
-        self.assertEqual(occupied["schema_before"], "0006_sprint_transport_key")
-        self.assertEqual(occupied["forward_migrations"], ["0007_card_transport_key"])
+        self.assertEqual(occupied["schema_before"], "0007_card_transport_key")
+        self.assertEqual(occupied["forward_migrations"], [])
 
         copy_name = "successor_archive_readback"
         with psycopg.connect(
@@ -861,6 +916,11 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         access_copy = replace(original, dbname=copy_name)
         after_content = content_snapshot(access_copy)
         self.assertEqual(after_content, before_content)
+        self.assertEqual(status_after_plan, status_before_plan)
+        self.assertTrue(replay_after_plan["idempotent_replay"])
+        self.assertEqual(
+            replay_after_plan["successor_preparation"]["status"], "complete"
+        )
         self.assertNotEqual(successor_plan["plan_id"], state["plan_id"])
         self.assertTrue(replay["idempotent_replay"])
         predecessor = successor_plan["recovered_predecessors"][0]["successor_preparation"]
@@ -870,6 +930,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             "original_oid": original_identity["oid"], "archive_name": archived["name"],
             "successor_oid": configured["oid"], "schema_head": fresh["source_schema"],
             "original_schema_head": "0006_sprint_transport_key",
+            "external_upgrade": list(applied_upgrade),
             "counts": predecessor_metadata["table_counts"],
             "dump_sha256": result["successor_preparation"]["dump"]["sha256"],
             "real_postgres_failure_injections": list(injected),

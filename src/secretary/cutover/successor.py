@@ -10,12 +10,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from secretary._fsutil import sha256_file
+from secretary._fsutil import sha256_file, stage_text
 from secretary.board import migrate, postgres_recovery
 from secretary.board.provision import verify_roles
 from secretary.board.store import BoardStoreConfig, BoardStoreError, parse, resolve, store_path
@@ -32,7 +33,15 @@ PHASES = (
     "empty_verification",
     "history_publication",
     "canonical_release",
+    "release_receipt",
 )
+
+UPGRADE_PREREQUISITE = (
+    "preserved PostgreSQL target is at 0006_sprint_transport_key; owner/operator must install "
+    "the expected revision, run and verify the external 0007_card_transport_key upgrade, then "
+    "rerun prepare-successor"
+)
+RECEIPT_KIND = "postgres-successor-release"
 
 
 def confirmation(plan_id: str, database_oid: int, database_name: str) -> str:
@@ -43,6 +52,10 @@ def confirmation(plan_id: str, database_oid: int, database_name: str) -> str:
 def archive_name(plan_id: str, database_oid: int) -> str:
     # PostgreSQL identifiers are at most 63 bytes.  This is 56 bytes at the largest OID.
     return f"secretary_archive_{plan_id[:20]}_{database_oid}"
+
+
+def release_receipt_path(paths: Any, plan_id: str) -> Path:
+    return paths.history / f"successor-release-{plan_id}.json"
 
 
 def exact_eligibility(
@@ -245,16 +258,38 @@ def status_probe(
         else:
             identity = inspect_database(config)
         token = confirmation(state["plan_id"], identity["oid"], config.dbname)
-        result.update({
-            "database": identity,
-            "expected_revision": revision,
-            "confirmation": token,
-            "next_command": (
-                f"secretary cutover prepare-successor --instance {instance} "
-                f"--expected-revision {revision} --actor <actor> --reason <reason> "
-                f"--confirm {token}"
-            ),
-        })
+        schema_revision = inspect_schema_revision(config)
+        schema_action: dict[str, Any]
+        if schema_revision == "0006_sprint_transport_key":
+            schema_action = {
+                "prerequisite": UPGRADE_PREREQUISITE,
+                "next_command": f"secretary upgrade --no-pull --instance {instance}",
+            }
+        elif schema_revision == migrate.head_revision():
+            schema_action = {
+                "next_command": (
+                    f"secretary cutover prepare-successor --instance {instance} "
+                    f"--expected-revision {revision} --actor <actor> --reason <reason> "
+                    f"--confirm {token}"
+                )
+            }
+        else:
+            schema_action = {
+                "prerequisite": (
+                    "preserved PostgreSQL target has an unsupported schema; owner/operator "
+                    "must verify 0007_card_transport_key before prepare-successor"
+                ),
+                "next_command": None,
+            }
+        result.update(
+            {
+                "database": identity,
+                "schema_revision": schema_revision,
+                "expected_revision": revision,
+                "confirmation": token,
+                **schema_action,
+            }
+        )
     except Exception as exc:  # noqa: BLE001 - status must render an unavailable read-only probe
         result["probe_error"] = str(exc)
     return result
@@ -287,21 +322,14 @@ class SuccessorOperations:
             raise RuntimeError(
                 "archival database name is already occupied by OID " + str(conflict["oid"])
             )
-        before_revision = inspect_schema_revision(self.config)
-        allowed = {"0006_sprint_transport_key", migrate.head_revision()}
-        if before_revision not in allowed:
-            raise RuntimeError(
-                "occupied PostgreSQL database is not at the imported or approved forward schema"
-            )
-        applied = migrate.migrate_instance(self.paths.instance, reuse_existing_roles=True)
         proof = _occupied_proof(self.config, self.state, self.paths.artifacts)
         intended = self.prep["database"]
         if proof["database"]["oid"] != intended["original_oid"]:
             raise RuntimeError("configured database OID changed after successor confirmation")
         return {
             **proof,
-            "schema_before": before_revision,
-            "forward_migrations": list(applied),
+            "schema_before": proof["schema_head"],
+            "forward_migrations": [],
         }
 
     def dump_publication(self) -> dict[str, Any]:
@@ -421,6 +449,10 @@ class SuccessorOperations:
             "canonical_release",
             {"status": "intent", "started_at": started_at},
         )
+        prep["phases"].setdefault(
+            "release_receipt",
+            {"status": "intent", "started_at": started_at},
+        )
         prep["status"] = "preparing"
         published["updated_at"] = started_at
         archive = _publish_recovered_archive(self.paths, published)
@@ -457,46 +489,285 @@ class SuccessorOperations:
             "directory_fsync": True,
         }
 
+    def release_receipt(self) -> dict[str, Any]:
+        _verify_completed_targets(self.paths, self.state)
+        return publish_release_receipt(self.paths, self.state)
 
-def released_history_state(state: dict[str, Any]) -> dict[str, Any]:
-    """Project the release fact that is durable only as canonical-path absence."""
-    prep = state.get("successor_preparation")
+
+def _receipt_document(item: dict[str, Any]) -> dict[str, Any]:
+    from secretary.cutover import CutoverError
+
+    state = item.get("state")
+    prep = state.get("successor_preparation") if isinstance(state, dict) else None
     phases = prep.get("phases") if isinstance(prep, dict) else None
     history = phases.get("history_publication") if isinstance(phases, dict) else None
     release = phases.get("canonical_release") if isinstance(phases, dict) else None
-    if (
-        not isinstance(history, dict)
-        or history.get("status") != "complete"
-        or not isinstance(release, dict)
-        or release.get("status") != "intent"
-    ):
-        return state
+    receipt_phase = phases.get("release_receipt") if isinstance(phases, dict) else None
+    history_evidence = history.get("evidence") if isinstance(history, dict) else None
+    database = prep.get("database") if isinstance(prep, dict) else None
+    dump = prep.get("dump") if isinstance(prep, dict) else None
+    completed_evidence = (
+        isinstance(phases, dict)
+        and all(
+            isinstance(phases.get(name), dict)
+            and phases[name].get("status") == "complete"
+            and isinstance(phases[name].get("evidence"), dict)
+            for name in PHASES[: PHASES.index("history_publication")]
+        )
+    )
+    required = (
+        isinstance(prep, dict)
+        and prep.get("version") == 1
+        and prep.get("status") in {"preparing", "complete"}
+        and all(
+            isinstance(prep.get(name), str) and bool(prep[name])
+            for name in (
+                "instance",
+                "actor",
+                "reason",
+                "expected_revision",
+                "confirmation",
+                "started_at",
+            )
+        )
+        and completed_evidence
+        and isinstance(history, dict)
+        and history.get("status") == "complete"
+        and isinstance(history_evidence, dict)
+        and history_evidence.get("immutable") is True
+        and history_evidence.get("archive") == item.get("path")
+        and isinstance(release, dict)
+        and release.get("status") in {"intent", "complete"}
+        and isinstance(release.get("started_at"), str)
+        and isinstance(receipt_phase, dict)
+        and receipt_phase.get("status") in {"intent", "complete"}
+        and isinstance(receipt_phase.get("started_at"), str)
+        and isinstance(database, dict)
+        and isinstance(database.get("original_oid"), int)
+        and isinstance(database.get("successor_oid"), int)
+        and isinstance(database.get("original_name"), str)
+        and isinstance(database.get("archive_name"), str)
+        and isinstance(database.get("owner"), str)
+        and isinstance(dump, dict)
+        and isinstance(dump.get("path"), str)
+        and isinstance(dump.get("sha256"), str)
+        and len(dump["sha256"]) == 64
+        and isinstance(item.get("archive_sha256"), str)
+        and len(item["archive_sha256"]) == 64
+    )
+    if not required:
+        raise CutoverError("successor recovered history has malformed release evidence")
+    return {
+        "version": 1,
+        "kind": RECEIPT_KIND,
+        "plan_id": state["plan_id"],
+        "released_at": release.get("completed_at", release["started_at"]),
+        "history": {"path": item["path"], "sha256": item["archive_sha256"]},
+        "archived_database": {
+            "name": database["archive_name"],
+            "oid": database["original_oid"],
+        },
+        "successor_database": {
+            "name": database["original_name"],
+            "oid": database["successor_oid"],
+        },
+        "dump": {"path": dump["path"], "sha256": dump["sha256"]},
+    }
+
+
+def _terminal_state(
+    state: dict[str, Any], receipt: dict[str, Any], receipt_path: Path, receipt_sha: str
+) -> dict[str, Any]:
     completed = deepcopy(state)
     prep = completed["successor_preparation"]
-    completed_at = release.get("started_at")
-    prep["phases"]["canonical_release"] = {
+    phases = prep["phases"]
+    started_at = phases["canonical_release"]["started_at"]
+    phases["canonical_release"] = {
         "status": "complete",
-        "started_at": completed_at,
-        "completed_at": completed_at,
+        "started_at": started_at,
+        "completed_at": receipt["released_at"],
         "evidence": {
             "ordering": "history-fsync-before-canonical-unlink",
             "released": True,
             "directory_fsync": True,
-            "verified_by": "canonical-path-absent-after-history-publication",
+        },
+    }
+    phases["release_receipt"] = {
+        "status": "complete",
+        "started_at": phases["release_receipt"].get("started_at"),
+        "completed_at": receipt["released_at"],
+        "evidence": {
+            "path": str(receipt_path),
+            "sha256": receipt_sha,
+            "immutable": True,
         },
     }
     prep["status"] = "complete"
-    prep["completed_at"] = completed_at
+    prep["completed_at"] = receipt["released_at"]
     completed["successor_eligibility"] = {
         "eligible": True,
         "reason": "successor-target-prepared",
     }
     completed["successor"] = {
-        "archive": history["evidence"]["archive"],
-        "prepared_at": completed_at,
-        "canonical_slot": "released-after-archive",
+        "archive": receipt["history"]["path"],
+        "prepared_at": receipt["released_at"],
+        "canonical_slot": "released-after-receipt",
+        "release_receipt": phases["release_receipt"]["evidence"],
     }
     return completed
+
+
+def resolve_history(paths: Any, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate successor history/receipt pairs and project terminal state once."""
+    from secretary.cutover import CutoverError, _safe_regular
+
+    resolved: list[dict[str, Any]] = []
+    expected_receipts: set[Path] = set()
+    for source in history:
+        item = dict(source)
+        state = item.get("state")
+        if not isinstance(state, dict) or "successor_preparation" not in state:
+            resolved.append(item)
+            continue
+        expected = _receipt_document(item)
+        receipt_path = release_receipt_path(paths, state["plan_id"])
+        expected_receipts.add(receipt_path)
+        try:
+            receipt_path.lstat()
+        except FileNotFoundError:
+            item["successor_release"] = {
+                "status": "pending",
+                "receipt": str(receipt_path),
+                "reason": "release-receipt-missing",
+            }
+        except OSError as exc:
+            raise CutoverError(f"cannot inspect successor release receipt: {exc}") from None
+        else:
+            _safe_regular(receipt_path, "successor release receipt")
+            try:
+                raw = receipt_path.read_bytes()
+                document = json.loads(raw)
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise CutoverError(
+                    f"successor release receipt is unreadable: {type(exc).__name__}"
+                ) from None
+            if not isinstance(document, dict) or document != expected:
+                raise CutoverError("successor release receipt does not match recovered history")
+            receipt_sha = hashlib.sha256(raw).hexdigest()
+            item["state"] = _terminal_state(state, document, receipt_path, receipt_sha)
+            item["successor_release"] = {
+                "status": "complete",
+                "receipt": str(receipt_path),
+                "sha256": receipt_sha,
+            }
+        resolved.append(item)
+    if paths.history.exists():
+        for receipt in paths.history.glob("successor-release-*.json"):
+            if receipt not in expected_receipts:
+                raise CutoverError("successor release receipt has no matching recovered history")
+    return resolved
+
+
+def _history_item(paths: Any, state: dict[str, Any]) -> dict[str, Any]:
+    from secretary.cutover import CutoverError, _read_recovered_history
+
+    matches = [item for item in _read_recovered_history(paths) if item["state"].get("plan_id") == state.get("plan_id")]
+    if len(matches) != 1:
+        raise CutoverError("successor recovered history identity is missing or ambiguous")
+    return matches[0]
+
+
+def publish_release_receipt(paths: Any, state: dict[str, Any]) -> dict[str, Any]:
+    from secretary.cutover import CutoverError, _safe_directory, _safe_regular
+
+    item = _history_item(paths, state)
+    expected = _receipt_document(item)
+    target = release_receipt_path(paths, state["plan_id"])
+    body = json.dumps(expected, indent=2, sort_keys=True) + "\n"
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        staged = stage_text(target, body)
+        try:
+            staged.chmod(0o444)
+            os.link(staged, target)
+            descriptor = os.open(paths.history, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise CutoverError(f"could not publish successor release receipt: {exc}") from None
+        finally:
+            staged.unlink(missing_ok=True)
+    except OSError as exc:
+        raise CutoverError(f"could not inspect successor release receipt: {exc}") from None
+    else:
+        _safe_directory(paths.history, "cutover history directory")
+        _safe_regular(target, "successor release receipt")
+        try:
+            existing = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise CutoverError(f"could not inspect successor release receipt: {exc}") from None
+        if existing != body:
+            raise CutoverError("successor release receipt conflicts with recovered history")
+        try:
+            descriptor = os.open(paths.history, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise CutoverError(f"could not sync successor release receipt: {exc}") from None
+    return {
+        "path": str(target),
+        "sha256": sha256_file(target),
+        "immutable": True,
+    }
+
+
+def history_status(item: dict[str, Any]) -> dict[str, Any]:
+    state = item["state"]
+    prep = state["successor_preparation"]
+    command = (
+        "secretary cutover prepare-successor "
+        f"--instance {shlex.quote(prep['instance'])} "
+        f"--expected-revision {prep['expected_revision']} "
+        f"--actor {shlex.quote(prep['actor'])} --reason {shlex.quote(prep['reason'])} "
+        f"--confirm {prep['confirmation']}"
+    )
+    return {
+        "status": item["successor_release"]["status"],
+        "phases": prep["phases"],
+        "next_command": command if item["successor_release"]["status"] == "pending" else None,
+        "release_receipt": item["successor_release"],
+    }
+
+
+def _verify_completed_targets(paths: Any, state: dict[str, Any]) -> None:
+    from secretary.cutover import CutoverError
+
+    prep = state.get("successor_preparation")
+    database = prep.get("database") if isinstance(prep, dict) else None
+    dump_evidence = prep.get("dump") if isinstance(prep, dict) else None
+    if not isinstance(database, dict) or not isinstance(dump_evidence, dict):
+        raise CutoverError("successor history has malformed database or dump evidence")
+    try:
+        config = resolve(paths.instance)
+        archived = inspect_database(config, name=database["archive_name"])
+        configured = inspect_database(config)
+        dump = Path(dump_evidence["path"])
+        valid = (
+            archived["oid"] == database["original_oid"]
+            and not archived["allow_connections"]
+            and configured["oid"] == database["successor_oid"]
+            and dump.is_file()
+            and sha256_file(dump) == dump_evidence["sha256"]
+        )
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise CutoverError(f"completed successor evidence cannot be verified: {exc}") from None
+    if not valid:
+        raise CutoverError("completed successor database or dump identity no longer matches history")
 
 
 def prepare(args: Any, paths: Any) -> dict[str, Any]:
@@ -517,41 +788,75 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
     with CutoverLock(paths):
         _provenance(paths, args.expected_revision)
         state = _read_state(paths)
-        if state is None:
-            matches = []
-            for item in _read_recovered_history(paths):
-                archived_state = item["state"]
-                archived_prep = archived_state.get("successor_preparation", {})
-                if (
-                    archived_prep.get("status") == "complete"
-                    and archived_prep.get("confirmation") == args.confirm
-                    and archived_prep.get("expected_revision") == args.expected_revision
-                    and archived_prep.get("actor") == actor
-                    and archived_prep.get("reason") == reason
-                ):
-                    matches.append(item)
-            if len(matches) != 1:
-                raise CutoverError("there is no canonical or matching completed successor identity")
-            completed = matches[0]["state"]
-            saved = completed["successor_preparation"]
-            config = resolve(paths.instance)
-            archived = inspect_database(config, name=saved["database"]["archive_name"])
-            configured = inspect_database(config)
-            dump = Path(saved["dump"]["path"])
-            if (
-                archived["oid"] != saved["database"]["original_oid"]
-                or archived["allow_connections"]
-                or configured["oid"] != saved["database"]["successor_oid"]
-                or not dump.is_file()
-                or sha256_file(dump) != saved["dump"]["sha256"]
-            ):
-                raise CutoverError("completed successor database or dump identity no longer matches history")
+        history = _read_recovered_history(paths)
+
+        def matching(item: dict[str, Any]) -> bool:
+            archived_state = item.get("state")
+            archived_prep = (
+                archived_state.get("successor_preparation")
+                if isinstance(archived_state, dict)
+                else None
+            )
+            return bool(
+                isinstance(archived_prep, dict)
+                and archived_prep.get("confirmation") == args.confirm
+                and archived_prep.get("expected_revision") == args.expected_revision
+                and archived_prep.get("actor") == actor
+                and archived_prep.get("reason") == reason
+            )
+
+        matches = [item for item in history if matching(item)]
+        completed_matches = [
+            item
+            for item in matches
+            if item.get("successor_release", {}).get("status") == "complete"
+        ]
+        if len(completed_matches) == 1:
+            completed = completed_matches[0]["state"]
+            _verify_completed_targets(paths, completed)
             return {
                 **completed,
-                "archived_state": matches[0]["path"],
+                "archived_state": completed_matches[0]["path"],
                 "successor_ready": True,
                 "idempotent_replay": True,
             }
+        if len(completed_matches) > 1:
+            raise CutoverError("completed successor history identity is ambiguous")
+        pending_matches = [
+            item
+            for item in matches
+            if item.get("successor_release", {}).get("status") == "pending"
+        ]
+        if state is None:
+            if len(pending_matches) != 1:
+                raise CutoverError("there is no canonical or matching successor release intent")
+            pending = pending_matches[0]
+            _verify_completed_targets(paths, pending["state"])
+            try:
+                SuccessorOperations(paths, pending["state"]).release_receipt()
+            except Exception as exc:  # noqa: BLE001 - pending receipt must remain a bounded refusal
+                reason_text = (
+                    str(exc)
+                    if isinstance(exc, (CutoverError, RuntimeError, BoardStoreError))
+                    else f"{type(exc).__name__}: {exc}"
+                )
+                raise CutoverError(
+                    f"successor release_receipt remains pending; rerun the identical command: {reason_text}"
+                ) from None
+            completed = [item for item in _read_recovered_history(paths) if matching(item)]
+            if len(completed) != 1 or completed[0].get("successor_release", {}).get("status") != "complete":
+                raise CutoverError("successor release receipt did not complete the recovered identity")
+            return {
+                **completed[0]["state"],
+                "archived_state": completed[0]["path"],
+                "successor_ready": True,
+                "idempotent_replay": True,
+                "resumed_release_receipt": True,
+            }
+        if pending_matches and any(
+            item["state"].get("plan_id") != state.get("plan_id") for item in pending_matches
+        ):
+            raise CutoverError("successor release receipt is pending beside a canonical identity")
         if state.get("expected_revision") == args.expected_revision:
             raise CutoverError("prepare-successor requires an installed revision distinct from the recovered attempt")
         eligible = exact_eligibility(
@@ -566,6 +871,13 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
             expected = confirmation(state["plan_id"], identity["oid"], config.dbname)
             if args.confirm != expected:
                 raise CutoverError("confirmation token does not match the plan and current database identity")
+            schema_revision = inspect_schema_revision(config)
+            if schema_revision == "0006_sprint_transport_key":
+                raise CutoverError(UPGRADE_PREREQUISITE)
+            if schema_revision != migrate.head_revision():
+                raise CutoverError(
+                    "preserved PostgreSQL target must be at 0007_card_transport_key before prepare-successor"
+                )
             name = archive_name(state["plan_id"], identity["oid"])
             prep = state["successor_preparation"] = {
                 "version": 1, "status": "preparing", "instance": str(paths.instance),
@@ -579,6 +891,14 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
         else:
             if prep.get("actor") != actor or prep.get("reason") != reason or prep.get("expected_revision") != args.expected_revision or prep.get("confirmation") != args.confirm:
                 raise CutoverError("retry must use the successor preparation identity's actor, reason, revision and confirmation")
+            if "connection_fence" not in prep.get("phases", {}):
+                schema_revision = inspect_schema_revision(resolve(paths.instance))
+                if schema_revision == "0006_sprint_transport_key":
+                    raise CutoverError(UPGRADE_PREREQUISITE)
+                if schema_revision != migrate.head_revision():
+                    raise CutoverError(
+                        "preserved PostgreSQL target must be at 0007_card_transport_key before prepare-successor"
+                    )
         operations = SuccessorOperations(paths, state)
         for name in PHASES:
             phase = prep["phases"].get(name, {})
@@ -586,15 +906,17 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
                 continue
             prep["phases"][name] = {"status": "intent", "started_at": phase.get("started_at", _now())}
             state["updated_at"] = _now()
-            _write_state(paths, state)
+            if name != "release_receipt":
+                _write_state(paths, state)
             try:
                 evidence = getattr(operations, name)()
             except Exception as exc:  # noqa: BLE001 - every failed effect must become durable evidence
-                if name == "canonical_release" and not paths.state.exists():
-                    state = released_history_state(state)
-                    prep = state["successor_preparation"]
-                    break
                 reason_text = str(exc) if isinstance(exc, (RuntimeError, BoardStoreError)) else f"{type(exc).__name__}: {exc}"
+                if not paths.state.exists():
+                    raise CutoverError(
+                        "successor canonical release completed but release_receipt is pending; "
+                        f"rerun the identical command: {reason_text}"
+                    ) from None
                 prep["phases"][name].update({"status": "failed", "failed_at": _now(), "reason": reason_text[:1000]})
                 prep["status"] = "failed"
                 _write_state(paths, state)
@@ -608,7 +930,12 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
             if name == "database_create":
                 prep["database"]["successor_oid"] = evidence["oid"]
             if name == "canonical_release":
-                state = released_history_state(state)
+                continue
+            if name == "release_receipt":
+                resolved = [item for item in _read_recovered_history(paths) if matching(item)]
+                if len(resolved) != 1 or resolved[0].get("successor_release", {}).get("status") != "complete":
+                    raise CutoverError("successor release receipt did not resolve terminal completion")
+                state = resolved[0]["state"]
                 prep = state["successor_preparation"]
                 break
             prep["status"] = "preparing"

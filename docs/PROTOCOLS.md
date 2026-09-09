@@ -4187,13 +4187,18 @@ and full parity completed, recovery branch is `kanboard-before-first-write`, sel
 absent, `first_sql_write` is null, backend remains Kanboard, and matching import evidence is readable.
 It requires an absolute explicit instance, exact installed revision, non-empty actor/reason and a
 confirmation derived from plan ID, configured database name and current database OID. Status renders
-the token, phase evidence and exact next command without credentials.
+the token, phase evidence and exact next command without credentials. At
+`0006_sprint_transport_key` that command is the external owner/operator upgrade; preparation is a
+read-only refusal until the configured preserved database is verified at `0007_card_transport_key`.
 
 The subprotocol records `eligibility`, `occupied_verification`, `dump_publication`,
 `connection_fence`, `database_rename`, `database_create`, `migration`, `role_verification`,
-`empty_verification`, `history_publication` and `canonical_release`. Every effect has a durable intent
-record and OID-based replay. Only the final immutable-history/fsync/canonical-unlink ordering releases
-the slot. Old cutover, recovery and successor tokens do not authorize a new plan or apply.
+`empty_verification`, `history_publication`, `canonical_release` and `release_receipt`. Migration here
+applies only to the new empty canonical database. Every effect has a durable intent record and
+OID-based replay. History is fsynced before canonical unlink and directory fsync; only a matching
+immutable receipt then proves terminal release. The shared resolver makes status, replay and planning
+consume that pair monotonically. Old cutover, recovery and successor tokens do not authorize a new
+plan or apply.
 
 Each product subprocess must exit successfully and return a nonempty JSON object or array. Empty,
 non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public

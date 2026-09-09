@@ -354,11 +354,15 @@ recovery and `resume-ready`; only the pre-import pair can release the canonical 
 
 The successor matrix interrupts every successor phase and asserts that completed phases do not run
 again. The PostgreSQL 16 integration starts with a populated `0006_sprint_transport_key` predecessor,
-lets the lifecycle migrate it through `0007_card_transport_key`, preserves its OID under the derived
-archive name, and compares collision refs/task numbers, comments, links, requests and board events
+proves `prepare-successor` refuses without changing state or rows, performs the external owner upgrade
+through `0007_card_transport_key`, then preserves its OID under the derived archive name. It snapshots
+and compares collision refs/task numbers and `tasks.board_key`, comments, links, requests and board events
 through a safe test-only access copy. It creates a distinct schema-current empty OID at the configured
 name, checks roles/default privileges, exercises real OID reconciliation and filesystem tail replay,
-repeats the command idempotently and builds a distinct successor plan. Missing Docker, psycopg,
+injects a crash after canonical unlink and before the immutable release receipt, proves exactly one
+receipt/history/dump/archive, repeats the command idempotently, and builds a distinct successor plan.
+Creating that plan does not change predecessor status or replay. Malformed nested history or receipt
+evidence refuses without a traceback. Missing Docker, psycopg,
 SQLAlchemy or Alembic is a red test failure, not a skip.
 
 `tests.test_postgres_recovery.PostgresRecoveryIntegrationTests.test_real_cutover_phases_share_one_disposable_postgres_16_boundary`

@@ -237,6 +237,71 @@ class CutoverSuccessorTests(CutoverFixture):
                 self.assertFalse(proof["eligible"])
                 self.assertEqual(proof["reason"], "full-parity-not-clean")
 
+        state = self.eligible_state()
+        with (
+            mock.patch.object(
+                successor, "parse", return_value=SimpleNamespace(dbname="secretary")
+            ),
+            mock.patch(
+                "secretary.head_registry.read_source", return_value={"revision": REVISION}
+            ),
+            mock.patch.object(
+                successor,
+                "inspect_database",
+                return_value={
+                    "oid": 41,
+                    "name": "secretary",
+                    "owner": "owner",
+                    "allow_connections": True,
+                },
+            ),
+            mock.patch.object(
+                successor,
+                "inspect_schema_revision",
+                return_value="0006_sprint_transport_key",
+            ),
+        ):
+            status = successor.status_probe(
+                self.paths.instance, state, "kanboard", artifacts=self.paths.artifacts
+            )
+        self.assertEqual(status["prerequisite"], successor.UPGRADE_PREREQUISITE)
+        self.assertEqual(
+            status["next_command"],
+            f"secretary upgrade --no-pull --instance {self.paths.instance}",
+        )
+
+        state["successor_preparation"] = {
+            "version": 1,
+            "status": "preparing",
+            "instance": str(self.paths.instance),
+            "actor": args().actor,
+            "reason": args().reason,
+            "expected_revision": REVISION,
+            "confirmation": "token",
+            "started_at": "2026-09-09T00:00:00Z",
+            "phases": {},
+            "database": {},
+            "dump": {},
+        }
+        cutover._write_state(self.paths, state)
+        before = self.paths.state.read_bytes()
+        run_args = args(confirm="token")
+        with (
+            mock.patch.object(cutover, "_provenance", return_value={}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(
+                successor, "resolve", return_value=SimpleNamespace(dbname="secretary")
+            ),
+            mock.patch.object(
+                successor,
+                "inspect_schema_revision",
+                return_value="0006_sprint_transport_key",
+            ),
+            self.assertRaisesRegex(cutover.CutoverError, successor.UPGRADE_PREREQUISITE),
+        ):
+            successor.prepare(run_args, self.paths)
+        self.assertEqual(self.paths.state.read_bytes(), before)
+
     def test_prepare_successor_resumes_every_phase_without_repeating_completed_work(self) -> None:
         state = self.eligible_state()
         cutover._write_state(self.paths, state)
@@ -270,6 +335,10 @@ class CutoverSuccessorTests(CutoverFixture):
                                 return {"oid": 42, "name": "secretary"}
                             if operation_name in {"history_publication", "canonical_release"}:
                                 return getattr(self.real, operation_name)()
+                            if operation_name == "release_receipt":
+                                return successor.publish_release_receipt(
+                                    self.real.paths, self.real.state
+                                )
                             return {"phase": operation_name}
                         return operation
 
@@ -278,6 +347,12 @@ class CutoverSuccessorTests(CutoverFixture):
                     mock.patch.object(cutover, "_backend", return_value="kanboard"),
                     mock.patch.object(successor, "resolve", return_value=SimpleNamespace(dbname="secretary")),
                     mock.patch.object(successor, "inspect_database", return_value={"oid": 41, "name": "secretary", "owner": "owner", "allow_connections": True}),
+                    mock.patch.object(
+                        successor,
+                        "inspect_schema_revision",
+                        return_value="0007_card_transport_key",
+                    ),
+                    mock.patch.object(successor, "_verify_completed_targets", return_value=None),
                     mock.patch.object(successor, "SuccessorOperations", FakeOperations),
                 ):
                     with self.assertRaisesRegex(cutover.CutoverError, failed_phase):
@@ -294,6 +369,9 @@ class CutoverSuccessorTests(CutoverFixture):
                 archive = Path(result["archived_state"])
                 archive.chmod(0o600)
                 archive.unlink()
+                receipt = successor.release_receipt_path(self.paths, state["plan_id"])
+                receipt.chmod(0o600)
+                receipt.unlink()
 
     def test_real_history_link_and_canonical_unlink_are_truthful_across_restart(self) -> None:
         state = self.eligible_state()
@@ -315,6 +393,17 @@ class CutoverSuccessorTests(CutoverFixture):
             },
             "dump": {"path": str(self.paths.artifacts / "successor.dump"), "sha256": "d" * 64},
             "phases": {
+                **{
+                    name: {
+                        "status": "complete",
+                        "started_at": "2026-09-09T00:00:01Z",
+                        "completed_at": "2026-09-09T00:00:01Z",
+                        "evidence": {},
+                    }
+                    for name in successor.PHASES[
+                        : successor.PHASES.index("history_publication")
+                    ]
+                },
                 "history_publication": {
                     "status": "intent",
                     "started_at": "2026-09-09T00:00:01Z",
@@ -363,7 +452,26 @@ class CutoverSuccessorTests(CutoverFixture):
             operations.canonical_release()
 
         self.assertFalse(self.paths.state.exists())
-        released = cutover._read_recovered_history(self.paths)[0]["state"]
+        pending = cutover._read_recovered_history(self.paths)[0]
+        self.assertEqual(pending["successor_release"]["status"], "pending")
+        self.assertEqual(
+            pending["state"]["successor_preparation"]["phases"]["canonical_release"]["status"],
+            "intent",
+        )
+        with (
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_provenance", return_value={"revision": REVISION}),
+            mock.patch.object(
+                cutover,
+                "_source_evidence",
+                return_value={"fingerprint": "new-source", "parity": {"ok": True}},
+            ),
+            self.assertRaisesRegex(cutover.CutoverError, "release receipt"),
+        ):
+            cutover.build_plan(self.paths, REVISION)
+        successor.publish_release_receipt(self.paths, pending["state"])
+        released_item = cutover._read_recovered_history(self.paths)[0]
+        released = released_item["state"]
         self.assertEqual(
             released["successor_preparation"]["phases"]["canonical_release"]["status"],
             "complete",
@@ -371,6 +479,44 @@ class CutoverSuccessorTests(CutoverFixture):
         self.assertTrue(
             released["successor_preparation"]["phases"]["canonical_release"]["evidence"]["released"]
         )
+        with (
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_provenance", return_value={"revision": REVISION}),
+            mock.patch.object(
+                cutover,
+                "_source_evidence",
+                return_value={"fingerprint": "new-source", "parity": {"ok": True}},
+            ),
+        ):
+            plan = cutover.build_plan(self.paths, REVISION)
+        cutover._write_state(self.paths, cutover._new_state(plan, "owner", "later cutover"))
+        self.assertEqual(cutover._read_recovered_history(self.paths)[0], released_item)
+        self.assertTrue(
+            successor.publish_release_receipt(self.paths, released_item["state"])["immutable"]
+        )
+        receipt = successor.release_receipt_path(self.paths, state["plan_id"])
+        receipt.chmod(0o600)
+        receipt.write_text("{}\n", encoding="utf-8")
+        receipt.chmod(0o444)
+        with self.assertRaisesRegex(cutover.CutoverError, "receipt does not match"):
+            cutover._read_recovered_history(self.paths)
+
+    def test_successor_history_and_receipt_malformed_evidence_refuses_cleanly(self) -> None:
+        state = self.eligible_state()
+        archive = self.paths.history / f"postgres-v1-{state['plan_id']}.json"
+        self.paths.history.mkdir(parents=True)
+        state["successor_preparation"] = {
+            "status": "preparing",
+            "phases": {
+                "history_publication": {"status": "complete", "evidence": None},
+                "canonical_release": {"status": "intent", "started_at": "time"},
+                "release_receipt": {"status": "intent", "started_at": "time"},
+            },
+        }
+        archive.write_text(json.dumps(state), encoding="utf-8")
+        archive.chmod(0o444)
+        with self.assertRaisesRegex(cutover.CutoverError, "malformed release evidence"):
+            cutover._read_recovered_history(self.paths)
 
 
 class CutoverCommandEvidenceTests(CutoverFixture):
