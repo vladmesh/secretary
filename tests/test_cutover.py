@@ -302,6 +302,70 @@ class CutoverSuccessorTests(CutoverFixture):
             successor.prepare(run_args, self.paths)
         self.assertEqual(self.paths.state.read_bytes(), before)
 
+    def test_status_keeps_next_command_while_the_target_is_fenced_or_unreachable(self) -> None:
+        state = self.eligible_state()
+        state["successor_preparation"] = {
+            "version": 1,
+            "status": "preparing",
+            "instance": str(self.paths.instance),
+            "actor": args().actor,
+            "reason": args().reason,
+            "expected_revision": REVISION,
+            "confirmation": "token",
+            "started_at": "2026-09-09T00:00:00Z",
+            "phases": {
+                "connection_fence": {"status": "complete"},
+                "database_rename": {"status": "complete"},
+            },
+            "database": {
+                "original_oid": 41,
+                "original_name": "secretary",
+                "archive_name": "secretary_archive",
+                "owner": "owner",
+            },
+            "dump": {},
+        }
+        token = successor.confirmation(state["plan_id"], 41, "secretary")
+        expected_command = (
+            f"secretary cutover prepare-successor --instance {self.paths.instance} "
+            f"--expected-revision {REVISION} --actor <actor> --reason <reason> --confirm {token}"
+        )
+        refused = RuntimeError("could not inspect PostgreSQL schema revision: connection refused")
+        with (
+            mock.patch.object(
+                successor, "parse", return_value=SimpleNamespace(dbname="secretary")
+            ),
+            mock.patch(
+                "secretary.head_registry.read_source", return_value={"revision": REVISION}
+            ),
+            mock.patch.object(successor, "inspect_database", side_effect=AssertionError("not read")),
+            mock.patch.object(successor, "inspect_schema_revision", side_effect=refused) as probe,
+        ):
+            # Mid-rotation: the configured name is fenced, absent or unmigrated, so status must
+            # not touch the database and must still render the identical retry command.
+            fenced = successor.status_probe(
+                self.paths.instance, state, "kanboard", artifacts=self.paths.artifacts
+            )
+            self.assertEqual(probe.call_count, 0)
+            self.assertEqual(fenced["database"]["oid"], 41)
+            self.assertEqual(fenced["confirmation"], token)
+            self.assertEqual(fenced["next_command"], expected_command)
+            self.assertIsNone(fenced["schema_revision"])
+            self.assertNotIn("probe_error", fenced)
+
+            # Before the fence an unreachable schema probe is reported, not allowed to swallow
+            # the identity, confirmation and next command.
+            state["successor_preparation"]["phases"] = {}
+            unreachable = successor.status_probe(
+                self.paths.instance, state, "kanboard", artifacts=self.paths.artifacts
+            )
+            self.assertEqual(probe.call_count, 1)
+            self.assertEqual(unreachable["database"]["oid"], 41)
+            self.assertEqual(unreachable["confirmation"], token)
+            self.assertEqual(unreachable["next_command"], expected_command)
+            self.assertIn("connection refused", unreachable["schema_probe_error"])
+            self.assertNotIn("probe_error", unreachable)
+
     def test_prepare_successor_resumes_every_phase_without_repeating_completed_work(self) -> None:
         state = self.eligible_state()
         cutover._write_state(self.paths, state)

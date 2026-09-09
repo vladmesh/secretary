@@ -258,7 +258,29 @@ def status_probe(
         else:
             identity = inspect_database(config)
         token = confirmation(state["plan_id"], identity["oid"], config.dbname)
-        schema_revision = inspect_schema_revision(config)
+        prepare_command = (
+            f"secretary cutover prepare-successor --instance {instance} "
+            f"--expected-revision {revision} --actor <actor> --reason <reason> "
+            f"--confirm {token}"
+        )
+        result.update({"database": identity, "expected_revision": revision, "confirmation": token})
+        # From connection_fence onward the configured name is fenced, absent or unmigrated, so
+        # the schema probe cannot connect; the retry path skips it for the same reason, and the
+        # operator's next command is always the identical prepare-successor retry.
+        if "connection_fence" in phases:
+            result.update({"schema_revision": None, "next_command": prepare_command})
+            return result
+        try:
+            schema_revision = inspect_schema_revision(config)
+        except Exception as exc:  # noqa: BLE001 - the schema branch is advisory, the command is not
+            result.update(
+                {
+                    "schema_revision": None,
+                    "schema_probe_error": str(exc),
+                    "next_command": prepare_command,
+                }
+            )
+            return result
         schema_action: dict[str, Any]
         if schema_revision == "0006_sprint_transport_key":
             schema_action = {
@@ -266,13 +288,7 @@ def status_probe(
                 "next_command": f"secretary upgrade --no-pull --instance {instance}",
             }
         elif schema_revision == migrate.head_revision():
-            schema_action = {
-                "next_command": (
-                    f"secretary cutover prepare-successor --instance {instance} "
-                    f"--expected-revision {revision} --actor <actor> --reason <reason> "
-                    f"--confirm {token}"
-                )
-            }
+            schema_action = {"next_command": prepare_command}
         else:
             schema_action = {
                 "prerequisite": (
@@ -281,15 +297,7 @@ def status_probe(
                 ),
                 "next_command": None,
             }
-        result.update(
-            {
-                "database": identity,
-                "schema_revision": schema_revision,
-                "expected_revision": revision,
-                "confirmation": token,
-                **schema_action,
-            }
-        )
+        result.update({"schema_revision": schema_revision, **schema_action})
     except Exception as exc:  # noqa: BLE001 - status must render an unavailable read-only probe
         result["probe_error"] = str(exc)
     return result
