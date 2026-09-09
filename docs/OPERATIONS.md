@@ -79,7 +79,9 @@ runtime secret.
 
 ### PostgreSQL board store
 
-A fresh `secretary bootstrap` creates `/opt/secretary/postgres-compose.yml`, the
+A fresh `secretary bootstrap` creates `/opt/secretary/postgres-compose.yml` (on an installation
+where root installed that file instead, see the privileged preconditions under *PostgreSQL
+board-store cutover*), the
 `secretary-board-store_board-db` named volume and `<instance>/board-store.env`, then runs Alembic
 to the shipped head and verifies the owner/app/read logins and privilege boundary. PostgreSQL is
 the only containerized part of this path; the CLI, web process, dispatcher and heads remain host
@@ -3649,6 +3651,38 @@ preserved imported target exposed duplicate public suffixes (`butler-1` and
 occupied target; it does not authorize changing either live store, controller state, or retrying the
 cutover. An owner/operator must install the merged revision and schedule another maintenance window.
 
+### Privileged preconditions installed by root before the window
+
+Two install steps belong to root and to nobody else. `apply` proves both of them before it takes
+the controller lock, writes its state document or enters the first phase, so an installation that is
+missing either one refuses with no durable effect and can be retried by the identical command once
+root has acted. `plan` reports the same two facts read-only and never fails on them, which is how
+an operator learns about them before the window rather than inside it.
+
+1. The board-store Compose definition `/opt/secretary/postgres-compose.yml` must already be a
+   regular file whose content is exactly the shipped `COMPOSE_TEXT`, at mode `0600` and owned by the
+   runtime user, because provisioning refuses to replace a drifted or broadly readable definition.
+2. Non-interactive `sudo -n` for `systemctl` must work for the runtime user. The controller stops,
+   starts and restarts the named units through `sudo -n systemctl ...` and records that exact argv in
+   phase evidence; it never runs a bare `systemctl` and never edits sudoers or a unit file.
+
+The refusal prints these commands. Run them as root, then rerun the identical `apply`:
+
+```
+install -d -m 0755 -o root -g root /opt/secretary
+install -m 0600 -o <runtime-user> -g <runtime-group> /dev/stdin \
+  /opt/secretary/postgres-compose.yml <<'COMPOSE'
+<the exact COMPOSE_TEXT the refusal prints>
+COMPOSE
+echo '<runtime-user> ALL=(root) NOPASSWD: /usr/bin/systemctl' \
+  | install -m 0440 -o root -g root /dev/stdin /etc/sudoers.d/secretary-systemctl
+visudo -cf /etc/sudoers.d/secretary-systemctl
+```
+
+The controller checks these preconditions and performs neither of them: writing that file, the
+sudoers rule and any unit remains operator work outside the command. Its probe of the sudo rule is
+read-only (`sudo -n systemctl show --property=Version`) and changes no unit.
+
 The expected outage begins at `global_freeze` and ends only after an operator inspects
 `resume_ready` and explicitly runs `secretary resume`. Budget a full maintenance window. First run:
 
@@ -3683,8 +3717,9 @@ repeating recovery side effects. Then run `plan` again and apply only its new co
 new plan binds the archived predecessor and therefore has a distinct identity. The old token remains
 refused. Never delete or edit either document.
 
-The operator needs ownership of the instance and data directories, permission to control the named
-systemd units and Docker PostgreSQL service, and access to the installed virtual environment. The
+The operator needs ownership of the instance and data directories, the two root-installed
+preconditions above, permission to control the named systemd units and Docker PostgreSQL service,
+and access to the installed virtual environment. The
 controller rejects symlinked or broadly writable configuration/state and does not print database
 credentials. The non-secret state fence is owner-writable and runtime-readable (`0644` below a
 `0755` cutover directory), because web and head processes may run under another uid. Controller

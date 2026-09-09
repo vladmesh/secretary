@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import grp
 import hashlib
 import json
 import os
+import pwd
 import stat
 import subprocess
 import sys
@@ -42,6 +44,9 @@ BACKEND_ENV = "SECRETARY_CARD_BACKEND"
 CUTOVER_ACTOR = "secretary-postgres-cutover"
 CONTROLLER_ID_ENV = "SECRETARY_CUTOVER_CONTROLLER_ID"
 PREIMPORT_RECOVERY_BRANCHES = frozenset(("no-cutover-effects", "kanboard-before-fingerprint"))
+SUDOERS_DROPIN = Path("/etc/sudoers.d/secretary-systemctl")
+SYSTEMCTL_PATH = "/usr/bin/systemctl"
+SUDO_PROBE = ("systemctl", "show", "--property=Version")
 
 PHASES = (
     "preflight",
@@ -260,6 +265,114 @@ def _source_evidence(paths: Paths) -> dict[str, Any]:
         "audit": report.discrepancy_count,
         "parity": report.parity,
     }
+
+
+def _privileged_argv(command: list[str]) -> list[str]:
+    """Every privileged host command of this controller uses the installer's sudo contour."""
+    from secretary.host_apply import SystemdUnitInstaller
+
+    return SystemdUnitInstaller().argv(command)
+
+
+def _runtime_identity() -> tuple[str, str]:
+    try:
+        entry = pwd.getpwuid(os.getuid())
+    except KeyError:
+        return str(os.getuid()), str(os.getgid())
+    try:
+        group = grp.getgrgid(entry.pw_gid).gr_name
+    except KeyError:
+        group = str(entry.pw_gid)
+    return entry.pw_name, group
+
+
+def _sudo_systemctl_probe() -> dict[str, Any]:
+    """Prove non-interactive sudo for systemctl by reading, never by changing a unit."""
+    user, _group = _runtime_identity()
+    argv = _privileged_argv(list(SUDO_PROBE))
+    evidence: dict[str, Any] = {
+        "requirement": f"sudo -n systemctl for {user}",
+        "command": argv,
+        "user": user,
+    }
+    try:
+        result = subprocess.run(argv, text=True, capture_output=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            **evidence,
+            "satisfied": False,
+            "detail": f"sudo -n systemctl could not run: {type(exc).__name__}",
+        }
+    if result.returncode:
+        lines = (result.stderr or result.stdout or "").strip().splitlines()
+        reason = lines[-1][:200] if lines else f"exit {result.returncode}"
+        return {**evidence, "satisfied": False, "detail": f"sudo -n systemctl failed: {reason}"}
+    return {**evidence, "satisfied": True, "detail": f"sudo -n systemctl works for {user}"}
+
+
+def _root_commands(compose: dict[str, Any], probe: dict[str, Any]) -> list[str]:
+    from secretary.board.provision import COMPOSE_TEXT
+
+    user, group = _runtime_identity()
+    commands: list[str] = []
+    if not compose["satisfied"]:
+        path = Path(compose["path"])
+        commands.append(f"install -d -m 0755 -o root -g root {path.parent}")
+        commands.append(
+            f"install -m 0600 -o {user} -g {group} /dev/stdin {path} <<'COMPOSE'\n{COMPOSE_TEXT}COMPOSE"
+        )
+    if not probe["satisfied"]:
+        commands.append(
+            f"echo '{user} ALL=(root) NOPASSWD: {SYSTEMCTL_PATH}' "
+            f"| install -m 0440 -o root -g root /dev/stdin {SUDOERS_DROPIN}"
+        )
+        commands.append(f"visudo -cf {SUDOERS_DROPIN}")
+    return commands
+
+
+def _privileged_preconditions(compose_path: Path | None = None) -> dict[str, Any]:
+    """Read-only report on the two install steps only root can take.
+
+    The controller owns neither of them: it proves the Compose definition that
+    provisioning needs is already installed as shipped, and that its own
+    systemd calls will be authorised, then prints the root commands for
+    whatever is missing.  It never writes the file or the sudo rule.
+    """
+    from secretary.board.provision import DEFAULT_COMPOSE_PATH, inspect_compose
+
+    path = compose_path if compose_path is not None else DEFAULT_COMPOSE_PATH
+    installed = inspect_compose(path)
+    compose = {
+        "requirement": "root-installed board-store Compose definition",
+        "path": str(path),
+        "status": installed.status,
+        "satisfied": installed.ok,
+        "detail": installed.describe(),
+    }
+    probe = _sudo_systemctl_probe()
+    report: dict[str, Any] = {
+        "satisfied": bool(compose["satisfied"] and probe["satisfied"]),
+        "compose": compose,
+        "sudo_systemctl": probe,
+    }
+    report["root_commands"] = _root_commands(compose, probe)
+    return report
+
+
+def _require_privileged_preconditions(compose_path: Path | None = None) -> dict[str, Any]:
+    report = _privileged_preconditions(compose_path)
+    if report["satisfied"]:
+        return report
+    missing = [
+        item["detail"] for item in (report["compose"], report["sudo_systemctl"]) if not item["satisfied"]
+    ]
+    raise CutoverError(
+        "privileged apply preconditions are not installed; the controller verifies them and "
+        "performs no root step:\n"
+        + "\n".join(f"- {detail}" for detail in missing)
+        + "\nRun as root, then rerun the identical apply command:\n"
+        + "\n".join(report["root_commands"])
+    )
 
 
 def build_plan(
@@ -684,8 +797,8 @@ def _set_backend(paths: Paths, backend: str) -> dict[str, Any]:
 def _systemctl(action: str, units: tuple[str, ...]) -> dict[str, Any]:
     evidence = []
     for unit in units:
-        evidence.append(_run(["systemctl", action, unit]))
-    return {"action": action, "units": list(units), "results": evidence}
+        evidence.append(_run(_privileged_argv(["systemctl", action, unit])))
+    return {"action": action, "units": list(units), "privileged": "sudo -n", "results": evidence}
 
 
 def _service_evidence(units: tuple[str, ...], product_root: str) -> list[dict[str, Any]]:
@@ -1356,6 +1469,10 @@ def _refresh_first_sql_write(paths: Paths, state: dict[str, Any]) -> None:
 
 
 def apply_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
+    # Both privileged install steps are proven before the lock, the first state
+    # write and the first phase, so a new run leaves no state document behind
+    # and a retry leaves the durable one exactly as it was.
+    _require_privileged_preconditions()
     with CutoverLock(paths):
         state = _read_state(paths)
         if state is None:
@@ -1547,7 +1664,12 @@ def run_cutover(args: argparse.Namespace) -> int:
             raise CutoverError("prepare-successor requires an absolute --instance path")
         paths = resolve_paths(args.instance)
         if args.cutover_command == "plan":
-            _render(build_plan(paths, args.expected_revision))
+            plan = build_plan(paths, args.expected_revision)
+            # The preconditions describe the host, not the plan, so they are
+            # reported beside the identity instead of inside the hashed
+            # evidence: a saved confirmation token has to survive the operator
+            # installing the missing root steps.  Plan only shows them.
+            _render({**plan, "privileged_preconditions": _privileged_preconditions()})
         elif args.cutover_command == "status":
             state = _read_state(paths)
             recovered_history = _read_recovered_history(paths)

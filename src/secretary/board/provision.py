@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 import time
 from dataclasses import dataclass
@@ -33,6 +34,58 @@ COMPOSE_TEXT = f"""services:
 volumes:
   {VOLUME}:
 """
+
+
+@dataclass(frozen=True)
+class ComposeInstallation:
+    """Read-only view of the shipped Compose definition as it exists on disk.
+
+    The file lives outside the instance and is installed by root, so both the
+    provisioner and the cutover controller have to answer the same question
+    about it.  They ask it here once instead of restating the literals and the
+    comparisons in a second module.
+    """
+
+    path: Path
+    status: str
+    mode: int | None = None
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+    def describe(self) -> str:
+        if self.status == "ok":
+            return f"{self.path} matches the shipped Compose definition at mode {oct(self.mode or 0)}"
+        if self.status == "missing":
+            return f"{self.path} is missing"
+        if self.status == "not-regular":
+            return f"{self.path} is not a regular file"
+        if self.status == "drift":
+            return f"{self.path} does not match the shipped Compose definition"
+        if self.status == "permissions":
+            return f"{self.path} has mode {oct(self.mode or 0)}, wider than 0600"
+        return f"{self.path} could not be inspected: {self.detail}"
+
+
+def inspect_compose(path: Path = DEFAULT_COMPOSE_PATH) -> ComposeInstallation:
+    """Answer whether the installed Compose definition is the shipped one, without writing."""
+    try:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            return ComposeInstallation(path, "not-regular")
+        if not path.exists():
+            return ComposeInstallation(path, "missing")
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if path.read_text(encoding="utf-8") != COMPOSE_TEXT:
+            return ComposeInstallation(path, "drift", mode)
+        if mode & 0o077:
+            return ComposeInstallation(path, "permissions", mode)
+        return ComposeInstallation(path, "ok", mode)
+    except OSError as exc:
+        return ComposeInstallation(path, "unreadable", detail=str(exc))
+    except UnicodeError:
+        return ComposeInstallation(path, "drift")
 
 
 @dataclass(frozen=True)
@@ -105,25 +158,24 @@ def _exists(kind: str, name: str) -> bool:
 
 
 def _write_compose(path: Path, *, dry_run: bool) -> bool:
+    installed = inspect_compose(path)
+    if installed.status == "not-regular":
+        raise BoardStoreError("board store compose definition must be a regular file")
+    if installed.status == "drift":
+        raise BoardStoreError(f"board store compose definition drift at {path}; refusing to replace it")
+    if installed.status == "permissions":
+        raise BoardStoreError(f"board store compose definition permissions are too broad: {path}")
+    if installed.status == "unreadable":
+        raise BoardStoreError(f"could not reconcile board store compose definition: {installed.detail}")
+    if installed.ok:
+        return False
     try:
-        if path.is_symlink() or (path.exists() and not path.is_file()):
-            raise BoardStoreError("board store compose definition must be a regular file")
-        if path.exists():
-            if path.read_text(encoding="utf-8") != COMPOSE_TEXT:
-                raise BoardStoreError(
-                    f"board store compose definition drift at {path}; refusing to replace it"
-                )
-            if path.stat().st_mode & 0o077:
-                raise BoardStoreError(f"board store compose definition permissions are too broad: {path}")
-            return False
         if not dry_run:
             write_text_atomic(path, COMPOSE_TEXT)
             path.chmod(0o600)
-        return True
-    except BoardStoreError:
-        raise
     except OSError as exc:
         raise BoardStoreError(f"could not reconcile board store compose definition: {exc}") from None
+    return True
 
 
 def _inspect_container(container: str, *, volume_name: str, host_port: int = 5432) -> None:
@@ -321,7 +373,9 @@ __all__ = [
     "IMAGE",
     "POSTGRES_MAJOR",
     "PROJECT",
+    "ComposeInstallation",
     "ProvisionOutcome",
+    "inspect_compose",
     "provision",
     "verify_roles",
 ]

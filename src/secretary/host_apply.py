@@ -130,8 +130,16 @@ class SystemdUnitInstaller(UnitInstaller):
         self.unit_dir = unit_dir
         self.sudo = sudo
 
+    def argv(self, cmd: list[str]) -> list[str]:
+        """The privileged invocation contour: root work goes through non-interactive sudo.
+
+        Callers that keep their own execution and evidence contract - the cutover
+        controller does - ask for the argv here instead of growing a second wrapper.
+        """
+        return (["sudo", "-n"] if self.sudo else []) + cmd
+
     def _run(self, cmd: list[str], label: str) -> subprocess.CompletedProcess[str]:
-        argv = (["sudo", "-n"] if self.sudo else []) + cmd
+        argv = self.argv(cmd)
         try:
             result = _proc.run(argv, timeout=self.timeout_seconds)
         except FileNotFoundError:
@@ -151,17 +159,19 @@ class SystemdUnitInstaller(UnitInstaller):
             return None
 
     def install(self, unit: PackagedUnit) -> None:
-        argv = (["sudo", "-n"] if self.sudo else []) + [
-            "install",
-            "-m",
-            "0644",
-            "-o",
-            "root",
-            "-g",
-            "root",
-            "/dev/stdin",
-            str(self.unit_dir / unit.name),
-        ]
+        argv = self.argv(
+            [
+                "install",
+                "-m",
+                "0644",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                "/dev/stdin",
+                str(self.unit_dir / unit.name),
+            ]
+        )
         try:
             result = _proc.run(argv, input=unit.content, text=False, timeout=self.timeout_seconds)
         except FileNotFoundError:
