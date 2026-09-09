@@ -679,7 +679,7 @@ by an import rehearsal.
 The versioned canonical state document is `<data_dir>/cutover/postgres-v1.json`; the sibling lock is
 the one installation-wide controller lock. Each phase records start/completion timestamps, exact
 revision, and non-secret evidence before the next phase starts. Import reports are retained under
-`<data_dir>/cutover/artifacts`, and recovered pre-write attempts under
+`<data_dir>/cutover/artifacts`, and recovered pre-import attempts under
 `<data_dir>/cutover/history`. Preserve these files and both backend backups during an incident.
 
 Recovery policy is determined by committed `requests`/`board_events` evidence, not by which service
@@ -707,7 +707,13 @@ The state document contains no credentials and is deliberately readable by runti
 only its owner may write it. Writers enforce it only while status is `applying` or `failed-frozen`.
 Terminal `resume-ready` and `recovered-frozen` states release the barrier unconditionally, including
 when an unrelated later pipeline freeze is active. A corrupt or unreadable in-scope state still
-fails closed. Apply refuses to reuse a terminal identity. After safe pre-write recovery, run `plan`
-again: its identity includes the immutable predecessor archive, so the old confirmation is refused
-and only the distinct successor can occupy the canonical slot. `resume-ready`, PostgreSQL-only
-recovery, SQL-write evidence and SQL-audit uncertainty never release that slot for a Kanboard retry.
+fails closed. Apply refuses to reuse a terminal identity. After either safe pre-import recovery, run
+`plan` again: its identity includes the immutable predecessor archive, so the old confirmation is
+refused and only the distinct successor can occupy the canonical slot. A completed final import is a
+controller effect independent of later application writes: its occupied PostgreSQL target keeps the
+canonical identity terminal, and `status` reports `final-import-effect-terminal`. `plan` and `apply`
+remain unavailable until some separately supported empty-target lifecycle exists. `resume-ready`,
+PostgreSQL-only recovery, SQL-write evidence and SQL-audit uncertainty likewise never release that
+slot for a Kanboard retry. An entered but incomplete import reports
+`final-import-occupancy-uncertain-terminal` and follows the same rule; phase absence, not mere lack of
+completion evidence, is what proves no controller import effect.

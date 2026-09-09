@@ -3625,13 +3625,14 @@ secretary cutover recover --instance /absolute/instance --expected-revision <sha
   --actor <operator> --reason <incident-record> --confirm RECOVER-<plan-id-prefix>
 ```
 
-After a successful pre-first-write recovery, the command atomically archives the exact
+After a successful recovery before `final_fenced_import`, the command atomically archives the exact
 `recovered-frozen` document under `<data_dir>/cutover/history/postgres-v1-<plan-id>.json`, fsyncs it,
-and only then releases the canonical `postgres-v1.json` slot. `status` lists this immutable history.
-If publication is interrupted, rerun the identical `recover`; it verifies the existing archive and
-finishes releasing the canonical slot without repeating recovery side effects. Then run `plan` again
-and apply only its new confirmation token. The new plan binds the archived predecessor and therefore
-has a distinct identity. The old token remains refused. Never delete or edit either document.
+and only then releases the canonical `postgres-v1.json` slot. `status` lists this immutable history
+and the shared successor-eligibility reason. If publication is interrupted, rerun the identical
+`recover`; it verifies and fsyncs the existing archive before finishing canonical release, without
+repeating recovery side effects. Then run `plan` again and apply only its new confirmation token. The
+new plan binds the archived predecessor and therefore has a distinct identity. The old token remains
+refused. Never delete or edit either document.
 
 The operator needs ownership of the instance and data directories, permission to control the named
 systemd units and Docker PostgreSQL service, and access to the installed virtual environment. The
@@ -3649,7 +3650,13 @@ occurred, it verifies that the selector is still Kanboard, records fresh source 
 restarts the stopped consumers. Both safe early outcomes publish their archived identity and open the
 canonical slot for the next maintenance-window plan. Later branches require the frozen fingerprint.
 A canonical `resume-ready`, a PostgreSQL-only recovered state, and every archived `recovered-frozen`
-state remain terminal and never become a write fence again because of a later unrelated freeze.
+state remain terminal and never become a write fence again because of a later unrelated freeze. If
+`final_fenced_import` completed, its committed target occupancy takes precedence over the absence of a
+later application write: recovery may restore Kanboard under the first-write policy, but the canonical
+identity remains terminal and `plan` refuses a successor. Another attempt requires a separately
+supported empty-target plan; this command neither wipes nor reinitializes the target. A running or
+failed import is also terminal for successor purposes because target occupancy is uncertain; only an
+attempt that never entered `final_fenced_import` proves the controller made no import effect.
 
 The packaged disposable PostgreSQL 16 rehearsal proves the mechanism and isolated public protocol
 surface. It is not live acceptance. The external operator must still retain the command's actual

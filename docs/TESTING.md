@@ -348,6 +348,9 @@ across process uids, terminal release during a later freeze, and selector propag
 launched role without inference from an existing `board-store.env`. The successor-publication matrix
 interrupts both early recovery branches after their immutable archive is published, retries recovery,
 proves the old identity and evidence survive, refuses its old token, and applies a distinct plan.
+The eligibility matrix then contrasts those two pre-import branches with completed import before
+activation, completed import after activation but before an application write, PostgreSQL-only
+recovery and `resume-ready`; only the pre-import pair can release the canonical slot.
 
 `tests.test_postgres_recovery.PostgresRecoveryIntegrationTests.test_real_cutover_phases_share_one_disposable_postgres_16_boundary`
 runs the real provision, migration verification, quiescence, import, parity, recovery backup,

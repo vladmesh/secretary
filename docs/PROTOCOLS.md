@@ -4169,13 +4169,17 @@ Every phase has `running`, `failed` or `complete` evidence. A failed phase canno
 same command retries it. `resume_ready` means probes and SQL-sourced recovery artifacts passed, not
 that work resumed.
 
-A successful pre-first-write `recover` publishes its exact `recovered-frozen` JSON under the
+A successful pre-import `recover` publishes its exact `recovered-frozen` JSON under the
 installation's cutover history and fsyncs that archive before releasing the canonical state slot.
 Repeating recovery after an interrupted publication verifies the same archive and completes the
 release without replaying service recovery. The next `plan` includes predecessor identities and
 archive digests in its input, so its confirmation and identity differ and the recovered token cannot
-be reused. Completed cutovers, PostgreSQL-only recovery, a first SQL write and audit uncertainty keep
-their canonical terminal identity instead.
+be reused. A completed final import also keeps its canonical identity because its target is occupied,
+regardless of whether a later application write exists. Completed cutovers, PostgreSQL-only recovery,
+a first SQL write and audit uncertainty remain terminal as well. Public planning refuses whenever a
+canonical identity exists; `status.successor_eligibility` supplies the shared phase-based reason.
+An entered but failed/running final import is conservatively terminal with uncertain occupancy; only
+absence of that phase admits the two pre-import successor branches.
 
 Each product subprocess must exit successfully and return a nonempty JSON object or array. Empty,
 non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public

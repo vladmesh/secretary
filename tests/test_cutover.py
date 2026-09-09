@@ -198,6 +198,25 @@ class CutoverStateTests(CutoverFixture):
 
 
 class CutoverCommandEvidenceTests(CutoverFixture):
+    def test_active_controller_can_revalidate_its_plan_while_public_successor_planning_refuses(self) -> None:
+        with (
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_provenance", return_value={"revision": REVISION}),
+            mock.patch.object(
+                cutover,
+                "_source_evidence",
+                return_value={"fingerprint": "source", "parity": {"ok": True}},
+            ),
+        ):
+            plan = cutover.build_plan(self.paths, REVISION)
+            state = cutover._new_state(plan, args().actor, args().reason)
+            cutover._write_state(self.paths, state)
+            evidence = cutover.Operations(self.paths, state).preflight()
+            with self.assertRaisesRegex(cutover.CutoverError, "canonical cutover identity"):
+                cutover.build_plan(self.paths, REVISION)
+
+        self.assertEqual(evidence["plan_id"], plan["plan_id"])
+
     def test_secretary_commands_use_the_package_entrypoint_and_require_json_evidence(self) -> None:
         with mock.patch("secretary.cutover.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, '{"status":"ok"}\n', "")
@@ -509,11 +528,12 @@ class CutoverRecoveryTests(CutoverFixture):
             "status": "complete",
             "evidence": {"sql_audit_baseline": {"committed_events": 10}},
         }
+        state["phases"]["final_fenced_import"] = {"status": "complete"}
         state["first_sql_write"] = first_write
         cutover._write_state(self.paths, state)
         return state
 
-    def test_before_first_write_recovery_can_restore_unchanged_kanboard(self) -> None:
+    def test_post_import_before_first_write_recovery_restores_kanboard_but_stays_terminal(self) -> None:
         self.state()
         recovery_args = args(confirm="RECOVER-" + "1" * 16)
         with (
@@ -526,12 +546,12 @@ class CutoverRecoveryTests(CutoverFixture):
             result = cutover.recover_cutover(recovery_args, self.paths)
         selector.assert_called_once_with(self.paths, "kanboard")
         self.assertEqual(result["recovery"]["branch"], "kanboard-before-first-write")
-        self.assertTrue(result["successor_ready"])
-        self.assertIsNone(cutover._read_state(self.paths))
+        self.assertFalse(result["successor_eligibility"]["eligible"])
         self.assertEqual(
-            cutover._read_recovered_history(self.paths)[0]["state"]["identity"],
-            result["identity"],
+            result["successor_eligibility"]["reason"], "final-import-effect-terminal"
         )
+        self.assertEqual(cutover._read_state(self.paths), result)
+        self.assertEqual(cutover._read_recovered_history(self.paths), [])
 
     def test_committed_post_activation_event_forces_postgres_only_recovery(self) -> None:
         self.state()
@@ -632,8 +652,38 @@ class CutoverRecoveryTests(CutoverFixture):
                     archive = Path(interrupted["successor"]["archive"])
                     self.assertTrue(archive.is_file())
 
-                    recovered = cutover.recover_cutover(recovery_args, paths)
+                    events: list[str] = []
+                    real_open = os.open
+
+                    def tracked_open(path, *open_args, **open_kwargs):
+                        candidate = Path(path)
+                        if candidate == paths.history:
+                            events.append("history-fsync-open")
+                        elif candidate == paths.state.parent:
+                            events.append("canonical-parent-fsync-open")
+                        return real_open(path, *open_args, **open_kwargs)
+
+                    def tracked_unlink(path, *unlink_args, **unlink_kwargs):
+                        if path == paths.state:
+                            events.append("canonical-unlink")
+                        return real_unlink(path, *unlink_args, **unlink_kwargs)
+
+                    with (
+                        mock.patch.object(cutover.os, "open", side_effect=tracked_open),
+                        mock.patch(
+                            "pathlib.Path.unlink", side_effect=tracked_unlink, autospec=True
+                        ),
+                    ):
+                        recovered = cutover.recover_cutover(recovery_args, paths)
                     self.assertTrue(recovered["successor_ready"])
+                    self.assertEqual(
+                        events[-3:],
+                        [
+                            "history-fsync-open",
+                            "canonical-unlink",
+                            "canonical-parent-fsync-open",
+                        ],
+                    )
                     self.assertIsNone(cutover._read_state(paths))
                     history = cutover._read_recovered_history(paths)
                     self.assertEqual(len(history), 1)
@@ -679,6 +729,99 @@ class CutoverRecoveryTests(CutoverFixture):
                         systemctl.call_count,
                         0 if branch == "no-cutover-effects" else 1,
                     )
+
+    def test_successor_eligibility_matrix_refuses_every_post_import_or_completed_state(self) -> None:
+        scenarios = (
+            ("import-before-activation", False, False, "final-import-effect-terminal"),
+            (
+                "import-entered-failed",
+                False,
+                False,
+                "final-import-occupancy-uncertain-terminal",
+            ),
+            ("activation-before-write", True, False, "final-import-effect-terminal"),
+            ("postgres-only", True, True, "final-import-effect-terminal"),
+            ("resume-ready", True, True, "completed-cutover-terminal"),
+        )
+        for name, activated, sql_write, reason in scenarios:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                paths = cutover.Paths(root / "instance", root / "data")
+                paths.instance.mkdir(mode=0o700)
+                paths.data.mkdir(mode=0o700)
+                (paths.instance / "runtime.env").write_text(
+                    "SECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8"
+                )
+                state = cutover._new_state(PLAN, args().actor, args().reason)
+                state["status"] = "resume-ready" if name == "resume-ready" else "failed-frozen"
+                state["phases"]["global_freeze"] = {"status": "complete"}
+                state["phases"]["writer_quiescence_proof"] = {
+                    "status": "complete",
+                    "evidence": {"source": {"fingerprint": "source-one"}},
+                }
+                state["phases"]["final_fenced_import"] = {
+                    "status": "failed" if name == "import-entered-failed" else "complete"
+                }
+                if activated:
+                    state["phases"]["selector_activation"] = {
+                        "status": "complete",
+                        "evidence": {"sql_audit_baseline": {"committed_events": 10}},
+                    }
+                if sql_write:
+                    state["first_sql_write"] = {
+                        "recorded_at": "2026-09-09T00:00:00Z",
+                        "evidence": {"committed_events": 11},
+                    }
+                if name == "postgres-only":
+                    state["status"] = "recovered-frozen"
+                    state["recovery"] = {"branch": "postgres-only"}
+                cutover._write_state(paths, state)
+
+                with (
+                    mock.patch.object(cutover, "_backend", return_value="kanboard"),
+                    mock.patch.object(cutover, "_provenance", return_value={}),
+                    mock.patch.object(
+                        cutover, "_source_evidence", return_value={"fingerprint": "source-one"}
+                    ),
+                    mock.patch.object(
+                        cutover, "_sql_event_count", return_value={"committed_events": 10}
+                    ),
+                    mock.patch.object(cutover, "_set_backend", return_value={}),
+                    mock.patch.object(cutover, "_systemctl", return_value={}) as systemctl,
+                    mock.patch.object(cutover, "Operations") as operations,
+                ):
+                    if name in {
+                        "import-before-activation",
+                        "import-entered-failed",
+                        "activation-before-write",
+                    }:
+                        recovery_args = args(confirm="RECOVER-" + "1" * 16)
+                        state = cutover.recover_cutover(recovery_args, paths)
+                        service_calls = systemctl.call_count
+                        repeated = cutover.recover_cutover(recovery_args, paths)
+                        self.assertEqual(repeated, state)
+                        self.assertEqual(systemctl.call_count, service_calls)
+                    eligibility = cutover._successor_eligibility(state)
+                    self.assertFalse(eligibility["eligible"])
+                    self.assertEqual(eligibility["reason"], reason)
+                    with self.assertRaisesRegex(cutover.CutoverError, "canonical cutover identity"):
+                        cutover.build_plan(paths, REVISION)
+                    with self.assertRaisesRegex(cutover.CutoverError, "terminal cutover identity"):
+                        cutover.apply_cutover(args(), paths)
+                self.assertEqual(
+                    systemctl.call_count,
+                    1
+                    if name
+                    in {
+                        "import-before-activation",
+                        "import-entered-failed",
+                        "activation-before-write",
+                    }
+                    else 0,
+                )
+                operations.assert_not_called()
+                self.assertEqual(cutover._read_state(paths), state)
+                self.assertEqual(cutover._read_recovered_history(paths), [])
 
 
 class RoleBackendPropagationTests(unittest.TestCase):

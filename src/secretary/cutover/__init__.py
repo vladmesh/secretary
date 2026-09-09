@@ -41,6 +41,7 @@ HISTORY_RELATIVE = Path("cutover") / "history"
 BACKEND_ENV = "SECRETARY_CARD_BACKEND"
 CUTOVER_ACTOR = "secretary-postgres-cutover"
 CONTROLLER_ID_ENV = "SECRETARY_CUTOVER_CONTROLLER_ID"
+PREIMPORT_RECOVERY_BRANCHES = frozenset(("no-cutover-effects", "kanboard-before-fingerprint"))
 
 PHASES = (
     "preflight",
@@ -261,7 +262,19 @@ def _source_evidence(paths: Paths) -> dict[str, Any]:
     }
 
 
-def build_plan(paths: Paths, expected_revision: str) -> dict[str, Any]:
+def build_plan(
+    paths: Paths,
+    expected_revision: str,
+    *,
+    _active_identity: str | None = None,
+) -> dict[str, Any]:
+    canonical = _read_state(paths)
+    if canonical is not None and canonical.get("identity") != _active_identity:
+        eligibility = _successor_eligibility(canonical)
+        raise CutoverError(
+            "canonical cutover identity is still present; inspect status or recover it before planning "
+            f"a successor ({eligibility['reason']})"
+        )
     backend = _backend(paths)
     if backend != "kanboard":
         raise CutoverError(f"new cutover plan requires backend kanboard, found {backend}")
@@ -365,6 +378,48 @@ def _recovered_archive_path(paths: Paths, state: dict[str, Any]) -> Path:
     return paths.history / f"postgres-v1-{plan_id}.json"
 
 
+def _successor_eligibility(state: dict[str, Any] | None) -> dict[str, Any]:
+    """Whether recovery may archive this identity and release the canonical slot."""
+    if state is None:
+        return {
+            "eligible": True,
+            "reason": "canonical-slot-available",
+            "final_import_complete": False,
+        }
+    phases = state.get("phases") if isinstance(state.get("phases"), dict) else {}
+    import_phase = phases.get("final_fenced_import")
+    import_entered = "final_fenced_import" in phases
+    import_status = import_phase.get("status") if isinstance(import_phase, dict) else None
+    if import_entered and not isinstance(import_phase, dict):
+        import_status = "invalid"
+    imported = import_status == "complete"
+    status = state.get("status")
+    branch = state.get("recovery", {}).get("branch")
+    evidence = {
+        "eligible": False,
+        "reason": "recovery-not-preimport-terminal",
+        "final_import_complete": imported,
+        "final_import_status": import_status,
+        "canonical_status": status,
+        "recovery_branch": branch,
+    }
+    if status == "resume-ready":
+        return {**evidence, "reason": "completed-cutover-terminal"}
+    # Import effect takes precedence over the first-application-write marker:
+    # the occupied target makes another import unsafe even if no later event exists.
+    if imported:
+        return {**evidence, "reason": "final-import-effect-terminal"}
+    if import_entered:
+        return {**evidence, "reason": "final-import-occupancy-uncertain-terminal"}
+    if state.get("first_sql_write") is not None:
+        return {**evidence, "reason": "sql-write-or-audit-uncertainty-terminal"}
+    if branch == "postgres-only":
+        return {**evidence, "reason": "postgres-only-recovery-terminal"}
+    if status == "recovered-frozen" and branch in PREIMPORT_RECOVERY_BRANCHES:
+        return {**evidence, "eligible": True, "reason": "recovered-before-final-import"}
+    return evidence
+
+
 def _publish_recovered_archive(paths: Paths, state: dict[str, Any]) -> Path:
     """Publish one immutable recovered identity, idempotently across a crash."""
     archive = _recovered_archive_path(paths, state)
@@ -389,6 +444,11 @@ def _publish_recovered_archive(paths: Paths, state: dict[str, Any]) -> Path:
             raise CutoverError(f"could not inspect recovered cutover archive: {exc}") from None
         if existing != expected:
             raise CutoverError("recovered cutover archive conflicts with canonical evidence")
+        descriptor = os.open(paths.history, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         return archive
     staged = stage_text(archive, expected)
     try:
@@ -410,9 +470,12 @@ def _publish_recovered_archive(paths: Paths, state: dict[str, Any]) -> Path:
 
 def _release_recovered_identity(paths: Paths, state: dict[str, Any]) -> dict[str, Any]:
     """Archive a safe pre-write recovery, then release the canonical plan slot."""
-    branch = state.get("recovery", {}).get("branch")
-    if state.get("first_sql_write") is not None or branch == "postgres-only":
-        raise CutoverError("post-write or uncertain recovery cannot release its terminal identity")
+    eligibility = _successor_eligibility(state)
+    state["successor_eligibility"] = eligibility
+    if not eligibility["eligible"]:
+        raise CutoverError(
+            f"cutover identity is not eligible for a successor: {eligibility['reason']}"
+        )
     successor = state.setdefault(
         "successor",
         {
@@ -438,6 +501,16 @@ def _release_recovered_identity(paths: Paths, state: dict[str, Any]) -> dict[str
     except OSError as exc:
         raise CutoverError(f"could not release recovered canonical cutover state: {exc}") from None
     return {**state, "archived_state": str(archive), "successor_ready": True}
+
+
+def _finish_recovery(paths: Paths, state: dict[str, Any]) -> dict[str, Any]:
+    """Publish terminal recovery and release only a genuinely pre-import attempt."""
+    eligibility = _successor_eligibility(state)
+    state["successor_eligibility"] = eligibility
+    if eligibility["eligible"]:
+        return _release_recovered_identity(paths, state)
+    _write_state(paths, state)
+    return state
 
 
 class CutoverLock:
@@ -663,7 +736,11 @@ class Operations:
         self.checkpoint_options = dict(checkpoint_options or {})
 
     def preflight(self) -> dict[str, Any]:
-        current = build_plan(self.paths, self.state["expected_revision"])
+        current = build_plan(
+            self.paths,
+            self.state["expected_revision"],
+            _active_identity=self.state["identity"],
+        )
         if current["plan_id"] != self.state["plan_id"]:
             raise CutoverError("plan is stale; inspect status and create a new plan before freezing")
         return {"plan_id": current["plan_id"], "provenance": current["provenance"]}
@@ -1359,14 +1436,12 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
             raise CutoverError(f"recovery confirmation token must be {expected_token}")
         _provenance(paths, args.expected_revision)
         if state.get("status") == "recovered-frozen":
-            branch = state.get("recovery", {}).get("branch")
-            if state.get("first_sql_write") is not None or branch == "postgres-only":
-                return state
-            return _release_recovered_identity(paths, state)
+            return _finish_recovery(paths, state)
         activated = state.get("phases", {}).get("selector_activation", {}).get("status") == "complete"
         freeze_status = state.get("phases", {}).get("global_freeze", {}).get("status")
-        imported = state.get("phases", {}).get("final_fenced_import", {}).get("status") == "complete"
-        if freeze_status is None and not imported and not activated:
+        import_phase = state.get("phases", {}).get("final_fenced_import")
+        import_entered = "final_fenced_import" in state.get("phases", {})
+        if freeze_status is None and not import_entered and not activated:
             # No old writer was durably declared stopped, no target was imported
             # and no selector changed.  There is no cutover effect to roll back.
             state["recovery"] = {
@@ -1378,8 +1453,8 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
             }
             state["status"] = "recovered-frozen"
             state["updated_at"] = _now()
-            return _release_recovered_identity(paths, state)
-        if not imported and not activated and not state.get("first_sql_write"):
+            return _finish_recovery(paths, state)
+        if not import_entered and not activated and not state.get("first_sql_write"):
             if _backend(paths) != "kanboard":
                 raise CutoverError("early recovery expected the unchanged Kanboard selector")
             source = _source_evidence(paths)
@@ -1396,7 +1471,7 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
             }
             state["status"] = "recovered-frozen"
             state["updated_at"] = _now()
-            return _release_recovered_identity(paths, state)
+            return _finish_recovery(paths, state)
         if activated:
             baseline = state["phases"]["selector_activation"]["evidence"]["sql_audit_baseline"]
             try:
@@ -1437,10 +1512,7 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
         }
         state["status"] = "recovered-frozen"
         state["updated_at"] = _now()
-        if branch != "postgres-only":
-            return _release_recovered_identity(paths, state)
-        _write_state(paths, state)
-        return state
+        return _finish_recovery(paths, state)
 
 
 def _render(payload: dict[str, Any], *, pretty: bool = True) -> None:
@@ -1458,6 +1530,7 @@ def run_cutover(args: argparse.Namespace) -> int:
                 {
                     "state": state,
                     "recovered_history": _read_recovered_history(paths),
+                    "successor_eligibility": _successor_eligibility(state),
                     "backend": _backend(paths),
                     "recovery_confirmation": (
                         f"RECOVER-{state['plan_id'][:16]}" if state is not None else None

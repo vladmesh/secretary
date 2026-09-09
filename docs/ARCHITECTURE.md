@@ -877,6 +877,8 @@ owner-writable and runtime-readable so service uids can enforce the same barrier
 the original actor, reason, revision and identity. Controller subprocesses carry the state identity;
 other matching writer processes remain fenced. The barrier applies only to in-flight controller
 states and terminal states release it unconditionally. The irreversible-policy marker is derived
-from committed SQL audit growth after the activation baseline. A safe pre-write recovery archives its
+from committed SQL audit growth after the activation baseline. A safe pre-import recovery archives its
 exact terminal document before releasing the canonical state slot. Successor plans bind the archive
-digests, so they are distinct while the recovered identities remain immutable and inspectable.
+digests, so they are distinct while the recovered identities remain immutable and inspectable. A
+completed final import makes the target occupied and therefore keeps the canonical identity terminal,
+even when the first-application-write marker is absent.

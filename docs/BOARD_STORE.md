@@ -2676,10 +2676,11 @@ The old Kanboard store is retained as a protected read-only archive. It is eligi
 SQL-write rollback only while its frozen fingerprint still matches; after a committed application
 event it is never a writable recovery target.
 
-A successful pre-first-write recovery preserves its terminal controller evidence in
+A successful pre-import recovery preserves its terminal controller evidence in
 `<data_dir>/cutover/history` before releasing the canonical controller slot. A later plan binds that
-archive and receives a distinct identity. PostgreSQL-only, uncertain and completed identities stay
-canonical and cannot create a new Kanboard attempt.
+archive and receives a distinct identity. Once final import completes, target occupancy takes
+precedence over first-application-write status: that identity, plus PostgreSQL-only, uncertain and
+completed identities, stays canonical and cannot create a new Kanboard attempt.
 
 Activation acceptance uses public commands for Product, Issue, Sprint and Task reads and writes.
 It proves sprint-comment delivery and replay, task request replay and history lookup,
