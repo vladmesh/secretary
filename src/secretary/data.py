@@ -220,9 +220,17 @@ def export_board(
 
     # Sprint entities live on their own board and never reach the task board export, so the
     # checkpoint reads them separately instead of inferring them from linked cards.
+    owned_sprint_client = None
     if sprint_client is None and getattr(task_client, "backend_kind", "kanboard") == "postgres":
-        sprint_client = task_client
-    sprints = export_sprint_entities(instance_dir, sprint_client)
+        from secretary.sprints import sprint_client as resolve_sprint_client
+
+        owned_sprint_client = resolve_sprint_client(instance_dir)
+        sprint_client = owned_sprint_client
+    try:
+        sprints = export_sprint_entities(instance_dir, sprint_client)
+    finally:
+        if owned_sprint_client is not None:
+            owned_sprint_client.connection.close()
 
     raw_active_task_count = _latest_raw_active_task_count(
         board_dir,

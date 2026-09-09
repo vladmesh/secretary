@@ -19,6 +19,7 @@ from secretary.backup_policy import (
     policy_for,
     should_skip_data_entry,
 )
+from secretary.board.provision import IMAGE, POSTGRES_MAJOR
 
 
 @dataclass(frozen=True)
@@ -194,8 +195,8 @@ def _verify_postgres_manifest(
         "engine": "postgresql",
         "format": "custom",
         "dump_version": 1,
-        "image": "postgres:16",
-        "server_major": 16,
+        "image": IMAGE,
+        "server_major": POSTGRES_MAJOR,
     }
     for key, value in expected.items():
         if dump.get(key) != value:

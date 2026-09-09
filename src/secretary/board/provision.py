@@ -13,7 +13,8 @@ from secretary._fsutil import write_text_atomic
 from secretary.board import store
 from secretary.board.store import BoardStoreConfig, BoardStoreError
 
-IMAGE = "postgres:16"
+POSTGRES_MAJOR = 16
+IMAGE = f"postgres:{POSTGRES_MAJOR}"
 PROJECT = "secretary-board-store"
 VOLUME = "board-db"
 DEFAULT_COMPOSE_PATH = Path("/opt/secretary/postgres-compose.yml")
@@ -318,6 +319,7 @@ __all__ = [
     "COMPOSE_TEXT",
     "DEFAULT_COMPOSE_PATH",
     "IMAGE",
+    "POSTGRES_MAJOR",
     "PROJECT",
     "ProvisionOutcome",
     "provision",

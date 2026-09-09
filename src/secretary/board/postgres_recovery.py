@@ -19,13 +19,12 @@ from typing import Any
 from secretary import _proc
 from secretary._fsutil import sha256_file, write_text_atomic
 from secretary.board import migrate
-from secretary.board.provision import IMAGE, verify_roles
+from secretary.board.provision import IMAGE, POSTGRES_MAJOR, verify_roles
 from secretary.board.store import BoardStoreConfig, BoardStoreError, resolve
 
 ENGINE = "postgresql"
 DUMP_FORMAT = "custom"
 DUMP_PURPOSE = "data-only local recovery into the shipped schema and role boundary"
-_CLIENT_MAJOR = 16
 _VERSION_RE = re.compile(r"\(PostgreSQL\)\s+(\d+)(?:\.(\d+))?")
 
 
@@ -54,9 +53,10 @@ def inspect_source(instance_dir: Path) -> tuple[BoardStoreConfig, dict[str, Any]
             "PostgreSQL board store preflight failed: " + str(exc).strip().splitlines()[0]
         ) from None
     server_major = server_num // 10000
-    if server_major != _CLIENT_MAJOR:
+    if server_major != POSTGRES_MAJOR:
         raise PostgresRecoveryError(
-            f"PostgreSQL server major {server_major} does not match the shipped client major {_CLIENT_MAJOR}"
+            f"PostgreSQL server major {server_major} does not match the shipped client major "
+            f"{POSTGRES_MAJOR}"
         )
     head = migrate.head_revision()
     current = str(revision[0]) if revision else ""
@@ -118,12 +118,13 @@ def restore_dump(
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
     try:
+        import psycopg
+
         config = resolve(instance_dir)
         if endpoint_identity(config) == metadata.get("source_endpoint_id"):
             raise PostgresRecoveryError("refusing to restore into the source PostgreSQL database")
         migrate.migrate_instance(instance_dir)
         verify_roles(instance_dir)
-        import psycopg
         with psycopg.connect(config.for_role("owner").conninfo(), connect_timeout=5) as connection:
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
             current = str(revision[0]) if revision else None
@@ -238,8 +239,10 @@ def _tool_version(tool: str) -> str:
         f"{tool} version check",
     )
     match = _VERSION_RE.search(output)
-    if match is None or int(match.group(1)) != _CLIENT_MAJOR:
-        raise PostgresRecoveryError(f"{tool} is not the expected PostgreSQL {_CLIENT_MAJOR} client")
+    if match is None or int(match.group(1)) != POSTGRES_MAJOR:
+        raise PostgresRecoveryError(
+            f"{tool} is not the expected PostgreSQL {POSTGRES_MAJOR} client"
+        )
     return match.group(0).removeprefix("pg_dump ").removeprefix("pg_restore ")
 
 

@@ -139,6 +139,36 @@ class RestoreTests(unittest.TestCase):
         audit = mock.Mock(events=mock.Mock(return_value=[]))
         self.assertTrue(restore_module._namespace_is_local(audit, "recorded", set()))
 
+    def test_kanboard_normalized_restore_imports_json_and_ndjson_audit_history(self) -> None:
+        historical = {
+            "event_id": "historical-event",
+            "request_id": "historical-request",
+            "kind": "commented",
+            "ref": "secretary-1",
+            "payload": {"body_sha256": "a" * 64},
+        }
+        for source in ("json", "ndjson"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmpdir:
+                data_dir = Path(tmpdir) / "secretary-data"
+                init_layout(data_dir)
+                self._write_restore_cards(data_dir, [_restore_card(reference="secretary-1")])
+                if source == "json":
+                    (data_dir / "board" / "audit.json").write_text(
+                        json.dumps({"version": 1, "events": [historical]}),
+                        encoding="utf-8",
+                    )
+                else:
+                    (data_dir / "board" / "audit.ndjson").write_text(
+                        json.dumps(historical) + "\n", encoding="utf-8"
+                    )
+
+                self.assertEqual(
+                    import_normalized_board(data_dir, client=_EmptyWriteKanboard()), 1
+                )
+                self.assertEqual(
+                    TaskAudit(data_dir).committed_event("historical-request"), historical
+                )
+
     @staticmethod
     def _product_card(*, projects: str = '["secretary"]') -> dict[str, object]:
         card = _restore_card(reference="product:secretary", title="Secretary", column="Issues", position=1)

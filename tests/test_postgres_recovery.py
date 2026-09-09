@@ -16,13 +16,46 @@ from secretary.backup import create_backups
 from secretary.backup_verify import verify_backup
 from secretary.board import migrate, provision, schema
 from secretary.board.backend import reset_card_backend
+from secretary.board.postgres_recovery import PostgresRecoveryError, restore_dump
 from secretary.board.sql_cards import SqlCardClient
-from secretary.board.store import BoardStoreConfig
+from secretary.board.store import BoardStoreConfig, BoardStoreError
 from secretary.data import DataExport, export_board, init_layout
 from secretary.restore import restore_postgres_backup
 from secretary.sprint_observer import none_choice
-from secretary.sprints import SprintWriter
+from secretary.sprints import SprintWriter, sprint_client
 from secretary.tasks import TaskWriter
+
+
+class PostgresRecoveryFailureTests(unittest.TestCase):
+    def test_migration_failure_is_not_masked_by_the_local_psycopg_handler(self) -> None:
+        config = BoardStoreConfig(
+            host="127.0.0.1",
+            port=6543,
+            dbname="target",
+            owner_user="owner",
+            owner_password="owner-secret",
+            app_user="app",
+            app_password="app-secret",
+            read_user="reader",
+            read_password="read-secret",
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch("secretary.board.postgres_recovery.resolve", return_value=config),
+            mock.patch(
+                "secretary.board.postgres_recovery.migrate.migrate_instance",
+                side_effect=BoardStoreError("migration failed before preflight"),
+            ),
+            self.assertRaisesRegex(
+                PostgresRecoveryError,
+                "PostgreSQL restore target is not usable: migration failed before preflight",
+            ),
+        ):
+            restore_dump(
+                Path(tmpdir) / "postgres.dump",
+                Path(tmpdir),
+                {"source_endpoint_id": "different"},
+            )
 
 
 class PostgresRecoveryIntegrationTests(unittest.TestCase):
@@ -55,8 +88,10 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
         (instance / "projects").mkdir()
+        repository = self.root / "repository"
+        repository.mkdir(exist_ok=True)
         (instance / "projects" / "secretary.yaml").write_text(
-            "id: secretary\nrepo: /tmp/secretary-recovery-fixture\n"
+            f"id: secretary\nrepo: {repository}\n"
             "enabled: false\nadapter: secretary\ndefault_branch: main\n",
             encoding="utf-8",
         )
@@ -130,8 +165,14 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 },
             )
         writer = TaskWriter(client, data_dir=data_dir)
-        sprint_ref = SprintWriter(client, data_dir=data_dir, instance=self.source_instance).create(
-            role="po", actor="test", goal="prove recovery", repositories=[],
+        sprint_board = sprint_client(self.source_instance)
+        self.addCleanup(sprint_board.close)
+        sprint_writer = SprintWriter(
+            sprint_board, data_dir=data_dir, instance=self.source_instance
+        )
+        sprint_ref = sprint_writer.create(
+            role="po", actor="test", goal="prove recovery",
+            repositories=[str(self.root / "repository")],
             product="secretary", issues=["issue:recovery"], projects=["secretary"],
             observer=none_choice(), reference="sprint:recovery-custom",
             request_id="create-nullable-number-sprint",
@@ -142,24 +183,66 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             sprint_override=True, sprint_override_reason="integration fixture",
             request_id="create-recovery-one",
         )["task"]
-        writer.create(
+        second = writer.create(
             role="po", actor="test", project="secretary", task_type="code",
             title="Dependent", target="ready", reference="secretary-2", sprint=sprint_ref,
             blocked_by="secretary-1", request_id="create-recovery-two",
+            seed_ref="a" * 40, supersedes="secretary-1",
             sprint_override=True, sprint_override_reason="integration fixture",
-        )
+        )["task"]
         client.call(
             "saveTaskMetadata", task_id=int(str(first["id"]).rsplit("_", 1)[1]),
-            values={"future_task_key": "opaque"},
+            values={"future_task_key": "opaque", "issues": "issue:recovery"},
         )
-        client.call(
-            "moveTaskPosition", project_id=1,
-            task_id=int(str(first["id"]).rsplit("_", 1)[1]), column_id=7, position=1,
+        self.assertEqual(second["workspace"]["supersedes"], "secretary-1")
+        sprint_writer.comment(
+            role="po", actor="test", reference=sprint_ref,
+            body="sprint recovery comment", request_id="sprint-recovery-comment",
         )
-        client.call("closeTask", task_id=int(str(first["id"]).rsplit("_", 1)[1]))
+        sprint_writer.resume(
+            role="po", actor="test", reference=sprint_ref,
+            entry={
+                "selected_step": "continue recovery",
+                "selected_why": "the dump is ready",
+                "rejected_alternatives": "none",
+                "current_task": "secretary-1",
+                "dod_state": "in progress",
+                "next_safe_step": "verify restore",
+                "recorded_at": "2026-09-08T00:00:00Z",
+            },
+            request_id="sprint-recovery-resume",
+        )
+        sprint_writer.record_budget(
+            role="po", actor="test", reference=sprint_ref,
+            event_type="red_ci", request_id="sprint-recovery-budget",
+        )
+        writer.move(
+            role="po", actor="test", reference="secretary-1", target="done",
+            reason="recovery fixture complete", request_id="complete-recovery-one",
+            sprint_override=True, sprint_override_reason="integration recovery fixture",
+        )
+        writer.archive(
+            role="po", actor="test", reference="secretary-1",
+            reason="retain archived recovery evidence", request_id="archive-recovery-one",
+        )
         writer.comment(
             role="worker", actor="test", reference="secretary-1",
             body="post-close evidence", request_id="post-close-comment",
+        )
+        sprint_writer.close(
+            role="po", actor="test", reference=sprint_ref,
+            decisions={
+                "issues": [{
+                    "ref": "issue:recovery", "verdict": "open",
+                    "reason": "recovery remains supported",
+                }],
+                "cards": [{
+                    "ref": "secretary-2", "verdict": "drop",
+                    "reason": "fixture closes with dependent work recorded",
+                }],
+            },
+            reason="recovery fixture closed",
+            request_id="close-recovery-sprint",
         )
         client.connection.close()
 
@@ -189,10 +272,26 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
             mock.patch("secretary.backup._pipeline_action", return_value=None),
             mock.patch("secretary.backup.export_all", side_effect=self._exports),
+            mock.patch("secretary.sprints.sprint_client", wraps=sprint_client) as sprint_factory,
         ):
-            result = create_backups(self.source_instance)[0]
+            results = create_backups(
+                self.source_instance, backup_kinds=("full", "core")
+            )
+        sprint_factory.assert_called_once_with(self.source_instance)
+        by_kind = {result.manifest["backup_kind"]: result for result in results}
+        result = by_kind["full"]
+        core = by_kind["core"]
         verified = verify_backup(result.archive)
         self.assertEqual(verified.code, 0, verified.findings)
+        core_verified = verify_backup(core.archive)
+        self.assertEqual(core_verified.code, 0, core_verified.findings)
+        self.assertEqual(core.manifest["board_backend"], "postgres")
+        self.assertIn("board_history", core.manifest["components"])
+        self.assertNotIn("postgres_dump", core.manifest["components"])
+        with tarfile.open(core.archive) as archive:
+            self.assertIn("secretary-backup/secretary-data/board/audit.json", archive.getnames())
+            self.assertIn("secretary-backup/secretary-data/board/audit.ndjson", archive.getnames())
+            self.assertNotIn("secretary-backup/engine/postgres.dump", archive.getnames())
         self.assertNotIn("raw_board", result.manifest["components"])
         counts = result.manifest["components"]["postgres_dump"]["table_counts"]
         self.assertEqual(counts["products"], 1)
@@ -200,9 +299,72 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual(counts["tasks"], 2)
         self.assertEqual(counts["sprints"], 1)
         self.assertEqual(counts["task_dependencies"], 1)
-        self.assertEqual(counts["task_comments"], 1)
-        self.assertGreaterEqual(counts["requests"], 4)
+        self.assertEqual(counts["task_supersessions"], 1)
+        self.assertEqual(counts["task_issues"], 1)
+        self.assertGreaterEqual(counts["task_comments"], 2)
+        self.assertEqual(counts["repositories"], 1)
+        self.assertEqual(counts["projects"], 1)
+        self.assertEqual(counts["sprint_repositories"], 1)
+        self.assertEqual(counts["sprint_projects"], 1)
+        self.assertEqual(counts["sprint_issues"], 1)
+        self.assertEqual(counts["sprint_comments"], 2)
+        self.assertEqual(counts["sprint_resumes"], 1)
+        self.assertEqual(counts["sprint_budget_events"], 1)
+        self.assertEqual(counts["sprint_decisions"], 2)
+        self.assertGreater(counts["board_events"], 0)
+        self.assertGreaterEqual(counts["requests"], 12)
         self.assertGreater(result.manifest["components"]["postgres_dump"]["bytes"], 0)
+        source_probe = SqlCardClient(
+            self.source_config.for_role("read"), self.source_instance
+        )
+        self.assertEqual(
+            source_probe._query(
+                "SELECT request_id FROM sprint_budget_events WHERE sprint_ref = %s",
+                ("sprint:recovery-custom",),
+            ),
+            [("sprint-recovery-budget",)],
+        )
+        self.assertIn(
+            ("complete-recovery-one", True),
+            source_probe._query(
+                "SELECT request_id, committed FROM board_events ORDER BY request_id"
+            ),
+        )
+        source_probe.close()
+        with tarfile.open(result.archive) as archive:
+            cards = json.loads(
+                archive.extractfile("secretary-backup/secretary-data/board/cards.json")
+                .read()
+                .decode("utf-8")
+            )["cards"]
+            sprints = json.loads(
+                archive.extractfile("secretary-backup/secretary-data/board/sprints.json")
+                .read()
+                .decode("utf-8")
+            )["sprints"]
+            history = json.loads(
+                archive.extractfile("secretary-backup/secretary-data/board/audit.json")
+                .read()
+                .decode("utf-8")
+            )["events"]
+        cards_by_ref = {card["reference"]: card for card in cards}
+        self.assertEqual(cards_by_ref["secretary-1"]["metadata"]["issues"], "issue:recovery")
+        self.assertEqual(cards_by_ref["secretary-2"]["metadata"]["supersedes"], "secretary-1")
+        self.assertEqual(sprints[0]["repositories"], [str(self.root / "repository")])
+        self.assertEqual(sprints[0]["resume"]["selected_step"], "continue recovery")
+        self.assertEqual(sprints[0]["budget"]["by_type"]["red_ci"], 1)
+        self.assertEqual(len(sprints[0]["comments"]), 2)
+        history_requests = {event["request_id"] for event in history}
+        self.assertTrue(
+            {
+                "sprint-recovery-budget",
+                "sprint-recovery-comment",
+                "sprint-recovery-resume",
+                "complete-recovery-one",
+                "close-recovery-sprint",
+            }
+            <= history_requests
+        )
         with tarfile.open(result.archive) as archive:
             names = archive.getnames()
             secrets = {
@@ -229,6 +391,49 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             (self.root / "target-data" / "postgres-restore.json").read_text(encoding="utf-8")
         )
         self.assertFalse(marker["processes_started"])
+        target_probe = SqlCardClient(
+            self.target_config.for_role("read"), self.target_instance
+        )
+        self.addCleanup(target_probe.close)
+        self.assertEqual(
+            target_probe._query(
+                "SELECT request_id FROM sprint_budget_events WHERE sprint_ref = %s",
+                ("sprint:recovery-custom",),
+            ),
+            [("sprint-recovery-budget",)],
+        )
+        self.assertEqual(
+            target_probe._query(
+                "SELECT task_ref, issue_id FROM task_issues ORDER BY task_ref, issue_id"
+            ),
+            [("secretary-1", "recovery")],
+        )
+        self.assertEqual(
+            target_probe._query(
+                "SELECT task_ref, supersedes FROM task_supersessions ORDER BY task_ref"
+            ),
+            [("secretary-2", "secretary-1")],
+        )
+        self.assertIn(
+            ("complete-recovery-one", True),
+            target_probe._query(
+                "SELECT request_id, committed FROM board_events ORDER BY request_id"
+            ),
+        )
+        self.assertEqual(
+            target_probe._query(
+                "SELECT DISTINCT request_id FROM sprint_decisions ORDER BY request_id"
+            ),
+            [("close-recovery-sprint",)],
+        )
+        self.assertEqual(
+            target_probe._query("SELECT project_id FROM projects ORDER BY project_id"),
+            [("secretary",)],
+        )
+        self.assertEqual(
+            target_probe._query("SELECT path FROM repositories ORDER BY path"),
+            [(str(self.root / "repository"),)],
+        )
         print(
             "postgres recovery evidence:",
             json.dumps(

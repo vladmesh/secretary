@@ -161,6 +161,7 @@ _KNOWN_METADATA = {
     "base_branch",
     "seed_ref",
     "supersedes",
+    "issues",
     "head",
     "resolved_head",
     "review_head",

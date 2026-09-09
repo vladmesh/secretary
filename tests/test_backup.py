@@ -682,6 +682,7 @@ class BackupTests(unittest.TestCase):
                 )
 
             with tarfile.open(result.archive, "r") as archive:
+                names = archive.getnames()
                 cards = json.loads(
                     archive.extractfile("secretary-backup/secretary-data/board/cards.json")
                     .read()
@@ -692,6 +693,8 @@ class BackupTests(unittest.TestCase):
                 )
             self.assertEqual([card["reference"] for card in cards["cards"]], ["active-1"])
             self.assertEqual(manifest["components"]["board"]["count"], 1)
+            self.assertIn("secretary-backup/secretary-data/board/audit.json", names)
+            self.assertIn("secretary-backup/secretary-data/board/audit.ndjson", names)
 
     def test_retention_keeps_one_core_and_removes_old_full(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1035,6 +1038,10 @@ def _write_export_surface(data_dir: Path, *, include_done: bool = False) -> None
         encoding="utf-8",
     )
     (data_dir / "board" / "export.json").write_text('{"version":1}\n', encoding="utf-8")
+    (data_dir / "board" / "audit.json").write_text(
+        '{"version":1,"events":[]}\n', encoding="utf-8"
+    )
+    (data_dir / "board" / "audit.ndjson").write_text("", encoding="utf-8")
     (data_dir / "memory").mkdir(parents=True, exist_ok=True)
     (data_dir / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
     (data_dir / "memory" / "index.sqlite").write_bytes(b"index")
