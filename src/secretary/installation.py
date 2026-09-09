@@ -99,7 +99,7 @@ from secretary.upgrade import (
 from triggered_agents.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
 from triggered_agents.runtime.shared_state import resolve_pipeline_state_dir
 
-CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json")
+CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json")
 CHECKPOINT_RUNS = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")
 
 

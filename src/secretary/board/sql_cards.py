@@ -109,8 +109,8 @@ _ENUM_DEFAULTS = {"complexity": "standard", "family_preference": "auto"}
 #: `quota_snapshot_at` is a `timestamptz` column and an RFC3339 string on the board.
 _METADATA_TIMESTAMP = ("quota_snapshot_at", "quota_snapshot_at")
 
-#: The three metadata keys with satellite tables rather than columns (§3.5).
-_METADATA_LINKS = ("retry_heads", "blocked_by", "supersedes")
+#: Metadata keys with satellite tables rather than columns (§3.5).
+_METADATA_LINKS = ("retry_heads", "blocked_by", "supersedes", "issues")
 
 
 class SqlCardError(TaskError):
@@ -663,6 +663,11 @@ class SqlCardClient:
         )
         if supersedes:
             meta["supersedes"] = supersedes[0][0]
+        issues = self._query(
+            "SELECT issue_id FROM task_issues WHERE task_ref = %s ORDER BY issue_id", (ref,)
+        )
+        if issues:
+            meta["issues"] = ",".join(f"issue:{issue_id}" for (issue_id,) in issues)
         bag = values[18] if isinstance(values[18], dict) else json.loads(values[18] or "{}")
         for key, value in (bag.get("kanboard") or {}).items():
             if key != "swimlane":
@@ -763,6 +768,15 @@ class SqlCardClient:
                     "INSERT INTO task_supersessions (task_ref, supersedes, recorded_at) "
                     "VALUES (%s, %s, %s)",
                     (ref, text, _now()),
+                )
+        elif key == "issues":
+            self._execute("DELETE FROM task_issues WHERE task_ref = %s", (ref,))
+            for value in (part.strip() for part in text.split(",") if part.strip()):
+                issue_id = value.removeprefix("issue:")
+                self._execute(
+                    "INSERT INTO task_issues (task_ref, issue_id) "
+                    "SELECT %s, issue_id FROM issues WHERE issue_id = %s",
+                    (ref, issue_id),
                 )
 
     # --- comments --------------------------------------------------------------------

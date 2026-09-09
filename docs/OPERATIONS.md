@@ -1861,10 +1861,26 @@ python3 -P -m secretary backup create --instance INSTANCE --kind both
 python3 -P -m secretary backup verify ARCHIVE.tar [--strict]
 ```
 
-`create` writes a plain tar into `backups/` (`core`, `full` or `both`), unencrypted. `verify` returns `0` on
-success, `1` for findings or strict warnings, and `2` for an unreadable archive. Restoring from such an archive is
-still available through `secretary restore ARCHIVE.tar` for compatibility. The archive is not a recovery contract
-and does not affect `doctor` or readiness.
+`create` writes a plain tar into `backups/` (`core`, `full` or `both`), unencrypted. Backend selection
+happens before an engine-specific snapshot. `core` is portable on either backend. Kanboard `full`
+retains its raw data directory; PostgreSQL `full` carries a custom-format `postgres:16` data dump
+under `engine/`, in addition to the normalized export. Staging files and pgpass are mode `0600`, the
+password is absent from argv and logs, and `board-store.env` is excluded from every archive.
+`verify` returns `0` on success, `1` for findings or strict warnings, and `2` for an unreadable
+archive. It selects the component matrix from the manifest, so a PostgreSQL archive neither needs
+nor accepts `raw_board`.
+
+Legacy extraction remains `secretary restore ARCHIVE.tar`. A PostgreSQL engine recovery uses:
+
+```bash
+SECRETARY_CARD_BACKEND=postgres python3 -P -m secretary restore-postgres ARCHIVE.tar --instance TARGET
+```
+
+Provision TARGET through the normal PostgreSQL lifecycle first. It must identify the same Secretary
+instance but a different database endpoint, and contain the migrated schema and no application rows.
+The restore is data-only, single-transaction, role-verified and idempotent for the same archive.
+Neither command reconciles or starts recovered processes. The archive does not affect `doctor` or
+readiness, and this procedure is not evidence that live cutover or live recovery occurred.
 
 ## Auto-merging green cards
 

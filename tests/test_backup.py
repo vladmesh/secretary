@@ -682,6 +682,7 @@ class BackupTests(unittest.TestCase):
                 )
 
             with tarfile.open(result.archive, "r") as archive:
+                names = archive.getnames()
                 cards = json.loads(
                     archive.extractfile("secretary-backup/secretary-data/board/cards.json")
                     .read()
@@ -692,6 +693,8 @@ class BackupTests(unittest.TestCase):
                 )
             self.assertEqual([card["reference"] for card in cards["cards"]], ["active-1"])
             self.assertEqual(manifest["components"]["board"]["count"], 1)
+            self.assertIn("secretary-backup/secretary-data/board/audit.json", names)
+            self.assertIn("secretary-backup/secretary-data/board/audit.ndjson", names)
 
     def test_retention_keeps_one_core_and_removes_old_full(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1035,6 +1038,10 @@ def _write_export_surface(data_dir: Path, *, include_done: bool = False) -> None
         encoding="utf-8",
     )
     (data_dir / "board" / "export.json").write_text('{"version":1}\n', encoding="utf-8")
+    (data_dir / "board" / "audit.json").write_text(
+        '{"version":1,"events":[]}\n', encoding="utf-8"
+    )
+    (data_dir / "board" / "audit.ndjson").write_text("", encoding="utf-8")
     (data_dir / "memory").mkdir(parents=True, exist_ok=True)
     (data_dir / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
     (data_dir / "memory" / "index.sqlite").write_bytes(b"index")
@@ -1225,6 +1232,105 @@ def _fake_exports(data_dir: Path, *, include_done: bool = False) -> dict[str, Da
         "transcripts": DataExport(data_dir / "transcripts" / "inventory.json", 1, "transcripts"),
         "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "artifacts"),
     }
+
+
+class PostgresBackupPolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.env_patch = mock.patch.dict(
+            os.environ, {"BOARD_ROLE": "", "SECRETARY_CARD_BACKEND": "postgres"}
+        )
+        self.env_patch.start()
+        from secretary.board.backend import reset_card_backend
+
+        reset_card_backend()
+        self.addCleanup(reset_card_backend)
+        self.addCleanup(self.env_patch.stop)
+
+    def test_postgres_full_never_calls_kanboard_and_excludes_store_credentials(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            secret = "not-in-the-archive"
+            (instance / "board-store.env").write_text(secret, encoding="utf-8")
+            (instance / "board-store.env").chmod(0o600)
+
+            def exports(path, *_args, **_kwargs):
+                result = _fake_exports(path)
+                (path / "board" / "audit.json").write_text(
+                    '{"version":1,"events":[]}\n', encoding="utf-8"
+                )
+                (path / "board" / "audit.ndjson").write_text("", encoding="utf-8")
+                return result
+
+            metadata = {
+                "engine": "postgresql", "format": "custom", "dump_version": 1,
+                "image": "postgres:16", "server_major": 16,
+                "source_schema": "0006_sprint_transport_key",
+                "alembic_head": "0006_sprint_transport_key",
+                "restore_purpose": "local recovery", "source_endpoint_id": "a" * 64,
+                "table_counts": {"tasks": 1},
+            }
+
+            def dump(_config, destination, details):
+                destination.write_bytes(b"PGDMPtest")
+                return {**details, "tool_version": "(PostgreSQL) 16.10", "bytes": 9}
+
+            with (
+                mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("secretary.backup.raw_kanboard_dump") as raw,
+                mock.patch("secretary.backup.export_all", side_effect=exports),
+                mock.patch(
+                    "secretary.board.postgres_recovery.inspect_source",
+                    return_value=(object(), metadata),
+                ),
+                mock.patch("secretary.board.postgres_recovery.create_dump", side_effect=dump),
+            ):
+                result = create_backup(instance)
+
+            raw.assert_not_called()
+            verified = verify_backup(result.archive)
+            self.assertEqual(verified.code, 0, verified.findings)
+            self.assertEqual(result.manifest["version"], 2)
+            self.assertEqual(result.manifest["board_backend"], "postgres")
+            self.assertIn("postgres_dump", result.manifest["components"])
+            self.assertNotIn("raw_board", result.manifest["components"])
+            with tarfile.open(result.archive) as archive:
+                names = archive.getnames()
+                body = b"".join(
+                    archive.extractfile(name).read()
+                    for name in names
+                    if archive.getmember(name).isfile()
+                )
+            self.assertNotIn("board-store.env", names)
+            self.assertNotIn(secret.encode(), body)
+
+    def test_unusable_postgres_fails_before_pause_or_archive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "secretary-data"
+            _write_instance(instance, data_dir)
+            previous = data_dir / "backups" / "previous.tar"
+            previous.parent.mkdir(parents=True)
+            previous.write_bytes(b"previous")
+            with (
+                mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+                mock.patch(
+                    "secretary.board.postgres_recovery.inspect_source",
+                    side_effect=__import__(
+                        "secretary.board.postgres_recovery", fromlist=["PostgresRecoveryError"]
+                    ).PostgresRecoveryError("unreachable"),
+                ),
+                mock.patch("secretary.backup._pipeline_action") as pipeline,
+                self.assertRaisesRegex(RuntimeError, "unreachable"),
+            ):
+                create_backup(instance)
+            pipeline.assert_not_called()
+            self.assertEqual(previous.read_bytes(), b"previous")
 
 
 if __name__ == "__main__":

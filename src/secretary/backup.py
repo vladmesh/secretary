@@ -21,6 +21,7 @@ from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
     BACKUP_VERSION,
+    POSTGRES_BACKUP_VERSION,
     BackupKind,
     build_components_manifest,
     policy_for,
@@ -35,6 +36,8 @@ from secretary.backup_retention import (
 from secretary.backup_verify import (
     verify_backup,  # noqa: F401  # Public compatibility re-export.
 )
+from secretary.board.backend import BoardBackendError, card_backend
+from secretary.board.store import STORE_FILE
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.data import (
     DataExport,
@@ -84,6 +87,20 @@ def create_backups(
         exclude_workspace = caller_workspace.expanduser().resolve()
     instance_file = _instance_file(instance_path)
     data_dir = (data_dir or _load_data_dir(instance_file)).expanduser().resolve()
+    try:
+        backend = card_backend()
+    except BoardBackendError as exc:
+        raise RuntimeError(str(exc)) from None
+
+    postgres_config = None
+    postgres_metadata: dict[str, Any] | None = None
+    if backend == "postgres":
+        from secretary.board.postgres_recovery import PostgresRecoveryError, inspect_source
+
+        try:
+            postgres_config, postgres_metadata = inspect_source(instance_file.parent)
+        except PostgresRecoveryError as exc:
+            raise RuntimeError(str(exc)) from None
 
     backups_dir = data_dir / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)
@@ -114,11 +131,27 @@ def create_backups(
                 raise RuntimeError("pipeline pause was not owned by backup create")
 
             init_layout(data_dir)
-            raw_dump = raw_kanboard_dump(data_dir)
+            raw_dump = raw_kanboard_dump(data_dir) if backend == "kanboard" and "full" in kinds else None
             exports = export_all(data_dir, instance_file.parent, copy_transcripts=copy_transcripts)
 
+            postgres_dump_path: Path | None = None
+            if backend == "postgres" and "full" in kinds:
+                assert postgres_config is not None and postgres_metadata is not None
+                from secretary.board.postgres_recovery import PostgresRecoveryError, create_dump
+
+                dump_staging = Path(tempfile.mkdtemp(prefix=".secretary-postgres-dump-", suffix=".tmp"))
+                dump_staging.chmod(0o700)
+                temp_paths.append(dump_staging)
+                postgres_dump_path = dump_staging / "postgres.dump"
+                try:
+                    postgres_metadata = create_dump(
+                        postgres_config, postgres_dump_path, postgres_metadata
+                    )
+                except PostgresRecoveryError as exc:
+                    raise RuntimeError(str(exc)) from None
+
             for kind, final_archive in zip(kinds, final_archives, strict=True):
-                policy = policy_for(kind)
+                policy = policy_for(kind, backend)
                 if policy is None:
                     raise RuntimeError(f"unsupported backup kind: {kind}")
                 staging = Path(tempfile.mkdtemp(prefix=".secretary-backup-", suffix=".tmp"))
@@ -131,11 +164,18 @@ def create_backups(
                     backup_kind=kind,
                     instance_file=instance_file,
                     data_dir=data_dir,
-                    raw_dump=raw_dump.dump_dir,
+                    raw_dump=raw_dump.dump_dir if raw_dump is not None else None,
                     exports=exports,
+                    backend=backend,
+                    postgres_dump=postgres_metadata if kind == "full" else None,
                 )
                 _copy_instance_config(instance_file.parent, payload / "instance")
                 _copy_data_snapshot(data_dir, payload / "secretary-data", backup_kind=kind)
+                if kind == "full" and postgres_dump_path is not None:
+                    engine_dump = payload / "engine" / "postgres.dump"
+                    engine_dump.parent.mkdir(parents=True)
+                    shutil.copyfile(postgres_dump_path, engine_dump)
+                    engine_dump.chmod(0o600)
                 if kind == "core":
                     core_board_count = _filter_core_board_export(payload / "secretary-data" / "board")
                     manifest["components"]["board"]["count"] = core_board_count
@@ -214,15 +254,18 @@ def _build_versions_manifest(
     backup_kind: BackupKind,
     instance_file: Path,
     data_dir: Path,
-    raw_dump: Path,
+    raw_dump: Path | None,
     exports: dict[str, DataExport],
+    backend: str = "kanboard",
+    postgres_dump: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    policy = policy_for(backup_kind)
+    policy = policy_for(backup_kind, backend)
     if policy is None:
         raise RuntimeError(f"unsupported backup kind: {backup_kind}")
     return {
-        "version": BACKUP_VERSION,
+        "version": POSTGRES_BACKUP_VERSION if backend == "postgres" else BACKUP_VERSION,
         "backup_kind": backup_kind,
+        "board_backend": backend,
         "restore_capability": policy.restore_capability,
         "created_at": created_at,
         "tool": "secretary",
@@ -238,6 +281,7 @@ def _build_versions_manifest(
             data_dir=data_dir,
             raw_dump=raw_dump,
             exports=exports,
+            postgres_dump=postgres_dump,
         ),
     }
 
@@ -359,13 +403,15 @@ def _copy_instance_config(source: Path, destination: Path) -> None:
         source,
         destination,
         skip=lambda relative: (
-            ".git" in relative.parts or relative.name == "runtime.env" or relative.name.startswith(".env")
+            ".git" in relative.parts
+            or relative.name in {"runtime.env", STORE_FILE}
+            or relative.name.startswith(".env")
         ),
     )
 
 
 def _copy_data_snapshot(data_dir: Path, destination: Path, *, backup_kind: BackupKind) -> None:
-    policy = policy_for(backup_kind)
+    policy = policy_for(backup_kind, card_backend())
     if policy is None:
         raise RuntimeError(f"unsupported backup kind: {backup_kind}")
 

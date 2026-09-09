@@ -29,6 +29,7 @@ from secretary.checkpoint import (
     AnalyticsManifestError,
     CheckpointPusher,
     CheckpointWriter,
+    _analytics_checkpoint_id,
     _validate_board,
     _validate_board_events,
     _write_analytics_manifest,
@@ -124,6 +125,7 @@ class CheckpointWriterTests(unittest.TestCase):
             encoding="utf-8",
         )
         (board / "events.ndjson").write_text("", encoding="utf-8")
+        (board / "audit.ndjson").write_text("", encoding="utf-8")
         (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")
         (board / "sprints.json").write_text(json.dumps({"sprints": sprints}), encoding="utf-8")
         (board / "export.json").write_text(
@@ -187,6 +189,7 @@ class CheckpointWriterTests(unittest.TestCase):
         files = self.head_files()
         self.assertIn("state/board/cards.ndjson", files)
         self.assertIn("state/board/events.ndjson", files)
+        self.assertIn("state/board/audit.ndjson", files)
         self.assertIn("state/board/export.json", files)
         self.assertIn("state/board/analytics-manifest.json", files)
         self.assertIn("state/runs/runs.ndjson", files)
@@ -220,6 +223,15 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("state/board/events.ndjson", self.head_files())
         self.assertEqual((self.instance_dir / "state" / "board" / "events.ndjson").read_text(), "")
         self.assertIn("state/board/cards.ndjson", self.head_files())
+
+    def test_missing_live_audit_history_blocks_the_checkpoint(self):
+        (self.data_dir / "board" / "audit.ndjson").unlink()
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("checkpoint board export is missing audit.ndjson", result.reason)
+        self.assertNotIn("state/board/analytics-manifest.json", self.head_files())
 
     def test_board_publication_exposes_no_seal_during_its_copy_window(self):
         self.assertEqual(self.write().status, "committed")
@@ -749,6 +761,7 @@ class AnalyticsManifestTests(unittest.TestCase):
         (self.board / "cards.ndjson").write_text('{"reference":"secretary-1"}\n', encoding="utf-8")
         (self.board / "sprints.ndjson").write_text('{"reference":"sprint:1"}\n', encoding="utf-8")
         (self.board / "events.ndjson").write_text('{"event_id":"event-1"}\n', encoding="utf-8")
+        (self.board / "audit.ndjson").write_text('{"request_id":"request-1"}\n', encoding="utf-8")
         (self.board / "export.json").write_text(
             json.dumps({"version": 1, "card_count": 1, "sprint_count": 1}) + "\n",
             encoding="utf-8",
@@ -776,13 +789,14 @@ class AnalyticsManifestTests(unittest.TestCase):
         self.assertRegex(verified.checkpoint_id, r"^[0-9a-f]{64}$")
         manifest = self.manifest(self.board)
         self.assertEqual(manifest["schema"], "secretary.board.analytics-checkpoint")
-        self.assertEqual(manifest["version"], 1)
+        self.assertEqual(manifest["version"], 2)
         self.assertEqual(
             [entry["path"] for entry in manifest["files"]],
             [
                 "events.ndjson",
                 "cards.ndjson",
                 "sprints.ndjson",
+                "audit.ndjson",
                 "export.json",
             ],
         )
@@ -872,7 +886,7 @@ class AnalyticsManifestTests(unittest.TestCase):
 
         board = self.copy_board()
         manifest = self.manifest(board)
-        manifest["version"] = 2
+        manifest["version"] = 3
         self.write_manifest(board, manifest)
         with self.assertRaisesRegex(AnalyticsManifestError, "unknown manifest version"):
             verify_analytics_checkpoint(board)
@@ -882,6 +896,25 @@ class AnalyticsManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(
             AnalyticsManifestError, "events.ndjson: required analytics file is missing"
         ):
+            verify_analytics_checkpoint(board)
+
+    def test_version_one_seal_without_audit_remains_readable(self):
+        board = self.copy_board()
+        manifest = self.manifest(board)
+        entries = [entry for entry in manifest["files"] if entry["path"] != "audit.ndjson"]
+        manifest["version"] = 1
+        manifest["files"] = entries
+        manifest["checkpoint_id"] = _analytics_checkpoint_id(entries)
+        self.write_manifest(board, manifest)
+        (board / "audit.ndjson").unlink()
+
+        verify_analytics_checkpoint(board)
+
+    def test_version_two_seal_rejects_audit_history_tampering(self):
+        board = self.copy_board()
+        (board / "audit.ndjson").write_text('{"request_id":"changed"}\n', encoding="utf-8")
+
+        with self.assertRaisesRegex(AnalyticsManifestError, "audit.ndjson: sha256"):
             verify_analytics_checkpoint(board)
 
     def test_malformed_manifest_duplicate_entry_and_bad_file_metadata_are_rejected(self):

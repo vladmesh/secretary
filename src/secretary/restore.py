@@ -18,6 +18,7 @@ from secretary.backup_policy import (
     BACKUP_KINDS,
     BACKUP_VERSION,
     CORE_POLICY,
+    POSTGRES_BACKUP_VERSION,
     BackupPolicy,
     is_memory_journal_git_runtime_entry,
     policy_for,
@@ -196,6 +197,7 @@ def _import_normalized_board(
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed: restored card order")
             _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
+            _import_board_history(data_dir, writer.audit)
             pending_comments = [
                 event for event in writer.audit.pending_events() if event.get("kind") == "restored_comment"
             ]
@@ -213,6 +215,33 @@ def _import_normalized_board(
             sprint_count=len(sprints),
         )
         return len(cards)
+
+
+def _import_board_history(data_dir: Path, audit: Any) -> None:
+    """Recreate portable committed request/audit history without replaying effects."""
+    path = data_dir / "board" / "audit.json"
+    try:
+        if path.is_file():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            events = payload.get("events") if isinstance(payload, dict) else None
+        else:
+            ndjson = data_dir / "board" / "audit.ndjson"
+            if not ndjson.is_file():
+                return
+            events = [json.loads(line) for line in ndjson.read_text(encoding="utf-8").splitlines() if line]
+    except (OSError, ValueError) as exc:
+        raise RestoreError(f"normalized board audit export is invalid: {exc}") from None
+    if not isinstance(events, list) or any(not isinstance(event, dict) for event in events):
+        raise RestoreError("normalized board audit export has no events list")
+    for event in events:
+        request_id = event.get("request_id")
+        event_id = event.get("event_id")
+        if not isinstance(request_id, str) or not request_id or not isinstance(event_id, str) or not event_id:
+            raise RestoreError("normalized board audit export contains an invalid event")
+        try:
+            audit.append(request_id, event)
+        except TaskError as exc:
+            raise RestoreError(f"normalized board audit restore failed: {exc.message}") from None
 
 
 def _set_restore_phase(client: Any, phase: str) -> None:
@@ -1131,6 +1160,7 @@ def restore_backup(
     instance_path: Path,
     *,
     dry_run: bool = False,
+    _allow_postgres_engine: bool = False,
 ) -> RestorePlan:
     _, target, target_identity = _target(instance_path)
     _reject_existing_target(target)
@@ -1151,15 +1181,19 @@ def restore_backup(
         if archive_identity != target_identity:
             raise RestoreError("archive instance identity does not match target instance")
         kind = manifest.get("backup_kind")
-        if kind not in BACKUP_KINDS or manifest.get("version") != BACKUP_VERSION:
+        backend = manifest.get("board_backend", "kanboard")
+        expected_version = POSTGRES_BACKUP_VERSION if backend == "postgres" else BACKUP_VERSION
+        if kind not in BACKUP_KINDS or manifest.get("version") != expected_version:
             raise RestoreError("archive kind or version is not supported")
-        policy = policy_for(kind)
+        policy = policy_for(kind, backend)
         if policy is None:
             raise RestoreError("archive kind is not supported")
+        if backend == "postgres" and kind == "full" and not _allow_postgres_engine:
+            raise RestoreError("PostgreSQL full archives require secretary restore-postgres")
         plan = RestorePlan(
             archive=archive,
             backup_kind=kind,
-            backup_version=BACKUP_VERSION,
+            backup_version=expected_version,
             data_dir=target,
             components=restore_plan_components(policy),
             instance_identity=target_identity,
@@ -1170,12 +1204,138 @@ def restore_backup(
         return plan
 
 
+def restore_postgres_backup(
+    archive: Path,
+    instance_path: Path,
+    *,
+    dry_run: bool = False,
+) -> RestorePlan:
+    """Restore a PostgreSQL full archive into a distinct, empty local store.
+
+    The target container, credentials and roles remain owned by the existing
+    board-store lifecycle.  This operation applies/verifies that lifecycle,
+    restores data as owner, proves normalized parity, and starts no processes.
+    """
+    archive = archive.expanduser()
+    verified = _verify_plain_tar(archive)
+    manifest = verified.manifest if isinstance(verified.manifest, dict) else {}
+    if verified.code or verified.findings:
+        raise RestoreError("; ".join(verified.findings) or "archive verification failed")
+    _, target, target_identity = _target(instance_path)
+    if _archive_identity(manifest) != target_identity:
+        raise RestoreError("archive instance identity does not match target instance")
+    policy = policy_for("full", "postgres")
+    if (
+        manifest.get("board_backend") != "postgres"
+        or manifest.get("backup_kind") != "full"
+        or manifest.get("version") != POSTGRES_BACKUP_VERSION
+        or policy is None
+    ):
+        raise RestoreError("PostgreSQL local restore requires a PostgreSQL full archive")
+    plan = RestorePlan(
+        archive=archive,
+        backup_kind="full",
+        backup_version=POSTGRES_BACKUP_VERSION,
+        data_dir=target,
+        components=restore_plan_components(policy),
+        instance_identity=target_identity,
+    )
+    component = manifest.get("components", {}).get("postgres_dump")
+    if not isinstance(component, dict):
+        raise RestoreError("PostgreSQL archive has no engine dump component")
+    from secretary._fsutil import sha256_file
+    from secretary.board.backend import card_backend
+    from secretary.board.postgres_recovery import (
+        PostgresRecoveryError,
+        restore_dump,
+        target_counts,
+        write_restore_marker,
+    )
+    from secretary.board.store import BoardStoreError, resolve
+
+    if card_backend() != "postgres":
+        raise RestoreError("PostgreSQL local restore requires SECRETARY_CARD_BACKEND=postgres")
+    marker = target / "postgres-restore.json"
+    if target.exists():
+        try:
+            record = json.loads(marker.read_text(encoding="utf-8"))
+            config = resolve(_instance_file_for_restore(instance_path).parent)
+        except (OSError, ValueError, BoardStoreError):
+            raise RestoreError(f"target data root already exists: {target}") from None
+        if record.get("archive_sha256") != sha256_file(archive):
+            raise RestoreError("existing PostgreSQL restore belongs to a different archive")
+        if target_counts(config) != component.get("table_counts"):
+            raise RestoreError("existing PostgreSQL restore no longer matches the archive")
+        _verify_postgres_normalized_parity(target, _instance_file_for_restore(instance_path).parent)
+        return plan
+    if dry_run:
+        return plan
+    try:
+        with tempfile.TemporaryDirectory(prefix=".secretary-postgres-archive-") as temporary:
+            dump = Path(temporary) / "postgres.dump"
+            with tarfile.open(archive, "r") as bundle:
+                member = bundle.getmember(f"{ARCHIVE_ROOT}/engine/postgres.dump")
+                source = bundle.extractfile(member)
+                if source is None or not member.isfile() or _unsafe_member(member):
+                    raise RestoreError("PostgreSQL dump archive entry is unsafe")
+                with source, dump.open("wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+            dump.chmod(0o600)
+            result = restore_dump(dump, _instance_file_for_restore(instance_path).parent, component)
+        plan = restore_backup(archive, instance_path, _allow_postgres_engine=True)
+        _verify_postgres_normalized_parity(target, _instance_file_for_restore(instance_path).parent)
+        write_restore_marker(target, archive, result)
+        return plan
+    except PostgresRecoveryError as exc:
+        raise RestoreError(str(exc)) from None
+
+
+def _instance_file_for_restore(path: Path) -> Path:
+    expanded = path.expanduser()
+    return expanded / "instance.yaml" if expanded.is_dir() else expanded
+
+
+def _verify_postgres_normalized_parity(data_dir: Path, instance_dir: Path) -> None:
+    expected_cards = _normalized_cards(data_dir)
+    expected_sprints = _normalized_sprints(data_dir)
+    client = None
+    try:
+        client = board_client(instance_dir, serves=(CARD, SPRINT), role="read")
+        actual_cards = [
+            __import__("secretary.data", fromlist=["normalize_board_card"]).normalize_board_card(card, card)
+            for card in TaskReader(client).export()
+            if isinstance(card, dict) and str(card.get("reference") or "")
+        ]
+        from secretary.board.sql_audit import SqlTaskAudit
+        from secretary.data import normalize_sprint_entity
+        from secretary.sprints import SprintReader
+
+        actual_sprints = [normalize_sprint_entity(item) for item in SprintReader(client).export()]
+        history_payload = json.loads((data_dir / "board" / "audit.json").read_text(encoding="utf-8"))
+        expected_history = history_payload.get("events") if isinstance(history_payload, dict) else None
+        actual_history = SqlTaskAudit(client).events()
+    except TaskError as exc:
+        raise RestoreError(f"restored PostgreSQL normalized verification failed: {exc.message}") from None
+    except (OSError, ValueError) as exc:
+        raise RestoreError(f"portable PostgreSQL verification data is invalid: {exc}") from None
+    finally:
+        if client is not None and getattr(client, "backend_kind", "kanboard") == "postgres":
+            client.connection.close()
+    by_ref = lambda rows: sorted(rows, key=lambda row: str(row.get("reference") or ""))
+    if (
+        by_ref(actual_cards) != by_ref(expected_cards)
+        or by_ref(actual_sprints) != by_ref(expected_sprints)
+        or actual_history != expected_history
+    ):
+        raise RestoreError("restored PostgreSQL store does not match the portable normalized export")
+
+
 def plan_as_json(plan: RestorePlan, *, action: str, dry_run: bool) -> dict[str, Any]:
     return {
         "ok": True,
         "action": action,
         "dry_run": dry_run,
-        "archive": str(plan.archive) if action == "restore" else None,
+        "archive": str(plan.archive) if action.startswith("restore") else None,
         "backup_kind": plan.backup_kind,
         "backup_version": plan.backup_version,
         "data_dir": str(plan.data_dir),

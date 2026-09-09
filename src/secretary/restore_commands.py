@@ -28,6 +28,7 @@ from secretary.restore import (
     plan_as_json,
     rebuild_memory_index,
     restore_backup,
+    restore_postgres_backup,
     restore_state,
 )
 
@@ -49,6 +50,14 @@ def add_restore_subcommands(subparsers) -> None:
     restore.add_argument("--instance", required=True)
     restore.add_argument("--dry-run", action="store_true")
     restore.set_defaults(handler=run_restore)
+
+    postgres_restore = subparsers.add_parser(
+        "restore-postgres", help="restore a PostgreSQL full archive into an empty local board store"
+    )
+    postgres_restore.add_argument("archive")
+    postgres_restore.add_argument("--instance", required=True)
+    postgres_restore.add_argument("--dry-run", action="store_true")
+    postgres_restore.set_defaults(handler=run_restore_postgres)
 
     board = subparsers.add_parser("restore-board", help="import the normalized board into an empty backend")
     board.add_argument("--instance", required=True)
@@ -125,6 +134,15 @@ def run_restore(args: argparse.Namespace) -> int:
     return plan_as_json(
         restore_backup(Path(args.archive), Path(args.instance), dry_run=args.dry_run),
         action="restore",
+        dry_run=args.dry_run,
+    )
+
+
+@_restore_command("restore-postgres")
+def run_restore_postgres(args: argparse.Namespace) -> int:
+    return plan_as_json(
+        restore_postgres_backup(Path(args.archive), Path(args.instance), dry_run=args.dry_run),
+        action="restore-postgres",
         dry_run=args.dry_run,
     )
 

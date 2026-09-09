@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import socket
 import subprocess
 import threading
 import time
@@ -814,6 +815,28 @@ class BoardStoreSchemaTests(unittest.TestCase):
             root = Path(tmp)
             compose = root / "postgres-compose.yml"
             project = f"secretary-provision-{root.name.lower()}"
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                host_port = listener.getsockname()[1]
+            config_path = root / "board-store.env"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "SECRETARY_DB_HOST=127.0.0.1",
+                        f"SECRETARY_DB_PORT={host_port}",
+                        f"SECRETARY_DB_NAME={DATABASE}",
+                        f"SECRETARY_DB_OWNER_USER={OWNER}",
+                        f"SECRETARY_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
+                        f"SECRETARY_DB_APP_USER={schema.APP_ROLE}",
+                        f"SECRETARY_DB_APP_PASSWORD={APP_PASSWORD}",
+                        f"SECRETARY_DB_READ_USER={schema.READ_ROLE}",
+                        f"SECRETARY_DB_READ_PASSWORD={READ_PASSWORD}",
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
 
             def cleanup() -> None:
                 config = root / "board-store.env"
@@ -834,7 +857,6 @@ class BoardStoreSchemaTests(unittest.TestCase):
             try:
                 first = provision.provision(
                     root,
-                    allow_create=True,
                     compose_path=compose,
                     project=project,
                 )

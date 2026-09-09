@@ -89,7 +89,7 @@ copies, publishes or deletes the export at *any* hop:
 
 | Hop | Artefact | Written by |
 |---|---|---|
-| 1 | `<data>/board/**` — `cards.json`, `cards.ndjson`, `sprints.json`, `sprints.ndjson`, `events.ndjson`, `export.json`, `analytics-manifest.json`, and the `kanboard-raw-*/` dump | `data.py` (`export_board`, `export_all`, `raw_kanboard_dump`) |
+| 1 | `<data>/board/**` — `cards.json`, `cards.ndjson`, `sprints.json`, `sprints.ndjson`, `events.ndjson`, `audit.json`, `audit.ndjson`, `export.json`, `analytics-manifest.json`, and the `kanboard-raw-*/` dump | `data.py` (`export_board`, `export_all`, `raw_kanboard_dump`) |
 | 2 | `<instance>/state/board/**` — the published, git-committed copy of hop 1 | `checkpoint.py` through `state_repo.py`, under `BOARD_RUNS_PATHSPEC` |
 | 3 | `<data>/backups/secretary-backup-{core,full}-<ts>.tar` — an archived copy of hop 1 under `archive/secretary-data/board/**` | `backup.py` |
 
@@ -302,10 +302,10 @@ group against the flow rather than against a single search.
 | Module | Hop | Consumed fields | R/W | Own writer process? | Also (b)? |
 |---|---|---|---|---|---|
 | `checkpoint.py` | 1→2 | regenerates the exports, validates, publishes `state/board` + `state/runs` under `BOARD_RUNS_PATHSPEC`; seals `analytics-manifest.json`; reads `runs.ndjson` to refuse history loss | R+W (files, git) | yes — runs inside the dispatcher tick, and as `secretary checkpoint` | no — it reaches the board only through `data.py:export_board` |
-| `data.py` | 1 | **produces** `cards.json`, `cards.ndjson`, `sprints.json`, `sprints.ndjson`, `export.json`, validating the pair before publishing; **reads** the previous `<data>/board/kanboard-raw-*/data/db.sqlite` for `raw_active_task_count` (`_latest_raw_active_task_count`) | R+W | yes (checkpoint/backup) | **yes** — full group (b) reader; see §2.2 |
+| `data.py` | 1 | **produces** `cards.json`, `cards.ndjson`, `sprints.json`, `sprints.ndjson`, `audit.json`, `audit.ndjson`, `export.json`, validating the pair before publishing; **reads** the previous `<data>/board/kanboard-raw-*/data/db.sqlite` for `raw_active_task_count` (`_latest_raw_active_task_count`) | R+W | yes (checkpoint/backup) | **yes** — full group (b) reader; see §2.2 |
 | `bootstrap.py` | 2 | reads `<instance>/state/board/cards.ndjson` and takes each card's `swimlane` to seed lane discovery before it writes the Pipeline board (`:91-103`) | R | yes (bootstrap command, root) | **yes** — full group (b) writer; see §2.2 |
 | `board/normalized_checkpoint.py` | 1 | `cards.json` / `cards.ndjson` and their parity; card `reference` uniqueness; Product/Issue record validity | R | no — a validator inside its caller | no |
-| `board/analytics.py` | 2 | a sealed, copied `state/board`: `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `analytics-manifest.json` | R | no — offline, takes a directory rather than an installation | no |
+| `board/analytics.py` | 2 | a sealed, copied `state/board`: `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `audit.ndjson`, `analytics-manifest.json` | R | no — offline, takes a directory rather than an installation | no |
 | `backup.py` | 1→3 | `board/cards.json`, `cards.ndjson`, `export.json`; filters Done cards out of a `core` archive (`_filter_core_board_export`) | R+W (tar under `<data>/backups`) | yes (backup command) | indirectly — it calls `data.py:export_all` and `raw_kanboard_dump` |
 | `backup_policy.py` | 3 | declares which board entries each policy requires; reads nothing itself | — | no — a policy table | no |
 | `backup_verify.py` | 3 | the export **inside the archive**: `archive/secretary-data/board/cards.json` → `cards[].reference` \| `cards[].id` and `cards[].column`, to fail a `core` archive that carries a Done card (`:265-278`); the `raw_board` component directory → `manifest.json` and any file under `data/**` (`_verify_raw_board_component`, `:235-247`); the archive paths `archive/secretary-data/board/kanboard-raw-*`, to fail a `core` archive carrying a raw dump (`:252-259`); component names, paths and checksums from `archive/versions.json` | R (tar) | yes — `secretary backup verify` is its own short-lived operator process (`cli.py:1515`); also a library inside `restore.py` (`_verify_plain_tar`) and re-exported by `backup.py` | no |

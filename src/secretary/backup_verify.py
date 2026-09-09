@@ -11,6 +11,7 @@ from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
     BACKUP_VERSION,
+    POSTGRES_BACKUP_VERSION,
     BackupPolicy,
     component_archive_name,
     is_memory_journal_git_entry,
@@ -18,6 +19,7 @@ from secretary.backup_policy import (
     policy_for,
     should_skip_data_entry,
 )
+from secretary.board.provision import IMAGE, POSTGRES_MAJOR
 
 
 @dataclass(frozen=True)
@@ -61,8 +63,12 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
         findings.append("versions manifest must be an object")
     else:
         raw_kind = manifest.get("backup_kind", manifest.get("kind", "full"))
-        if manifest.get("version") != BACKUP_VERSION:
+        backend = manifest.get("board_backend", "kanboard")
+        expected_version = POSTGRES_BACKUP_VERSION if backend == "postgres" else BACKUP_VERSION
+        if manifest.get("version") != expected_version:
             findings.append("unsupported backup version")
+        if backend not in {"kanboard", "postgres"}:
+            findings.append("unsupported board backend")
         if raw_kind not in BACKUP_KINDS:
             findings.append("unsupported backup kind")
         findings.extend(_verify_manifest_components(manifest, policy, members, names))
@@ -70,6 +76,8 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
 
     if policy.kind == "core":
         findings.extend(_verify_core_archive(names, path, policy))
+    if policy.backend == "postgres" and policy.kind == "full":
+        findings.extend(_verify_postgres_archive_signature(path))
 
     forbidden_names = [name for name in sorted(names) if _is_forbidden_archive_entry(name)]
     findings.extend(f"forbidden archive entry: {name}" for name in forbidden_names)
@@ -97,7 +105,8 @@ def _policy_from_manifest(manifest: Any) -> BackupPolicy:
     if not isinstance(manifest, dict):
         return policy_for("full")
     raw_kind = manifest.get("backup_kind", manifest.get("kind", "full"))
-    return policy_for(raw_kind) or policy_for("full")
+    backend = manifest.get("board_backend", "kanboard")
+    return policy_for(raw_kind, backend) or policy_for("full")
 
 
 def _required_entries_for_manifest(manifest: Any, policy: BackupPolicy) -> set[str]:
@@ -119,6 +128,12 @@ def _verify_manifest_components(
     missing_components = sorted(required_components - set(components))
     findings.extend(f"versions manifest missing component: {name}" for name in missing_components)
     component_policies = {component.name: component for component in policy.components}
+    if policy.backend == "postgres":
+        if "raw_board" in components:
+            findings.append("PostgreSQL archive must not contain a Kanboard raw_board component")
+        findings.extend(_verify_postgres_manifest(manifest, components))
+    elif "postgres_dump" in components:
+        findings.append("Kanboard archive must not contain a PostgreSQL dump component")
     for name in sorted(required_components & set(components)):
         component = components.get(name)
         if not isinstance(component, dict) or not isinstance(component.get("path"), str):
@@ -129,6 +144,8 @@ def _verify_manifest_components(
             findings.append(f"component path missing from archive: {name}")
             continue
         component_policy = component_policies[name]
+        if name == "postgres_dump":
+            findings.extend(_verify_postgres_dump_member(members, archive_name))
         if component_policy.requires_raw_board_data:
             findings.extend(_verify_raw_board_component(members, names, archive_name))
         for field in component_policy.required_fields:
@@ -139,6 +156,63 @@ def _verify_manifest_components(
             field_archive_name = component_archive_name(value)
             if not _archive_has_path(names, field_archive_name):
                 findings.append(f"{name} component path missing from archive: {field}")
+    return findings
+
+
+def _verify_postgres_dump_member(
+    members: list[tarfile.TarInfo], archive_name: str
+) -> list[str]:
+    member = next((item for item in members if item.name == archive_name), None)
+    if member is None or not member.isfile() or member.size < 5:
+        return ["PostgreSQL dump component is not a regular custom-format dump"]
+    # PostgreSQL custom archives start with the format's stable PGDMP signature.
+    # The checksum proves the remainder; creation also asks matching pg_restore
+    # to list the completed archive before it can be published.
+    return []
+
+
+def _verify_postgres_archive_signature(path: Path) -> list[str]:
+    try:
+        with tarfile.open(path, "r") as archive:
+            source = archive.extractfile(f"{ARCHIVE_ROOT}/engine/postgres.dump")
+            if source is None or source.read(5) != b"PGDMP":
+                return ["PostgreSQL dump is not in pg_restore custom format"]
+    except (KeyError, OSError, tarfile.TarError):
+        return ["PostgreSQL dump could not be inspected"]
+    return []
+
+
+def _verify_postgres_manifest(
+    manifest: dict[str, Any], components: dict[str, Any]
+) -> list[str]:
+    findings: list[str] = []
+    dump = components.get("postgres_dump")
+    if manifest.get("board_backend") != "postgres":
+        findings.append("PostgreSQL policy requires board_backend=postgres")
+    if not isinstance(dump, dict):
+        return findings
+    expected = {
+        "engine": "postgresql",
+        "format": "custom",
+        "dump_version": 1,
+        "image": IMAGE,
+        "server_major": POSTGRES_MAJOR,
+    }
+    for key, value in expected.items():
+        if dump.get(key) != value:
+            findings.append(f"PostgreSQL dump has invalid {key}")
+    for key in ("source_schema", "alembic_head", "restore_purpose", "tool_version", "source_endpoint_id"):
+        if not isinstance(dump.get(key), str) or not dump[key]:
+            findings.append(f"PostgreSQL dump has no {key}")
+    if dump.get("source_schema") != dump.get("alembic_head"):
+        findings.append("PostgreSQL dump source schema does not match its Alembic head")
+    counts = dump.get("table_counts")
+    if (
+        not isinstance(counts, dict)
+        or any(not isinstance(name, str) or not name for name in counts)
+        or any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in counts.values())
+    ):
+        findings.append("PostgreSQL dump has no table counts")
     return findings
 
 
@@ -220,7 +294,7 @@ def _is_forbidden_archive_entry(name: str) -> bool:
     data_relative = Path(*parts[2:]) if parts[:2] == (ARCHIVE_ROOT, "secretary-data") else Path()
     return (
         (".git" in parts and not is_memory_journal_git_entry(data_relative))
-        or any(part.startswith(".env") for part in parts)
+        or any(part.startswith(".env") or part == "board-store.env" for part in parts)
         or "index.sqlite" in parts
         or "backups" in parts
         or any(part.endswith(".service") or part.endswith(".timer") for part in parts)
