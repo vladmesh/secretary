@@ -18,6 +18,8 @@ import pwd
 import stat
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -800,6 +802,45 @@ def _acceptance_context(sprints: dict[str, Any] | list[Any]) -> tuple[str, str]:
     raise CutoverError("installed acceptance requires one open sprint with a project reservation")
 
 
+def _serve_backend(backend: str | None) -> None:
+    """The one place the controller changes which card backend *this process* serves.
+
+    `secretary/board/backend.py` decides once per process on purpose, and that invariant stands:
+    an ordinary command that read cards from one backend must not write them to the other because
+    something re-exported the variable between its two halves.  The controller is the single
+    caller that legitimately crosses the boundary — it is the thing performing the switch — and
+    `reset_card_backend()` is the sanctioned way to say so.  Exporting the name without it is the
+    09.09 defect: `postgresql_recovery_backup` set `postgres`, `create_backups` asked the switch
+    and got the `kanboard` the earlier phases had already decided, and the phase took a Kanboard
+    backup where the recovery point had to be the SQL one.  `None` restores "no name exported",
+    which `parse_card_backend` reads as the default.
+    """
+    from secretary.board.backend import reset_card_backend
+
+    if backend is None:
+        os.environ.pop(BACKEND_ENV, None)
+    else:
+        os.environ[BACKEND_ENV] = backend
+    reset_card_backend()
+
+
+@contextmanager
+def _serving_backend(backend: str) -> Iterator[None]:
+    """Serve `backend` for the body, then put back exactly what was there: name and decision.
+
+    Symmetric by construction, which is the half the inline pairs kept losing.  A phase that
+    borrows PostgreSQL before `selector_activation` has activated it restores the environment on
+    the way out and must restore the process decision with it, or the next phase inherits a
+    `postgres` reader under a `kanboard` selector.
+    """
+    before = os.environ.get(BACKEND_ENV)
+    _serve_backend(backend)
+    try:
+        yield
+    finally:
+        _serve_backend(before)
+
+
 def _set_backend(paths: Paths, backend: str) -> dict[str, Any]:
     parse_card_backend(backend)
     path = paths.runtime_env
@@ -1128,32 +1169,32 @@ class Operations:
     def postgresql_recovery_backup(self) -> dict[str, Any]:
         from secretary.backup import create_backups
 
-        env_before = os.environ.get(BACKEND_ENV)
-        os.environ[BACKEND_ENV] = "postgres"
-        try:
+        # The recovery point of the whole cutover, taken before the selector moves.  Earlier
+        # phases of this same process have already read Kanboard, so borrowing PostgreSQL here is
+        # a change of the process decision, not only of the environment.
+        with _serving_backend("postgres"):
             backups = create_backups(
                 self.paths.instance,
                 data_dir=self.paths.data,
                 backup_kinds=("full",),
                 existing_freeze_actor=CUTOVER_ACTOR,
             )
-        finally:
-            if env_before is None:
-                os.environ.pop(BACKEND_ENV, None)
-            else:
-                os.environ[BACKEND_ENV] = env_before
+        manifests = [item.manifest for item in backups]
+        if any("raw_board" in item.get("components", {}) for item in manifests):
+            raise CutoverError("pre-switch recovery backup unexpectedly contains a raw Kanboard component")
+        if not manifests or any("postgres_dump" not in item.get("components", {}) for item in manifests):
+            raise CutoverError("pre-switch recovery backup has no PostgreSQL dump component")
         return {
             "archives": [str(item.archive) for item in backups],
-            "archive_manifests": [item.manifest for item in backups],
+            "archive_manifests": manifests,
         }
 
     def selector_activation(self) -> dict[str, Any]:
-        from secretary.board.backend import reset_card_backend
-
         baseline = _sql_event_count(self.paths)
         activated = _set_backend(self.paths, "postgres")
-        os.environ[BACKEND_ENV] = "postgres"
-        reset_card_backend()
+        # The durable selector and the process decision move through the same named switch, so
+        # every phase after this one reads PostgreSQL without a fresh process.
+        _serve_backend("postgres")
         return {**activated, "sql_audit_baseline": baseline}
 
     def service_reconciliation(self) -> dict[str, Any]:
@@ -1531,9 +1572,7 @@ class Operations:
         from secretary.backup import create_backups
         from secretary.checkpoint import CheckpointWriter
 
-        old = os.environ.get(BACKEND_ENV)
-        os.environ[BACKEND_ENV] = "postgres"
-        try:
+        with _serving_backend("postgres"):
             checkpoint = CheckpointWriter(
                 self.paths.data, self.paths.instance, **self.checkpoint_options
             ).write()
@@ -1545,11 +1584,6 @@ class Operations:
                 backup_kinds=("full",),
                 existing_freeze_actor=CUTOVER_ACTOR,
             )
-        finally:
-            if old is None:
-                os.environ.pop(BACKEND_ENV, None)
-            else:
-                os.environ[BACKEND_ENV] = old
         manifests = [item.manifest for item in backups]
         if any("raw_board" in item.get("components", {}) for item in manifests):
             raise CutoverError("post-switch backup unexpectedly contains a raw Kanboard component")

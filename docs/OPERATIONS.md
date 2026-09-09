@@ -3714,6 +3714,13 @@ required. `recover` records the same document beside the restarted services. Tha
 answer to "why did the steward not come back": no hand-maintained inventory file is involved, and
 an operator neither edits the lists nor removes units before the window.
 
+One controller process spans both sides of the card-backend boundary. The pre-switch recovery
+backup and the post-switch checkpoint serve PostgreSQL through the same named switch that selector
+activation uses, and the pre-switch one, which runs while the selector is still Kanboard, restores
+the previous backend on the way out so no later phase inherits it. No phase needs a fresh process,
+and restarting `apply` to make a phase read the other backend is not a supported workaround: a
+phase that archives or checkpoints the wrong engine is a defect to report, not to retry around.
+
 The expected outage begins at `global_freeze` and ends only after an operator inspects
 `resume_ready` and explicitly runs `secretary resume`. Budget a full maintenance window. First run:
 
