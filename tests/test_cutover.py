@@ -8,14 +8,23 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from secretary import cutover
+from secretary.board import provision
 from secretary.cutover import successor
 
 REVISION = "a" * 40
+INSTALLED_PRECONDITIONS = {
+    "satisfied": True,
+    "compose": {"requirement": "compose", "satisfied": True, "detail": "installed", "status": "ok"},
+    "sudo_systemctl": {"requirement": "sudo", "satisfied": True, "detail": "works"},
+    "root_commands": [],
+}
 PLAN = {
     "version": 1,
     "plan_id": "1" * 64,
@@ -68,6 +77,20 @@ class CutoverFixture(unittest.TestCase):
         self.runtime.write_text("UNRELATED=kept\nSECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8")
         self.runtime.chmod(0o640)
         self.paths = cutover.Paths(self.instance, self.data)
+        # Both privileged apply preconditions are facts about the host. No unit
+        # test may consult a live sudo or systemd, so the fixture answers them
+        # and PrivilegedPreconditionTests drives the real predicate instead.
+        self._preconditions = mock.patch.object(
+            cutover, "_privileged_preconditions", return_value=INSTALLED_PRECONDITIONS
+        )
+        self._preconditions.start()
+        self.addCleanup(self.host_preconditions)
+
+    def host_preconditions(self) -> None:
+        """Stop answering for the host so a test can drive the real predicate."""
+        if self._preconditions is not None:
+            self._preconditions.stop()
+            self._preconditions = None
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -1265,6 +1288,229 @@ class RoleBackendPropagationTests(unittest.TestCase):
                 self.assertEqual(card_backend(), "postgres")
                 os.environ.pop(cutover.BACKEND_ENV, None)
                 reset_card_backend()
+
+
+class PrivilegedPreconditionTests(CutoverFixture):
+    """The two install steps only root can take, checked before the first mutation."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host_preconditions()
+        self.compose = Path(self.temporary.name) / "opt" / "postgres-compose.yml"
+        self.compose.parent.mkdir(mode=0o755)
+
+    def install_compose(self) -> None:
+        self.compose.write_text(provision.COMPOSE_TEXT, encoding="utf-8")
+        self.compose.chmod(0o600)
+
+    def sudo(self, *, allowed: bool):
+        result = subprocess.CompletedProcess(
+            [],
+            0 if allowed else 1,
+            "Version=255.4\n" if allowed else "",
+            "" if allowed else "sudo: a password is required\n",
+        )
+        return mock.patch.object(cutover.subprocess, "run", return_value=result)
+
+    def test_compose_predicate_is_the_provisioners_own_predicate(self) -> None:
+        def drift() -> None:
+            self.compose.write_text("services: {}\n", encoding="utf-8")
+            self.compose.chmod(0o600)
+
+        def permissions() -> None:
+            self.install_compose()
+            self.compose.chmod(0o644)
+
+        def not_regular() -> None:
+            target = self.compose.with_name("elsewhere.yml")
+            target.write_text(provision.COMPOSE_TEXT, encoding="utf-8")
+            self.compose.symlink_to(target)
+
+        cases = {
+            "missing": lambda: None,
+            "drift": drift,
+            "permissions": permissions,
+            "not-regular": not_regular,
+            "ok": self.install_compose,
+        }
+        for status, prepare in cases.items():
+            with self.subTest(status=status):
+                self.compose.unlink(missing_ok=True)
+                prepare()
+                with self.sudo(allowed=True):
+                    report = cutover._privileged_preconditions(self.compose)
+                self.assertEqual(report["compose"]["status"], status)
+                self.assertEqual(report["compose"]["satisfied"], status == "ok")
+                self.assertEqual(report["satisfied"], status == "ok")
+                self.assertEqual(
+                    provision.inspect_compose(self.compose).status,
+                    report["compose"]["status"],
+                )
+
+    def test_sudo_probe_is_read_only_and_reports_a_denied_rule(self) -> None:
+        self.install_compose()
+        with self.sudo(allowed=True) as run:
+            report = cutover._privileged_preconditions(self.compose)
+        self.assertEqual(
+            run.call_args.args[0], ["sudo", "-n", "systemctl", "show", "--property=Version"]
+        )
+        self.assertTrue(report["sudo_systemctl"]["satisfied"])
+        self.assertTrue(report["satisfied"])
+        self.assertEqual(report["root_commands"], [])
+
+        with self.sudo(allowed=False):
+            denied = cutover._privileged_preconditions(self.compose)
+        self.assertFalse(denied["sudo_systemctl"]["satisfied"])
+        self.assertFalse(denied["satisfied"])
+        self.assertIn("password is required", denied["sudo_systemctl"]["detail"])
+
+    def test_refusal_names_both_root_commands_and_prints_no_stored_credential(self) -> None:
+        secret = self.instance / "board-store.env"
+        secret.write_text("SECRETARY_DB_OWNER_PASSWORD=owner-secret\n", encoding="utf-8")
+        with self.sudo(allowed=False), self.assertRaises(cutover.CutoverError) as refusal:
+            cutover._require_privileged_preconditions(self.compose)
+
+        message = str(refusal.exception)
+        self.assertIn("performs no root step", message)
+        user, group = cutover._runtime_identity()
+        self.assertIn(f"install -m 0600 -o {user} -g {group}", message)
+        self.assertIn(str(self.compose), message)
+        self.assertIn(provision.COMPOSE_TEXT, message)
+        self.assertIn("NOPASSWD: /usr/bin/systemctl", message)
+        self.assertIn(f"visudo -cf {cutover.SUDOERS_DROPIN}", message)
+        self.assertNotIn("owner-secret", message)
+
+    def test_every_unmet_precondition_refuses_a_new_apply_before_the_state_file_exists(self) -> None:
+        scenarios = {
+            "missing": (lambda: None, True),
+            "drift": (lambda: self.compose.write_text("services: {}\n", encoding="utf-8"), True),
+            "permissions": (self.install_compose, True),
+            "sudo": (self.install_compose, False),
+        }
+        for name, (prepare, allowed) in scenarios.items():
+            with self.subTest(precondition=name):
+                self.compose.unlink(missing_ok=True)
+                prepare()
+                if name == "permissions":
+                    self.compose.chmod(0o644)
+                with (
+                    mock.patch.object(provision, "DEFAULT_COMPOSE_PATH", self.compose),
+                    self.sudo(allowed=allowed),
+                    mock.patch.object(cutover, "build_plan") as plan,
+                    mock.patch.object(cutover, "Operations") as operations,
+                    self.assertRaisesRegex(cutover.CutoverError, "privileged apply preconditions"),
+                ):
+                    cutover.apply_cutover(args(), self.paths)
+                plan.assert_not_called()
+                operations.assert_not_called()
+                self.assertFalse(self.paths.state.exists())
+                self.assertIsNone(cutover._read_state(self.paths))
+
+    def test_retry_refusal_leaves_the_durable_state_byte_and_mtime_identical(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        state["phases"]["preflight"] = {"status": "complete"}
+        cutover._write_state(self.paths, state)
+        before = self.paths.state.read_bytes()
+        stamp = self.paths.state.stat().st_mtime_ns
+
+        with (
+            mock.patch.object(provision, "DEFAULT_COMPOSE_PATH", self.compose),
+            self.sudo(allowed=True),
+            mock.patch.object(cutover, "Operations") as operations,
+            self.assertRaisesRegex(cutover.CutoverError, "privileged apply preconditions"),
+        ):
+            cutover.apply_cutover(args(), self.paths)
+
+        operations.assert_not_called()
+        self.assertEqual(self.paths.state.read_bytes(), before)
+        self.assertEqual(self.paths.state.stat().st_mtime_ns, stamp)
+
+    def test_installed_preconditions_let_a_new_apply_reach_every_phase(self) -> None:
+        self.install_compose()
+        calls: list[str] = []
+        with (
+            mock.patch.object(provision, "DEFAULT_COMPOSE_PATH", self.compose),
+            self.sudo(allowed=True),
+            mock.patch.object(cutover, "build_plan", return_value=PLAN),
+            mock.patch.object(cutover, "Operations", fake_operations(None, calls, {"enabled": False})),
+            mock.patch.object(cutover, "_provenance", return_value={}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+        ):
+            result = cutover.apply_cutover(args(), self.paths)
+
+        self.assertEqual(result["status"], "resume-ready")
+        self.assertEqual(calls, list(cutover.PHASES))
+
+    def test_plan_shows_both_preconditions_and_the_root_commands_without_failing(self) -> None:
+        buffer = StringIO()
+        with (
+            mock.patch.object(cutover, "resolve_paths", return_value=self.paths),
+            mock.patch.object(cutover, "build_plan", return_value=dict(PLAN)),
+            mock.patch.object(provision, "DEFAULT_COMPOSE_PATH", self.compose),
+            self.sudo(allowed=False),
+            redirect_stdout(buffer),
+        ):
+            code = cutover.run_cutover(
+                argparse.Namespace(
+                    cutover_command="plan",
+                    instance=str(self.instance),
+                    expected_revision=REVISION,
+                )
+            )
+
+        self.assertEqual(code, 0)
+        document = json.loads(buffer.getvalue())
+        self.assertEqual(document["confirmation"], PLAN["confirmation"])
+        preconditions = document["privileged_preconditions"]
+        self.assertFalse(preconditions["satisfied"])
+        self.assertFalse(preconditions["compose"]["satisfied"])
+        self.assertFalse(preconditions["sudo_systemctl"]["satisfied"])
+        self.assertTrue(
+            any("NOPASSWD: /usr/bin/systemctl" in command for command in preconditions["root_commands"])
+        )
+        self.assertTrue(
+            any(str(self.compose) in command for command in preconditions["root_commands"])
+        )
+
+    def test_service_commands_are_executed_through_the_non_interactive_sudo_contour(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(cutover.subprocess, "run", return_value=completed) as run:
+            evidence = cutover._systemctl("stop", ("secretary-web.service",))
+
+        self.assertEqual(
+            run.call_args.args[0], ["sudo", "-n", "systemctl", "stop", "secretary-web.service"]
+        )
+        self.assertEqual(evidence["privileged"], "sudo -n")
+        self.assertEqual(
+            evidence["results"][0]["command"],
+            ["sudo", "-n", "systemctl", "stop", "secretary-web.service"],
+        )
+        from secretary.host_apply import SystemdUnitInstaller
+
+        self.assertEqual(
+            SystemdUnitInstaller().argv(["systemctl", "restart", "unit"]),
+            ["sudo", "-n", "systemctl", "restart", "unit"],
+        )
+
+    def test_early_recovery_restarts_consumers_through_the_same_sudo_contour(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        state["status"] = "failed-frozen"
+        state["phases"]["global_freeze"] = {"status": "complete"}
+        cutover._write_state(self.paths, state)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(cutover, "_provenance", return_value={}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_source_evidence", return_value={"fingerprint": "source"}),
+            mock.patch.object(cutover.subprocess, "run", return_value=completed) as run,
+        ):
+            result = cutover.recover_cutover(args(confirm="RECOVER-" + "1" * 16), self.paths)
+
+        self.assertEqual(result["recovery"]["branch"], "kanboard-before-fingerprint")
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(len(commands), len(cutover.START_UNITS))
+        for command, unit in zip(commands, cutover.START_UNITS, strict=True):
+            self.assertEqual(command, ["sudo", "-n", "systemctl", "restart", unit])
 
 
 if __name__ == "__main__":

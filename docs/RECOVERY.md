@@ -689,6 +689,13 @@ fingerprint is unchanged. At or after the first committed event, recovery is Pos
 or restart PostgreSQL, or restore the verified PostgreSQL recovery backup. It never points writers at
 the stale Kanboard archive. No recovery branch resumes the pipeline automatically.
 
+Every consumer stop, start and restart in `apply` and in all three `recover` branches is issued as
+`sudo -n systemctl ...` and recorded with that argv in the evidence; the controller runs no bare
+`systemctl` and installs no privileged file. The two root-installed preconditions `apply` proves
+before its first phase are described once under *Privileged preconditions installed by root before
+the window* in `docs/OPERATIONS.md`; a refusal there is durable-effect-free and does not need
+recovery, only the root step and the identical rerun.
+
 An uncertain phase at or after `global_freeze` stays frozen. Do not remove the freeze, hand-edit
 `runtime.env`, rerun the importer, or start an individual consumer. Inspect `secretary cutover status`
 and retry the same cutover identity or use its `RECOVER-...` token.
