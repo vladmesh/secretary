@@ -36,6 +36,20 @@ from secretary.tasks import TaskWriter
 from tests.sql_backend_fixtures import PostgresBoard
 
 
+def installed_inventory() -> cutover.UnitInventory:
+    """Every declared unit installed, so the rehearsal asserts about a fixture, not a machine.
+
+    `service_reconciliation` inventories systemd itself, and `_systemctl` and `_service_evidence`
+    being answered does not cover that third host fact: an unpatched call reads the LoadState of
+    twelve units from whatever host the suite runs on, and the phase then acts on whichever of
+    them that host happens to have.  Nothing here mutates a unit either way, but a rehearsal whose
+    result depends on the machine is not a rehearsal of the installation.
+    """
+    return cutover.UnitInventory(
+        {declaration.name: "loaded" for declaration in cutover.DECLARED_UNITS}
+    )
+
+
 def cutover_source(repository: Path) -> BoardSource:
     """Complete, small Kanboard snapshot for the isolated controller boundary."""
 
@@ -596,6 +610,14 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             mock.patch.object(cutover, "_secretary", side_effect=isolated_command),
             mock.patch.object(cutover, "_systemctl", return_value={"action": "isolated"}),
             mock.patch.object(cutover, "_service_evidence", return_value=[]),
+            mock.patch.object(cutover, "inventory_units", return_value=installed_inventory()),
+            # The guard on the patch above: nothing else in this boundary may reach the host's
+            # systemd, and a new phase that did would fail here rather than quietly depend on it.
+            mock.patch.object(
+                cutover,
+                "_unit_load_state",
+                side_effect=AssertionError("this boundary must not read the host's systemd"),
+            ),
             mock.patch.object(cutover, "_provenance", return_value={"product_root": str(self.root)}),
             mock.patch.object(cutover, "_writer_processes", return_value=[]),
             mock.patch("secretary.board.import_board.read_source", return_value=source),

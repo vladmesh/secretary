@@ -981,8 +981,33 @@ def inventory_units() -> UnitInventory:
 
 
 def _restart_consumers() -> dict[str, Any]:
-    """Every recovery branch reconciles the installed consumers, not a fixed list."""
+    """Every recovery branch reconciles the installed consumers, not a fixed list.
+
+    Recovery is the controller's second entrance: its own command, run after an apply that
+    did not finish, with the apply seam and its `_require_privileged_preconditions` gate
+    behind it rather than in front.  A unit that was installed when those preconditions
+    passed can be gone by the time this runs, and inventorying excludes every `not-found`
+    unit — including a required one.  A silently excluded required unit is a recovery that
+    reports success without bringing the web tier back, which is what the `systemctl
+    restart` of the fixed list used to fail loudly on.  So the exclusion of a required unit
+    refuses here instead, naming the unit and the LoadState that excluded it.
+
+    The refusal is raised before the first restart, so it changes no unit; the caller
+    writes no state document for a recovery that did not reconcile, and every durable
+    effect the branch already made — the selector in runtime.env, the provisioned and
+    migrated store — stands and is idempotent under the identical rerun.
+    """
     inventory = inventory_units()
+    if inventory.missing_required:
+        raise CutoverError(
+            "recovery cannot reconcile an installation that is missing a required unit; "
+            "no unit was restarted and the durable cutover state is unchanged:\n"
+            + "\n".join(
+                f"- {name}: LoadState={inventory.state(name)}"
+                for name in inventory.missing_required
+            )
+            + "\nInstall the unit as root, then rerun the identical recover command."
+        )
     return {
         "services": _systemctl("restart", inventory.start_units()),
         "inventory": inventory.evidence(),
@@ -1820,11 +1845,18 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
         if state.get("first_sql_write") is not None:
             if _backend(paths) != "postgres":
                 _set_backend(paths, "postgres")
+            # Recovery is the second entrance that changes which backend the installation
+            # serves, and it moves the durable selector and the process decision through the
+            # same named switch apply does.  The durable write is conditional because the
+            # selector may already be activated; the decision is not, because the process
+            # that reconciles the store must serve what runtime.env now names either way.
+            _serve_backend("postgres")
             evidence = {"postgresql": _reconcile_postgres(paths), **_restart_consumers()}
             branch = "postgres-only"
         else:
             source = _frozen_source_unchanged(paths, state)
             _set_backend(paths, "kanboard")
+            _serve_backend("kanboard")
             evidence = {"source": source, **_restart_consumers()}
             branch = "kanboard-before-first-write"
         state["recovery"] = {
