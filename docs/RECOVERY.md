@@ -717,3 +717,10 @@ PostgreSQL-only recovery, SQL-write evidence and SQL-audit uncertainty likewise 
 slot for a Kanboard retry. An entered but incomplete import reports
 `final-import-occupancy-uncertain-terminal` and follows the same rule; phase absence, not mere lack of
 completion evidence, is what proves no controller import effect.
+
+The recovered 2026-09-09 target is intentionally preserved at revision `0006` with its imported
+population. Upgrade it in place to `0007_card_transport_key`: the migration backfills immutable Card
+transport keys without changing refs, per-project task numbers, ownership, archived rows, comments,
+links or audit. Do not wipe or reimport that occupied target, edit controller state, or infer authority
+to retry cutover. A new owner/operator maintenance window remains required after the repair is merged
+and installed.

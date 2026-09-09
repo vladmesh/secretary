@@ -24,12 +24,8 @@ live data (`board/import_board.py`):
   `extensions.kanboard.swimlane` — and the lane *table* is virtual, derived from the lanes the
   rows themselves name plus the products the store holds.
 
-What is deliberately **not** here: a numeric Kanboard card id.  §9 makes the reference the card's
-stable identifier and the store has no column for Kanboard's integer, so the integer this client
-answers with is `tasks.task_number` — the store's own number for the card, parsed from its
-reference by the importer.  Two projects can spell the same number, and rather than pick one this
-client refuses (`SqlCardError`), because silently serving the wrong card is the one failure a
-board client must not have.
+The integer board-client identity is `tasks.board_key`. It is immutable and globally unique while
+`tasks.task_number` remains the public per-project number parsed from the stable reference.
 """
 
 from __future__ import annotations
@@ -43,7 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from secretary.board.backend import record_key_kind
+from secretary.board.backend import card_transport_key, record_key_kind
 from secretary.board.sql_product_issues import ProductIssueRecords
 from secretary.board.sql_sprints import SqlSprintRecords
 from secretary.board.store import BoardStoreCredentials
@@ -401,14 +397,14 @@ class SqlCardClient:
     # --- cards -----------------------------------------------------------------------
 
     _CARD_COLUMNS = (
-        "task_ref, task_number, title, description, state, archived, position, "
+        "task_ref, board_key, title, description, state, archived, position, "
         "extensions, created_at, updated_at, date_moved"
     )
 
     def _row(self, values: tuple[Any, ...]) -> dict[str, Any]:
         (
             ref,
-            number,
+            board_key,
             title,
             description,
             state,
@@ -421,8 +417,11 @@ class SqlCardClient:
         ) = values
         bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
         lane = (bag.get("kanboard") or {}).get("swimlane")
+        transport_key = card_transport_key(board_key)
+        if transport_key is None:
+            raise SqlCardError(f"card {ref} carries malformed transport key {board_key!r}")
         return {
-            "id": number,
+            "id": transport_key,
             "reference": ref,
             "title": _text(title),
             "description": _text(description),
@@ -452,7 +451,7 @@ class SqlCardClient:
             previous = seen.get(row["id"])
             if previous is not None:
                 raise SqlCardError(
-                    "two cards share one card number and the store keeps no separate card id: "
+                    f"two cards carry transport key {row['id']}: "
                     f"{previous} and {row['reference']}"
                 )
             seen[row["id"]] = row["reference"]
@@ -484,11 +483,14 @@ class SqlCardClient:
         return rows[0] if rows else None
 
     def _ref_of(self, task_id: Any) -> str:
-        rows = self._query("SELECT task_ref FROM tasks WHERE task_number = %s", (int(task_id),))
+        key = card_transport_key(task_id)
+        if key is None:
+            raise SqlCardError(f"no Card transport key is {task_id!r}")
+        rows = self._query("SELECT task_ref FROM tasks WHERE board_key = %s", (key,))
         if not rows:
-            raise SqlCardError(f"no card carries the number {task_id}")
+            raise SqlCardError(f"no card carries transport key {key}")
         if len(rows) > 1:
-            raise SqlCardError(f"two cards carry the number {task_id}")
+            raise SqlCardError(f"two cards carry transport key {key}")
         return rows[0][0]
 
     def _rpc_createTask(
@@ -515,10 +517,10 @@ class SqlCardClient:
         lane = self._lane_name(swimlane_id)
         extensions: dict[str, Any] = {"kanboard": {"swimlane": lane}} if lane else {}
         now = _now()
-        self._execute(
+        rows = self._query(
             "INSERT INTO tasks (task_ref, task_number, title, description, state, archived, "
             "position, extensions, created_at, updated_at, date_moved) "
-            "VALUES (%s, %s, %s, %s, %s, false, %s, %s::jsonb, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, false, %s, %s::jsonb, %s, %s, %s) RETURNING board_key",
             (
                 reference,
                 number,
@@ -533,7 +535,7 @@ class SqlCardClient:
             ),
         )
         self._commit_unless_nested()
-        return number
+        return int(rows[0][0])
 
     def _next_position(self, state: str) -> int:
         rows = self._query("SELECT coalesce(max(position), 0) + 1 FROM tasks WHERE state = %s", (state,))

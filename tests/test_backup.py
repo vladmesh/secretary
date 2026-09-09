@@ -1267,8 +1267,8 @@ class PostgresBackupPolicyTests(unittest.TestCase):
             metadata = {
                 "engine": "postgresql", "format": "custom", "dump_version": 1,
                 "image": "postgres:16", "server_major": 16,
-                "source_schema": "0006_sprint_transport_key",
-                "alembic_head": "0006_sprint_transport_key",
+                "source_schema": "0007_card_transport_key",
+                "alembic_head": "0007_card_transport_key",
                 "restore_purpose": "local recovery", "source_endpoint_id": "a" * 64,
                 "table_counts": {"tasks": 1},
             }

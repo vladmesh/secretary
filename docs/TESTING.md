@@ -22,7 +22,7 @@ exercise atomic credential materialization, fail-closed config and Compose drift
 and pulled-code handoff. `tests.test_board_store_schema` in `integration-board` uses real Docker
 Compose and `postgres:16`: it creates a disposable named volume on a dynamically selected loopback
 port, provisions
-all nine private values, migrates scratch to `0006_sprint_transport_key`, verifies owner/app/read
+all nine private values, migrates scratch to `0007_card_transport_key`, verifies owner/app/read
 logins and privileges, proves default privileges with a later owner-created table, reruns unchanged
 and removes the disposable project and volume. Missing Docker, Compose, psycopg, SQLAlchemy or
 Alembic is a red setup failure, never a skip. No integration test reads or writes the live
@@ -357,6 +357,12 @@ runs the real provision, migration verification, quiescence, import, parity, rec
 activation, public acceptance and post-switch checkpoint methods against one isolated PostgreSQL 16
 boundary. Only systemd, installed-head probes and dispatcher host launch are substituted. Missing
 Docker, psycopg, SQLAlchemy, Alembic or PostgreSQL is a red prerequisite failure, never a skip.
+
+The PostgreSQL contract also seeds `butler-1` and `codegen-product-kit-1` with public task number 1
+in different projects. It proves distinct transport keys, active and archived reads, isolated
+metadata/comments/moves/audit, idempotent replay, `TaskReader.export`, and lossless upgrade of a
+populated `0006` database before a fresh create advances the allocator. Neither public ref is
+renumbered.
 
 An external rehearsal and live operation remain conditional evidence boundaries. Record source and
 target identities, migration head, per-table import/parity counts, protocol acceptance counts,

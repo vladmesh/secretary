@@ -1,7 +1,7 @@
 # The board store: read/write inventory and the PostgreSQL schema
 
 Status: schema and container provisioning are implemented through revision
-`0006_sprint_transport_key` for Cards, Product/Issue and Sprint. Live import, backend-aware backup
+`0007_card_transport_key` for Cards, Product/Issue and Sprint. Live import, backend-aware backup
 and the cutover controller are implemented; the external live operation remains pending and the
 default backend is still Kanboard.
 
@@ -212,21 +212,23 @@ source.  `tests/test_architecture.py` holds that list and its reasons executably
 that builds a client for itself fails the unit suite.
 
 **The identity a normalized row carries.**  `<kind>_<backend>_<n>` — `task_kanboard_12`,
-`task_postgres_468`, `sprint_kanboard_9` — is one convention, minted by `board/backend.py:
+`task_postgres_37`, `sprint_kanboard_9` — is one convention, minted by `board/backend.py:
 entity_id` and read back by `entity_number`, and by nothing else.  `kind` is the entity, `backend`
 is the implementation that answered, and `n` is that implementation's own number for the row:
-Kanboard's task id, or `tasks.task_number` in the store (§9 keeps the reference as the stable
-identifier, so the store has no column for Kanboard's integer).  One function each way is not
+Kanboard's task id, or `tasks.board_key` in the store. `tasks.task_ref` remains the stable public
+identity and `tasks.task_number` remains its per-project public number; neither is a globally unique
+integer protocol address. One function each way is not
 tidiness.  Every consumer that stripped a single literal prefix answered "invalid" for every row
 the other backend produced, which is how `report`, `verdict` and `decide` refused on the
 PostgreSQL backend — through `BoardHost.marker_comment`'s card lookup — while the reader that had
 just minted the identity worked; `sprints.py`'s sprint lookup carried the same defect with
 `sprint_kanboard_`.
 
-Product and Issue retain their string references but the inherited board vocabulary addresses a
+Cards, Products and Issues retain their string references but the inherited board vocabulary addresses a
 row by integer. `board.backend.record_key` hashes `<kind>:<identifier>` into disjoint positive
 `bigint` ranges above the card schema's `int4`; the value is stored as each row's unique indexed
-`board_key`. Lookups use that index and verify the deterministic mapping. A collision is refused,
+`board_key`. Card keys are sequence-allocated below two billion. Lookups use the appropriate unique
+index and reject malformed or colliding stored keys. A collision is refused,
 never resolved by scanning or guessing, and Product, Issue and Card keys cannot cross kinds.
 
 
@@ -723,8 +725,9 @@ that can hold every reference the board has. The reference that is still **not**
 *duplicate* one: `sprint:1037` names two rows on today's board, a live one and an archived one, and
 a primary key holds one of them. §9 records that.
 
-The board-client integer namespace is central and disjoint: Card task numbers are below
-`2000000000`; numbered Sprints occupy `[2000000000,2500000000)`, custom Sprint references occupy
+The board-client integer namespace is central and disjoint: immutable Card `board_key` values are in
+`[1,2000000000)` independently of public task numbers; numbered Sprints occupy
+`[2000000000,2500000000)`, custom Sprint references occupy
 `[2500000000,3000000000)`, Products `[3000000000,4000000000)`, and Issues
 `[4000000000,5000000000)`. `sprints.board_key` makes dispatch an indexed equality lookup. No
 metadata, comment, update or close path enumerates Sprint rows to guess an integer's owner.
@@ -826,6 +829,8 @@ name a card — and `MATCH SIMPLE` skips the check exactly then.
 ```sql
 CREATE TABLE tasks (
     task_ref       text PRIMARY KEY,                  -- "secretary-1580"
+    board_key      bigint NOT NULL UNIQUE DEFAULT nextval('card_board_key_seq'),
+                                                     -- immutable protocol identity, 1..1999999999
     -- Nullable since 2026-09-07: `secretary-583` carries no `project` metadata (§8.6).
     project_id     text REFERENCES projects(project_id),
     task_number    integer NOT NULL,
@@ -866,6 +871,7 @@ CREATE TABLE tasks (
     created_at     timestamptz NOT NULL,
     updated_at     timestamptz NOT NULL,
     date_moved    timestamptz,                       -- NULL when no move time was observed
+    CHECK (board_key > 0 AND board_key < 2000000000),
     UNIQUE (project_id, task_number),
     -- The target the sprint's scoped cursor and decision keys need (§3.3, §3.8).
     -- Redundant with the primary key by design.
@@ -1427,7 +1433,7 @@ is the whole of its placement, and it is why the order above did not otherwise c
 Every fence in §3 that begins `ALTER TABLE` is a step-2 fence and is labelled as one. Every fence
 that begins `CREATE` is a step-1 fence. Nothing else needs to be decided at execution time.
 
-**The catalogue, per revision.** The schema of §3 is built by four Alembic revisions, and a card
+**The catalogue, per revision.** The schema of §3 is built by seven Alembic revisions, and a card
 that checks its work against a migrated database needs the numbers of the one it ran. Both are
 counted from a real `postgres:16` by `tests/test_board_store_schema.py`, never asserted from
 reading:
@@ -1440,6 +1446,7 @@ reading:
 | `0004_product_issue_sql` (2026-09-08, Product/Issue and Done retention) | 24 | 37 | 40 | 24 | 16 | 4 |
 | `0005_sprint_sql` (2026-09-08, Sprint runtime and ordered evidence) | 24 | 37 | 40 | 24 | 15 | 4 |
 | `0006_sprint_transport_key` (2026-09-08, disjoint indexed Sprint transport keys) | 24 | 38 | 40 | 24 | 16 | 4 |
+| `0007_card_transport_key` (2026-09-09, collision-free indexed Card transport keys) | 24 | 39 | 40 | 24 | 17 | 4 |
 
 The last table and the last primary key are Alembic's `alembic_version` in both rows. The deltas
 are the whole of `0002`: one table (`issue_comments`) with its primary key, its `UNIQUE
@@ -1460,6 +1467,11 @@ measures. The number that *is* different is the one this table does not carry �
 uniqueness; indexed unique `board_key` columns on Products and Issues; Product extensions; and
 nullable `tasks.date_moved`. The timestamp deliberately stays NULL for history whose move time
 the SQL store never observed.
+
+`0007` upgrades an occupied `0006` store in place. It assigns every existing task a distinct Card
+key in stable reference order, advances `card_board_key_seq` beyond the backfill, then makes the
+column non-null, unique and range-checked. It does not rewrite refs, per-project numbers, ownership,
+archive state, relations, comments or audit records.
 
 The split exists because four of the schema's relations are forward or mutual, and a scoped
 foreign key (§3.3) makes that unavoidable rather than incidental: `sprints` must exist before
