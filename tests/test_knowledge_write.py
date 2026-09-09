@@ -62,6 +62,7 @@ class KnowledgeRepoCase(unittest.TestCase):
         (board / "cards.ndjson").write_text(body, encoding="utf-8")
         (board / "sprints.ndjson").write_text("", encoding="utf-8")
         (board / "events.ndjson").write_text("", encoding="utf-8")
+        (board / "audit.ndjson").write_text("", encoding="utf-8")
         (board / "export.json").write_text(
             json.dumps({"version": 1, "card_count": len(cards), "sprint_count": 0}), encoding="utf-8"
         )

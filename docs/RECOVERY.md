@@ -111,7 +111,7 @@ configuration.
 <private repository>/
   instance.yaml, persona/, projects/, adapters/, heads/, policies/   config, committed by the operator
   state/                                                             state, committed by the auto-writer
-    board/   cards.ndjson, sprints.ndjson, events.ndjson, export.json, analytics-manifest.json
+    board/   cards.ndjson, sprints.ndjson, events.ndjson, audit.ndjson, export.json, analytics-manifest.json
     runs/    runs.ndjson, claims.json, watermarks.json, export.json
     memory/facts/**
     knowledge/**   brainstorms, decision logs, incident write-ups
@@ -234,19 +234,21 @@ history.
   leak, for example a token pasted into a card or a log. The memory and knowledge writers run the same
   scan over their own text before committing, since their path does not go through the tick gate.
 
-### Analytics checkpoint seal v1
+### Analytics checkpoint seal v2
 
-`analytics-manifest.json` is `secretary.board.analytics-checkpoint` version 1. It is the boundary for
+`analytics-manifest.json` is `secretary.board.analytics-checkpoint` version 2. It is the boundary for
 a later offline analytics projection, not a replacement for recovery validation. Its object has exactly
 `schema`, `version`, `checkpoint_id`, and `files`. `files` has exactly one entry for each of
-`events.ndjson`, `cards.ndjson`, `sprints.ndjson`, and `export.json`. Every entry records its path,
-lowercase SHA-256 digest and byte count; the three NDJSON entries also record their non-blank line count.
-`checkpoint_id` is the lowercase SHA-256 digest of those canonical file-entry values. `export.json`
+`events.ndjson`, `cards.ndjson`, `sprints.ndjson`, `audit.ndjson`, and `export.json`. Every entry records its path,
+lowercase SHA-256 digest and byte count; the four NDJSON entries also record their non-blank line count.
+`checkpoint_id` is the lowercase SHA-256 digest of those canonical file-entry values. Version 1 seals
+without `audit.ndjson` remain readable; new exports carrying audit history are always sealed as version 2.
+`export.json`
 continues to be a card/sprint summary, never proof of the cut by itself.
 
-The writer validates all four files first, synthesizing an empty `events.ndjson` when there are no board
+The writer validates all five files first, synthesizing an empty `events.ndjson` when there are no board
 events, then hashes and validates the staged manifest. It removes any prior manifest before replacing the
-four files and renames the new manifest last. A directory copied during that interval therefore has no
+five files and renames the new manifest last. A directory copied during that interval therefore has no
 manifest, or after the final rename has a complete matching cut; it cannot carry a manifest authenticating
 the prior files mixed with the new ones.
 
@@ -255,7 +257,7 @@ dispatcher, provider, transcript, comment or runtime state, returns only verifie
 rejects unknown schemas, missing or extra files, duplicate entries, malformed metadata, digest/count
 mismatches and stale card/sprint summaries. A projection must call it before parsing any analytics rows.
 Eventless or unsealed historical checkpoints remain valid recovery input under the existing restore rules,
-but are deliberately not analytics v1 input; the writer does not backfill seals into history.
+but are deliberately not analytics v2 input; the writer does not backfill seals into history.
 
 ## Failure and divergence
 

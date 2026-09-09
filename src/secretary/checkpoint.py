@@ -65,8 +65,15 @@ from triggered_agents.runtime.redact import redact
 # readable without either events.ndjson or the analytics seal.
 ANALYTICS_MANIFEST = "analytics-manifest.json"
 ANALYTICS_SCHEMA = "secretary.board.analytics-checkpoint"
-ANALYTICS_VERSION = 1
-ANALYTICS_FILES = ("events.ndjson", "cards.ndjson", "sprints.ndjson", "export.json")
+ANALYTICS_VERSION = 2
+LEGACY_ANALYTICS_FILES = ("events.ndjson", "cards.ndjson", "sprints.ndjson", "export.json")
+ANALYTICS_FILES = (
+    "events.ndjson",
+    "cards.ndjson",
+    "sprints.ndjson",
+    "audit.ndjson",
+    "export.json",
+)
 BOARD_ENTRIES = (
     "cards.ndjson",
     "sprints.ndjson",
@@ -75,7 +82,7 @@ BOARD_ENTRIES = (
     "export.json",
     ANALYTICS_MANIFEST,
 )
-BOARD_REQUIRED = ("cards.ndjson", "sprints.ndjson", "export.json")
+BOARD_REQUIRED = ("cards.ndjson", "sprints.ndjson", "audit.ndjson", "export.json")
 RUNS_ENTRIES = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")
 RUNS_REQUIRED = RUNS_ENTRIES
 
@@ -173,8 +180,10 @@ def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
         )
     if manifest["schema"] != ANALYTICS_SCHEMA:
         _analytics_failure(manifest_path, f"unknown manifest schema {manifest['schema']!r}")
-    if not _is_int(manifest["version"]) or manifest["version"] != ANALYTICS_VERSION:
+    version = manifest["version"]
+    if not _is_int(version) or version not in {1, ANALYTICS_VERSION}:
         _analytics_failure(manifest_path, f"unknown manifest version {manifest['version']!r}")
+    files = ANALYTICS_FILES if version == ANALYTICS_VERSION else LEGACY_ANALYTICS_FILES
     checkpoint_id = manifest["checkpoint_id"]
     if not isinstance(checkpoint_id, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_id):
         _analytics_failure(manifest_path, "checkpoint_id must be a lowercase SHA-256 digest")
@@ -187,7 +196,7 @@ def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
         if not isinstance(entry, dict):
             _analytics_failure(manifest_path, f"files[{number}] entry must be an object")
         relative = entry.get("path")
-        if not isinstance(relative, str) or relative not in ANALYTICS_FILES:
+        if not isinstance(relative, str) or relative not in files:
             _analytics_failure(manifest_path, f"files[{number}].path must name a required analytics file")
         if relative in indexed:
             _analytics_failure(manifest_path, f"files[{number}] duplicate manifest entry for {relative}")
@@ -207,15 +216,15 @@ def verify_analytics_checkpoint(directory: Path) -> AnalyticsCheckpoint:
             )
         indexed[relative] = entry
 
-    missing_entries = [name for name in ANALYTICS_FILES if name not in indexed]
+    missing_entries = [name for name in files if name not in indexed]
     if missing_entries:
         _analytics_failure(manifest_path, f"missing manifest entry for {', '.join(missing_entries)}")
-    if len(entries) != len(ANALYTICS_FILES):
+    if len(entries) != len(files):
         _analytics_failure(manifest_path, "files must list each required analytics file exactly once")
-    _verify_analytics_directory_files(root)
+    _verify_analytics_directory_files(root, files)
 
     canonical_entries: list[dict[str, Any]] = []
-    for name in ANALYTICS_FILES:
+    for name in files:
         path = root / name
         if not path.is_file() or path.is_symlink():
             _analytics_failure(path, "required analytics file is missing or is not a regular file")
@@ -278,8 +287,8 @@ def _analytics_checkpoint_id(entries: list[dict[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _verify_analytics_directory_files(root: Path) -> None:
-    allowed = {*ANALYTICS_FILES, ANALYTICS_MANIFEST, ".gitignore"}
+def _verify_analytics_directory_files(root: Path, files: tuple[str, ...]) -> None:
+    allowed = {*files, ANALYTICS_MANIFEST, ".gitignore"}
     try:
         entries = list(root.iterdir())
     except OSError as exc:

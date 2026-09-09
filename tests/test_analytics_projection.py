@@ -172,6 +172,7 @@ class AnalyticsProjectionTests(unittest.TestCase):
         sprints = sprints if sprints is not None else [{"reference": SPRINT}]
         for name, values in (("cards.ndjson", cards), ("sprints.ndjson", sprints), ("events.ndjson", events)):
             (board / name).write_text("".join(json.dumps(value) + "\n" for value in values), encoding="utf-8")
+        (board / "audit.ndjson").write_text("", encoding="utf-8")
         (board / "export.json").write_text(
             json.dumps({"version": 1, "card_count": len(cards), "sprint_count": len(sprints)}) + "\n",
             encoding="utf-8",
