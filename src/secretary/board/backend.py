@@ -118,9 +118,12 @@ POSTGRES_SERVES = frozenset({CARD, PRODUCT_ISSUE, SPRINT})
 
 
 # Every normalized entity shares the integer-addressed board-client vocabulary.  These ranges
-# are its one namespace: Cards retain their positive int4 task number, while Sprint, Product and
-# Issue keys are stored and indexed beside their string identity.  Sprint reserves two disjoint
+# are its one namespace: Cards use an immutable stored key in the positive range below two
+# billion, while Sprint, Product and Issue keys are stored and indexed beside their string
+# identity.  Sprint reserves two disjoint
 # half-ranges so numbered references are reversible without colliding with custom references.
+CARD_KEY_BASE = 1
+CARD_KEY_LIMIT = 2_000_000_000
 RECORD_KINDS = ("sprint", "product", "issue")
 RECORD_KEY_BASES = {"sprint": 2_000_000_000, "product": 3_000_000_000, "issue": 4_000_000_000}
 RECORD_KEY_SPAN = 1_000_000_000
@@ -173,6 +176,15 @@ def record_key_kind(value: object) -> str | None:
         if base <= number < base + RECORD_KEY_SPAN:
             return kind
     return None
+
+
+def card_transport_key(value: object) -> int | None:
+    """Return a valid Card transport key, or ``None`` outside the Card namespace."""
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if CARD_KEY_BASE <= number < CARD_KEY_LIMIT else None
 
 
 def board_client(
@@ -295,6 +307,8 @@ __all__ = [
     "CARD",
     "CARD_BACKENDS",
     "CARD_BACKEND_ENV",
+    "CARD_KEY_BASE",
+    "CARD_KEY_LIMIT",
     "DEFAULT_CARD_BACKEND",
     "ENTITY_KINDS",
     "KANBOARD",
@@ -309,6 +323,7 @@ __all__ = [
     "card_backend",
     "card_backend_status",
     "card_client",
+    "card_transport_key",
     "entity_id",
     "entity_number",
     "parse_card_backend",

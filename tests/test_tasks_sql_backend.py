@@ -18,15 +18,15 @@ the card client's own protocol (`BoardFixture` in tests/test_tasks.py) and read 
 is no longer one of its reasons.
 
 Where an expectation genuinely cannot be shared, the difference is stated here rather than
-softened: the card's identity.  §9 makes a card's reference its stable identifier and the store
-holds no Kanboard integer, so `tasks.task_number` is the number this backend answers with and the
-normalized `id` reads `task_postgres_468` where Kanboard's reads `task_kanboard_12`.  That is a
-different value for the same card, and a test that asserted one spelling cannot assert both.
+softened: the card's identity. The stable public reference and per-project task number are not the
+PostgreSQL board-client identity; `tasks.board_key` is. A test that asserted the old overloaded
+suffix therefore changes with this contract.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import tempfile
 import unittest
@@ -128,7 +128,7 @@ class SqlTaskReaderTests(SqlBoardCase):
         self.assertEqual([task["ref"] for task in result], ["secretary-468"])
         task = result[0]
         # The one field that cannot be shared with the Kanboard run: §9's identity.
-        self.assertEqual(task["id"], "task_postgres_468")
+        self.assertEqual(task["id"], "task_postgres_1")
         self.assertEqual(task["claim"], {"worker": "codex-terra", "claimed_at": None})
         self.assertEqual(
             task["retry"], {"same": 2, "switched": 0, "heads": ["codex-terra", "claude-opus"]}
@@ -514,7 +514,10 @@ class SqlTaskWriterTests(SqlBoardCase):
             "SELECT status, operation, ref FROM requests WHERE request_id = %s", ("rq-1",)
         )
         self.assertEqual(rows, [("committed", "commented", "secretary-468")])
-        bodies = [row["comment"] for row in self.client.call("getAllComments", task_id=468)]
+        task_id = self.client.call(
+            "getTaskByReference", project_id=1, reference="secretary-468"
+        )["id"]
+        bodies = [row["comment"] for row in self.client.call("getAllComments", task_id=task_id)]
         self.assertIn("hello", "\n".join(bodies))
 
     def test_the_same_request_id_replays_instead_of_writing_twice(self) -> None:
@@ -526,8 +529,119 @@ class SqlTaskWriterTests(SqlBoardCase):
         )
 
         self.assertTrue(again["replayed"])
-        bodies = [row["comment"] for row in self.client.call("getAllComments", task_id=468)]
+        task_id = self.client.call(
+            "getTaskByReference", project_id=1, reference="secretary-468"
+        )["id"]
+        bodies = [row["comment"] for row in self.client.call("getAllComments", task_id=task_id)]
         self.assertEqual(sum("once" in body for body in bodies), 1)
+
+    def test_cross_project_suffix_collision_is_isolated_end_to_end(self) -> None:
+        """The two live refs share public number 1 but never share protocol identity or effects."""
+        with self.client.transaction():
+            self.client._execute(
+                "INSERT INTO projects (project_id, enabled, registry_present) VALUES "
+                "('butler', true, true), ('codegen-product-kit', true, true) "
+                "ON CONFLICT (project_id) DO NOTHING"
+            )
+        keys = {}
+        for ref, project in (
+            ("butler-1", "butler"),
+            ("codegen-product-kit-1", "codegen-product-kit"),
+        ):
+            keys[ref] = self.client.call(
+                "createTask",
+                project_id=1,
+                title=ref,
+                description=f"description for {ref}",
+                column_id=_COLUMN_ID_BY_STATE["ready"],
+                reference=ref,
+            )
+            self.client.call("saveTaskMetadata", task_id=keys[ref], values={"project": project})
+
+        self.assertNotEqual(keys["butler-1"], keys["codegen-product-kit-1"])
+        self.client.call(
+            "updateTask",
+            id=keys["codegen-product-kit-1"],
+            reference="codegen-product-kit-1",
+            title="kit collision updated",
+        )
+        self.assertEqual(
+            self.client._query(
+                "SELECT board_key FROM tasks WHERE task_ref = 'codegen-product-kit-1'"
+            ),
+            [(keys["codegen-product-kit-1"],)],
+        )
+        self.assertEqual(
+            self.client._query(
+                "SELECT task_ref, task_number FROM tasks WHERE task_ref IN (%s, %s) ORDER BY task_ref",
+                ("butler-1", "codegen-product-kit-1"),
+            ),
+            [("butler-1", 1), ("codegen-product-kit-1", 1)],
+        )
+        self.writer.comment(
+            role="po", actor="operator", reference="butler-1", body="butler only",
+            request_id="collision-comment-butler",
+        )
+        replay = self.writer.comment(
+            role="po", actor="operator", reference="butler-1", body="butler only",
+            request_id="collision-comment-butler",
+        )
+        self.assertTrue(replay["replayed"])
+        self.writer.comment(
+            role="po", actor="operator", reference="codegen-product-kit-1", body="kit only",
+            request_id="collision-comment-kit",
+        )
+        self.client.call(
+            "moveTaskPosition", project_id=1, task_id=keys["codegen-product-kit-1"],
+            column_id=_COLUMN_ID_BY_STATE["in_progress"], position=1,
+        )
+        self.writer.archive(
+            role="po", actor="operator", reference="butler-1", reason="fixture archive",
+            request_id="collision-archive-butler",
+        )
+
+        exported = {row["reference"]: row for row in self.reader.export()}
+        self.assertEqual(
+            sorted(ref for ref in exported if ref in keys),
+            ["butler-1", "codegen-product-kit-1"],
+        )
+        self.assertTrue(exported["butler-1"]["closed"])
+        self.assertFalse(exported["codegen-product-kit-1"]["closed"])
+        self.assertEqual(exported["codegen-product-kit-1"]["column"], "In progress")
+        self.assertIn("butler only", "\n".join(c["text"] for c in exported["butler-1"]["comments"]))
+        self.assertNotIn("kit only", "\n".join(c["text"] for c in exported["butler-1"]["comments"]))
+        self.assertIn(
+            "kit only",
+            "\n".join(c["text"] for c in exported["codegen-product-kit-1"]["comments"]),
+        )
+        audit_refs = self.client._query(
+            "SELECT ref, count(*) FROM requests WHERE ref IN (%s, %s) GROUP BY ref ORDER BY ref",
+            ("butler-1", "codegen-product-kit-1"),
+        )
+        self.assertEqual(audit_refs, [("butler-1", 2), ("codegen-product-kit-1", 1)])
+
+        from secretary.data import export_board
+
+        artifact = export_board(
+            Path(self.tmpdir.name) / "export-data",
+            instance_dir=Path(self.tmpdir.name),
+            reader=self.reader,
+            sprint_client=self.client,
+        )
+        document = json.loads(artifact.path.read_text(encoding="utf-8"))
+        exported_refs = [card["reference"] for card in document["cards"]]
+        self.assertEqual(exported_refs.count("butler-1"), 1)
+        self.assertEqual(exported_refs.count("codegen-product-kit-1"), 1)
+        exported_cards = {card["reference"]: card for card in document["cards"]}
+        self.assertIn(
+            "butler only",
+            "\n".join(c["text"] for c in exported_cards["butler-1"]["comments"]),
+        )
+        audit = json.loads((artifact.path.parent / "audit.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            sorted(event["ref"] for event in audit["events"] if event.get("ref") in keys),
+            ["butler-1", "butler-1", "codegen-product-kit-1"],
+        )
 
     def test_a_request_id_reused_for_another_operation_is_refused(self) -> None:
         from secretary.tasks import TaskError
@@ -894,7 +1008,7 @@ class SqlTaskReaderParityTests(KanboardFixtureCase, kanboard_cases.TaskReaderTes
 
     def test_list_names_the_card_identity_of_its_backend(self) -> None:
         task = self.reader.list(states={"ready"}, project="secretary")[0]
-        self.assertEqual(task["id"], "task_postgres_468")
+        self.assertEqual(task["id"], "task_postgres_1")
         self.assertEqual(task["audit"]["backend"]["kind"], "postgres")
 
 

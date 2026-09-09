@@ -188,21 +188,22 @@ def seed_client(config: BoardStoreConfig, fake: Any, instance_dir: Path | str) -
         for name in sorted(set(lanes.values())):
             client._lane_names().append(name) if name not in client._lane_names() else None
         client._lanes = sorted(set(client._lanes or []))
-        numbers = {}
+        public_numbers = {}
+        transport_keys = {}
         for row in fake.tasks:
             reference = str(row["reference"])
             kind = reference.split(":", 1)[0] if ":" in reference else ""
-            numbers[int(row["id"])] = (
+            public_numbers[int(row["id"])] = (
                 record_key(kind, reference.split(":", 1)[1])
                 if kind in {"product", "issue"}
                 else _task_number_of(reference)
             )
         for row in fake.tasks:
-            number = numbers[int(row["id"])]
+            number = public_numbers[int(row["id"])]
             reference = str(row["reference"])
             meta = dict(fake.metadata.get(int(row["id"]), {}))
             if meta.get("record_type") in {"product", "issue"}:
-                client.call(
+                transport_keys[int(row["id"])] = client.call(
                     "createTask", project_id=1, title=str(row.get("title") or reference),
                     description=str(row.get("description") or ""), column_id=1,
                     swimlane_id=0, reference=reference,
@@ -223,10 +224,11 @@ def seed_client(config: BoardStoreConfig, fake: Any, instance_dir: Path | str) -
                 position_value = max(int(position), 0)
             except (TypeError, ValueError):
                 position_value = 0
-            client._execute(
+            created = client._query(
                 "INSERT INTO tasks (task_ref, task_number, title, description, state, archived, "
                 "position, project_id, created_at, updated_at, extensions) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) "
+                "RETURNING board_key",
                 (
                     reference,
                     number,
@@ -241,14 +243,17 @@ def seed_client(config: BoardStoreConfig, fake: Any, instance_dir: Path | str) -
                     json.dumps(extensions),
                 ),
             )
+            transport_keys[int(row["id"])] = int(created[0][0])
         for identifier, meta in fake.metadata.items():
             if (
                 meta
-                and int(identifier) in numbers
+                and int(identifier) in transport_keys
                 and meta.get("record_type") not in {"product", "issue"}
             ):
-                client.call("saveTaskMetadata", task_id=numbers[int(identifier)], values=dict(meta))
-        for identifier in sorted(numbers):
+                client.call(
+                    "saveTaskMetadata", task_id=transport_keys[int(identifier)], values=dict(meta)
+                )
+        for identifier in sorted(public_numbers):
             for comment in fake.call("getAllComments", task_id=identifier) or []:
                 # The board's own creation time, not the seeding's: a comment's timestamp is part
                 # of what the reader returns, so a fixture that stamped `now()` would be asking
@@ -258,8 +263,13 @@ def seed_client(config: BoardStoreConfig, fake: Any, instance_dir: Path | str) -
                 marker = first[1:-1] if first.startswith("[") and first.endswith("]") else None
                 client._execute(
                     "INSERT INTO task_comments (task_ref, marker, body, created_at) "
-                    "VALUES ((SELECT task_ref FROM tasks WHERE task_number = %s), %s, %s, %s)",
-                    (numbers[int(identifier)], marker, body, _epoch(comment.get("date_creation"))),
+                    "VALUES ((SELECT task_ref FROM tasks WHERE board_key = %s), %s, %s, %s)",
+                    (
+                        transport_keys[int(identifier)],
+                        marker,
+                        body,
+                        _epoch(comment.get("date_creation")),
+                    ),
                 )
     return client
 

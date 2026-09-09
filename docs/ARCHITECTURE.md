@@ -882,3 +882,8 @@ exact terminal document before releasing the canonical state slot. Successor pla
 digests, so they are distinct while the recovered identities remain immutable and inspectable. A
 completed final import makes the target occupied and therefore keeps the canonical identity terminal,
 even when the first-application-write marker is absent.
+
+The SQL board-client transport identity is not the public Card suffix. `tasks.task_ref` is the stable
+public identity, `(project_id, task_number)` is project-local vocabulary, and an immutable unique
+`tasks.board_key` below the Sprint range is the integer used by every SQL Card operation. This keeps
+same-number Cards in different projects independently addressable without changing either public ref.

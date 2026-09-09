@@ -63,6 +63,11 @@ metadata = Base.metadata
 #: number out before the row exists.
 SPRINT_NUMBER_SEQ = sa.Sequence("sprint_number_seq", metadata=metadata)
 
+#: The shared board-client identity for Cards. Public per-project task numbers are separate.
+CARD_BOARD_KEY_SEQ = sa.Sequence(
+    "card_board_key_seq", metadata=metadata, start=1, maxvalue=1_999_999_999
+)
+
 
 # --- §3.1 Products, projects, repositories ------------------------------------------------
 
@@ -326,6 +331,13 @@ class Task(Base):
     __tablename__ = "tasks"
 
     task_ref = sa.Column(sa.Text, primary_key=True)  # "secretary-1580"
+    board_key = sa.Column(
+        sa.BigInteger,
+        CARD_BOARD_KEY_SEQ,
+        server_default=CARD_BOARD_KEY_SEQ.next_value(),
+        nullable=False,
+        unique=True,
+    )
     # Nullable since 0002: `secretary-583` carries no `project` metadata, and a NOT NULL column
     # would have made that card the one record the board holds and the store cannot (§8.6).
     project_id = sa.Column(sa.Text, sa.ForeignKey("projects.project_id"))
@@ -382,6 +394,9 @@ class Task(Base):
         sa.CheckConstraint("codex_launch_mode IN ('tui')"),
         sa.CheckConstraint("retry_same >= 0"),
         sa.CheckConstraint("retry_switch >= 0"),
+        sa.CheckConstraint(
+            "board_key > 0 AND board_key < 2000000000", name="task_board_key_is_in_card_range"
+        ),
         sa.CheckConstraint("task_number < 2000000000", name="task_number_is_in_card_key_range"),
         sa.UniqueConstraint("project_id", "task_number"),
         # The target the sprint's scoped cursor and decision keys need (§3.3, §3.8).

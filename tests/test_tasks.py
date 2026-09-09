@@ -469,7 +469,7 @@ class TaskReaderTests(BoardFixture, unittest.TestCase):
 
         §9 of docs/BOARD_STORE.md makes a card's reference its stable identifier, and the store
         keeps no column for Kanboard's integer, so the PostgreSQL backend answers with
-        `tasks.task_number` (`task_postgres_468`) where Kanboard answers with its row id
+        `tasks.board_key` (`task_postgres_<key>`) where Kanboard answers with its row id
         (`task_kanboard_12`).  Every other assertion of the case above is shared; this one is
         overridden by the backend that spells it differently, rather than softened for both.
         """

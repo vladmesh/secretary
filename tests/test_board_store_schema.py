@@ -8,7 +8,7 @@ run produced. Four revisions ship now, and §3.13 records the numbers of each: `
 34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique constraints and 4 partial unique indexes;
 `0002_board_gaps`, which closes the gaps the first import of real data found, makes that 23, 37,
 38, 23, 13 and 4; `0003_task_type_optional` leaves every one of those six numbers alone; and
-`0006_sprint_transport_key` makes the head counts 24, 38, 40, 24, 16 and 4. The last table and
+`0007_card_transport_key` makes the head counts 24, 39, 40, 24, 17 and 4. The last table and
 the last primary key are Alembic's `alembic_version`, which since the owner's decision of
 2026-09-07 stands where §7.4's `schema_migrations` stood.
 
@@ -72,7 +72,7 @@ SELECT
 #: What the same schema makes of a `postgres:16` at the head revision, and what §3.13 records
 #: beside `0001`'s own numbers. A disagreement here is a defect of the transcription into models,
 #: not of the document. Unchanged by `0003`, which trades one `CHECK` for one `CHECK`.
-DOCUMENTED_COUNTS = (24, 38, 40, 24, 16, 4)
+DOCUMENTED_COUNTS = (24, 39, 40, 24, 17, 4)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -82,6 +82,7 @@ REVISIONS = (
     "0004_product_issue_sql",
     "0005_sprint_sql",
     "0006_sprint_transport_key",
+    "0007_card_transport_key",
 )
 
 
@@ -297,11 +298,11 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection = self.owner_connection()
         command.upgrade(
             migrate.alembic_config(connection=connection, passwords=self.passwords),
-            "0005_sprint_sql",
+            "0006_sprint_transport_key",
         )
         connection.commit()
 
-        self.assertEqual(self.run_migrations(connection), ("0006_sprint_transport_key",))
+        self.assertEqual(self.run_migrations(connection), ("0007_card_transport_key",))
         self.assertEqual(migrate.current_revision(connection), REVISIONS[-1])
 
     def test_a_dry_run_reads_the_version_and_writes_nothing(self) -> None:
@@ -404,6 +405,75 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "'ready', %s, %s, now(), now())",
             (ref, project, int(ref.rsplit("-", 1)[1]), task_type, sprint, extensions),
         )
+
+    def test_0007_upgrades_a_populated_collision_without_renumbering(self) -> None:
+        """The retained imported target: same suffix, with dependent rows, upgraded in place."""
+        from alembic import command
+
+        connection = self.owner_connection()
+        command.upgrade(
+            migrate.alembic_config(connection=connection, passwords=self.passwords),
+            "0006_sprint_transport_key",
+        )
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('butler'), ('codegen-product-kit')")
+        for ref, project in (("butler-1", "butler"), ("codegen-product-kit-1", "codegen-product-kit")):
+            connection.exec_driver_sql(
+                "INSERT INTO tasks (task_ref, project_id, task_number, title, task_type, state, "
+                "created_at, updated_at) VALUES (%s, %s, 1, %s, 'code', 'ready', now(), now())",
+                (ref, project, ref),
+            )
+        connection.exec_driver_sql(
+            "INSERT INTO task_comments (task_ref, marker, body, created_at) "
+            "VALUES ('butler-1', 'note', 'butler comment', now())"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO task_dependencies (task_ref, depends_on, depends_on_task) "
+            "VALUES ('codegen-product-kit-1', 'butler-1', 'butler-1')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, "
+            "ref, created_at, settled_at) VALUES ('collision-audit', 'card.comment', '{}'::jsonb, "
+            "'committed', true, 'card', 'butler-1', now(), now())"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO board_events (event_id, request_id, kind, entity_kind, ref, actor_role, "
+            "actor_id, reason, occurred_at, committed, committed_at) VALUES "
+            "('collision-event', 'collision-audit', 'entity.updated', 'card', 'butler-1', "
+            "'worker', 'fixture', 'commented', now(), true, now())"
+        )
+        connection.commit()
+
+        self.assertEqual(self.run_migrations(connection), ("0007_card_transport_key",))
+        rows = connection.exec_driver_sql(
+            "SELECT task_ref, project_id, task_number, board_key FROM tasks ORDER BY task_ref"
+        ).fetchall()
+        self.assertEqual([(row[0], row[1], row[2]) for row in rows], [
+            ("butler-1", "butler", 1),
+            ("codegen-product-kit-1", "codegen-product-kit", 1),
+        ])
+        self.assertEqual(len({row[3] for row in rows}), 2)
+        self.assertEqual(
+            connection.exec_driver_sql("SELECT task_ref, marker, body FROM task_comments").fetchall(),
+            [("butler-1", "note", "butler comment")],
+        )
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT task_ref, depends_on, depends_on_task FROM task_dependencies"
+            ).fetchall(),
+            [("codegen-product-kit-1", "butler-1", "butler-1")],
+        )
+        self.assertEqual(
+            connection.exec_driver_sql(
+                "SELECT request_id, requests.ref FROM requests JOIN board_events USING (request_id)"
+            ).fetchall(),
+            [("collision-audit", "butler-1")],
+        )
+        fresh = connection.exec_driver_sql(
+            "INSERT INTO tasks (task_ref, project_id, task_number, title, task_type, state, "
+            "created_at, updated_at) VALUES ('butler-2', 'butler', 2, 'fresh', 'code', 'ready', "
+            "now(), now()) RETURNING board_key"
+        ).scalar_one()
+        self.assertNotIn(fresh, {row[3] for row in rows})
 
     def test_issue_and_product_comments_have_entity_scoped_tables(self) -> None:
         """Product writes now need the same durable comment shape already used by Issues."""

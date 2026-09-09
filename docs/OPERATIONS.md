@@ -3600,6 +3600,12 @@ standing automation timers. It must therefore be invoked outside an observer tur
 controller change is merged, installed, and the installed head source pin reports the candidate
 revision. This implementation card did not run the live cutover.
 
+The 2026-09-09 authorized attempt recovered safely before the first SQL application write after its
+preserved imported target exposed duplicate public suffixes (`butler-1` and
+`codegen-product-kit-1`). Revision `0007_card_transport_key` is the in-place schema repair for that
+occupied target; it does not authorize changing either live store, controller state, or retrying the
+cutover. An owner/operator must install the merged revision and schedule another maintenance window.
+
 The expected outage begins at `global_freeze` and ends only after an operator inspects
 `resume_ready` and explicitly runs `secretary resume`. Budget a full maintenance window. First run:
 

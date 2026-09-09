@@ -4186,3 +4186,8 @@ non-JSON, scalar or error documents cannot complete a phase. During an in-flight
 writers read the durable state and admit only a child carrying
 `SECRETARY_CUTOVER_CONTROLLER_ID=<state identity>` or the immediate controller child identified by
 parent pid. Terminal controller states are never re-armed by later pause state.
+
+On PostgreSQL, a Card row's integer protocol address is its database-backed `board_key`, not the
+numeric suffix in its public reference. Public refs and `(project_id, task_number)` remain stable and
+project-local. Card keys occupy `[1,2000000000)`; Sprint, Product and Issue dispatch retains the
+disjoint ranges above it. Reference updates preserve the Card key.

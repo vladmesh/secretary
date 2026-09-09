@@ -62,7 +62,7 @@ from typing import Any
 
 import yaml
 
-from secretary.board.backend import record_key, sprint_reference_number
+from secretary.board.backend import card_transport_key, record_key, sprint_reference_number
 from secretary.board.models import EntityKind, Event
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
@@ -2568,6 +2568,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
     stored_sprints = {row["ref"]: row for row in rows["sprints"]}
     stored_issues = {"issue:" + row["issue_id"]: row for row in rows["issues"]}
     stored_products = {"product:" + row["product_id"]: row for row in rows["products"]}
+    card_keys = [row.get("board_key") for row in rows["tasks"]]
 
     board_comment_total = len(inventory.comments)
     stored_comment_total = sum(len(rows[table]) for table, _ in COMMENT_TABLES)
@@ -2629,6 +2630,15 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
             "task numbers agree with the reference suffix",
             {(row["task_ref"], _task_number_of(row["task_ref"])) for row in rows["tasks"]},
             {(row["task_ref"], row["task_number"]) for row in rows["tasks"]},
+        ),
+        _check(
+            "Card transport keys are valid and globally unique",
+            True,
+            all(key is None for key in card_keys)
+            or (
+                all(card_transport_key(key) is not None for key in card_keys)
+                and len(set(card_keys)) == len(card_keys)
+            ),
         ),
         _check(
             "a numbered sprint reference keeps its number, and only a numbered one has one",

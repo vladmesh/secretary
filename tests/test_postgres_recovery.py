@@ -31,7 +31,15 @@ from secretary.tasks import TaskWriter
 def cutover_source(repository: Path) -> BoardSource:
     """Complete, small Kanboard snapshot for the isolated controller boundary."""
 
-    def row(identifier: int, reference: str, *, meta: dict[str, str], column: int = 2) -> SourceRow:
+    def row(
+        identifier: int,
+        reference: str,
+        *,
+        meta: dict[str, str],
+        column: int = 2,
+        active: bool = True,
+        comments: tuple[dict[str, object], ...] = (),
+    ) -> SourceRow:
         return SourceRow(
             raw={
                 "id": identifier,
@@ -40,13 +48,13 @@ def cutover_source(repository: Path) -> BoardSource:
                 "description": "isolated cutover fixture",
                 "column_id": column,
                 "swimlane_id": 2,
-                "is_active": 1,
+                "is_active": 1 if active else 0,
                 "position": 0,
                 "date_creation": 1_700_000_000,
                 "date_modification": 1_700_000_500,
             },
             meta=meta,
-            comments=(),
+            comments=comments,
         )
 
     issue_ref = "issue:" + "a" * 20
@@ -83,6 +91,24 @@ def cutover_source(repository: Path) -> BoardSource:
                     "sprint_ref": "sprint:1",
                 },
             ),
+            row(
+                4,
+                "butler-1",
+                active=False,
+                meta={"record_type": "task", "project": "butler", "task_type": "code"},
+                comments=({"id": 40, "date_creation": 1_700_000_040, "comment": "butler note"},),
+            ),
+            row(
+                5,
+                "codegen-product-kit-1",
+                meta={
+                    "record_type": "task",
+                    "project": "codegen-product-kit",
+                    "task_type": "code",
+                    "blocked_by": "butler-1",
+                },
+                comments=({"id": 50, "date_creation": 1_700_000_050, "comment": "kit note"},),
+            ),
         ),
         sprints=(
             row(
@@ -113,6 +139,16 @@ def cutover_source(repository: Path) -> BoardSource:
                 enabled=True,
                 plane="orchestrator",
                 curator_roots=(),
+            ),
+            RegistryEntry(
+                project_id="butler", repo=str(repository.parent / "butler"), remote=None,
+                default_branch="main", adapter=None, orca_binding="butler", enabled=True,
+                plane="orchestrator", curator_roots=(),
+            ),
+            RegistryEntry(
+                project_id="codegen-product-kit", repo=str(repository.parent / "codegen-product-kit"),
+                remote=None, default_branch="main", adapter=None, orca_binding="codegen-product-kit", enabled=True,
+                plane="orchestrator", curator_roots=(),
             ),
         ),
         budget_records=(),
@@ -331,6 +367,41 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             values={"future_task_key": "opaque", "issues": "issue:recovery"},
         )
         self.assertEqual(second["workspace"]["supersedes"], "secretary-1")
+        with client.transaction():
+            client._execute(
+                "INSERT INTO projects (project_id, enabled, registry_present) VALUES "
+                "('butler', true, true), ('codegen-product-kit', true, true)"
+            )
+        butler_key = client.call(
+            "createTask", project_id=1, title="Butler collision", reference="butler-1", column_id=2
+        )
+        kit_key = client.call(
+            "createTask", project_id=1, title="Kit collision", reference="codegen-product-kit-1",
+            column_id=2,
+        )
+        client.call(
+            "saveTaskMetadata", task_id=butler_key,
+            values={"record_type": "task", "project": "butler", "task_type": "code"},
+        )
+        client.call(
+            "saveTaskMetadata", task_id=kit_key,
+            values={
+                "project": "codegen-product-kit",
+                "record_type": "task",
+                "task_type": "code",
+                "blocked_by": "butler-1",
+            },
+        )
+        writer.comment(
+            role="worker", actor="test", reference="butler-1", body="butler collision comment",
+            request_id="comment-butler-collision",
+        )
+        writer.comment(
+            role="worker", actor="test", reference="codegen-product-kit-1",
+            body="kit collision comment", request_id="comment-kit-collision",
+        )
+        client.call("closeTask", task_id=butler_key)
+        self.assertNotEqual(butler_key, kit_key)
         sprint_writer.comment(
             role="po",
             actor="test",
@@ -592,14 +663,14 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         counts = result.manifest["components"]["postgres_dump"]["table_counts"]
         self.assertEqual(counts["products"], 1)
         self.assertEqual(counts["issues"], 1)
-        self.assertEqual(counts["tasks"], 2)
+        self.assertEqual(counts["tasks"], 4)
         self.assertEqual(counts["sprints"], 1)
-        self.assertEqual(counts["task_dependencies"], 1)
+        self.assertEqual(counts["task_dependencies"], 2)
         self.assertEqual(counts["task_supersessions"], 1)
         self.assertEqual(counts["task_issues"], 1)
-        self.assertGreaterEqual(counts["task_comments"], 2)
+        self.assertGreaterEqual(counts["task_comments"], 4)
         self.assertEqual(counts["repositories"], 1)
-        self.assertEqual(counts["projects"], 1)
+        self.assertEqual(counts["projects"], 3)
         self.assertEqual(counts["sprint_repositories"], 1)
         self.assertEqual(counts["sprint_projects"], 1)
         self.assertEqual(counts["sprint_issues"], 1)
@@ -636,6 +707,27 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 archive.extractfile("secretary-backup/secretary-data/board/audit.json").read().decode("utf-8")
             )["events"]
         cards_by_ref = {card["reference"]: card for card in cards}
+        self.assertEqual(
+            [card["reference"] for card in cards].count("butler-1"), 1
+        )
+        self.assertEqual(
+            [card["reference"] for card in cards].count("codegen-product-kit-1"), 1
+        )
+        self.assertTrue(cards_by_ref["butler-1"]["closed"])
+        self.assertFalse(cards_by_ref["codegen-product-kit-1"]["closed"])
+        self.assertEqual(
+            cards_by_ref["codegen-product-kit-1"]["metadata"]["blocked_by"], "butler-1"
+        )
+        self.assertIn(
+            "butler collision comment",
+            "\n".join(comment["text"] for comment in cards_by_ref["butler-1"]["comments"]),
+        )
+        self.assertIn(
+            "kit collision comment",
+            "\n".join(
+                comment["text"] for comment in cards_by_ref["codegen-product-kit-1"]["comments"]
+            ),
+        )
         self.assertEqual(cards_by_ref["secretary-1"]["metadata"]["issues"], "issue:recovery")
         self.assertEqual(cards_by_ref["secretary-2"]["metadata"]["supersedes"], "secretary-1")
         self.assertEqual(sprints[0]["repositories"], [str(self.root / "repository")])
@@ -648,6 +740,8 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 "sprint-recovery-budget",
                 "sprint-recovery-comment",
                 "sprint-recovery-resume",
+                "comment-butler-collision",
+                "comment-kit-collision",
                 "complete-recovery-one",
                 "close-recovery-sprint",
             }
@@ -704,8 +798,17 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             target_probe._query("SELECT project_id FROM projects ORDER BY project_id"),
-            [("secretary",)],
+            [("butler",), ("codegen-product-kit",), ("secretary",)],
         )
+        collision_rows = target_probe._query(
+            "SELECT task_ref, task_number, board_key, archived FROM tasks "
+            "WHERE task_ref IN ('butler-1', 'codegen-product-kit-1') ORDER BY task_ref"
+        )
+        self.assertEqual(
+            [(row[0], row[1], row[3]) for row in collision_rows],
+            [("butler-1", 1, True), ("codegen-product-kit-1", 1, False)],
+        )
+        self.assertNotEqual(collision_rows[0][2], collision_rows[1][2])
         self.assertEqual(
             target_probe._query("SELECT path FROM repositories ORDER BY path"),
             [(str(self.root / "repository"),)],

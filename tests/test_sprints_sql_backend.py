@@ -744,14 +744,14 @@ class SqlTransportNamespaceTests(SqlSprintFixture, shared.unittest.TestCase):
 
     def test_secretary_5_and_sprint_5_never_cross_dispatch(self) -> None:
         self.client = self.make_ownership_client()
-        self.client.call(
+        card_key = self.client.call(
             "createTask", project_id=1, title="card five", reference="secretary-5", column_id=2
         )
         self.client.call(
-            "saveTaskMetadata", task_id=5,
+            "saveTaskMetadata", task_id=card_key,
             values={"project": "secretary", "task_type": "code", "worker_profile": "codex-high"},
         )
-        self.client.call("createComment", task_id=5, content="card comment")
+        self.client.call("createComment", task_id=card_key, content="card comment")
         writer = SprintWriter(self.client, data_dir=self.tmp.name)
         writer.restore_create(
             reference="sprint:5", goal="goal", definition_of_done="dod",
@@ -759,18 +759,22 @@ class SqlTransportNamespaceTests(SqlSprintFixture, shared.unittest.TestCase):
         )
 
         key = sprint_key("sprint:5")
-        self.assertNotEqual(key, 5)
-        self.assertEqual(self.client.call("getTaskMetadata", task_id=5)["worker_profile"], "codex-high")
+        self.assertNotEqual(key, card_key)
         self.assertEqual(
-            [row["comment"] for row in self.client.call("getAllComments", task_id=5)],
+            self.client.call("getTaskMetadata", task_id=card_key)["worker_profile"], "codex-high"
+        )
+        self.assertEqual(
+            [row["comment"] for row in self.client.call("getAllComments", task_id=card_key)],
             ["card comment"],
         )
         self.assertEqual(self.client.call("getTaskMetadata", task_id=key)["sprint_goal"], "goal")
 
-        self.client.call("saveTaskMetadata", task_id=5, values={"worker_profile": "claude-opus"})
-        self.client.call("createComment", task_id=5, content="second card comment")
-        self.client.call("updateTask", id=5, title="card five edited")
-        self.client.call("closeTask", task_id=5)
+        self.client.call(
+            "saveTaskMetadata", task_id=card_key, values={"worker_profile": "claude-opus"}
+        )
+        self.client.call("createComment", task_id=card_key, content="second card comment")
+        self.client.call("updateTask", id=card_key, title="card five edited")
+        self.client.call("closeTask", task_id=card_key)
 
         self.assertEqual(
             self.client._query("SELECT title, archived FROM tasks WHERE task_ref='secretary-5'"),
