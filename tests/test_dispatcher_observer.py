@@ -5370,13 +5370,14 @@ class ObserverConfigurationTests(unittest.TestCase):
 
     def test_the_observer_runs_with_the_role_scoped_environment(self) -> None:
         self.assertIn("observer", ROLE_ALLOWLIST)
-        # The worker's environment plus the two names that say which sprint this head observes.
+        # The shared non-secret environment plus the two names that say which sprint this head observes.
         self.assertEqual(
             ROLE_ALLOWLIST["observer"],
             (
                 "SECRETARY_INSTANCE",
                 "SECRETARY_DATA_DIR",
                 "TA_SECRETARY_REPO",
+                "SECRETARY_CARD_BACKEND",
                 OBSERVER_SPRINT_ENV,
                 OBSERVER_GENERATION_ENV,
                 "SECRETARY_MEMORY_ACCESS_TOKEN",
