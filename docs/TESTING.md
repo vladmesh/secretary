@@ -345,7 +345,9 @@ same identity, and asserts earlier phases execute once. It also covers atomic se
 runtime-readable/symlink-safe state, backend/phase disagreement, source movement, both recovery
 branches, actual service/import/parity/backup/checkpoint/first-write seams, controller identity
 across process uids, terminal release during a later freeze, and selector propagation to every
-launched role without inference from an existing `board-store.env`.
+launched role without inference from an existing `board-store.env`. The successor-publication matrix
+interrupts both early recovery branches after their immutable archive is published, retries recovery,
+proves the old identity and evidence survive, refuses its old token, and applies a distinct plan.
 
 `tests.test_postgres_recovery.PostgresRecoveryIntegrationTests.test_real_cutover_phases_share_one_disposable_postgres_16_boundary`
 runs the real provision, migration verification, quiescence, import, parity, recovery backup,

@@ -37,6 +37,7 @@ STATE_VERSION = 1
 STATE_RELATIVE = Path("cutover") / "postgres-v1.json"
 LOCK_RELATIVE = Path("cutover") / "postgres-v1.lock"
 ARTIFACTS_RELATIVE = Path("cutover") / "artifacts"
+HISTORY_RELATIVE = Path("cutover") / "history"
 BACKEND_ENV = "SECRETARY_CARD_BACKEND"
 CUTOVER_ACTOR = "secretary-postgres-cutover"
 CONTROLLER_ID_ENV = "SECRETARY_CUTOVER_CONTROLLER_ID"
@@ -143,6 +144,17 @@ def _safe_directory(path: Path, label: str) -> os.stat_result:
     return info
 
 
+def _safe_optional_directory(path: Path, label: str) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise CutoverError(f"cannot inspect {label}: {exc}") from None
+    _safe_directory(path, label)
+    return True
+
+
 @dataclass(frozen=True)
 class Paths:
     instance: Path
@@ -164,6 +176,10 @@ class Paths:
     def artifacts(self) -> Path:
         return self.data / ARTIFACTS_RELATIVE
 
+    @property
+    def history(self) -> Path:
+        return self.data / HISTORY_RELATIVE
+
 
 def resolve_paths(instance_arg: str) -> Paths:
     if not instance_arg:
@@ -179,6 +195,7 @@ def resolve_paths(instance_arg: str) -> Paths:
     _safe_regular(instance / "runtime.env", "runtime.env")
     _safe_regular(data / STATE_RELATIVE, "cutover state", may_be_absent=True)
     _safe_regular(data / LOCK_RELATIVE, "cutover lock", may_be_absent=True)
+    _safe_optional_directory(data / HISTORY_RELATIVE, "cutover history directory")
     return Paths(instance, data)
 
 
@@ -257,6 +274,14 @@ def build_plan(paths: Paths, expected_revision: str) -> dict[str, Any]:
         "provenance": _provenance(paths, expected_revision),
         "source": _source_evidence(paths),
         "phases": list(PHASES),
+        "recovered_predecessors": [
+            {
+                "identity": item["state"]["identity"],
+                "plan_id": item["state"]["plan_id"],
+                "archive_sha256": item["archive_sha256"],
+            }
+            for item in _read_recovered_history(paths)
+        ],
     }
     plan_id = _sha(evidence)
     return {**evidence, "plan_id": plan_id, "confirmation": f"CUTOVER-{plan_id[:16]}"}
@@ -295,6 +320,124 @@ def _write_state(paths: Paths, payload: dict[str, Any]) -> None:
         raise CutoverError(f"could not publish cutover state: {exc}") from None
     finally:
         staged.unlink(missing_ok=True)
+
+
+def _read_recovered_history(paths: Paths) -> list[dict[str, Any]]:
+    """Read immutable pre-write recovery evidence that precedes a fresh plan."""
+    if not _safe_optional_directory(paths.history, "cutover history directory"):
+        return []
+    history: list[dict[str, Any]] = []
+    for path in sorted(paths.history.glob("postgres-v1-*.json")):
+        _safe_regular(path, "recovered cutover state")
+        try:
+            raw = path.read_bytes()
+            state = json.loads(raw)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise CutoverError(f"recovered cutover state is unreadable: {type(exc).__name__}") from None
+        if (
+            not isinstance(state, dict)
+            or state.get("version") != STATE_VERSION
+            or state.get("status") != "recovered-frozen"
+            or not isinstance(state.get("identity"), str)
+            or not isinstance(state.get("plan_id"), str)
+        ):
+            raise CutoverError("recovered cutover state has an unsupported version or shape")
+        if path != _recovered_archive_path(paths, state):
+            raise CutoverError("recovered cutover archive name does not match its plan identity")
+        history.append(
+            {
+                "path": str(path),
+                "archive_sha256": hashlib.sha256(raw).hexdigest(),
+                "state": state,
+            }
+        )
+    return history
+
+
+def _recovered_archive_path(paths: Paths, state: dict[str, Any]) -> Path:
+    plan_id = state.get("plan_id")
+    if (
+        not isinstance(plan_id, str)
+        or len(plan_id) != 64
+        or any(character not in "0123456789abcdef" for character in plan_id)
+    ):
+        raise CutoverError("cutover state has an invalid plan identity")
+    return paths.history / f"postgres-v1-{plan_id}.json"
+
+
+def _publish_recovered_archive(paths: Paths, state: dict[str, Any]) -> Path:
+    """Publish one immutable recovered identity, idempotently across a crash."""
+    archive = _recovered_archive_path(paths, state)
+    if not _safe_optional_directory(paths.history, "cutover history directory"):
+        try:
+            paths.history.mkdir(mode=0o755, parents=True)
+        except OSError as exc:
+            raise CutoverError(f"could not create cutover history: {exc}") from None
+    _safe_directory(paths.history, "cutover history directory")
+    expected = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    try:
+        archive.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        raise CutoverError(f"could not inspect recovered cutover archive: {exc}") from None
+    else:
+        _safe_regular(archive, "recovered cutover state")
+        try:
+            existing = archive.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise CutoverError(f"could not inspect recovered cutover archive: {exc}") from None
+        if existing != expected:
+            raise CutoverError("recovered cutover archive conflicts with canonical evidence")
+        return archive
+    staged = stage_text(archive, expected)
+    try:
+        staged.chmod(0o444)
+        # The installation lock serializes controllers, while link's EEXIST
+        # guarantee also prevents an external race from overwriting evidence.
+        os.link(staged, archive)
+        descriptor = os.open(paths.history, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise CutoverError(f"could not publish recovered cutover archive: {exc}") from None
+    finally:
+        staged.unlink(missing_ok=True)
+    return archive
+
+
+def _release_recovered_identity(paths: Paths, state: dict[str, Any]) -> dict[str, Any]:
+    """Archive a safe pre-write recovery, then release the canonical plan slot."""
+    branch = state.get("recovery", {}).get("branch")
+    if state.get("first_sql_write") is not None or branch == "postgres-only":
+        raise CutoverError("post-write or uncertain recovery cannot release its terminal identity")
+    successor = state.setdefault(
+        "successor",
+        {
+            "archive": str(_recovered_archive_path(paths, state)),
+            "prepared_at": _now(),
+            "canonical_slot": "released-after-archive",
+        },
+    )
+    if successor.get("archive") != str(_recovered_archive_path(paths, state)):
+        raise CutoverError("recovered cutover successor evidence is inconsistent")
+    _write_state(paths, state)
+    archive = _publish_recovered_archive(paths, state)
+    current = _read_state(paths)
+    if current != state:
+        raise CutoverError("canonical cutover state changed before successor publication")
+    try:
+        paths.state.unlink()
+        descriptor = os.open(paths.state.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise CutoverError(f"could not release recovered canonical cutover state: {exc}") from None
+    return {**state, "archived_state": str(archive), "successor_ready": True}
 
 
 class CutoverLock:
@@ -1215,6 +1358,11 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
         if args.confirm != expected_token:
             raise CutoverError(f"recovery confirmation token must be {expected_token}")
         _provenance(paths, args.expected_revision)
+        if state.get("status") == "recovered-frozen":
+            branch = state.get("recovery", {}).get("branch")
+            if state.get("first_sql_write") is not None or branch == "postgres-only":
+                return state
+            return _release_recovered_identity(paths, state)
         activated = state.get("phases", {}).get("selector_activation", {}).get("status") == "complete"
         freeze_status = state.get("phases", {}).get("global_freeze", {}).get("status")
         imported = state.get("phases", {}).get("final_fenced_import", {}).get("status") == "complete"
@@ -1230,8 +1378,7 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
             }
             state["status"] = "recovered-frozen"
             state["updated_at"] = _now()
-            _write_state(paths, state)
-            return state
+            return _release_recovered_identity(paths, state)
         if not imported and not activated and not state.get("first_sql_write"):
             if _backend(paths) != "kanboard":
                 raise CutoverError("early recovery expected the unchanged Kanboard selector")
@@ -1249,8 +1396,7 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
             }
             state["status"] = "recovered-frozen"
             state["updated_at"] = _now()
-            _write_state(paths, state)
-            return state
+            return _release_recovered_identity(paths, state)
         if activated:
             baseline = state["phases"]["selector_activation"]["evidence"]["sql_audit_baseline"]
             try:
@@ -1291,6 +1437,8 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
         }
         state["status"] = "recovered-frozen"
         state["updated_at"] = _now()
+        if branch != "postgres-only":
+            return _release_recovered_identity(paths, state)
         _write_state(paths, state)
         return state
 
@@ -1309,6 +1457,7 @@ def run_cutover(args: argparse.Namespace) -> int:
             _render(
                 {
                     "state": state,
+                    "recovered_history": _read_recovered_history(paths),
                     "backend": _backend(paths),
                     "recovery_confirmation": (
                         f"RECOVER-{state['plan_id'][:16]}" if state is not None else None
@@ -1348,6 +1497,7 @@ def add_cutover_subcommands(subparsers: Any) -> None:
 __all__ = [
     "ARTIFACTS_RELATIVE",
     "BACKEND_ENV",
+    "HISTORY_RELATIVE",
     "LOCK_RELATIVE",
     "PHASES",
     "STATE_RELATIVE",

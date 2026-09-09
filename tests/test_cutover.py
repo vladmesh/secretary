@@ -526,6 +526,12 @@ class CutoverRecoveryTests(CutoverFixture):
             result = cutover.recover_cutover(recovery_args, self.paths)
         selector.assert_called_once_with(self.paths, "kanboard")
         self.assertEqual(result["recovery"]["branch"], "kanboard-before-first-write")
+        self.assertTrue(result["successor_ready"])
+        self.assertIsNone(cutover._read_state(self.paths))
+        self.assertEqual(
+            cutover._read_recovered_history(self.paths)[0]["state"]["identity"],
+            result["identity"],
+        )
 
     def test_committed_post_activation_event_forces_postgres_only_recovery(self) -> None:
         self.state()
@@ -542,6 +548,8 @@ class CutoverRecoveryTests(CutoverFixture):
         selector.assert_called_once_with(self.paths, "postgres")
         self.assertEqual(result["recovery"]["branch"], "postgres-only")
         self.assertEqual(result["first_sql_write"]["evidence"]["committed_events"], 11)
+        self.assertEqual(cutover._read_state(self.paths), result)
+        self.assertEqual(cutover._read_recovered_history(self.paths), [])
 
     def test_source_movement_blocks_pre_write_rollback(self) -> None:
         self.state()
@@ -566,7 +574,111 @@ class CutoverRecoveryTests(CutoverFixture):
         ):
             result = cutover.recover_cutover(recovery_args, self.paths)
         self.assertEqual(result["recovery"]["branch"], "no-cutover-effects")
+        self.assertTrue(result["successor_ready"])
+        self.assertIsNone(cutover._read_state(self.paths))
         systemctl.assert_not_called()
+
+    def test_both_early_recoveries_archive_the_old_identity_and_open_a_distinct_successor(self) -> None:
+        from pathlib import Path as ConcretePath
+
+        scenarios = ("no-cutover-effects", "kanboard-before-fingerprint")
+        for branch in scenarios:
+            with self.subTest(branch=branch), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                paths = cutover.Paths(root / "instance", root / "data")
+                paths.instance.mkdir(mode=0o700)
+                paths.data.mkdir(mode=0o700)
+                runtime = paths.instance / "runtime.env"
+                runtime.write_text("SECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8")
+                stable_source = {"fingerprint": "stable-source", "parity": {"ok": True}}
+                provenance = {"installed_revision": REVISION}
+                real_unlink = ConcretePath.unlink
+                interrupt = {"enabled": True}
+
+                def unlink(path, *unlink_args, **unlink_kwargs):
+                    if path == paths.state and interrupt["enabled"]:
+                        interrupt["enabled"] = False
+                        raise OSError("injected canonical release interruption")
+                    return real_unlink(path, *unlink_args, **unlink_kwargs)
+
+                with (
+                    mock.patch.object(cutover, "_backend", return_value="kanboard"),
+                    mock.patch.object(cutover, "_provenance", return_value=provenance),
+                    mock.patch.object(cutover, "_source_evidence", return_value=stable_source),
+                    mock.patch.object(cutover, "_systemctl", return_value={}) as systemctl,
+                ):
+                    original_plan = cutover.build_plan(paths, REVISION)
+                    original = cutover._new_state(
+                        original_plan, args().actor, args().reason
+                    )
+                    original["status"] = "failed"
+                    if branch == "kanboard-before-fingerprint":
+                        original["status"] = "failed-frozen"
+                        original["phases"]["global_freeze"] = {"status": "complete"}
+                    cutover._write_state(paths, original)
+                    recovery_args = args(confirm=f"RECOVER-{original_plan['plan_id'][:16]}")
+
+                    with (
+                        mock.patch("pathlib.Path.unlink", side_effect=unlink, autospec=True),
+                        self.assertRaisesRegex(
+                            cutover.CutoverError, "canonical cutover state"
+                        ),
+                    ):
+                        cutover.recover_cutover(recovery_args, paths)
+
+                    interrupted = cutover._read_state(paths)
+                    self.assertEqual(interrupted["identity"], original["identity"])
+                    self.assertEqual(interrupted["recovery"]["branch"], branch)
+                    archive = Path(interrupted["successor"]["archive"])
+                    self.assertTrue(archive.is_file())
+
+                    recovered = cutover.recover_cutover(recovery_args, paths)
+                    self.assertTrue(recovered["successor_ready"])
+                    self.assertIsNone(cutover._read_state(paths))
+                    history = cutover._read_recovered_history(paths)
+                    self.assertEqual(len(history), 1)
+                    self.assertEqual(history[0]["state"], interrupted)
+                    self.assertEqual(history[0]["state"]["identity"], original["identity"])
+                    self.assertEqual(history[0]["state"]["recovery"]["branch"], branch)
+                    self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o444)
+
+                    successor_plan = cutover.build_plan(paths, REVISION)
+                    self.assertNotEqual(successor_plan["plan_id"], original_plan["plan_id"])
+                    self.assertEqual(
+                        successor_plan["recovered_predecessors"][0]["identity"],
+                        original["identity"],
+                    )
+                    with (
+                        mock.patch.object(cutover, "Operations") as operations,
+                        self.assertRaisesRegex(cutover.CutoverError, "confirmation token"),
+                    ):
+                        cutover.apply_cutover(
+                            args(confirm=original_plan["confirmation"]), paths
+                        )
+                    operations.assert_not_called()
+
+                    calls: list[str] = []
+                    failure = {"enabled": False}
+                    with (
+                        mock.patch.object(
+                            cutover, "Operations", fake_operations(None, calls, failure)
+                        ),
+                        mock.patch.object(
+                            cutover,
+                            "_sql_event_count",
+                            return_value={"committed_events": 10},
+                        ),
+                    ):
+                        applied = cutover.apply_cutover(
+                            args(confirm=successor_plan["confirmation"]), paths
+                        )
+                    self.assertNotEqual(applied["identity"], original["identity"])
+                    self.assertEqual(applied["status"], "resume-ready")
+                    self.assertEqual(cutover._read_recovered_history(paths), history)
+                    self.assertEqual(
+                        systemctl.call_count,
+                        0 if branch == "no-cutover-effects" else 1,
+                    )
 
 
 class RoleBackendPropagationTests(unittest.TestCase):

@@ -3618,13 +3618,20 @@ secretary cutover status --instance /absolute/instance
 
 Rerun the identical `apply` command after a crash. Never delete or edit the state document. A failed
 phase remains failed and frozen; completed phases are not repeated. `status` prints the recovery
-token. A terminal `resume-ready` or `recovered-frozen` identity cannot be applied again; a later
-cutover attempt requires a fresh plan and identity. Recovery is similarly explicit:
+token. A terminal identity cannot be applied again. Recovery is similarly explicit:
 
 ```
 secretary cutover recover --instance /absolute/instance --expected-revision <sha> \
   --actor <operator> --reason <incident-record> --confirm RECOVER-<plan-id-prefix>
 ```
+
+After a successful pre-first-write recovery, the command atomically archives the exact
+`recovered-frozen` document under `<data_dir>/cutover/history/postgres-v1-<plan-id>.json`, fsyncs it,
+and only then releases the canonical `postgres-v1.json` slot. `status` lists this immutable history.
+If publication is interrupted, rerun the identical `recover`; it verifies the existing archive and
+finishes releasing the canonical slot without repeating recovery side effects. Then run `plan` again
+and apply only its new confirmation token. The new plan binds the archived predecessor and therefore
+has a distinct identity. The old token remains refused. Never delete or edit either document.
 
 The operator needs ownership of the instance and data directories, permission to control the named
 systemd units and Docker PostgreSQL service, and access to the installed virtual environment. The
@@ -3639,9 +3646,10 @@ otherwise refuses any command line matching the declared writer vocabulary.
 If failure occurs before `global_freeze` starts, `recover` records `no-cutover-effects` and does not
 restart services. If the freeze was entered but no final import, selector activation or SQL write
 occurred, it verifies that the selector is still Kanboard, records fresh source evidence and
-restarts the stopped consumers. Later branches require the frozen fingerprint. A terminal
-`resume-ready` or `recovered-frozen` state never becomes a write fence again because of a later,
-unrelated pipeline freeze.
+restarts the stopped consumers. Both safe early outcomes publish their archived identity and open the
+canonical slot for the next maintenance-window plan. Later branches require the frozen fingerprint.
+A canonical `resume-ready`, a PostgreSQL-only recovered state, and every archived `recovered-frozen`
+state remain terminal and never become a write fence again because of a later unrelated freeze.
 
 The packaged disposable PostgreSQL 16 rehearsal proves the mechanism and isolated public protocol
 surface. It is not live acceptance. The external operator must still retain the command's actual

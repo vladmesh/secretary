@@ -676,10 +676,11 @@ verify the live SQL backend, and establish the rollback window. None of those ac
 by an import rehearsal.
 # Cutover recovery boundary
 
-The versioned state document is `<data_dir>/cutover/postgres-v1.json`; the sibling lock is the one
-installation-wide controller lock. Each phase records start/completion timestamps, exact revision,
-and non-secret evidence before the next phase starts. Import reports are retained under
-`<data_dir>/cutover/artifacts`. Preserve these files and both backend backups during an incident.
+The versioned canonical state document is `<data_dir>/cutover/postgres-v1.json`; the sibling lock is
+the one installation-wide controller lock. Each phase records start/completion timestamps, exact
+revision, and non-secret evidence before the next phase starts. Import reports are retained under
+`<data_dir>/cutover/artifacts`, and recovered pre-write attempts under
+`<data_dir>/cutover/history`. Preserve these files and both backend backups during an incident.
 
 Recovery policy is determined by committed `requests`/`board_events` evidence, not by which service
 appears healthy. `selector_activation` records the imported SQL audit baseline. Before any later
@@ -696,11 +697,17 @@ There are two safe early outcomes before a frozen fingerprint exists. A failure 
 records `no-cutover-effects` without touching services. A freeze that stopped consumers but failed
 before import or activation records `kanboard-before-fingerprint` only after confirming the
 Kanboard selector and obtaining a fresh stable source fence, then reconciles consumers. Neither
-branch claims rollback from an imported target.
+branch claims rollback from an imported target. Once either recovery is durable, `recover` archives
+the exact terminal identity and fsyncs the history directory before removing the canonical file. A
+crash leaves either the canonical recovered document, which the same `recover` completes, or the
+archived document and an already free canonical slot. `status` exposes both the canonical state and
+recovered history.
 
 The state document contains no credentials and is deliberately readable by runtime service uids;
 only its owner may write it. Writers enforce it only while status is `applying` or `failed-frozen`.
 Terminal `resume-ready` and `recovered-frozen` states release the barrier unconditionally, including
 when an unrelated later pipeline freeze is active. A corrupt or unreadable in-scope state still
-fails closed. Apply refuses to reuse either terminal identity; another attempt requires a fresh plan
-and identity.
+fails closed. Apply refuses to reuse a terminal identity. After safe pre-write recovery, run `plan`
+again: its identity includes the immutable predecessor archive, so the old confirmation is refused
+and only the distinct successor can occupy the canonical slot. `resume-ready`, PostgreSQL-only
+recovery, SQL-write evidence and SQL-audit uncertainty never release that slot for a Kanboard retry.
