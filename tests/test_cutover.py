@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from secretary import cutover
@@ -108,11 +112,15 @@ class CutoverStateTests(CutoverFixture):
         with self.assertRaisesRegex(cutover.CutoverError, "duplicate"):
             cutover._set_backend(self.paths, "postgres")
 
-    def test_state_is_private_versioned_and_atomic(self) -> None:
+    def test_state_is_runtime_readable_owner_writable_versioned_and_atomic(self) -> None:
         payload = {"version": 1, "identity": "fixture"}
         cutover._write_state(self.paths, payload)
         self.assertEqual(cutover._read_state(self.paths), payload)
-        self.assertEqual(stat.S_IMODE(self.paths.state.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.paths.state.stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(self.paths.state.parent.stat().st_mode), 0o755)
+        self.assertTrue(self.paths.state.stat().st_mode & stat.S_IROTH)
+        self.assertFalse(self.paths.state.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+        self.assertTrue(self.paths.state.parent.stat().st_mode & stat.S_IXOTH)
         self.assertFalse(list(self.paths.state.parent.glob("*.tmp")))
 
     def test_atomic_state_rename_failure_keeps_the_previous_document(self) -> None:
@@ -150,16 +158,206 @@ class CutoverStateTests(CutoverFixture):
         ):
             require_board_write_allowed(self.data)
 
-    def test_explicit_pipeline_resume_releases_completed_cutover_barrier(self) -> None:
+    def test_terminal_cutover_never_rearms_during_a_later_freeze(self) -> None:
         from secretary.cutover.barrier import require_board_write_allowed
-        from secretary.dispatcher_pause import ProductionPause
 
         state = cutover._new_state(PLAN, args().actor, args().reason)
         state["status"] = "resume-ready"
         state["phases"]["global_freeze"] = {"status": "complete"}
         cutover._write_state(self.paths, state)
-        with mock.patch.object(ProductionPause, "summary", return_value={"paused": False}):
-            require_board_write_allowed(self.data)
+        require_board_write_allowed(self.data)
+
+    def test_runtime_child_may_write_only_with_the_controller_identity(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        state["controller_pid"] = os.getpid()
+        state["phases"]["global_freeze"] = {"status": "complete"}
+        cutover._write_state(self.paths, state)
+        script = (
+            "from secretary.cutover.barrier import require_board_write_allowed; "
+            f"require_board_write_allowed({str(self.data)!r})"
+        )
+        environment = dict(os.environ)
+        environment[cutover.CONTROLLER_ID_ENV] = state["identity"]
+        allowed = subprocess.run(
+            [sys.executable, "-c", script],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        refused = subprocess.run(
+            [sys.executable, "-c", script],
+            env=os.environ,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("writes are fenced", refused.stderr)
+
+
+class CutoverCommandEvidenceTests(CutoverFixture):
+    def test_secretary_commands_use_the_package_entrypoint_and_require_json_evidence(self) -> None:
+        with mock.patch("secretary.cutover.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, '{"status":"ok"}\n', "")
+            evidence = cutover._secretary(self.paths, "status", "--json")
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[1:4], ["-P", "-m", "secretary"])
+            self.assertEqual(evidence["document"], {"status": "ok"})
+            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            with self.assertRaisesRegex(cutover.CutoverError, "empty success evidence"):
+                cutover._secretary(self.paths, "status", "--json")
+            run.return_value = subprocess.CompletedProcess([], 0, "not json", "")
+            with self.assertRaisesRegex(cutover.CutoverError, "non-JSON"):
+                cutover._secretary(self.paths, "status", "--json")
+
+    def test_post_switch_backup_rejects_raw_board_and_requires_postgres_dump(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        operation = cutover.Operations(self.paths, state)
+        checkpoint = SimpleNamespace(status="ok", to_json=lambda: {"status": "ok"})
+        raw = SimpleNamespace(archive=Path("raw.tar"), manifest={"components": {"raw_board": {}}})
+        with (
+            mock.patch("secretary.checkpoint.CheckpointWriter.write", return_value=checkpoint),
+            mock.patch("secretary.backup.create_backups", return_value=[raw]),
+            self.assertRaisesRegex(cutover.CutoverError, "raw Kanboard"),
+        ):
+            operation.post_switch_checkpoint()
+
+        empty = SimpleNamespace(archive=Path("empty.tar"), manifest={"components": {}})
+        with (
+            mock.patch("secretary.checkpoint.CheckpointWriter.write", return_value=checkpoint),
+            mock.patch("secretary.backup.create_backups", return_value=[empty]),
+            self.assertRaisesRegex(cutover.CutoverError, "no PostgreSQL dump"),
+        ):
+            operation.post_switch_checkpoint()
+
+    def test_acceptance_exercises_and_asserts_the_public_protocol_surface(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        operation = cutover.Operations(self.paths, state)
+        seen: list[tuple[str, ...]] = []
+        repeats: dict[str, int] = {}
+
+        def command(_paths, *argv):
+            seen.append(argv)
+            key = " ".join(argv)
+            repeats[key] = repeats.get(key, 0) + 1
+            document: object = {"ok": True}
+            if argv[:2] == ("sprint", "list"):
+                document = {
+                    "sprints": {
+                        "items": [{"ref": "sprint:1", "status": "open", "reservations": ["secretary"]}]
+                    }
+                }
+            elif argv[:2] == ("issue", "create"):
+                document = {"issue": {"ref": "issue:acceptance"}}
+            elif argv[:2] == ("task", "create"):
+                document = {"task": {"ref": "secretary-99"}}
+            elif argv[:2] == ("sprint", "comment"):
+                document = {"comment_id": "evt-sprint", "saved": repeats[key] == 1}
+            elif argv[:2] == ("task", "comment") and "cutover-task-comment-" in key:
+                document = {"event_id": "evt-task", "replayed": repeats[key] > 1}
+            return {"output": json.dumps(document), "document": document}
+
+        with (
+            mock.patch.object(cutover, "_secretary", side_effect=command),
+            mock.patch.object(cutover, "_sql_event_count", return_value={"committed_events": 20}),
+        ):
+            evidence = operation.installed_protocol_acceptance()
+
+        pairs = {entry[:2] for entry in seen}
+        self.assertTrue(
+            {
+                ("product", "create"),
+                ("product", "show"),
+                ("issue", "create"),
+                ("issue", "update-priority"),
+                ("issue", "show"),
+                ("issue", "close"),
+                ("sprint", "comment"),
+                ("sprint", "comment-delivery"),
+                ("task", "create"),
+                ("task", "claim"),
+                ("task", "move"),
+                ("task", "archive"),
+                ("task", "comment"),
+                ("task", "show"),
+                ("web-read", "system"),
+                ("web-read", "task"),
+                ("web-read", "commands"),
+                ("web-read", "request"),
+                ("dispatcher", "production-tick"),
+            }
+            <= pairs
+        )
+        self.assertEqual(evidence["write"]["replay"]["document"]["replayed"], True)
+
+
+class CutoverOperationSeamTests(CutoverFixture):
+    def operation(self):
+        return cutover.Operations(self.paths, cutover._new_state(PLAN, args().actor, args().reason))
+
+    def test_service_stop_failure_surfaces_from_the_real_freeze_phase(self) -> None:
+        with (
+            mock.patch.object(cutover, "_secretary", return_value={"document": {"paused": True}}),
+            mock.patch.object(cutover, "_systemctl", side_effect=RuntimeError("service stop failed")),
+            self.assertRaisesRegex(RuntimeError, "service stop failed"),
+        ):
+            self.operation().global_freeze()
+
+    def test_service_start_failure_surfaces_from_the_real_reconciliation_phase(self) -> None:
+        with (
+            mock.patch.object(cutover, "_systemctl", side_effect=RuntimeError("service start failed")),
+            self.assertRaisesRegex(RuntimeError, "service start failed"),
+        ):
+            self.operation().service_reconciliation()
+
+    def test_import_failure_surfaces_from_the_real_import_phase(self) -> None:
+        with (
+            mock.patch("secretary.board.import_board.run", side_effect=RuntimeError("import failed")),
+            self.assertRaisesRegex(RuntimeError, "import failed"),
+        ):
+            self.operation().final_fenced_import()
+
+    def test_parity_failure_surfaces_from_the_real_parity_phase(self) -> None:
+        operation = self.operation()
+        operation.state["phases"]["final_fenced_import"] = {
+            "evidence": {"import": {"parity": {"ok": False}}}
+        }
+        with self.assertRaisesRegex(cutover.CutoverError, "parity failed"):
+            operation.full_parity()
+
+    def test_backup_failure_surfaces_and_restores_the_process_selector(self) -> None:
+        os.environ[cutover.BACKEND_ENV] = "kanboard"
+        with (
+            mock.patch("secretary.backup.create_backups", side_effect=RuntimeError("dump failed")),
+            self.assertRaisesRegex(RuntimeError, "dump failed"),
+        ):
+            self.operation().postgresql_recovery_backup()
+        self.assertEqual(os.environ[cutover.BACKEND_ENV], "kanboard")
+
+    def test_checkpoint_refusal_surfaces_from_the_real_post_switch_phase(self) -> None:
+        checkpoint = SimpleNamespace(status="blocked", reason="checkpoint failed")
+        with (
+            mock.patch("secretary.checkpoint.CheckpointWriter.write", return_value=checkpoint),
+            self.assertRaisesRegex(cutover.CutoverError, "checkpoint failed"),
+        ):
+            self.operation().post_switch_checkpoint()
+
+    def test_first_write_audit_failure_records_an_irreversible_boundary(self) -> None:
+        operation = self.operation()
+        operation.state["phases"]["selector_activation"] = {
+            "status": "complete",
+            "evidence": {"sql_audit_baseline": {"committed_events": 10}},
+        }
+        with mock.patch.object(
+            cutover, "_sql_event_count", side_effect=cutover.CutoverError("audit unavailable")
+        ):
+            cutover._refresh_first_sql_write(self.paths, operation.state)
+        self.assertEqual(
+            operation.state["first_sql_write"]["evidence"],
+            {"unavailable": True, "reason": "audit unavailable"},
+        )
 
 
 class CutoverFailureInjectionTests(CutoverFixture):
@@ -266,6 +464,20 @@ class CutoverRecoveryTests(CutoverFixture):
         ):
             cutover.recover_cutover(recovery_args, self.paths)
 
+    def test_failure_before_freeze_has_no_cutover_effect_to_recover(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        state["status"] = "failed"
+        cutover._write_state(self.paths, state)
+        recovery_args = args(confirm="RECOVER-" + "1" * 16)
+        with (
+            mock.patch.object(cutover, "_provenance", return_value={}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_systemctl") as systemctl,
+        ):
+            result = cutover.recover_cutover(recovery_args, self.paths)
+        self.assertEqual(result["recovery"]["branch"], "no-cutover-effects")
+        systemctl.assert_not_called()
+
 
 class RoleBackendPropagationTests(unittest.TestCase):
     def test_every_launched_role_receives_selector_and_board_store_file_is_not_a_selector(self) -> None:
@@ -291,7 +503,9 @@ class RoleBackendPropagationTests(unittest.TestCase):
                 self.assertEqual(environment[cutover.BACKEND_ENV], "postgres", role)
 
             runtime.write_text("", encoding="utf-8")
-            (root / "board-store.env").write_text("SECRETARY_DB_HOST=present\n", encoding="utf-8")
+            (root / "board-store.env").write_text(
+                "SECRETARY_CARD_BACKEND=postgres\nSECRETARY_DB_HOST=present\n", encoding="utf-8"
+            )
             for role in roles:
                 environment = role_env.runtime_env(
                     role,

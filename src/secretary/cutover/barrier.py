@@ -6,6 +6,10 @@ import json
 import os
 from pathlib import Path
 
+CONTROLLER_ID_ENV = "SECRETARY_CUTOVER_CONTROLLER_ID"
+IN_FLIGHT_STATUSES = frozenset(("applying", "failed-frozen"))
+TERMINAL_STATUSES = frozenset(("resume-ready", "recovered-frozen"))
+
 
 def _refuse(message: str) -> None:
     from secretary.tasks import TaskError
@@ -28,6 +32,13 @@ def require_board_write_allowed(data_dir: str | os.PathLike[str]) -> None:
         _refuse("cutover state is unreadable; board writes are fenced")
     if not isinstance(state, dict):
         _refuse("cutover state is invalid; board writes are fenced")
+    status = state.get("status")
+    # Terminal controller state is evidence only.  It must never re-arm during
+    # a later unrelated pipeline freeze or backup.
+    if status in TERMINAL_STATUSES:
+        return
+    if status not in IN_FLIGHT_STATUSES:
+        return
     phase = state.get("phases", {}).get("global_freeze", {})
     if phase.get("status") not in {"running", "failed", "complete"}:
         return
@@ -35,18 +46,10 @@ def require_board_write_allowed(data_dir: str | os.PathLike[str]) -> None:
     controller_pid = state.get("controller_pid")
     if (
         identity
-        and os.environ.get("SECRETARY_CUTOVER_CONTROLLER_ID") == identity
+        and os.environ.get(CONTROLLER_ID_ENV) == identity
         and controller_pid in {os.getpid(), os.getppid()}
     ):
         return
-    # A completed/recovered cutover stays fenced until the supported pause is
-    # explicitly lifted.  After that explicit action, the durable cutover record
-    # remains evidence rather than a permanent write prohibition.
-    if state.get("status") in {"resume-ready", "recovered-frozen"}:
-        from secretary.dispatcher_pause import ProductionPause
-
-        if not ProductionPause(Path(data_dir)).summary().get("paused"):
-            return
     _refuse("PostgreSQL cutover freeze is active; board writes are fenced")
 
 

@@ -3628,4 +3628,20 @@ secretary cutover recover --instance /absolute/instance --expected-revision <sha
 The operator needs ownership of the instance and data directories, permission to control the named
 systemd units and Docker PostgreSQL service, and access to the installed virtual environment. The
 controller rejects symlinked or broadly writable configuration/state and does not print database
-credentials.
+credentials. The non-secret state fence is owner-writable and runtime-readable (`0644` below a
+`0755` cutover directory), because web and head processes may run under another uid. Controller
+children receive the durable controller identity and are admitted by that identity; an immediate
+child is also recognized by parent pid. The installation data root must remain traversable by those
+runtime service accounts. Process scanning excludes the controller and its invoking parent, and
+otherwise refuses any command line matching the declared writer vocabulary.
+
+If failure occurs before `global_freeze` starts, `recover` records `no-cutover-effects` and does not
+restart services. If the freeze was entered but no final import, selector activation or SQL write
+occurred, it verifies that the selector is still Kanboard, records fresh source evidence and
+restarts the stopped consumers. Later branches require the frozen fingerprint. A terminal
+`resume-ready` or `recovered-frozen` state never becomes a write fence again because of a later,
+unrelated pipeline freeze.
+
+The packaged disposable PostgreSQL 16 rehearsal proves the mechanism and isolated public protocol
+surface. It is not live acceptance. The external operator must still retain the command's actual
+revision, service, source, parity, archive, checkpoint and acceptance evidence before resuming.

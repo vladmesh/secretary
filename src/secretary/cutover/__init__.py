@@ -39,6 +39,7 @@ LOCK_RELATIVE = Path("cutover") / "postgres-v1.lock"
 ARTIFACTS_RELATIVE = Path("cutover") / "artifacts"
 BACKEND_ENV = "SECRETARY_CARD_BACKEND"
 CUTOVER_ACTOR = "secretary-postgres-cutover"
+CONTROLLER_ID_ENV = "SECRETARY_CUTOVER_CONTROLLER_ID"
 
 PHASES = (
     "preflight",
@@ -230,9 +231,13 @@ def _source_evidence(paths: Paths) -> dict[str, Any]:
         raise CutoverError(f"Kanboard source preflight failed: {exc}") from None
     if not report.parity.get("ok"):
         raise CutoverError("Kanboard source does not produce a complete parity-clean import plan")
+    consistency = report.source_consistency
+    fingerprint = consistency.get("before")
+    if not consistency.get("matched") or not isinstance(fingerprint, str) or not fingerprint:
+        raise CutoverError("Kanboard source preflight returned no stable source fingerprint")
     return {
-        "fingerprint": report.source.get("fingerprint"),
-        "consistency": report.source_consistency,
+        "fingerprint": fingerprint,
+        "consistency": consistency,
         "counts": report.counts,
         "audit": report.discrepancy_count,
         "parity": report.parity,
@@ -271,11 +276,15 @@ def _read_state(paths: Paths) -> dict[str, Any] | None:
 
 
 def _write_state(paths: Paths, payload: dict[str, Any]) -> None:
-    paths.state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    paths.state.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    # The state contains evidence, never credentials.  Board writers may run as
+    # a different uid from the privileged operator, so they must be able to
+    # traverse and read this fail-closed fence.  Only its owner may mutate it.
+    paths.state.parent.chmod(0o755)
     _safe_directory(paths.state.parent, "cutover state directory")
     staged = stage_text(paths.state, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     try:
-        staged.chmod(0o600)
+        staged.chmod(0o644)
         os.replace(staged, paths.state)
         descriptor = os.open(paths.state.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -310,7 +319,7 @@ class CutoverLock:
             self.handle.close()
 
 
-def _run(argv: list[str], *, env: dict[str, str] | None = None) -> dict[str, Any]:
+def _run(argv: list[str], *, env: dict[str, str] | None = None, capture_full: bool = False) -> dict[str, Any]:
     try:
         result = subprocess.run(argv, text=True, capture_output=True, timeout=600, check=False, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -319,16 +328,34 @@ def _run(argv: list[str], *, env: dict[str, str] | None = None) -> dict[str, Any
         detail = (result.stderr or result.stdout or "failed").strip().splitlines()[-1]
         raise CutoverError(f"{Path(argv[0]).name} failed: {detail[:500]}")
     output = (result.stdout or "").strip()
-    return {
+    evidence = {
         "command": [Path(argv[0]).name, *argv[1:]],
         "exit_code": 0,
         "output": output[:4000],
         "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
     }
+    if capture_full:
+        evidence["_captured_output"] = output
+    return evidence
 
 
 def _secretary(paths: Paths, *args: str) -> dict[str, Any]:
-    return _run([sys.executable, "-P", "-m", "secretary.cli", *args, "--instance", str(paths.instance)])
+    evidence = _run(
+        [sys.executable, "-P", "-m", "secretary", *args, "--instance", str(paths.instance)],
+        capture_full=True,
+    )
+    output = evidence.pop("_captured_output")
+    if not output:
+        raise CutoverError("secretary command returned empty success evidence")
+    try:
+        document = json.loads(output)
+    except (TypeError, ValueError):
+        raise CutoverError("secretary command returned non-JSON success evidence") from None
+    if not isinstance(document, (dict, list)):
+        raise CutoverError("secretary command returned a non-document JSON value")
+    if isinstance(document, dict) and "error" in document:
+        raise CutoverError("secretary command returned an error document with exit zero")
+    return {**evidence, "document": document}
 
 
 def _sql_event_count(paths: Paths) -> dict[str, Any]:
@@ -350,23 +377,34 @@ def _sql_event_count(paths: Paths) -> dict[str, Any]:
         engine.dispose()
 
 
-def _acceptance_task_ref(paths: Paths) -> str:
-    import sqlalchemy as sa
+def _command_document(evidence: dict[str, Any], label: str) -> dict[str, Any] | list[Any]:
+    document = evidence.get("document")
+    if not isinstance(document, (dict, list)):
+        raise CutoverError(f"{label} returned no machine-readable document")
+    return document
 
-    from secretary.board import migrate, store
 
-    config = store.resolve(paths.instance)
-    engine = sa.create_engine(migrate.sqlalchemy_url(config.for_role("read")))
-    try:
-        with engine.connect() as connection:
-            row = connection.exec_driver_sql("SELECT task_ref FROM tasks ORDER BY task_ref LIMIT 1").first()
-        if row is None:
-            raise CutoverError("installed protocol acceptance needs at least one imported task")
-        return str(row[0])
-    except sa.exc.SQLAlchemyError as exc:
-        raise CutoverError(f"could not select the protocol acceptance task: {exc}") from None
-    finally:
-        engine.dispose()
+def _artifact(paths: Paths, name: str, body: str) -> Path:
+    paths.artifacts.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target = paths.artifacts / name
+    target.write_text(body, encoding="utf-8")
+    target.chmod(0o600)
+    return target
+
+
+def _acceptance_context(sprints: dict[str, Any] | list[Any]) -> tuple[str, str]:
+    if not isinstance(sprints, dict):
+        raise CutoverError("sprint list returned an invalid acceptance document")
+    rows = sprints.get("sprints", {}).get("items", [])
+    if not isinstance(rows, list):
+        raise CutoverError("sprint list returned an invalid items collection")
+    for row in rows:
+        if not isinstance(row, dict) or row.get("status") != "open":
+            continue
+        projects = row.get("reservations") or []
+        if isinstance(projects, list) and projects and row.get("ref"):
+            return str(row["ref"]), str(projects[0])
+    raise CutoverError("installed acceptance requires one open sprint with a project reservation")
 
 
 def _set_backend(paths: Paths, backend: str) -> dict[str, Any]:
@@ -466,9 +504,20 @@ def _writer_processes() -> list[dict[str, Any]]:
 class Operations:
     """Production phase implementations, kept injectable for crash/failure rehearsal."""
 
-    def __init__(self, paths: Paths, state: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        paths: Paths,
+        state: dict[str, Any],
+        *,
+        provision_options: dict[str, Any] | None = None,
+        checkpoint_options: dict[str, Any] | None = None,
+    ) -> None:
         self.paths = paths
         self.state = state
+        # Tests use an isolated Compose project and file; production deliberately
+        # takes the provisioner's supported defaults.
+        self.provision_options = dict(provision_options or {})
+        self.checkpoint_options = dict(checkpoint_options or {})
 
     def preflight(self) -> dict[str, Any]:
         current = build_plan(self.paths, self.state["expected_revision"])
@@ -480,12 +529,14 @@ class Operations:
         from secretary.backup import create_backups
         from secretary.checkpoint import CheckpointWriter
 
-        checkpoint = CheckpointWriter(self.paths.data, self.paths.instance).write()
+        checkpoint = CheckpointWriter(
+            self.paths.data, self.paths.instance, **self.checkpoint_options
+        ).write()
         if checkpoint.status == "blocked":
             raise CutoverError(f"Kanboard checkpoint refused: {checkpoint.reason}")
         backups = create_backups(self.paths.instance, data_dir=self.paths.data, backup_kinds=("full",))
         return {
-            "checkpoint": checkpoint.as_dict(),
+            "checkpoint": checkpoint.to_json(),
             "archives": [str(item.archive) for item in backups],
             "archive_manifests": [item.manifest for item in backups],
         }
@@ -494,7 +545,7 @@ class Operations:
         from secretary.board import migrate
         from secretary.board.provision import provision, verify_roles
 
-        outcome = provision(self.paths.instance, allow_create=True)
+        outcome = provision(self.paths.instance, allow_create=True, **self.provision_options)
         applied = migrate.migrate_instance(self.paths.instance)
         verify_roles(self.paths.instance)
         return {
@@ -522,6 +573,9 @@ class Operations:
         if survivors:
             raise CutoverError(f"writer quiescence refused; {len(survivors)} writer process(es) survive")
         source = _source_evidence(self.paths)
+        planned = self.state.get("planned_source", {}).get("fingerprint")
+        if not planned or source["fingerprint"] != planned:
+            raise CutoverError("Kanboard source moved after planning; refusing fenced import")
         return {"survivors": [], "controller_pid": os.getpid(), "source": source}
 
     def final_fenced_import(self) -> dict[str, Any]:
@@ -545,6 +599,21 @@ class Operations:
         consistency = imported.get("source_consistency", {})
         if not consistency.get("matched"):
             raise CutoverError("final Kanboard source fence did not match")
+        planned = self.state.get("planned_source", {}).get("fingerprint")
+        quiescent = (
+            self.state.get("phases", {})
+            .get("writer_quiescence_proof", {})
+            .get("evidence", {})
+            .get("source", {})
+            .get("fingerprint")
+        )
+        if (
+            not planned
+            or not quiescent
+            or consistency.get("before") != planned
+            or consistency.get("before") != quiescent
+        ):
+            raise CutoverError("final Kanboard source did not match the planned quiescent source")
         return {
             "parity": parity,
             "counts": imported.get("counts", {}),
@@ -590,24 +659,214 @@ class Operations:
         return {"services": started, "units": units, "provenance": provenance}
 
     def installed_protocol_acceptance(self) -> dict[str, Any]:
-        # These are public executable boundaries.  The idempotent comment is the
-        # first accepted application write and its committed request/event pair is
-        # the irreversible recovery boundary.  Repeating the same request proves
-        # public replay without creating a second comment or event.
+        # Every operation below is a public executable boundary and every write
+        # has a deterministic request id.  A crash may therefore resume this
+        # phase without duplicating a product, issue, comment, task or event.
         status = _secretary(self.paths, "status", "--json")
-        doctor = _secretary(self.paths, "doctor", "--json")
+        doctor = _secretary(self.paths, "doctor", "--json", "--offline")
         product = _secretary(self.paths, "product", "list")
         issue = _secretary(self.paths, "issue", "list")
         sprint = _secretary(self.paths, "sprint", "list")
         task = _secretary(self.paths, "task", "list")
-        reference = _acceptance_task_ref(self.paths)
-        body = self.paths.artifacts / f"acceptance-{self.state['plan_id']}.md"
-        body.write_text(
+        sprint_ref, project = _acceptance_context(_command_document(sprint, "sprint list"))
+        prefix = self.state["plan_id"][:16]
+        product_id = f"cutover-{prefix}"
+        body = _artifact(
+            self.paths,
+            f"acceptance-{self.state['plan_id']}.md",
             "PostgreSQL cutover installed-protocol acceptance.\n",
-            encoding="utf-8",
         )
-        body.chmod(0o600)
-        request_id = f"postgres-cutover-acceptance-{self.state['plan_id'][:24]}"
+        override = _artifact(
+            self.paths,
+            f"acceptance-override-{self.state['plan_id']}.md",
+            "Isolated cutover acceptance canary while the imported sprint remains frozen.\n",
+        )
+
+        created_product = _secretary(
+            self.paths,
+            "product",
+            "create",
+            "--role",
+            "po",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--request-id",
+            f"cutover-product-{prefix}",
+            "--id",
+            product_id,
+            "--project",
+            project,
+            "--title",
+            "PostgreSQL cutover acceptance",
+            "--description",
+            "Durable installed-protocol canary",
+            "--data-dir",
+            str(self.paths.data),
+        )
+        shown_product = _secretary(self.paths, "product", "show", "--id", product_id)
+        created_issue = _secretary(
+            self.paths,
+            "issue",
+            "create",
+            "--role",
+            "po",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--request-id",
+            f"cutover-issue-{prefix}",
+            "--product",
+            product_id,
+            "--kind",
+            "improvement",
+            "--priority",
+            "P3",
+            "--title",
+            "Verify PostgreSQL cutover",
+            "--description",
+            "Installed acceptance issue",
+            "--data-dir",
+            str(self.paths.data),
+        )
+        issue_document = _command_document(created_issue, "issue create")
+        issue_ref = str(
+            (issue_document.get("ref") or issue_document.get("issue", {}).get("ref"))
+            if isinstance(issue_document, dict)
+            else ""
+        )
+        if not issue_ref:
+            raise CutoverError("issue create returned no issue reference")
+        updated_issue = _secretary(
+            self.paths,
+            "issue",
+            "update-priority",
+            "--role",
+            "po",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--request-id",
+            f"cutover-issue-priority-{prefix}",
+            "--ref",
+            issue_ref,
+            "--priority",
+            "P2",
+            "--reason",
+            "exercise installed mutation",
+            "--data-dir",
+            str(self.paths.data),
+        )
+        shown_issue = _secretary(self.paths, "issue", "show", "--ref", issue_ref)
+
+        sprint_request = f"cutover-sprint-comment-{prefix}"
+        sprint_comment_args = (
+            "sprint",
+            "comment",
+            "--ref",
+            sprint_ref,
+            "--role",
+            "po",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--request-id",
+            sprint_request,
+            "--body-file",
+            str(body),
+            "--data-dir",
+            str(self.paths.data),
+        )
+        sprint_comment = _secretary(self.paths, *sprint_comment_args)
+        sprint_replay = _secretary(self.paths, *sprint_comment_args)
+        sprint_document = _command_document(sprint_comment, "sprint comment")
+        replay_document = _command_document(sprint_replay, "sprint comment replay")
+        comment_id = str(sprint_document.get("comment_id") if isinstance(sprint_document, dict) else "")
+        if (
+            not comment_id
+            or replay_document.get("comment_id") != comment_id
+            or replay_document.get("saved") is not False
+        ):
+            raise CutoverError(
+                "sprint comment replay did not prove one durable delivery event: "
+                f"first={sprint_document!r}, replay={replay_document!r}"
+            )
+        delivery = _secretary(
+            self.paths,
+            "sprint",
+            "comment-delivery",
+            "--ref",
+            sprint_ref,
+            "--comment-id",
+            comment_id,
+            "--data-dir",
+            str(self.paths.data),
+        )
+
+        create_task = _secretary(
+            self.paths,
+            "task",
+            "create",
+            "--role",
+            "po",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--request-id",
+            f"cutover-task-{prefix}",
+            "--project",
+            project,
+            "--type",
+            "code",
+            "--title",
+            "PostgreSQL cutover acceptance task",
+            "--state",
+            "ready",
+            "--sprint",
+            sprint_ref,
+            "--sprint-override",
+            "--sprint-override-reason-file",
+            str(override),
+            "--data-dir",
+            str(self.paths.data),
+        )
+        create_document = _command_document(create_task, "task create")
+        reference = str(
+            create_document.get("task", {}).get("ref") if isinstance(create_document, dict) else ""
+        )
+        if not reference:
+            raise CutoverError("task create returned no task reference")
+        claim = _secretary(
+            self.paths,
+            "task",
+            "claim",
+            "--ref",
+            reference,
+            "--role",
+            "dispatcher",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--worker",
+            f"cutover-{prefix}",
+            "--request-id",
+            f"cutover-task-claim-{prefix}",
+            "--data-dir",
+            str(self.paths.data),
+        )
+        release = _secretary(
+            self.paths,
+            "task",
+            "move",
+            "--ref",
+            reference,
+            "--role",
+            "dispatcher",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--to",
+            "ready",
+            "--reason-file",
+            str(body),
+            "--request-id",
+            f"cutover-task-release-{prefix}",
+            "--data-dir",
+            str(self.paths.data),
+        )
         comment_args = (
             "task",
             "comment",
@@ -618,7 +877,7 @@ class Operations:
             "--actor",
             CUTOVER_ACTOR,
             "--request-id",
-            request_id,
+            f"cutover-task-comment-{prefix}",
             "--body-file",
             str(body),
             "--data-dir",
@@ -626,7 +885,96 @@ class Operations:
         )
         first = _secretary(self.paths, *comment_args)
         replay = _secretary(self.paths, *comment_args)
-        tick = _secretary(self.paths, "dispatcher", "production-tick", "--probe")
+        first_document = _command_document(first, "task comment")
+        replay_task_document = _command_document(replay, "task comment replay")
+        if not isinstance(first_document, dict) or not isinstance(replay_task_document, dict):
+            raise CutoverError("task comment replay returned invalid documents")
+        if (
+            first_document.get("event_id") != replay_task_document.get("event_id")
+            or replay_task_document.get("replayed") is not True
+        ):
+            raise CutoverError("task comment replay did not prove one committed event")
+        completed = _secretary(
+            self.paths,
+            "task",
+            "move",
+            "--ref",
+            reference,
+            "--role",
+            "po",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--to",
+            "done",
+            "--reason-file",
+            str(body),
+            "--request-id",
+            f"cutover-task-done-{prefix}",
+            "--sprint-override",
+            "--sprint-override-reason-file",
+            str(override),
+            "--data-dir",
+            str(self.paths.data),
+        )
+        archived = _secretary(
+            self.paths,
+            "task",
+            "archive",
+            "--ref",
+            reference,
+            "--role",
+            "po",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--reason-file",
+            str(body),
+            "--request-id",
+            f"cutover-task-archive-{prefix}",
+            "--data-dir",
+            str(self.paths.data),
+        )
+        post_close = _secretary(
+            self.paths,
+            "task",
+            "comment",
+            "--ref",
+            reference,
+            "--role",
+            "po",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--request-id",
+            f"cutover-task-post-close-{prefix}",
+            "--body-file",
+            str(body),
+            "--data-dir",
+            str(self.paths.data),
+        )
+        closed_issue = _secretary(
+            self.paths,
+            "issue",
+            "close",
+            "--role",
+            "po",
+            "--actor",
+            CUTOVER_ACTOR,
+            "--request-id",
+            f"cutover-issue-close-{prefix}",
+            "--ref",
+            issue_ref,
+            "--reason",
+            "resolved",
+            "--data-dir",
+            str(self.paths.data),
+        )
+        task_read = _secretary(self.paths, "task", "show", "--ref", reference)
+        web_task = _secretary(self.paths, "web-read", "task", "--json", "--ref", reference, "--events", "50")
+        web_request = _secretary(
+            self.paths, "web-read", "request", "--json", "--request-id", f"cutover-task-comment-{prefix}"
+        )
+        web_commands = _secretary(self.paths, "web-read", "commands", "--json", "--limit", "50")
+        web_system = _secretary(self.paths, "web-read", "system", "--json")
+        tick = _secretary(self.paths, "dispatcher", "production-tick", "--probe", "--host-mode", "noop")
         audit = _sql_event_count(self.paths)
         return {
             "reads": {
@@ -637,7 +985,34 @@ class Operations:
                 "sprint": sprint,
                 "task": task,
             },
-            "write": {"task_ref": reference, "request_id": request_id, "first": first, "replay": replay},
+            "product": {"id": product_id, "created": created_product, "shown": shown_product},
+            "issue": {
+                "ref": issue_ref,
+                "created": created_issue,
+                "updated": updated_issue,
+                "shown": shown_issue,
+                "closed": closed_issue,
+            },
+            "sprint": {
+                "ref": sprint_ref,
+                "comment": sprint_comment,
+                "replay": sprint_replay,
+                "delivery": delivery,
+            },
+            "write": {
+                "task_ref": reference,
+                "request_id": f"cutover-task-comment-{prefix}",
+                "created": create_task,
+                "claim": claim,
+                "release": release,
+                "first": first,
+                "replay": replay,
+                "completed": completed,
+                "archived": archived,
+                "post_close_comment": post_close,
+                "read": task_read,
+            },
+            "web": {"system": web_system, "task": web_task, "commands": web_commands, "request": web_request},
             "dispatcher_probe": tick,
             "sql_audit": audit,
         }
@@ -649,7 +1024,9 @@ class Operations:
         old = os.environ.get(BACKEND_ENV)
         os.environ[BACKEND_ENV] = "postgres"
         try:
-            checkpoint = CheckpointWriter(self.paths.data, self.paths.instance).write()
+            checkpoint = CheckpointWriter(
+                self.paths.data, self.paths.instance, **self.checkpoint_options
+            ).write()
             if checkpoint.status == "blocked":
                 raise CutoverError(f"PostgreSQL checkpoint refused: {checkpoint.reason}")
             backups = create_backups(
@@ -664,9 +1041,21 @@ class Operations:
             else:
                 os.environ[BACKEND_ENV] = old
         manifests = [item.manifest for item in backups]
-        if any("kanboard_raw" in item.get("components", {}) for item in manifests):
+        if any("raw_board" in item.get("components", {}) for item in manifests):
             raise CutoverError("post-switch backup unexpectedly contains a raw Kanboard component")
-        return {"checkpoint": checkpoint.as_dict(), "archives": [str(x.archive) for x in backups]}
+        if not manifests or any("postgres_dump" not in item.get("components", {}) for item in manifests):
+            raise CutoverError("post-switch full backup has no PostgreSQL dump component")
+        preserved = None
+        acceptance = self.state.get("phases", {}).get("installed_protocol_acceptance", {}).get("evidence", {})
+        task_ref = acceptance.get("write", {}).get("task_ref")
+        if task_ref:
+            preserved = _secretary(self.paths, "task", "show", "--ref", str(task_ref))
+        return {
+            "checkpoint": checkpoint.to_json(),
+            "archives": [str(x.archive) for x in backups],
+            "archive_manifests": manifests,
+            "acceptance_preserved": preserved,
+        }
 
     def resume_ready(self) -> dict[str, Any]:
         return {
@@ -688,6 +1077,7 @@ def _new_state(plan: dict[str, Any], actor: str, reason: str) -> dict[str, Any]:
         "updated_at": _now(),
         "status": "applying",
         "backend_before": "kanboard",
+        "planned_source": plan.get("source", {}),
         "first_sql_write": None,
         "phases": {},
     }
@@ -700,6 +1090,26 @@ def _validate_mutation(args: argparse.Namespace, plan: dict[str, Any] | None = N
         raise CutoverError("mutating cutover modes require --confirm")
     if plan is not None and args.confirm != plan["confirmation"]:
         raise CutoverError("confirmation token does not match the current plan")
+
+
+def _refresh_first_sql_write(paths: Paths, state: dict[str, Any]) -> None:
+    """Persist the irreversible boundary, treating an unreadable audit as uncertainty."""
+    if state.get("first_sql_write") is not None:
+        return
+    activation = state.get("phases", {}).get("selector_activation", {})
+    if activation.get("status") != "complete":
+        return
+    baseline = activation.get("evidence", {}).get("sql_audit_baseline", {})
+    try:
+        current = _sql_event_count(paths)
+    except Exception as exc:  # noqa: BLE001 - uncertainty must itself cross the durable boundary
+        reason = str(exc) if isinstance(exc, CutoverError) else type(exc).__name__
+        current = {"unavailable": True, "reason": reason}
+        crossed = True
+    else:
+        crossed = current.get("committed_events", 0) > baseline.get("committed_events", 0)
+    if crossed:
+        state["first_sql_write"] = {"recorded_at": _now(), "evidence": current}
 
 
 def apply_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
@@ -728,8 +1138,8 @@ def apply_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
         state["controller_pid"] = os.getpid()
         state["updated_at"] = _now()
         _write_state(paths, state)
-        old_controller = os.environ.get("SECRETARY_CUTOVER_CONTROLLER_ID")
-        os.environ["SECRETARY_CUTOVER_CONTROLLER_ID"] = state["identity"]
+        old_controller = os.environ.get(CONTROLLER_ID_ENV)
+        os.environ[CONTROLLER_ID_ENV] = state["identity"]
         operations = Operations(paths, state)
         try:
             for name in PHASES:
@@ -742,6 +1152,7 @@ def apply_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
                     evidence = getattr(operations, name)()
                 except Exception as exc:  # noqa: BLE001 - every phase failure must become durable evidence
                     reason = str(exc) if isinstance(exc, CutoverError) else f"{type(exc).__name__}: {exc}"
+                    _refresh_first_sql_write(paths, state)
                     state["phases"][name] = {
                         **state["phases"][name],
                         "status": "failed",
@@ -760,17 +1171,14 @@ def apply_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
                     "evidence": evidence,
                 }
                 if name == "installed_protocol_acceptance":
-                    baseline = state["phases"]["selector_activation"]["evidence"]["sql_audit_baseline"]
-                    audit = evidence["sql_audit"]
-                    if audit["committed_events"] > baseline["committed_events"]:
-                        state["first_sql_write"] = {"recorded_at": _now(), "evidence": audit}
+                    _refresh_first_sql_write(paths, state)
                 state["updated_at"] = _now()
                 _write_state(paths, state)
         finally:
             if old_controller is None:
-                os.environ.pop("SECRETARY_CUTOVER_CONTROLLER_ID", None)
+                os.environ.pop(CONTROLLER_ID_ENV, None)
             else:
-                os.environ["SECRETARY_CUTOVER_CONTROLLER_ID"] = old_controller
+                os.environ[CONTROLLER_ID_ENV] = old_controller
         state["status"] = "resume-ready"
         state["updated_at"] = _now()
         _write_state(paths, state)
@@ -799,6 +1207,41 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
             raise CutoverError(f"recovery confirmation token must be {expected_token}")
         _provenance(paths, args.expected_revision)
         activated = state.get("phases", {}).get("selector_activation", {}).get("status") == "complete"
+        freeze_status = state.get("phases", {}).get("global_freeze", {}).get("status")
+        imported = state.get("phases", {}).get("final_fenced_import", {}).get("status") == "complete"
+        if freeze_status is None and not imported and not activated:
+            # No old writer was durably declared stopped, no target was imported
+            # and no selector changed.  There is no cutover effect to roll back.
+            state["recovery"] = {
+                "branch": "no-cutover-effects",
+                "actor": args.actor,
+                "reason": args.reason,
+                "completed_at": _now(),
+                "evidence": {"backend": _backend(paths), "frozen": False},
+            }
+            state["status"] = "recovered-frozen"
+            state["updated_at"] = _now()
+            _write_state(paths, state)
+            return state
+        if not imported and not activated and not state.get("first_sql_write"):
+            if _backend(paths) != "kanboard":
+                raise CutoverError("early recovery expected the unchanged Kanboard selector")
+            source = _source_evidence(paths)
+            state["recovery"] = {
+                "branch": "kanboard-before-fingerprint",
+                "actor": args.actor,
+                "reason": args.reason,
+                "completed_at": _now(),
+                "evidence": {
+                    "source": source,
+                    "freeze_phase_status": freeze_status,
+                    "services": _systemctl("restart", START_UNITS),
+                },
+            }
+            state["status"] = "recovered-frozen"
+            state["updated_at"] = _now()
+            _write_state(paths, state)
+            return state
         if activated:
             baseline = state["phases"]["selector_activation"]["evidence"]["sql_audit_baseline"]
             try:

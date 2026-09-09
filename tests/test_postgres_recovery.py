@@ -12,10 +12,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary import cutover
 from secretary.backup import create_backups
 from secretary.backup_verify import verify_backup
 from secretary.board import migrate, provision, schema
 from secretary.board.backend import reset_card_backend
+from secretary.board.import_board import BoardSource, RegistryEntry, SourceRow
 from secretary.board.postgres_recovery import PostgresRecoveryError, restore_dump
 from secretary.board.sql_cards import SqlCardClient
 from secretary.board.store import BoardStoreConfig, BoardStoreError
@@ -24,6 +26,101 @@ from secretary.restore import restore_postgres_backup
 from secretary.sprint_observer import none_choice
 from secretary.sprints import SprintWriter, sprint_client
 from secretary.tasks import TaskWriter
+
+
+def cutover_source(repository: Path) -> BoardSource:
+    """Complete, small Kanboard snapshot for the isolated controller boundary."""
+
+    def row(identifier: int, reference: str, *, meta: dict[str, str], column: int = 2) -> SourceRow:
+        return SourceRow(
+            raw={
+                "id": identifier,
+                "reference": reference,
+                "title": f"title {reference}",
+                "description": "isolated cutover fixture",
+                "column_id": column,
+                "swimlane_id": 2,
+                "is_active": 1,
+                "position": 0,
+                "date_creation": 1_700_000_000,
+                "date_modification": 1_700_000_500,
+            },
+            meta=meta,
+            comments=(),
+        )
+
+    issue_ref = "issue:" + "a" * 20
+    source = BoardSource(
+        pipeline=(
+            row(
+                1,
+                "product:secretary",
+                column=1,
+                meta={
+                    "record_type": "product",
+                    "product_id": "secretary",
+                    "product_projects": '["secretary"]',
+                },
+            ),
+            row(
+                2,
+                issue_ref,
+                column=1,
+                meta={
+                    "record_type": "issue",
+                    "issue_product": "secretary",
+                    "issue_kind": "bug",
+                    "issue_priority": "P1",
+                },
+            ),
+            row(
+                3,
+                "secretary-1",
+                meta={
+                    "record_type": "task",
+                    "project": "secretary",
+                    "task_type": "code",
+                    "sprint_ref": "sprint:1",
+                },
+            ),
+        ),
+        sprints=(
+            row(
+                10,
+                "sprint:1",
+                meta={
+                    "sprint_goal": "rehearse the cutover",
+                    "sprint_definition_of_done": "the isolated controller passes",
+                    "sprint_status": "open",
+                    "sprint_product": "secretary",
+                    "sprint_issues": json.dumps([issue_ref]),
+                    "sprint_reservations": '["secretary"]',
+                    "sprint_repositories": json.dumps([str(repository)]),
+                    "sprint_observer": '{"kind":"none"}',
+                },
+            ),
+        ),
+        pipeline_columns={1: "Issues", 2: "Ready", 3: "In progress", 6: "Blocked", 7: "Done"},
+        pipeline_swimlanes={1: "Default swimlane", 2: "secretary"},
+        registry=(
+            RegistryEntry(
+                project_id="secretary",
+                repo=str(repository),
+                remote=None,
+                default_branch="main",
+                adapter="secretary",
+                orca_binding="secretary",
+                enabled=True,
+                plane="orchestrator",
+                curator_roots=(),
+            ),
+        ),
+        budget_records=(),
+        transaction_documents=(),
+        audit_records=(),
+        source_fence={"before": "isolated", "after": "isolated", "matched": True},
+    )
+    return source
 
 
 class PostgresRecoveryFailureTests(unittest.TestCase):
@@ -91,8 +188,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         repository = self.root / "repository"
         repository.mkdir(exist_ok=True)
         (instance / "projects" / "secretary.yaml").write_text(
-            f"id: secretary\nrepo: {repository}\n"
-            "enabled: false\nadapter: secretary\ndefault_branch: main\n",
+            f"id: secretary\nrepo: {repository}\nenabled: false\nadapter: secretary\ndefault_branch: main\n",
             encoding="utf-8",
         )
         (instance / "adapters").mkdir()
@@ -106,10 +202,15 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             listener.bind(("127.0.0.1", 0))
             port = int(listener.getsockname()[1])
         config = BoardStoreConfig(
-            host="127.0.0.1", port=port, dbname="secretary",
-            owner_user="secretary_owner", owner_password=f"{name}-owner-secret",
-            app_user=schema.APP_ROLE, app_password=f"{name}-app-secret",
-            read_user=schema.READ_ROLE, read_password=f"{name}-read-secret",
+            host="127.0.0.1",
+            port=port,
+            dbname="secretary",
+            owner_user="secretary_owner",
+            owner_password=f"{name}-owner-secret",
+            app_user=schema.APP_ROLE,
+            app_password=f"{name}-app-secret",
+            read_user=schema.READ_ROLE,
+            read_password=f"{name}-read-secret",
         )
         path = instance / "board-store.env"
         path.write_text(
@@ -132,11 +233,22 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             if config.exists() and compose.exists():
                 subprocess.run(
                     [
-                        "docker", "compose", "--project-name", project,
-                        "--env-file", str(config), "--file", str(compose),
-                        "down", "--volumes", "--remove-orphans",
+                        "docker",
+                        "compose",
+                        "--project-name",
+                        project,
+                        "--env-file",
+                        str(config),
+                        "--file",
+                        str(compose),
+                        "down",
+                        "--volumes",
+                        "--remove-orphans",
                     ],
-                    check=False, capture_output=True, text=True, timeout=180,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
                 )
 
     def _seed(self) -> None:
@@ -148,59 +260,88 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 "createTask", project_id=1, title="Secretary", reference="product:secretary"
             )
             client.call(
-                "saveTaskMetadata", task_id=product_key,
+                "saveTaskMetadata",
+                task_id=product_key,
                 values={
-                    "record_type": "product", "product_id": "secretary",
-                    "product_projects": '["secretary"]', "future_product_key": "opaque",
+                    "record_type": "product",
+                    "product_id": "secretary",
+                    "product_projects": '["secretary"]',
+                    "future_product_key": "opaque",
                 },
             )
-            issue_key = client.call(
-                "createTask", project_id=1, title="Recovery", reference="issue:recovery"
-            )
+            issue_key = client.call("createTask", project_id=1, title="Recovery", reference="issue:recovery")
             client.call(
-                "saveTaskMetadata", task_id=issue_key,
+                "saveTaskMetadata",
+                task_id=issue_key,
                 values={
-                    "record_type": "issue", "issue_product": "secretary",
-                    "issue_kind": "feature", "issue_priority": "P1",
+                    "record_type": "issue",
+                    "issue_product": "secretary",
+                    "issue_kind": "feature",
+                    "issue_priority": "P1",
                 },
             )
         writer = TaskWriter(client, data_dir=data_dir)
         sprint_board = sprint_client(self.source_instance)
         self.addCleanup(sprint_board.close)
-        sprint_writer = SprintWriter(
-            sprint_board, data_dir=data_dir, instance=self.source_instance
-        )
+        sprint_writer = SprintWriter(sprint_board, data_dir=data_dir, instance=self.source_instance)
         sprint_ref = sprint_writer.create(
-            role="po", actor="test", goal="prove recovery",
+            role="po",
+            actor="test",
+            goal="prove recovery",
             repositories=[str(self.root / "repository")],
-            product="secretary", issues=["issue:recovery"], projects=["secretary"],
-            observer=none_choice(), reference="sprint:recovery-custom",
+            product="secretary",
+            issues=["issue:recovery"],
+            projects=["secretary"],
+            observer=none_choice(),
+            reference="sprint:recovery-custom",
             request_id="create-nullable-number-sprint",
         )["sprint"]["ref"]
         first = writer.create(
-            role="po", actor="test", project="secretary", task_type="code",
-            title="Recover me", target="ready", reference="secretary-1", sprint=sprint_ref,
-            sprint_override=True, sprint_override_reason="integration fixture",
+            role="po",
+            actor="test",
+            project="secretary",
+            task_type="code",
+            title="Recover me",
+            target="ready",
+            reference="secretary-1",
+            sprint=sprint_ref,
+            sprint_override=True,
+            sprint_override_reason="integration fixture",
             request_id="create-recovery-one",
         )["task"]
         second = writer.create(
-            role="po", actor="test", project="secretary", task_type="code",
-            title="Dependent", target="ready", reference="secretary-2", sprint=sprint_ref,
-            blocked_by="secretary-1", request_id="create-recovery-two",
-            seed_ref="a" * 40, supersedes="secretary-1",
-            sprint_override=True, sprint_override_reason="integration fixture",
+            role="po",
+            actor="test",
+            project="secretary",
+            task_type="code",
+            title="Dependent",
+            target="ready",
+            reference="secretary-2",
+            sprint=sprint_ref,
+            blocked_by="secretary-1",
+            request_id="create-recovery-two",
+            seed_ref="a" * 40,
+            supersedes="secretary-1",
+            sprint_override=True,
+            sprint_override_reason="integration fixture",
         )["task"]
         client.call(
-            "saveTaskMetadata", task_id=int(str(first["id"]).rsplit("_", 1)[1]),
+            "saveTaskMetadata",
+            task_id=int(str(first["id"]).rsplit("_", 1)[1]),
             values={"future_task_key": "opaque", "issues": "issue:recovery"},
         )
         self.assertEqual(second["workspace"]["supersedes"], "secretary-1")
         sprint_writer.comment(
-            role="po", actor="test", reference=sprint_ref,
-            body="sprint recovery comment", request_id="sprint-recovery-comment",
+            role="po",
+            actor="test",
+            reference=sprint_ref,
+            body="sprint recovery comment",
+            request_id="sprint-recovery-comment",
         )
         sprint_writer.resume(
-            role="po", actor="test", reference=sprint_ref,
+            role="po",
+            actor="test",
+            reference=sprint_ref,
             entry={
                 "selected_step": "continue recovery",
                 "selected_why": "the dump is ready",
@@ -213,33 +354,55 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             request_id="sprint-recovery-resume",
         )
         sprint_writer.record_budget(
-            role="po", actor="test", reference=sprint_ref,
-            event_type="red_ci", request_id="sprint-recovery-budget",
+            role="po",
+            actor="test",
+            reference=sprint_ref,
+            event_type="red_ci",
+            request_id="sprint-recovery-budget",
         )
         writer.move(
-            role="po", actor="test", reference="secretary-1", target="done",
-            reason="recovery fixture complete", request_id="complete-recovery-one",
-            sprint_override=True, sprint_override_reason="integration recovery fixture",
+            role="po",
+            actor="test",
+            reference="secretary-1",
+            target="done",
+            reason="recovery fixture complete",
+            request_id="complete-recovery-one",
+            sprint_override=True,
+            sprint_override_reason="integration recovery fixture",
         )
         writer.archive(
-            role="po", actor="test", reference="secretary-1",
-            reason="retain archived recovery evidence", request_id="archive-recovery-one",
+            role="po",
+            actor="test",
+            reference="secretary-1",
+            reason="retain archived recovery evidence",
+            request_id="archive-recovery-one",
         )
         writer.comment(
-            role="worker", actor="test", reference="secretary-1",
-            body="post-close evidence", request_id="post-close-comment",
+            role="worker",
+            actor="test",
+            reference="secretary-1",
+            body="post-close evidence",
+            request_id="post-close-comment",
         )
         sprint_writer.close(
-            role="po", actor="test", reference=sprint_ref,
+            role="po",
+            actor="test",
+            reference=sprint_ref,
             decisions={
-                "issues": [{
-                    "ref": "issue:recovery", "verdict": "open",
-                    "reason": "recovery remains supported",
-                }],
-                "cards": [{
-                    "ref": "secretary-2", "verdict": "drop",
-                    "reason": "fixture closes with dependent work recorded",
-                }],
+                "issues": [
+                    {
+                        "ref": "issue:recovery",
+                        "verdict": "open",
+                        "reason": "recovery remains supported",
+                    }
+                ],
+                "cards": [
+                    {
+                        "ref": "secretary-2",
+                        "verdict": "drop",
+                        "reason": "fixture closes with dependent work recorded",
+                    }
+                ],
             },
             reason="recovery fixture closed",
             request_id="close-recovery-sprint",
@@ -251,8 +414,10 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         (data_dir / "memory" / "export.ndjson").write_text("", encoding="utf-8")
         runs = data_dir / "runs"
         for name, body in (
-            ("watermarks.json", "{}\n"), ("cards.json", "{}\n"),
-            ("claims.json", "{}\n"), ("runs.ndjson", ""),
+            ("watermarks.json", "{}\n"),
+            ("cards.json", "{}\n"),
+            ("claims.json", "{}\n"),
+            ("runs.ndjson", ""),
         ):
             (runs / name).write_text(body, encoding="utf-8")
         for name in ("transcripts", "artifacts"):
@@ -265,6 +430,139 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 0, "test"),
         }
 
+    def test_real_cutover_phases_share_one_disposable_postgres_16_boundary(self) -> None:
+        """Run the controller methods themselves, not a wholesale Operations fake."""
+        instance = self.target_instance
+        data = self.root / "target-data"
+        init_layout(data)
+        pipeline_state = self.root / "pipeline-state"
+        pipeline_state.mkdir()
+        runtime = instance / "runtime.env"
+        runtime.write_text("SECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8")
+        runtime.chmod(0o600)
+        (instance / ".gitignore").write_text(
+            "board-store.env\npostgres-data/\n",
+            encoding="utf-8",
+        )
+        source = cutover_source(self.root / "repository")
+        subprocess.run(["git", "-C", str(instance), "init", "-b", "main"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(instance), "config", "user.name", "cutover-test"], check=True)
+        subprocess.run(
+            ["git", "-C", str(instance), "config", "user.email", "cutover@example.invalid"], check=True
+        )
+        subprocess.run(["git", "-C", str(instance), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(instance), "commit", "-m", "fixture"], check=True, capture_output=True
+        )
+
+        plan = {
+            "version": 1,
+            "plan_id": "d" * 64,
+            "expected_revision": "a" * 40,
+            "source": {"fingerprint": "isolated"},
+        }
+        state = cutover._new_state(plan, "integration", "disposable PostgreSQL 16 rehearsal")
+        state["controller_pid"] = os.getpid()
+        state["phases"]["global_freeze"] = {"status": "complete"}
+        paths = cutover.Paths(instance, data)
+        cutover._write_state(paths, state)
+        project = next(project for candidate, project in self.projects if candidate == instance)
+        operation = cutover.Operations(
+            paths,
+            state,
+            provision_options={
+                "compose_path": instance / "postgres-compose.yml",
+                "project": project,
+            },
+            checkpoint_options={"state_dir": pipeline_state},
+        )
+        real_command = cutover._secretary
+
+        def isolated_command(command_paths, *argv):
+            if argv[:2] == ("dispatcher", "production-tick"):
+                document = {"status": "ok", "isolated_host_control": True, "would": []}
+                return {"output": json.dumps(document), "document": document}
+            return real_command(command_paths, *argv)
+
+        freeze = {"paused": True, "mode": "freeze", "actor": cutover.CUTOVER_ACTOR}
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SECRETARY_CARD_BACKEND": "kanboard",
+                    cutover.CONTROLLER_ID_ENV: state["identity"],
+                },
+                clear=False,
+            ),
+            mock.patch.object(cutover, "_secretary", side_effect=isolated_command),
+            mock.patch.object(cutover, "_systemctl", return_value={"action": "isolated"}),
+            mock.patch.object(cutover, "_service_evidence", return_value=[]),
+            mock.patch.object(cutover, "_provenance", return_value={"product_root": str(self.root)}),
+            mock.patch.object(cutover, "_writer_processes", return_value=[]),
+            mock.patch("secretary.board.import_board.read_source", return_value=source),
+            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("secretary.backup._pipeline_status", return_value=freeze),
+            mock.patch("secretary.backup.export_all", side_effect=self._exports),
+        ):
+            provisioned = operation.postgresql_provision_migration_verification()
+            quiescent = operation.writer_quiescence_proof()
+            state["phases"]["writer_quiescence_proof"] = {
+                "status": "complete",
+                "evidence": quiescent,
+            }
+            imported = operation.final_fenced_import()
+            state["phases"]["final_fenced_import"] = {"status": "complete", "evidence": imported}
+            parity = operation.full_parity()
+            recovery_backup = operation.postgresql_recovery_backup()
+            activated = operation.selector_activation()
+            state["phases"]["selector_activation"] = {
+                "status": "complete",
+                "evidence": activated,
+            }
+            reconciled = operation.service_reconciliation()
+            accepted = operation.installed_protocol_acceptance()
+            state["phases"]["installed_protocol_acceptance"] = {
+                "status": "complete",
+                "evidence": accepted,
+            }
+            checkpoint = operation.post_switch_checkpoint()
+
+        self.assertEqual(provisioned["migration_head"], migrate.head_revision())
+        self.assertEqual(
+            quiescent["source"]["fingerprint"],
+            imported["import"]["source_consistency"]["before"],
+        )
+        self.assertTrue(parity["parity"]["ok"])
+        self.assertTrue(recovery_backup["archives"])
+        self.assertEqual(activated["backend"], "postgres")
+        self.assertEqual(reconciled["services"], {"action": "isolated"})
+        self.assertGreater(
+            accepted["sql_audit"]["committed_events"], activated["sql_audit_baseline"]["committed_events"]
+        )
+        self.assertTrue(checkpoint["archives"])
+        self.assertIsNotNone(checkpoint["acceptance_preserved"])
+        self.assertTrue(
+            all("postgres_dump" in manifest["components"] for manifest in checkpoint["archive_manifests"])
+        )
+        print(
+            "cutover rehearsal evidence: "
+            + json.dumps(
+                {
+                    "source": "synthetic-kanboard-complete",
+                    "target": project,
+                    "postgres_image": "postgres:16",
+                    "migration_head": provisioned["migration_head"],
+                    "parity_counts": parity["counts"],
+                    "acceptance_events": accepted["sql_audit"]["committed_events"],
+                    "activation_baseline": activated["sql_audit_baseline"]["committed_events"],
+                    "recovery_archives": len(recovery_backup["archives"]),
+                    "checkpoint_commit": checkpoint["checkpoint"]["commit"],
+                    "post_switch_archives": len(checkpoint["archives"]),
+                },
+                sort_keys=True,
+            )
+        )
+
     def test_full_backup_destroy_source_restore_target_and_rerun(self) -> None:
         self._seed()
         with (
@@ -274,9 +572,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             mock.patch("secretary.backup.export_all", side_effect=self._exports),
             mock.patch("secretary.sprints.sprint_client", wraps=sprint_client) as sprint_factory,
         ):
-            results = create_backups(
-                self.source_instance, backup_kinds=("full", "core")
-            )
+            results = create_backups(self.source_instance, backup_kinds=("full", "core"))
         sprint_factory.assert_called_once_with(self.source_instance)
         by_kind = {result.manifest["backup_kind"]: result for result in results}
         result = by_kind["full"]
@@ -314,9 +610,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertGreater(counts["board_events"], 0)
         self.assertGreaterEqual(counts["requests"], 12)
         self.assertGreater(result.manifest["components"]["postgres_dump"]["bytes"], 0)
-        source_probe = SqlCardClient(
-            self.source_config.for_role("read"), self.source_instance
-        )
+        source_probe = SqlCardClient(self.source_config.for_role("read"), self.source_instance)
         self.assertEqual(
             source_probe._query(
                 "SELECT request_id FROM sprint_budget_events WHERE sprint_ref = %s",
@@ -326,16 +620,12 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         )
         self.assertIn(
             ("complete-recovery-one", True),
-            source_probe._query(
-                "SELECT request_id, committed FROM board_events ORDER BY request_id"
-            ),
+            source_probe._query("SELECT request_id, committed FROM board_events ORDER BY request_id"),
         )
         source_probe.close()
         with tarfile.open(result.archive) as archive:
             cards = json.loads(
-                archive.extractfile("secretary-backup/secretary-data/board/cards.json")
-                .read()
-                .decode("utf-8")
+                archive.extractfile("secretary-backup/secretary-data/board/cards.json").read().decode("utf-8")
             )["cards"]
             sprints = json.loads(
                 archive.extractfile("secretary-backup/secretary-data/board/sprints.json")
@@ -343,9 +633,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 .decode("utf-8")
             )["sprints"]
             history = json.loads(
-                archive.extractfile("secretary-backup/secretary-data/board/audit.json")
-                .read()
-                .decode("utf-8")
+                archive.extractfile("secretary-backup/secretary-data/board/audit.json").read().decode("utf-8")
             )["events"]
         cards_by_ref = {card["reference"]: card for card in cards}
         self.assertEqual(cards_by_ref["secretary-1"]["metadata"]["issues"], "issue:recovery")
@@ -387,13 +675,9 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         first = restore_postgres_backup(result.archive, self.target_instance)
         second = restore_postgres_backup(result.archive, self.target_instance)
         self.assertEqual(first, second)
-        marker = json.loads(
-            (self.root / "target-data" / "postgres-restore.json").read_text(encoding="utf-8")
-        )
+        marker = json.loads((self.root / "target-data" / "postgres-restore.json").read_text(encoding="utf-8"))
         self.assertFalse(marker["processes_started"])
-        target_probe = SqlCardClient(
-            self.target_config.for_role("read"), self.target_instance
-        )
+        target_probe = SqlCardClient(self.target_config.for_role("read"), self.target_instance)
         self.addCleanup(target_probe.close)
         self.assertEqual(
             target_probe._query(
@@ -403,27 +687,19 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             [("sprint-recovery-budget",)],
         )
         self.assertEqual(
-            target_probe._query(
-                "SELECT task_ref, issue_id FROM task_issues ORDER BY task_ref, issue_id"
-            ),
+            target_probe._query("SELECT task_ref, issue_id FROM task_issues ORDER BY task_ref, issue_id"),
             [("secretary-1", "recovery")],
         )
         self.assertEqual(
-            target_probe._query(
-                "SELECT task_ref, supersedes FROM task_supersessions ORDER BY task_ref"
-            ),
+            target_probe._query("SELECT task_ref, supersedes FROM task_supersessions ORDER BY task_ref"),
             [("secretary-2", "secretary-1")],
         )
         self.assertIn(
             ("complete-recovery-one", True),
-            target_probe._query(
-                "SELECT request_id, committed FROM board_events ORDER BY request_id"
-            ),
+            target_probe._query("SELECT request_id, committed FROM board_events ORDER BY request_id"),
         )
         self.assertEqual(
-            target_probe._query(
-                "SELECT DISTINCT request_id FROM sprint_decisions ORDER BY request_id"
-            ),
+            target_probe._query("SELECT DISTINCT request_id FROM sprint_decisions ORDER BY request_id"),
             [("close-recovery-sprint",)],
         )
         self.assertEqual(
@@ -456,12 +732,22 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
     def _down(instance: Path, project: str) -> None:
         subprocess.run(
             [
-                "docker", "compose", "--project-name", project,
-                "--env-file", str(instance / "board-store.env"),
-                "--file", str(instance / "postgres-compose.yml"),
-                "down", "--volumes", "--remove-orphans",
+                "docker",
+                "compose",
+                "--project-name",
+                project,
+                "--env-file",
+                str(instance / "board-store.env"),
+                "--file",
+                str(instance / "postgres-compose.yml"),
+                "down",
+                "--volumes",
+                "--remove-orphans",
             ],
-            check=True, capture_output=True, text=True, timeout=180,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
 
 

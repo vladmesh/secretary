@@ -4167,3 +4167,9 @@ revision/provenance disagreement, stale identity, backend disagreement and out-o
 Every phase has `running`, `failed` or `complete` evidence. A failed phase cannot be relabelled; the
 same command retries it. `resume_ready` means probes and SQL-sourced recovery artifacts passed, not
 that work resumed.
+
+Each product subprocess must exit successfully and return a nonempty JSON object or array. Empty,
+non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public
+writers read the durable state and admit only a child carrying
+`SECRETARY_CUTOVER_CONTROLLER_ID=<state identity>` or the immediate controller child identified by
+parent pid. Terminal controller states are never re-armed by later pause state.

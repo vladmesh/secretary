@@ -342,13 +342,19 @@ live cutover acceptance.
 
 `tests.test_cutover` is the controller failure matrix. It interrupts each durable phase, retries the
 same identity, and asserts earlier phases execute once. It also covers atomic selector preservation,
-private/symlink-safe state, backend/phase disagreement, source movement, both recovery branches, and
-selector propagation to every launched role without inference from `board-store.env`.
+runtime-readable/symlink-safe state, backend/phase disagreement, source movement, both recovery
+branches, actual service/import/parity/backup/checkpoint/first-write seams, controller identity
+across process uids, terminal release during a later freeze, and selector propagation to every
+launched role without inference from an existing `board-store.env`.
 
-The full external rehearsal must use disposable Kanboard source data, an empty PostgreSQL 16 target,
-isolated instance/data directories, and fake or isolated service/head controls. Missing Docker,
-psycopg, SQLAlchemy, Alembic or PostgreSQL is a red prerequisite failure, never a skip. Record source
-and target identities, migration head, per-table import/parity counts, protocol acceptance counts,
-archive/checkpoint identities, failure-injection results and exact installed provenance. Never point a
-rehearsal at `/home/dev/secretary-data`, `/home/dev/secretary-instance`, production systemd or a live
-observer.
+`tests.test_postgres_recovery.PostgresRecoveryIntegrationTests.test_real_cutover_phases_share_one_disposable_postgres_16_boundary`
+runs the real provision, migration verification, quiescence, import, parity, recovery backup,
+activation, public acceptance and post-switch checkpoint methods against one isolated PostgreSQL 16
+boundary. Only systemd, installed-head probes and dispatcher host launch are substituted. Missing
+Docker, psycopg, SQLAlchemy, Alembic or PostgreSQL is a red prerequisite failure, never a skip.
+
+An external rehearsal and live operation remain conditional evidence boundaries. Record source and
+target identities, migration head, per-table import/parity counts, protocol acceptance counts,
+archive/checkpoint identities, failure-injection results and exact installed provenance. Never point
+a test rehearsal at `/home/dev/secretary-data`, `/home/dev/secretary-instance`, production systemd or
+a live observer.

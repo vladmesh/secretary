@@ -872,7 +872,9 @@ acceptance; post-switch checkpoint; and resume-ready.
 
 The state identity is the digest of the exact installed revision, runtime/source provenance,
 instance/data paths, source fingerprint, counts, parity and phase vocabulary. The confirmation token
-is derived from that digest. An exclusive lock serializes mutation, atomic private state files make
-phase completion restart-safe, and retries accept only the original actor, reason, revision and
-identity. The irreversible-policy marker is derived from committed SQL audit growth after the
-activation baseline.
+is derived from that digest. An exclusive lock serializes mutation. Atomic, non-secret state is
+owner-writable and runtime-readable so service uids can enforce the same barrier. Retries accept only
+the original actor, reason, revision and identity. Controller subprocesses carry the state identity;
+other matching writer processes remain fenced. The barrier applies only to in-flight controller
+states and terminal states release it unconditionally. The irreversible-policy marker is derived
+from committed SQL audit growth after the activation baseline.

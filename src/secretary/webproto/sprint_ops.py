@@ -91,7 +91,7 @@ from secretary.board.backend import SPRINT, board_client
 from secretary.config import InstanceReport, validate_instance
 from secretary.sprint_observer import observer_choice
 from secretary.sprints import SprintWriter
-from secretary.tasks import TaskAudit, TaskError, _digest
+from secretary.tasks import TaskError, _digest
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
@@ -355,8 +355,8 @@ class SprintOperationLayer(ProtocolBoundary):
         report = self.report()
         data_dir = self.data_dir(report)
         try:
-            audit = TaskAudit(data_dir)
-            owned = audit.committed_event(request_id) or audit.pending_event(request_id)
+            writer = self._writer(report, data_dir)
+            owned = writer.audit.committed_event(request_id) or writer.audit.pending_event(request_id)
         except TaskError as exc:
             raise self._comment_refusal(exc, request_id=request_id) from None
         if owned is not None:
@@ -364,7 +364,7 @@ class SprintOperationLayer(ProtocolBoundary):
                 owned, role=role, actor=actor, reference=reference, body=body, request_id=request_id
             )
         try:
-            written = self._writer(report, data_dir).comment(
+            written = writer.comment(
                 role=role, actor=actor, reference=reference, body=body, request_id=request_id
             )
         except TaskError as exc:

@@ -691,3 +691,15 @@ the stale Kanboard archive. No recovery branch resumes the pipeline automaticall
 An uncertain phase at or after `global_freeze` stays frozen. Do not remove the freeze, hand-edit
 `runtime.env`, rerun the importer, or start an individual consumer. Inspect `secretary cutover status`
 and retry the same cutover identity or use its `RECOVER-...` token.
+
+There are two safe early outcomes before a frozen fingerprint exists. A failure before the freeze
+records `no-cutover-effects` without touching services. A freeze that stopped consumers but failed
+before import or activation records `kanboard-before-fingerprint` only after confirming the
+Kanboard selector and obtaining a fresh stable source fence, then reconciles consumers. Neither
+branch claims rollback from an imported target.
+
+The state document contains no credentials and is deliberately readable by runtime service uids;
+only its owner may write it. Writers enforce it only while status is `applying` or `failed-frozen`.
+Terminal `resume-ready` and `recovered-frozen` states release the barrier unconditionally, including
+when an unrelated later pipeline freeze is active. A corrupt or unreadable in-scope state still
+fails closed.

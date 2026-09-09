@@ -2675,3 +2675,11 @@ dual-write or read fallback.
 The old Kanboard store is retained as a protected read-only archive. It is eligible for pre-first-
 SQL-write rollback only while its frozen fingerprint still matches; after a committed application
 event it is never a writable recovery target.
+
+Activation acceptance uses public commands for Product, Issue, Sprint and Task reads and writes.
+It proves sprint-comment delivery and replay, task request replay and history lookup,
+reservation/claim release, completion, archival and post-close comment behavior, read-only web
+surfaces and an isolated dispatcher tick. The post-switch checkpoint and full backup must preserve
+the acceptance task, contain a `postgres_dump` component and contain no `raw_board` component.
+These are requirements on each external cutover's evidence, not a claim that the live installation
+has already been cut over.
