@@ -618,6 +618,14 @@ class IgnoreLifecycleTests(InstanceRepository):
         with self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"):
             ensure_ignored(self.instance)
 
+    def test_a_literal_ignore_overridden_by_a_negation_is_not_accepted(self) -> None:
+        (self.instance / ".gitignore").write_text(
+            f"/{STORE_FILE}\n!/{STORE_FILE}\n", encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(BoardStoreError, "verify exclusion failed"):
+            ensure_ignored(self.instance)
+
     def test_a_symlink_refuses_for_the_reason_the_parse_refuses_one(self) -> None:
         store_path(self.instance).symlink_to(self.instance / "elsewhere.env")
 

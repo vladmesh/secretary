@@ -361,6 +361,96 @@ class CutoverOperationSeamTests(CutoverFixture):
 
 
 class CutoverFailureInjectionTests(CutoverFixture):
+    barrier_phases = (
+        "writer_quiescence_proof",
+        "final_fenced_import",
+        "selector_activation",
+    )
+
+    def _operations_with_foreign_barrier_probes(self, failed_phase, failure, probes):
+        fixture = self
+
+        class ProbeOperations:
+            def __init__(self, paths, _state):
+                self.paths = paths
+
+            def __getattr__(self, name):
+                def operation():
+                    if name == failed_phase and failure["enabled"]:
+                        raise RuntimeError("injected crash")
+                    if name in fixture.barrier_phases:
+                        from secretary.cutover.barrier import require_board_write_allowed
+                        from secretary.tasks import TaskError
+
+                        durable = cutover._read_state(self.paths)
+                        fixture.assertEqual(durable["status"], "applying")
+                        controller_identity = os.environ.pop(cutover.CONTROLLER_ID_ENV, None)
+                        try:
+                            with fixture.assertRaisesRegex(TaskError, "writes are fenced"):
+                                require_board_write_allowed(self.paths.data)
+                        finally:
+                            if controller_identity is not None:
+                                os.environ[cutover.CONTROLLER_ID_ENV] = controller_identity
+                        probes.append(name)
+                    if name == "selector_activation":
+                        return {"sql_audit_baseline": {"committed_events": 10}}
+                    return {"phase": name}
+
+                return operation
+
+        return ProbeOperations
+
+    def _apply_with_barrier_probes(self, *, failed_phase=None) -> tuple[dict, list[str]]:
+        failure = {"enabled": failed_phase is not None}
+        probes: list[str] = []
+        operations = self._operations_with_foreign_barrier_probes(failed_phase, failure, probes)
+        with (
+            mock.patch.object(cutover, "build_plan", return_value=PLAN),
+            mock.patch.object(cutover, "Operations", operations),
+            mock.patch.object(cutover, "_provenance", return_value={}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_sql_event_count", return_value={"committed_events": 10}),
+        ):
+            if failed_phase is not None:
+                with self.assertRaisesRegex(cutover.CutoverError, failed_phase):
+                    cutover.apply_cutover(args(), self.paths)
+                failure["enabled"] = False
+            result = cutover.apply_cutover(args(), self.paths)
+        return result, probes
+
+    def test_first_apply_arms_the_real_barrier_through_quiescence_import_and_activation(self) -> None:
+        result, probes = self._apply_with_barrier_probes()
+
+        self.assertEqual(result["status"], "resume-ready")
+        self.assertEqual(probes, list(self.barrier_phases))
+
+    def test_pre_freeze_failure_retry_rearms_the_real_barrier_before_any_phase(self) -> None:
+        result, probes = self._apply_with_barrier_probes(
+            failed_phase="current_kanboard_backup_checkpoint"
+        )
+
+        self.assertEqual(result["status"], "resume-ready")
+        self.assertEqual(probes, list(self.barrier_phases))
+
+    def test_failed_frozen_retry_keeps_the_real_barrier_armed(self) -> None:
+        result, probes = self._apply_with_barrier_probes(failed_phase="writer_quiescence_proof")
+
+        self.assertEqual(result["status"], "resume-ready")
+        self.assertEqual(probes, list(self.barrier_phases))
+
+    def test_recovered_terminal_identity_cannot_enter_any_phase_again(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        state["status"] = "recovered-frozen"
+        state["recovery"] = {"branch": "no-cutover-effects"}
+        cutover._write_state(self.paths, state)
+
+        with (
+            mock.patch.object(cutover, "Operations") as operations,
+            self.assertRaisesRegex(cutover.CutoverError, "fresh plan and identity"),
+        ):
+            cutover.apply_cutover(args(), self.paths)
+        operations.assert_not_called()
+
     def test_interruption_after_every_phase_resumes_without_repeating_completed_work(self) -> None:
         for failed_index, failed_phase in enumerate(cutover.PHASES):
             with self.subTest(phase=failed_phase), tempfile.TemporaryDirectory() as raw:

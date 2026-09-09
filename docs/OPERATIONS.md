@@ -3618,7 +3618,8 @@ secretary cutover status --instance /absolute/instance
 
 Rerun the identical `apply` command after a crash. Never delete or edit the state document. A failed
 phase remains failed and frozen; completed phases are not repeated. `status` prints the recovery
-token. Recovery is similarly explicit:
+token. A terminal `resume-ready` or `recovered-frozen` identity cannot be applied again; a later
+cutover attempt requires a fresh plan and identity. Recovery is similarly explicit:
 
 ```
 secretary cutover recover --instance /absolute/instance --expected-revision <sha> \
@@ -3645,3 +3646,5 @@ unrelated pipeline freeze.
 The packaged disposable PostgreSQL 16 rehearsal proves the mechanism and isolated public protocol
 surface. It is not live acceptance. The external operator must still retain the command's actual
 revision, service, source, parity, archive, checkpoint and acceptance evidence before resuming.
+Installed acceptance deliberately leaves a closed canary issue and an archived canary task on the
+selected live sprint as durable protocol evidence.

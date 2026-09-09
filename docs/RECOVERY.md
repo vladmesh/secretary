@@ -702,4 +702,5 @@ The state document contains no credentials and is deliberately readable by runti
 only its owner may write it. Writers enforce it only while status is `applying` or `failed-frozen`.
 Terminal `resume-ready` and `recovered-frozen` states release the barrier unconditionally, including
 when an unrelated later pipeline freeze is active. A corrupt or unreadable in-scope state still
-fails closed.
+fails closed. Apply refuses to reuse either terminal identity; another attempt requires a fresh plan
+and identity.

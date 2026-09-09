@@ -382,6 +382,14 @@ def ensure_ignored(
     ignore = instance_dir / ".gitignore"
     try:
         if ignore.is_file() and entry in ignore.read_text(encoding="utf-8").splitlines():
+            # A later negation or re-inclusion can override this literal line.
+            # The lock-free checkpoint path may avoid an index-writing lock, but
+            # it must retain the same effective-ignore proof as the locked path.
+            git(
+                instance_dir,
+                ["check-ignore", "--quiet", "--", entry.lstrip("/")],
+                label="verify exclusion",
+            )
             return False
     except OSError as exc:
         raise StateRepoError(f"read gitignore failed: {exc}") from None

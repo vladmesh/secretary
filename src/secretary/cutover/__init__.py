@@ -1122,6 +1122,10 @@ def apply_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
             _write_state(paths, state)
         else:
             _validate_mutation(args)
+            if state.get("status") in {"resume-ready", "recovered-frozen"}:
+                raise CutoverError(
+                    "terminal cutover identity cannot be applied again; create a fresh plan and identity"
+                )
             if state.get("expected_revision") != args.expected_revision:
                 raise CutoverError("existing cutover state belongs to a different revision")
             if args.confirm != f"CUTOVER-{state['plan_id'][:16]}":
@@ -1135,6 +1139,11 @@ def apply_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
                     f"durable phase evidence expects backend {expected_backend}; refusing ambiguous continuation"
                 )
             _provenance(paths, args.expected_revision)
+        # This is the single apply-entry boundary for both a new run and every
+        # supported retry.  Publish it before constructing Operations or
+        # entering any phase so a failed/failed-frozen retry cannot traverse
+        # the freeze with the durable foreign-writer barrier disarmed.
+        state["status"] = "applying"
         state["controller_pid"] = os.getpid()
         state["updated_at"] = _now()
         _write_state(paths, state)
