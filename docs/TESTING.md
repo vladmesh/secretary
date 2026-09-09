@@ -322,3 +322,19 @@ and a real refusal, over HTTPS through the front and with the owner's password. 
 in [Operations](OPERATIONS.md#running-a-card-through-the-installed-service), and the unauthorised
 half of it — 401 and no body on every published route — is the `curl` loop under
 [*Auditing what is exposed*](OPERATIONS.md#auditing-what-is-exposed).
+
+## Import and audit migration evidence
+
+`tests.test_board_import_mapping` covers strict streaming journal validation, duplicate request and
+event identity refusal, closed typed-event validation, generic retention, centralized budget claim
+ownership, and source movement at the stream and complete-observation boundaries.
+`tests.test_board_import_integration` executes the resulting request and event rows against
+`postgres:16`, including foreign keys, exact intent retention and occupied-target refusal. Docker,
+Compose, psycopg, SQLAlchemy and Alembic are required evidence; absence is red rather than a skip.
+
+The release rehearsal is additionally a read-only observation of the current Kanboard and journal
+applied to an isolated dynamic-port Compose target. Its report records current source and
+destination counts, fence identities, Alembic head, duration, request replay/ownership and public
+history lookup probes. It is migration evidence only. The dispatcher-owned exact-SHA gate remains
+the authoritative broad test result, and neither the rehearsal nor a worker-local broad receipt is
+live cutover acceptance.

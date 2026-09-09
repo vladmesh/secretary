@@ -51,17 +51,19 @@ is cheap to apply (:func:`sprint_references`).
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from hashlib import sha1
+from hashlib import sha1, sha256
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from secretary.board.backend import record_key, sprint_reference_number
+from secretary.board.models import EntityKind, Event
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
     ISSUE_KINDS,
@@ -243,6 +245,8 @@ class BoardSource:
     registry: tuple[RegistryEntry, ...]
     budget_records: tuple[dict[str, Any], ...]
     transaction_documents: tuple[dict[str, Any], ...]
+    audit_records: tuple[dict[str, Any], ...] = ()
+    source_fence: dict[str, Any] = field(default_factory=dict)
 
 
 def _board_rows(client: KanboardClient, board_name: str) -> tuple[list[SourceRow], dict[int, str], dict[int, str]]:
@@ -316,30 +320,91 @@ def read_registry(instance: Path) -> list[RegistryEntry]:
     return entries
 
 
-def read_budget_records(data_dir: Path | None) -> list[dict[str, Any]]:
-    """§8.7's source for a charge's ``occurred_at``: the audit journal's ``budget_recorded`` rows.
+def read_audit_records(data_dir: Path | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Stream and validate the complete committed audit journal.
 
-    The journal is read and never written.  A journal that is absent is not an error — §8.7 then
-    falls back to the sprint's ``updated_at`` for every charge and the report marks the timestamps
-    approximate, which is exactly the case the document describes.
+    The narrow budget reader used to skip malformed lines.  An import cannot do that: every
+    nonblank line is either one named request owner or a source error, and a protocol-shaped row
+    must pass the closed :class:`Event` contract before it can be admitted.
     """
     if data_dir is None:
-        return []
+        return [], {"present": False, "records": 0, "sha256": sha256(b"").hexdigest()}
     path = Path(data_dir).expanduser() / "board" / "events.ndjson"
     if not path.is_file():
-        return []
-    records = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(record, dict) and record.get("kind") == "budget_recorded":
-            records.append(record)
-    return records
+        raise BoardImportError(f"the audit journal {path} is unavailable")
+    records: list[dict[str, Any]] = []
+    request_ids: dict[str, int] = {}
+    event_ids: dict[str, int] = {}
+    digest = sha256()
+    total_lines = 0
+    try:
+        with path.open("rb") as stream:
+            initial = os.fstat(stream.fileno())
+            for number, raw_line in enumerate(stream, start=1):
+                total_lines = number
+                digest.update(raw_line)
+                if not raw_line.strip():
+                    continue
+                try:
+                    record = json.loads(raw_line)
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise BoardImportError(
+                        f"audit journal {path} line {number} is malformed JSON: {exc}"
+                    ) from None
+                if not isinstance(record, dict):
+                    raise BoardImportError(
+                        f"audit journal {path} line {number} is not a JSON object"
+                    )
+                for key, owners in (("event_id", event_ids), ("request_id", request_ids)):
+                    value = record.get(key)
+                    if not isinstance(value, str) or not value.strip():
+                        raise BoardImportError(
+                            f"audit journal {path} line {number} has no non-empty {key}"
+                        )
+                    if value in owners:
+                        raise BoardImportError(
+                            f"audit journal {path} line {number} duplicates {key} {value!r} "
+                            f"from line {owners[value]}"
+                        )
+                    owners[value] = number
+                if record.get("record_type") == Event.RECORD_TYPE:
+                    try:
+                        Event.from_record(record)
+                    except (TypeError, ValueError) as exc:
+                        raise BoardImportError(
+                            f"audit journal {path} line {number} is an invalid board.protocol_event: {exc}"
+                        ) from None
+                records.append(record)
+            final = os.fstat(stream.fileno())
+        current = path.stat()
+    except OSError as exc:
+        raise BoardImportError(f"cannot read audit journal {path}: {exc}") from None
+    identity = {
+        "present": True,
+        "path": str(path.resolve()),
+        "device": initial.st_dev,
+        "inode": initial.st_ino,
+        "size": final.st_size,
+        "mtime_ns": final.st_mtime_ns,
+        "records": len(records),
+        "lines": total_lines,
+        "sha256": digest.hexdigest(),
+    }
+    descriptor = (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns)
+    if (
+        (initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns) != descriptor
+        or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != descriptor
+    ):
+        raise BoardImportError(
+            "the audit journal moved while it was being read; source consistency fence refused the run"
+        )
+    return records, identity
+
+
+def read_budget_records(data_dir: Path | None) -> list[dict[str, Any]]:
+    """Compatibility projection of the strict, complete journal reader."""
+    records, _identity = read_audit_records(data_dir)
+    return [record for record in records if record.get("kind") == "budget_recorded"]
 
 
 def read_transaction_documents(data_dir: Path | None) -> list[dict[str, Any]]:
@@ -360,6 +425,45 @@ def read_transaction_documents(data_dir: Path | None) -> list[dict[str, Any]]:
     return documents
 
 
+def _source_fingerprint(source: BoardSource) -> str:
+    def row(value: SourceRow) -> dict[str, Any]:
+        return {"raw": value.raw, "meta": value.meta, "comments": value.comments}
+
+    payload = {
+        "pipeline": [row(value) for value in source.pipeline],
+        "sprints": [row(value) for value in source.sprints],
+        "pipeline_columns": source.pipeline_columns,
+        "pipeline_swimlanes": source.pipeline_swimlanes,
+        "registry": [value.__dict__ for value in source.registry],
+        "audit_records": source.audit_records,
+        "transaction_documents": source.transaction_documents,
+        "journal_identity": source.source_fence.get("journal", {}),
+    }
+    return sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _read_source_once(instance_path: Path, data_path: Path | None) -> BoardSource:
+    client = KanboardClient.for_instance(instance_path)
+    pipeline, columns, swimlanes = _board_rows(client, PIPELINE_BOARD_NAME)
+    sprints, _, _ = _board_rows(client, SPRINT_BOARD_NAME)
+    audit_records, journal_identity = read_audit_records(data_path)
+    return BoardSource(
+        pipeline=tuple(pipeline),
+        sprints=tuple(row for row in sprints if row.ref.startswith(SPRINT_REFERENCE_PREFIX)),
+        pipeline_columns=columns,
+        pipeline_swimlanes=swimlanes,
+        registry=tuple(read_registry(instance_path)),
+        budget_records=tuple(
+            record for record in audit_records if record.get("kind") == "budget_recorded"
+        ),
+        transaction_documents=tuple(read_transaction_documents(data_path)),
+        audit_records=tuple(audit_records),
+        source_fence={"journal": journal_identity},
+    )
+
+
 def read_source(instance: str | Path, *, data_dir: str | Path | None = None) -> BoardSource:
     """One read of everything, so a dry run and a real run describe the same board.
 
@@ -369,19 +473,33 @@ def read_source(instance: str | Path, *, data_dir: str | Path | None = None) -> 
     `postgres` switch still reads Kanboard, and that is correct rather than an oversight.
     """
     instance_path = Path(instance).expanduser()
-    client = KanboardClient.for_instance(instance_path)
-    pipeline, columns, swimlanes = _board_rows(client, PIPELINE_BOARD_NAME)
-    sprints, _, _ = _board_rows(client, SPRINT_BOARD_NAME)
     data_path = Path(data_dir).expanduser() if data_dir else None
-    return BoardSource(
-        pipeline=tuple(pipeline),
-        sprints=tuple(row for row in sprints if row.ref.startswith(SPRINT_REFERENCE_PREFIX)),
-        pipeline_columns=columns,
-        pipeline_swimlanes=swimlanes,
-        registry=tuple(read_registry(instance_path)),
-        budget_records=tuple(read_budget_records(data_path)),
-        transaction_documents=tuple(read_transaction_documents(data_path)),
+    before = _read_source_once(instance_path, data_path)
+    before_fingerprint = _source_fingerprint(before)
+    # With no local journal there is no migration snapshot to fence.  This preserves the small
+    # programmatic reader's historical one-pass behaviour while every real import, which supplies
+    # --data-dir, proves two identical complete observations.
+    if data_path is None:
+        before.source_fence.update(
+            {"before": before_fingerprint, "after": before_fingerprint, "matched": True}
+        )
+        return before
+    after = _read_source_once(instance_path, data_path)
+    after_fingerprint = _source_fingerprint(after)
+    before.source_fence.update(
+        {
+            "before": before_fingerprint,
+            "after": after_fingerprint,
+            "matched": before_fingerprint == after_fingerprint,
+            "after_journal": after.source_fence["journal"],
+        }
     )
+    if before_fingerprint != after_fingerprint:
+        raise BoardImportError(
+            "Kanboard or the audit journal moved across the complete source read; "
+            f"source consistency fence refused the run ({before_fingerprint} != {after_fingerprint})"
+        )
+    return before
 
 
 # --- the §8.1 marker rule -----------------------------------------------------------------
@@ -442,6 +560,7 @@ class ImportReport:
     schema_revision: str | None = None
     generated_at: str = ""
     source: dict[str, int] = field(default_factory=dict)
+    source_consistency: dict[str, Any] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
     expected_zero: list[dict[str, Any]] = field(default_factory=list)
     records_not_imported: list[dict[str, Any]] = field(default_factory=list)
@@ -460,6 +579,7 @@ class ImportReport:
     project_repository_mismatch: dict[str, Any] = field(default_factory=dict)
     sprints_without_recoverable_decisions: list[str] = field(default_factory=list)
     budget: dict[str, Any] = field(default_factory=dict)
+    audit: dict[str, Any] = field(default_factory=dict)
     unrecognized_comment_markers: list[dict[str, Any]] = field(default_factory=list)
     approximate_values: list[dict[str, Any]] = field(default_factory=list)
     #: A card the board carries with no value at all for a column the schema has.  The column is
@@ -509,6 +629,7 @@ class ImportReport:
             "generated_at": self.generated_at,
             "mode": self.mode,
             "source": self.source,
+            "source_consistency": self.source_consistency,
             "counts": self.counts,
             "discrepancies": {
                 "expected_zero": self.expected_zero,
@@ -521,6 +642,7 @@ class ImportReport:
                 "project_repository_mismatch": self.project_repository_mismatch,
                 "sprints_without_recoverable_decisions": self.sprints_without_recoverable_decisions,
                 "budget": self.budget,
+                "audit": self.audit,
                 "unrecognized_comment_markers": self.unrecognized_comment_markers,
                 "approximate_values": self.approximate_values,
                 "fields_the_board_never_named": self.fields_the_board_never_named,
@@ -551,6 +673,11 @@ def render(report: ImportReport) -> str:
         "source:",
     ]
     lines += [f"  {name}: {value}" for name, value in sorted(report.source.items())]
+    if report.source_consistency:
+        lines += ["", "source consistency fence:"]
+        lines.append(f"  before: {report.source_consistency.get('before')}")
+        lines.append(f"  after:  {report.source_consistency.get('after')}")
+        lines.append(f"  matched: {report.source_consistency.get('matched')}")
     lines += ["", "rows per table:"]
     lines += [f"  {name}: {report.counts.get(name, 0)}" for name in TABLE_ORDER]
     if report.expected_zero:
@@ -628,6 +755,13 @@ def render(report: ImportReport) -> str:
         lines.append(f"  occurred_at approximate for {report.budget.get('approximate')} row(s)")
         for item in report.budget.get("mismatches", []):
             lines.append(f"  MISMATCH {item}")
+    if report.audit:
+        lines += ["", "audit journal:"]
+        for name in (
+            "lines", "records", "generic_records", "typed_records", "request_rows",
+            "board_event_rows", "budget_linked_requests", "refusals",
+        ):
+            lines.append(f"  {name.replace('_', ' ')}: {report.audit.get(name, 0)}")
     if report.sprints_without_recoverable_decisions:
         lines += [
             "",
@@ -707,10 +841,122 @@ def _sprint_number_of(ref: str) -> int | None:
     return sprint_reference_number(ref)
 
 
+def _request_entity(record: dict[str, Any]) -> tuple[str | None, str | None]:
+    ref = record.get("ref")
+    reference = ref if isinstance(ref, str) and ref else None
+    if record.get("record_type") == Event.RECORD_TYPE:
+        event = Event.from_record(record)
+        return event.entity_kind.value, event.ref
+    if reference is None:
+        return None, None
+    if reference.startswith("product:"):
+        return EntityKind.PRODUCT.value, reference
+    if reference.startswith("issue:"):
+        return EntityKind.ISSUE.value, reference
+    if reference.startswith("sprint:"):
+        return EntityKind.SPRINT.value, reference
+    return EntityKind.CARD.value, reference
+
+
+def _claim_request(
+    rows: dict[str, list[dict[str, Any]]],
+    claims: dict[str, dict[str, Any]],
+    claim: dict[str, Any],
+    *,
+    owner: str,
+) -> dict[str, Any]:
+    request_id = str(claim["request_id"])
+    previous = claims.get(request_id)
+    if previous is not None:
+        if {key: value for key, value in previous.items() if key != "__owner"} != claim:
+            raise BoardImportError(
+                f"request id {request_id!r} has conflicting ownership between "
+                f"{previous.get('__owner', 'an earlier source')} and {owner}"
+            )
+        return previous
+    stored = dict(claim)
+    stored["__owner"] = owner
+    claims[request_id] = stored
+    rows["requests"].append(claim)
+    return stored
+
+
+def _plan_audit(
+    source: BoardSource,
+    rows: dict[str, list[dict[str, Any]]],
+    report: ImportReport,
+    claims: dict[str, dict[str, Any]],
+) -> None:
+    typed = 0
+    generic = 0
+    for index, record in enumerate(source.audit_records, start=1):
+        request_id = str(record["request_id"])
+        occurred = _timestamp(record.get("occurred_at"))
+        if occurred is None:
+            raise BoardImportError(
+                f"audit journal record {index} request {request_id!r} has invalid occurred_at"
+            )
+        protocol = record.get("record_type") == Event.RECORD_TYPE
+        entity_kind, reference = _request_entity(record)
+        _claim_request(
+            rows,
+            claims,
+            {
+                "request_id": request_id,
+                "operation": str(record.get("kind") or ""),
+                "intent": record,
+                "status": "committed",
+                "protocol": protocol,
+                "entity_kind": entity_kind,
+                "ref": reference,
+                "created_at": occurred,
+                "settled_at": occurred,
+            },
+            owner=f"audit journal record {index}",
+        )
+        if not protocol:
+            generic += 1
+            continue
+        event = Event.from_record(record)
+        typed += 1
+        rows["board_events"].append(
+            {
+                "event_id": event.event_id,
+                "request_id": request_id,
+                "kind": event.kind.value,
+                "entity_kind": event.entity_kind.value,
+                "ref": event.ref,
+                "actor_role": event.actor.role,
+                "actor_id": event.actor.id,
+                "head_run_ref": event.actor.head_run_ref,
+                "reason": event.reason,
+                "source_state": event.source_state,
+                "target_state": event.target_state,
+                "related_refs": list(event.related_refs.refs),
+                "data": event.data,
+                "occurred_at": event.occurred_at,
+                "committed": True,
+                "committed_at": occurred,
+            }
+        )
+    report.audit = {
+        "lines": int(source.source_fence.get("journal", {}).get("lines", len(source.audit_records))),
+        "records": len(source.audit_records),
+        "generic_records": generic,
+        "typed_records": typed,
+        "request_rows": len(source.audit_records),
+        "board_event_rows": typed,
+        "budget_linked_requests": 0,
+        "refusals": 0,
+        "refusal_reasons": [],
+    }
+
+
 def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> ImportPlan:
     """Turn one read board into the rows of §3 and the report of §8.  Pure: no I/O, no clock."""
     report = ImportReport(generated_at=datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"))
     rows: dict[str, list[dict[str, Any]]] = {name: [] for name in TABLE_ORDER}
+    claims: dict[str, dict[str, Any]] = {}
 
     product_rows = [row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == PRODUCT_TYPE]
     issue_rows = [row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == ISSUE_TYPE]
@@ -730,8 +976,10 @@ def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> Im
         "sprint_comments": sum(len(row.comments) for row in source.sprints),
         "registry_projects": len(source.registry),
         "audit_budget_records": len(source.budget_records),
+        "audit_records": len(source.audit_records),
         "transaction_documents": len(source.transaction_documents),
     }
+    report.source_consistency = dict(source.source_fence)
 
     _plan_registry(source, card_rows, product_rows, rows, report)
     products = _plan_products(product_rows, rows, report)
@@ -739,9 +987,10 @@ def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> Im
     sprints = _plan_sprints(source, products, issues, rows, report)
     tasks = _plan_tasks(source, card_rows, sprints, products, rows, report)
     _link_sprint_cursors(source, sprints, tasks, report)
-    _plan_budget(source, sprints, rows, report, thresholds=thresholds)
+    _plan_audit(source, rows, report, claims)
+    _plan_budget(source, sprints, rows, report, claims, thresholds=thresholds)
     _plan_comments(source, tasks, sprints, products, issues, rows, report)
-    _plan_decisions(source, sprints, tasks, rows, report)
+    _plan_decisions(source, sprints, tasks, rows, report, claims)
 
     report.expected_zero = [
         {
@@ -750,14 +999,6 @@ def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> Im
             "board/kanboard.py:_card builds every Card with an empty issue_refs (§8.4, gap 1). "
             "A card's issue association is reachable through its sprint "
             "(tasks.sprint_ref -> sprint_issues).",
-        },
-        {
-            "table": "board_events",
-            "reason": "the typed events live in the local audit journal "
-            "<data>/board/events.ndjson, which is not board data and is not one of this card's "
-            "sources. The journal is untouched and still holds all 25605 records; importing it "
-            "is a later card. The only journal rows this import reads are the budget charges "
-            "§8.7 names, and they arrive as sprint_budget_events, not as events.",
         },
     ]
     if not rows["sprint_decisions"]:
@@ -1572,6 +1813,7 @@ def _plan_budget(
     sprints: dict[str, dict[str, Any]],
     rows: dict[str, list[dict[str, Any]]],
     report: ImportReport,
+    claims: dict[str, dict[str, Any]],
     *,
     thresholds: dict[str, int] | None = None,
 ) -> None:
@@ -1589,7 +1831,6 @@ def _plan_budget(
     approximate = 0
     mismatches: list[dict[str, Any]] = []
     per_type: Counter[str] = Counter()
-    claimed: set[str] = set()
     assigned = sprint_references(source.sprints)
     # Two sprint rows can share the board spelling the journal keys on, so the journal records of
     # one spelling are handed out once and never twice: the second row starts where the first
@@ -1640,11 +1881,7 @@ def _plan_budget(
                         "for this charge, so occurred_at is approximate"
                     )
                     approximate += 1
-                if request_id in claimed:
-                    request_id = f"{request_id}:{index}"
-                claimed.add(request_id)
-                rows["requests"].append(
-                    {
+                claim = {
                         "request_id": request_id,
                         "operation": "sprint.budget",
                         "intent": {
@@ -1659,7 +1896,37 @@ def _plan_budget(
                         "created_at": occurred,
                         "settled_at": occurred,
                     }
-                )
+                if record is not None:
+                    # The journal owns this installation-wide id.  The budget row only links to
+                    # that frozen claim; it must neither duplicate nor overwrite it.
+                    existing = claims.get(request_id)
+                    if existing is None:
+                        entity_kind, reference_from_record = _request_entity(record)
+                        _claim_request(
+                            rows,
+                            claims,
+                            {
+                                "request_id": request_id,
+                                "operation": str(record.get("kind") or ""),
+                                "intent": record,
+                                "status": "committed",
+                                "protocol": record.get("record_type") == Event.RECORD_TYPE,
+                                "entity_kind": entity_kind,
+                                "ref": reference_from_record,
+                                "created_at": occurred,
+                                "settled_at": occurred,
+                            },
+                            owner=f"budget journal projection {reference}/{event_type}/{index}",
+                        )
+                        existing = claims[request_id]
+                    if existing.get("intent") != record:
+                        raise BoardImportError(
+                            f"budget charge request {request_id!r} is not owned by its journal record"
+                        )
+                else:
+                    _claim_request(
+                        rows, claims, claim, owner=f"synthetic budget charge {reference}/{event_type}/{index}"
+                    )
                 rows["sprint_budget_events"].append(
                     {
                         "sprint_ref": reference,
@@ -1672,6 +1939,8 @@ def _plan_budget(
                     }
                 )
                 written += 1
+                if record is not None:
+                    report.audit["budget_linked_requests"] += 1
     report.budget = {
         "counter_total": counter_total,
         "rows": written,
@@ -1827,6 +2096,7 @@ def _plan_decisions(
     tasks: dict[str, dict[str, Any]],
     rows: dict[str, list[dict[str, Any]]],
     report: ImportReport,
+    claims: dict[str, dict[str, Any]],
 ) -> None:
     """§8.5: materialize what a surviving transaction document holds, and invent nothing else.
 
@@ -1839,7 +2109,6 @@ def _plan_decisions(
     """
     declared_issues = {(link["sprint_ref"], link["issue_id"]) for link in rows["sprint_issues"]}
     recovered: set[str] = set()
-    claimed: set[str] = set()
     for document in source.transaction_documents:
         event = document.get("event")
         if not isinstance(event, dict):
@@ -1903,9 +2172,10 @@ def _plan_decisions(
             )
         if not entries:
             continue
-        if request_id and request_id not in claimed:
-            claimed.add(request_id)
-            rows["requests"].append(
+        if request_id:
+            _claim_request(
+                rows,
+                claims,
                 {
                     "request_id": request_id,
                     "operation": "sprint.close",
@@ -1916,7 +2186,8 @@ def _plan_decisions(
                     "ref": reference,
                     "created_at": decided_at,
                     "settled_at": decided_at,
-                }
+                },
+                owner=f"sprint decision document for {reference}",
             )
         recovered.add(reference)
         for entry in entries:
@@ -2300,6 +2571,12 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
 
     board_comment_total = len(inventory.comments)
     stored_comment_total = sum(len(rows[table]) for table, _ in COMMENT_TABLES)
+    audit_request_ids = {record["request_id"] for record in source.audit_records}
+    typed_event_ids = {
+        record["event_id"]
+        for record in source.audit_records
+        if record.get("record_type") == Event.RECORD_TYPE
+    }
     counts = [
         _check(
             "every board card is a tasks row",
@@ -2321,6 +2598,19 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
             board_comment_total,
             stored_comment_total,
             note=", ".join(f"{table}: {len(rows[table])}" for table, _ in COMMENT_TABLES),
+        ),
+        _check(
+            "every audit journal record is one request row",
+            len(source.audit_records),
+            sum(
+                row["request_id"] in audit_request_ids
+                for row in rows["requests"]
+            ),
+        ),
+        _check(
+            "every typed audit record is one board_events row",
+            sum(record.get("record_type") == Event.RECORD_TYPE for record in source.audit_records),
+            len(rows["board_events"]),
         ),
     ]
 
@@ -2349,6 +2639,20 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
             "sprint transport keys agree with their references",
             {(row["ref"], record_key("sprint", row["ref"])) for row in rows["sprints"]},
             {(row["ref"], row["board_key"]) for row in rows["sprints"]},
+        ),
+        _check(
+            "audit request ids, literally",
+            audit_request_ids,
+            {
+                row["request_id"]
+                for row in rows["requests"]
+                if row["request_id"] in audit_request_ids
+            },
+        ),
+        _check(
+            "typed event ids, literally",
+            typed_event_ids,
+            {row["event_id"] for row in rows["board_events"]},
         ),
     ]
 
@@ -2539,6 +2843,22 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
                 "body are ordinary on this board",
             )
         )
+    source_intents = {
+        record["request_id"]: json.dumps(record, sort_keys=True, separators=(",", ":"))
+        for record in source.audit_records
+    }
+    stored_intents = {
+        row["request_id"]: json.dumps(row["intent"], sort_keys=True, separators=(",", ":"))
+        for row in rows["requests"]
+        if row["request_id"] in source_intents
+    }
+    content.append(
+        _check(
+            "audit request intents preserve the complete original records",
+            set(source_intents.items()),
+            set(stored_intents.items()),
+        )
+    )
 
     missing = _records_missing(inventory, rows, stored_tasks, stored_sprints, stored_issues,
                               stored_products, owners, fallback, report)

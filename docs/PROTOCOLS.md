@@ -4131,3 +4131,23 @@ grants, and the installation key opens every secret at once, with the same right
 `runtime.env`.
 
 Data-plane, archive-restore and unit runbooks are in [Operations](OPERATIONS.md).
+
+## Audit journal import protocol
+
+The committed `board/events.ndjson` journal owns the installation-wide request namespace during
+migration. Each accepted row becomes one committed `requests` claim under its original
+`request_id`, with the complete row frozen in `intent`. Generic operations remain visible through
+`TaskAudit.events`, request lookup and event-id ownership, but do not enter the typed occurrence
+stream. A declared `board.protocol_event` crosses `Event.from_record`; its `EventKind`, subject,
+actor, transition, related references, data and occurrence time become exactly one `board_events`
+row. A malformed declared protocol row is a refusal, never a generic fallback or a new event kind.
+
+`budget_recorded` retains the same journal request owner when projected into
+`sprint_budget_events`. A replay with the exact request and intent observes the committed claim; a
+different operation or payload under that id is refused. Importing claims only records history. It
+does not launch, resume or notify a dispatcher, worker, reviewer or observer.
+
+The import report accounts for total journal records, generic and typed records, request and board
+event rows, budget-linked requests, refusals and reasons. Its before/after source identities are a
+read fence over the complete source, not a control-plane pause protocol. A mismatch has no admitted
+snapshot and no apply phase.

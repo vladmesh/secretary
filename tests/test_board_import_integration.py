@@ -225,6 +225,28 @@ def synthetic_board() -> BoardSource:
             comments=(_comment("[po]\nthe archived twin's own journal", created=1_700_000_600),),
         ),
     )
+    budget_record = {
+        "kind": "budget_recorded",
+        "ref": "sprint:100",
+        "request_id": "sprint-budget-evt_1",
+        "event_id": "evt_1",
+        "occurred_at": "2026-08-01T10:00:00Z",
+        "payload": {"event_type": "red_review"},
+    }
+    typed_record = {
+        "schema_version": 2,
+        "record_type": "board.protocol_event",
+        "request_id": "typed-request-1",
+        "event_id": "typed-event-1",
+        "kind": "entity.updated",
+        "subject": {"kind": "card", "ref": "secretary-10"},
+        "ref": "secretary-10",
+        "actor": {"role": "worker", "id": "worker-1"},
+        "reason": "updated",
+        "related_refs": [],
+        "data": {"field": "value"},
+        "occurred_at": "2026-08-01T10:00:01Z",
+    }
     return BoardSource(
         pipeline=(product, *issues, *cards),
         sprints=sprints,
@@ -254,16 +276,8 @@ def synthetic_board() -> BoardSource:
                 curator_roots=(),
             ),
         ),
-        budget_records=(
-            {
-                "kind": "budget_recorded",
-                "ref": "sprint:100",
-                "request_id": "sprint-budget-evt_1",
-                "event_id": "evt_1",
-                "occurred_at": "2026-08-01T10:00:00Z",
-                "payload": {"event_type": "red_review"},
-            },
-        ),
+        budget_records=(budget_record,),
+        audit_records=(budget_record, typed_record),
         transaction_documents=(
             {
                 "version": 1,
@@ -308,6 +322,8 @@ def board_with_a_record_the_schema_cannot_carry() -> BoardSource:
         registry=board.registry,
         budget_records=board.budget_records,
         transaction_documents=board.transaction_documents,
+        audit_records=board.audit_records,
+        source_fence=board.source_fence,
     )
 
 
@@ -522,6 +538,16 @@ class BoardImportIntegrationTests(unittest.TestCase):
         claimed = {row["request_id"] for row in stored["requests"]}
         self.assertTrue({row["request_id"] for row in stored["sprint_budget_events"]} <= claimed)
         self.assertIn("sprint-budget-evt_1", claimed)
+
+    def test_complete_audit_history_is_queryable_and_typed_rows_are_projected(self) -> None:
+        _, stored = self.imported()
+        requests = {row["request_id"]: row for row in stored["requests"]}
+        self.assertEqual(requests["sprint-budget-evt_1"]["intent"], self.source.audit_records[0])
+        self.assertFalse(requests["sprint-budget-evt_1"]["protocol"])
+        self.assertEqual(
+            [(row["event_id"], row["request_id"]) for row in stored["board_events"]],
+            [("typed-event-1", "typed-request-1")],
+        )
 
     def test_the_recovered_close_decisions_satisfy_both_scoped_keys(self) -> None:
         _, stored = self.imported()

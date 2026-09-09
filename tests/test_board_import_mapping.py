@@ -16,6 +16,11 @@ first line looks like a marker but is not one.
 from __future__ import annotations
 
 import unittest
+import json
+import os
+import tempfile
+from pathlib import Path
+from unittest import mock
 
 from secretary.board import import_board
 from secretary.board.import_board import BoardSource, RegistryEntry, SourceRow
@@ -74,6 +79,7 @@ def source(
     registry: tuple[RegistryEntry, ...] = (),
     budget_records: tuple[dict[str, object], ...] = (),
     transaction_documents: tuple[dict[str, object], ...] = (),
+    audit_records: tuple[dict[str, object], ...] = (),
 ) -> BoardSource:
     return BoardSource(
         pipeline=pipeline,
@@ -83,6 +89,7 @@ def source(
         registry=registry,
         budget_records=budget_records,
         transaction_documents=transaction_documents,
+        audit_records=audit_records,
     )
 
 
@@ -713,6 +720,117 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual((mismatch["counter"], mismatch["audit_journal"]), (1, 3))
 
 
+class AuditImportTests(unittest.TestCase):
+    def generic(self, **overrides: object) -> dict[str, object]:
+        record: dict[str, object] = {
+            "schema_version": 1,
+            "request_id": "request-generic",
+            "event_id": "event-generic",
+            "kind": "commented",
+            "ref": "secretary-10",
+            "occurred_at": "2026-09-01T00:00:00Z",
+            "payload": {"marker": "worker"},
+        }
+        record.update(overrides)
+        return record
+
+    def typed(self) -> dict[str, object]:
+        return {
+            "schema_version": 2,
+            "record_type": "board.protocol_event",
+            "request_id": "request-typed",
+            "event_id": "event-typed",
+            "kind": "entity.updated",
+            "subject": {"kind": "card", "ref": "secretary-10"},
+            "ref": "secretary-10",
+            "actor": {"role": "worker", "id": "worker-1"},
+            "reason": "updated",
+            "related_refs": [],
+            "data": {"field": "value"},
+            "occurred_at": "2026-09-01T00:00:01Z",
+        }
+
+    def test_generic_and_typed_records_share_one_request_plan(self) -> None:
+        generic, typed = self.generic(), self.typed()
+        result = import_board.plan(source(audit_records=(generic, typed)))
+        self.assertEqual([row["request_id"] for row in result.rows["requests"]],
+                         ["request-generic", "request-typed"])
+        self.assertEqual(result.rows["requests"][0]["intent"], generic)
+        self.assertFalse(result.rows["requests"][0]["protocol"])
+        self.assertEqual([row["event_id"] for row in result.rows["board_events"]], ["event-typed"])
+        self.assertEqual(result.report.audit["generic_records"], 1)
+        self.assertEqual(result.report.audit["typed_records"], 1)
+
+    def test_budget_links_to_the_journal_claim_without_making_a_duplicate(self) -> None:
+        budget = self.generic(
+            request_id="budget-request", event_id="budget-event", kind="budget_recorded",
+            ref="sprint:100", payload={"event_type": "red_review"},
+        )
+        result = import_board.plan(source(
+            sprints=(sprint_row(9, 100, sprint_budget=json.dumps({"by_type": {"red_review": 1}})),),
+            budget_records=(budget,), audit_records=(budget,),
+        ))
+        self.assertEqual(len(result.rows["requests"]), 1)
+        self.assertEqual(result.rows["sprint_budget_events"][0]["request_id"], "budget-request")
+        self.assertEqual(result.report.audit["budget_linked_requests"], 1)
+
+    def test_strict_reader_names_malformed_and_duplicate_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            board = Path(directory) / "board"
+            board.mkdir()
+            journal = board / "events.ndjson"
+            journal.write_text('{"request_id":\n', encoding="utf-8")
+            with self.assertRaisesRegex(import_board.BoardImportError, "line 1 is malformed JSON"):
+                import_board.read_audit_records(Path(directory))
+            record = self.generic()
+            journal.write_text(json.dumps(record) + "\n" + json.dumps(record) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(import_board.BoardImportError, "line 2 duplicates event_id"):
+                import_board.read_audit_records(Path(directory))
+
+    def test_protocol_claim_with_unknown_kind_is_refused_not_downgraded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            board = Path(directory) / "board"
+            board.mkdir()
+            record = self.typed()
+            record["kind"] = "invented.kind"
+            (board / "events.ndjson").write_text(json.dumps(record) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(import_board.BoardImportError, "invalid board.protocol_event"):
+                import_board.read_audit_records(Path(directory))
+
+    def test_append_during_streaming_read_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            board = Path(directory) / "board"
+            board.mkdir()
+            journal = board / "events.ndjson"
+            journal.write_text(json.dumps(self.generic()) + "\n", encoding="utf-8")
+            real_fstat = os.fstat
+            calls = 0
+
+            def changing_fstat(fd: int):
+                nonlocal calls
+                result = real_fstat(fd)
+                calls += 1
+                if calls == 2:
+                    values = list(result)
+                    values[6] += 1
+                    return os.stat_result(values)
+                return result
+
+            with mock.patch.object(import_board.os, "fstat", changing_fstat):
+                with self.assertRaisesRegex(import_board.BoardImportError, "moved while it was being read"):
+                    import_board.read_audit_records(Path(directory))
+
+    def test_complete_source_fence_refuses_a_changed_second_observation(self) -> None:
+        first = source(audit_records=(self.generic(),))
+        first.source_fence["journal"] = {"inode": 1, "sha256": "a"}
+        second = source(audit_records=(self.generic(event_id="event-after"),))
+        second.source_fence["journal"] = {"inode": 1, "sha256": "b"}
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(import_board, "_read_source_once", side_effect=(first, second)):
+                with self.assertRaisesRegex(import_board.BoardImportError, "source consistency fence"):
+                    import_board.read_source(directory, data_dir=directory)
+
+
 class ProjectRepositoryTests(unittest.TestCase):
     """§8.3: every record survives, and the absences are recorded as absences."""
 
@@ -836,12 +954,12 @@ class DecisionTests(unittest.TestCase):
 
 
 class ReportShapeTests(unittest.TestCase):
-    def test_the_two_structural_zeroes_are_always_explained(self) -> None:
+    def test_the_only_structural_zero_is_explained(self) -> None:
         result = import_board.plan(source(pipeline=(PRODUCT,)))
         explained = {item["table"]: item["reason"] for item in result.report.expected_zero}
         self.assertIn("task_issues", explained)
         self.assertIn("no source field exists", explained["task_issues"])
-        self.assertIn("board_events", explained)
+        self.assertNotIn("board_events", explained)
 
     def test_every_table_the_import_fills_has_a_count(self) -> None:
         result = import_board.plan(source(pipeline=(PRODUCT,)))
