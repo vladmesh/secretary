@@ -909,8 +909,10 @@ class SprintWriter:
         thresholds: dict[str, int] | None = None,
         instance: str | Path | None = None,
     ) -> None:
+        from secretary.cutover.barrier import require_board_write_allowed
         from secretary.product_issues import ProductIssueTransaction
 
+        require_board_write_allowed(data_dir)
         self.client = client
         self.thresholds = (
             budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()

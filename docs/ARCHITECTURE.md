@@ -861,3 +861,24 @@ needed and it does not race the tick writer.
 
 Command contracts are in [Protocols](PROTOCOLS.md), runbooks in [Operations](OPERATIONS.md), and the
 product goal in [Vision](VISION.md).
+# Cutover controller
+
+`secretary.cutover` is an orchestration boundary over existing product operations. It does not own a
+second migration, import, parity, backup, checkpoint, pause, or backend-selection implementation.
+Its durable ordered phases are: preflight; Kanboard backup/checkpoint; PostgreSQL provision and
+migration verification; global freeze; writer-quiescence proof; final fenced import; full parity;
+PostgreSQL recovery backup; selector activation; service reconciliation; installed-protocol
+acceptance; post-switch checkpoint; and resume-ready.
+
+The state identity is the digest of the exact installed revision, runtime/source provenance,
+instance/data paths, source fingerprint, counts, parity and phase vocabulary. The confirmation token
+is derived from that digest. An exclusive lock serializes mutation. Atomic, non-secret state is
+owner-writable and runtime-readable so service uids can enforce the same barrier. Retries accept only
+the original actor, reason, revision and identity. Controller subprocesses carry the state identity;
+other matching writer processes remain fenced. The barrier applies only to in-flight controller
+states and terminal states release it unconditionally. The irreversible-policy marker is derived
+from committed SQL audit growth after the activation baseline. A safe pre-import recovery archives its
+exact terminal document before releasing the canonical state slot. Successor plans bind the archive
+digests, so they are distinct while the recovered identities remain immutable and inspectable. A
+completed final import makes the target occupied and therefore keeps the canonical identity terminal,
+even when the first-application-write marker is absent.

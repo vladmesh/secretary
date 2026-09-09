@@ -2,7 +2,8 @@
 
 Status: schema and container provisioning are implemented through revision
 `0006_sprint_transport_key` for Cards, Product/Issue and Sprint. Live import, backend-aware backup
-and cutover remain separate work; the default backend is still Kanboard.
+and the cutover controller are implemented; the external live operation remains pending and the
+default backend is still Kanboard.
 
 **The engine is given.** The owner chose PostgreSQL on 2026-09-07 (`sprint:1432`, PO comments of
 09:11Z and 09:22Z). This document does not argue for or against it and contains no comparison with
@@ -2657,3 +2658,34 @@ not a claim that a dispatcher pause is a write barrier.
 The current importer remains an empty-target operation. A second application refuses atomically
 and leaves the first import unchanged. This evidence does not switch the configured backend or
 perform live cutover.
+# Controlled activation
+
+The presence of `board-store.env` provisions connection material but selects nothing.
+`SECRETARY_CARD_BACKEND` in protected `runtime.env` remains the sole selector; absence means
+`kanboard`, and an unknown value fails closed. `secretary cutover` provisions and verifies an empty,
+schema-current PostgreSQL target, takes the complete audit-aware two-observation Kanboard source
+fence, imports once, and requires every parity axis before atomically writing
+`SECRETARY_CARD_BACKEND=postgres`.
+
+The selector is propagated through the shared role allowlist to pipeline, observer, worker,
+reviewer, steward, retro and curator processes. Dispatcher and web units already consume the same
+`runtime.env`. No consumer infers a backend from the database configuration file and there is no
+dual-write or read fallback.
+
+The old Kanboard store is retained as a protected read-only archive. It is eligible for pre-first-
+SQL-write rollback only while its frozen fingerprint still matches; after a committed application
+event it is never a writable recovery target.
+
+A successful pre-import recovery preserves its terminal controller evidence in
+`<data_dir>/cutover/history` before releasing the canonical controller slot. A later plan binds that
+archive and receives a distinct identity. Once final import completes, target occupancy takes
+precedence over first-application-write status: that identity, plus PostgreSQL-only, uncertain and
+completed identities, stays canonical and cannot create a new Kanboard attempt.
+
+Activation acceptance uses public commands for Product, Issue, Sprint and Task reads and writes.
+It proves sprint-comment delivery and replay, task request replay and history lookup,
+reservation/claim release, completion, archival and post-close comment behavior, read-only web
+surfaces and an isolated dispatcher tick. The post-switch checkpoint and full backup must preserve
+the acceptance task, contain a `postgres_dump` component and contain no `raw_board` component.
+These are requirements on each external cutover's evidence, not a claim that the live installation
+has already been cut over.

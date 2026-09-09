@@ -370,6 +370,29 @@ def ensure_ignored(
     instance_dir = require_repo(instance_dir)
     if _locked:
         return _ensure_ignored_locked(instance_dir, entry, dry_run=dry_run)
+    # Reads of an already-configured local store can occur inside a larger
+    # state-repository transaction, notably while checkpoint export resolves
+    # the PostgreSQL board.  flock is not reentrant across separately opened
+    # file descriptions, so avoid taking it when the exact durable exclusion
+    # is already present.  A tracked entry remains a refusal even if ignored.
+    if is_tracked(instance_dir, entry):
+        raise StateRepoError(
+            f"{entry.lstrip('/')} is tracked; remove it from the instance repository before enabling this local file"
+        )
+    ignore = instance_dir / ".gitignore"
+    try:
+        if ignore.is_file() and entry in ignore.read_text(encoding="utf-8").splitlines():
+            # A later negation or re-inclusion can override this literal line.
+            # The lock-free checkpoint path may avoid an index-writing lock, but
+            # it must retain the same effective-ignore proof as the locked path.
+            git(
+                instance_dir,
+                ["check-ignore", "--quiet", "--", entry.lstrip("/")],
+                label="verify exclusion",
+            )
+            return False
+    except OSError as exc:
+        raise StateRepoError(f"read gitignore failed: {exc}") from None
     with state_repo_lock(instance_dir):
         return _ensure_ignored_locked(instance_dir, entry, dry_run=dry_run)
 

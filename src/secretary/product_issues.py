@@ -667,6 +667,10 @@ class ProductIssueStore:
 
     def reconcile_lanes(self, *, apply: bool = False) -> dict[str, Any]:
         """Report, and with ``apply`` perform, the lane repair of existing Product/Issue rows."""
+        if apply:
+            from secretary.cutover.barrier import require_board_write_allowed
+
+            require_board_write_allowed(self.data_dir)
         from secretary.product_lanes import reconcile_product_lanes
 
         return reconcile_product_lanes(self, apply=apply)
@@ -1107,6 +1111,9 @@ class ProductIssueStore:
 
     def _host_mutation(self, callback: Callable[[], Any]) -> Any:
         """Run one Product/Issue host mutation at the SQL client's shared boundary."""
+        from secretary.cutover.barrier import require_board_write_allowed
+
+        require_board_write_allowed(self.data_dir)
         if getattr(self.client, "backend_kind", "kanboard") != "postgres":
             return callback()
         try:
@@ -1126,6 +1133,9 @@ class ProductIssueStore:
 
     def _require_sql_legacy_namespace_free(self, request_id: str) -> None:
         """Refuse unmigrated file claims before a SQL mutation touches the database."""
+        from secretary.cutover.barrier import require_board_write_allowed
+
+        require_board_write_allowed(self.data_dir)
         if getattr(self.client, "backend_kind", "kanboard") != "postgres":
             return
         self.legacy_audit.require_pending_layout()

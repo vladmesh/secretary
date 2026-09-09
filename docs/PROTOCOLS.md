@@ -4151,3 +4151,38 @@ The import report accounts for total journal records, generic and typed records,
 event rows, budget-linked requests, refusals and reasons. Its before/after source identities are a
 read fence over the complete source, not a control-plane pause protocol. A mismatch has no admitted
 snapshot and no apply phase.
+# `secretary cutover`
+
+The lifecycle has four machine-readable JSON commands:
+
+* `plan --instance PATH --expected-revision SHA` performs only reads and returns `plan_id` and
+  `confirmation`.
+* `status --instance PATH` reads backend, canonical durable phases, immutable recovered history and
+  the recovery confirmation token when a canonical identity exists.
+* `apply --instance PATH --expected-revision SHA --actor ACTOR --reason REASON --confirm TOKEN`
+  creates or resumes exactly one identity.
+* `recover` takes the same mutation arguments and the `RECOVER-...` token printed by status.
+
+Mutations reject the default instance guess, unsafe configuration/state, concurrent control,
+revision/provenance disagreement, stale identity, backend disagreement and out-of-order continuation.
+Every phase has `running`, `failed` or `complete` evidence. A failed phase cannot be relabelled; the
+same command retries it. `resume_ready` means probes and SQL-sourced recovery artifacts passed, not
+that work resumed.
+
+A successful pre-import `recover` publishes its exact `recovered-frozen` JSON under the
+installation's cutover history and fsyncs that archive before releasing the canonical state slot.
+Repeating recovery after an interrupted publication verifies the same archive and completes the
+release without replaying service recovery. The next `plan` includes predecessor identities and
+archive digests in its input, so its confirmation and identity differ and the recovered token cannot
+be reused. A completed final import also keeps its canonical identity because its target is occupied,
+regardless of whether a later application write exists. Completed cutovers, PostgreSQL-only recovery,
+a first SQL write and audit uncertainty remain terminal as well. Public planning refuses whenever a
+canonical identity exists; `status.successor_eligibility` supplies the shared phase-based reason.
+An entered but failed/running final import is conservatively terminal with uncertain occupancy; only
+absence of that phase admits the two pre-import successor branches.
+
+Each product subprocess must exit successfully and return a nonempty JSON object or array. Empty,
+non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public
+writers read the durable state and admit only a child carrying
+`SECRETARY_CUTOVER_CONTROLLER_ID=<state identity>` or the immediate controller child identified by
+parent pid. Terminal controller states are never re-armed by later pause state.
