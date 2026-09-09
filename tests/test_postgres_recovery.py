@@ -20,7 +20,11 @@ from secretary.backup_verify import verify_backup
 from secretary.board import migrate, provision, schema
 from secretary.board.backend import reset_card_backend
 from secretary.board.import_board import BoardSource, RegistryEntry, SourceRow
-from secretary.board.postgres_recovery import PostgresRecoveryError, restore_dump
+from secretary.board.postgres_recovery import (
+    PostgresRecoveryError,
+    endpoint_identity,
+    restore_dump,
+)
 from secretary.board.sql_cards import SqlCardClient
 from secretary.board.store import BoardStoreConfig, BoardStoreError
 from secretary.cutover import successor
@@ -29,6 +33,7 @@ from secretary.restore import restore_postgres_backup
 from secretary.sprint_observer import none_choice
 from secretary.sprints import SprintWriter, sprint_client
 from secretary.tasks import TaskWriter
+from tests.sql_backend_fixtures import PostgresBoard
 
 
 def cutover_source(repository: Path) -> BoardSource:
@@ -1156,6 +1161,161 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             text=True,
             timeout=180,
         )
+
+
+class RecoveryBackupBackendBoundaryTests(unittest.TestCase):
+    """Obstacle #5 of the 2026-09-09 attempt, on a real `postgres:16`.
+
+    `postgresql_recovery_backup` runs between the fenced import and selector activation, in the
+    same controller process whose earlier phases already read the live Kanboard board.  The card
+    backend is decided once per process on purpose (`secretary/board/backend.py`), so exporting
+    `SECRETARY_CARD_BACKEND=postgres` around the call does nothing on its own: `create_backups`
+    asked the switch and got `kanboard`, and the recovery point of the whole cutover was a
+    Kanboard archive.  The operator worked around it by rerunning the phase from a fresh process.
+    These cases hold both halves of the repair -- the phase reaches SQL in the warmed process, and
+    it hands the next phase back the backend it borrowed from.
+    """
+
+    board: PostgresBoard
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.board = PostgresBoard()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.board.stop()
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.config = self.board.fresh_database()
+        self.addCleanup(self.board.drop_database, self.config.dbname)
+        self.instance = self.root / "instance"
+        self.instance.mkdir(mode=0o700)
+        self.data = self.root / "data"
+        (self.instance / "instance.yaml").write_text(
+            "version: 1\nname: cutover-boundary\n"
+            f"data_dir: {self.data}\noffsite:\n"
+            "  instance_remote: git@example.invalid:test/boundary.git\n",
+            encoding="utf-8",
+        )
+        (self.instance / "projects").mkdir()
+        store = self.instance / "board-store.env"
+        store.write_text(
+            "".join(f"{key}={value}\n" for key, value in self.config.as_environ().items()),
+            encoding="utf-8",
+        )
+        store.chmod(0o600)
+        runtime = self.instance / "runtime.env"
+        runtime.write_text("SECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8")
+        runtime.chmod(0o600)
+        init_layout(self.data)
+        self.paths = cutover.Paths(self.instance, self.data)
+        self.state = cutover._new_state(
+            {
+                "version": 1,
+                "plan_id": "e" * 64,
+                "expected_revision": "b" * 40,
+                "source": {"fingerprint": "boundary"},
+            },
+            "integration",
+            "card backend across the apply boundary",
+        )
+        self.state["controller_pid"] = os.getpid()
+        # The board the earlier phases of this very process already read.  Nothing here is
+        # allowed to decide the backend lazily later: `card_backend()` is called now, exactly as
+        # `writer_quiescence_proof` and the fenced import call it before this phase is entered.
+        self.environment = mock.patch.dict(
+            os.environ, {"SECRETARY_CARD_BACKEND": "kanboard", "BOARD_ROLE": ""}, clear=False
+        )
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        reset_card_backend()
+        self.addCleanup(reset_card_backend)
+        from secretary.board.backend import card_backend
+
+        self.assertEqual(card_backend(), "kanboard")
+
+    def _exports(self, data_dir: Path, instance_dir: Path, **_kwargs) -> dict[str, DataExport]:
+        board = export_board(data_dir, instance_dir=instance_dir)
+        (data_dir / "memory" / "export.ndjson").write_text("", encoding="utf-8")
+        runs = data_dir / "runs"
+        for name, body in (
+            ("watermarks.json", "{}\n"),
+            ("cards.json", "{}\n"),
+            ("claims.json", "{}\n"),
+            ("runs.ndjson", ""),
+        ):
+            (runs / name).write_text(body, encoding="utf-8")
+        for name in ("transcripts", "artifacts"):
+            (data_dir / name / "inventory.json").write_text("{}\n", encoding="utf-8")
+        return {
+            "board": board,
+            "memory": DataExport(data_dir / "memory" / "export.ndjson", 0, "test"),
+            "runs": DataExport(runs / "runs.ndjson", 0, "test"),
+            "transcripts": DataExport(data_dir / "transcripts" / "inventory.json", 0, "test"),
+            "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 0, "test"),
+        }
+
+    def test_recovery_backup_dumps_sql_in_the_process_that_already_decided_kanboard(self) -> None:
+        from secretary.board.backend import card_backend
+
+        def kanboard_engine(*_args, **_kwargs):
+            raise AssertionError(
+                "the pre-switch recovery backup reached the Kanboard engine; the process "
+                "decision did not follow the environment across the apply boundary"
+            )
+
+        freeze = {"paused": True, "mode": "freeze", "actor": cutover.CUTOVER_ACTOR}
+        with (
+            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("secretary.backup._pipeline_status", return_value=freeze),
+            mock.patch("secretary.backup.export_all", side_effect=self._exports),
+            mock.patch("secretary.backup.raw_kanboard_dump", side_effect=kanboard_engine),
+        ):
+            evidence = cutover.Operations(self.paths, self.state).postgresql_recovery_backup()
+
+        manifests = evidence["archive_manifests"]
+        self.assertEqual(len(manifests), 1)
+        components = manifests[0]["components"]
+        self.assertIn("postgres_dump", components)
+        self.assertIn("board_history", components)
+        self.assertNotIn("raw_board", components)
+        self.assertEqual(
+            components["postgres_dump"]["source_endpoint_id"], endpoint_identity(self.config)
+        )
+        self.assertGreater(components["postgres_dump"]["bytes"], 0)
+        archive = Path(evidence["archives"][0])
+        with tarfile.open(archive) as tar:
+            names = tar.getnames()
+        self.assertIn("secretary-backup/engine/postgres.dump", names)
+        self.assertNotIn("secretary-backup/secretary-data/board/data", names)
+
+        # The other half of the boundary: activation has not happened yet, so the phase hands the
+        # process back the backend it borrowed from -- environment and decision together.
+        self.assertEqual(os.environ[cutover.BACKEND_ENV], "kanboard")
+        self.assertEqual(card_backend(), "kanboard")
+
+    def test_selector_activation_hands_every_later_phase_the_sql_reader(self) -> None:
+        from secretary.board.backend import card_backend
+
+        operation = cutover.Operations(self.paths, self.state)
+        evidence = operation.selector_activation()
+        self.assertEqual(evidence["backend"], "postgres")
+        self.assertEqual(evidence["sql_audit_baseline"]["committed_events"], 0)
+        self.assertEqual(os.environ[cutover.BACKEND_ENV], "postgres")
+        self.assertEqual(card_backend(), "postgres")
+        self.assertIn(
+            "SECRETARY_CARD_BACKEND=postgres",
+            (self.instance / "runtime.env").read_text(encoding="utf-8"),
+        )
+        # What a later phase does: build the board client through the switch and read.  Under the
+        # inherited `kanboard` decision this raises instead of reaching the store.
+        exported = export_board(self.data, instance_dir=self.instance)
+        self.assertTrue((self.data / "board" / "audit.ndjson").exists())
+        self.assertEqual(exported.count, 0)
 
 
 if __name__ == "__main__":

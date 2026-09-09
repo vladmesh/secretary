@@ -819,14 +819,108 @@ class CutoverOperationSeamTests(CutoverFixture):
         with self.assertRaisesRegex(cutover.CutoverError, "parity failed"):
             operation.full_parity()
 
-    def test_backup_failure_surfaces_and_restores_the_process_selector(self) -> None:
+    def _serving_kanboard(self) -> None:
+        """Warm the process the way the phases before the recovery backup warm it.
+
+        `global_freeze`, `writer_quiescence_proof` and the fenced import all read the live
+        Kanboard board first, so by the time the controller reaches the recovery backup the
+        per-process decision has already been made and only `reset_card_backend()` can revise it.
+        """
+        from secretary.board.backend import card_backend, reset_card_backend
+
+        self.addCleanup(reset_card_backend)
+        self.addCleanup(os.environ.pop, cutover.BACKEND_ENV, None)
         os.environ[cutover.BACKEND_ENV] = "kanboard"
+        reset_card_backend()
+        self.assertEqual(card_backend(), "kanboard")
+
+    def test_backup_failure_surfaces_and_restores_the_process_selector(self) -> None:
+        from secretary.board.backend import card_backend
+
+        self._serving_kanboard()
         with (
             mock.patch("secretary.backup.create_backups", side_effect=RuntimeError("dump failed")),
             self.assertRaisesRegex(RuntimeError, "dump failed"),
         ):
             self.operation().postgresql_recovery_backup()
         self.assertEqual(os.environ[cutover.BACKEND_ENV], "kanboard")
+        self.assertEqual(card_backend(), "kanboard")
+
+    def test_recovery_backup_serves_sql_although_earlier_phases_decided_kanboard(self) -> None:
+        """The 09.09 defect: the environment moved, the process decision did not.
+
+        `create_backups` asks `card_backend()` for the engine it is archiving, so a phase that
+        exports `postgres` without revising the decision takes a Kanboard backup where the
+        recovery point of the whole cutover has to be the SQL one.
+        """
+        from secretary.board.backend import card_backend
+
+        self._serving_kanboard()
+        served: list[str] = []
+
+        def backup(*_args, **_kwargs):
+            served.append(card_backend())
+            return [
+                SimpleNamespace(
+                    archive=Path("full.tar"), manifest={"components": {"postgres_dump": {}}}
+                )
+            ]
+
+        with mock.patch("secretary.backup.create_backups", side_effect=backup):
+            evidence = self.operation().postgresql_recovery_backup()
+        self.assertEqual(served, ["postgres"])
+        self.assertEqual(evidence["archive_manifests"], [{"components": {"postgres_dump": {}}}])
+        # The other half: the phase runs before the selector is activated, so the next phase must
+        # not inherit PostgreSQL from it -- neither in the environment nor in the decision.
+        self.assertEqual(os.environ[cutover.BACKEND_ENV], "kanboard")
+        self.assertEqual(card_backend(), "kanboard")
+
+    def test_recovery_backup_rejects_raw_board_and_requires_postgres_dump(self) -> None:
+        raw = SimpleNamespace(archive=Path("raw.tar"), manifest={"components": {"raw_board": {}}})
+        with (
+            mock.patch("secretary.backup.create_backups", return_value=[raw]),
+            self.assertRaisesRegex(cutover.CutoverError, "raw Kanboard"),
+        ):
+            self.operation().postgresql_recovery_backup()
+
+        empty = SimpleNamespace(archive=Path("empty.tar"), manifest={"components": {}})
+        with (
+            mock.patch("secretary.backup.create_backups", return_value=[empty]),
+            self.assertRaisesRegex(cutover.CutoverError, "no PostgreSQL dump"),
+        ):
+            self.operation().postgresql_recovery_backup()
+
+    def test_selector_activation_leaves_the_process_serving_sql(self) -> None:
+        from secretary.board.backend import card_backend
+
+        self._serving_kanboard()
+        with mock.patch.object(
+            cutover, "_sql_event_count", return_value={"committed_events": 3}
+        ):
+            evidence = self.operation().selector_activation()
+        self.assertEqual(evidence["backend"], "postgres")
+        self.assertEqual(os.environ[cutover.BACKEND_ENV], "postgres")
+        self.assertEqual(card_backend(), "postgres")
+        self.assertIn("SECRETARY_CARD_BACKEND=postgres", self.runtime.read_text(encoding="utf-8"))
+
+    def test_the_controller_has_one_named_way_to_change_the_process_backend(self) -> None:
+        """No phase may export the name past `reset_card_backend()`'s back.
+
+        Three inline pairs of `os.environ[...] = ...` were what let one of them forget the second
+        half.  `_serve_backend` is the single place that writes the name, and the assertion is on
+        the controller's own source rather than on one phase, so a fourth site cannot appear
+        quietly.
+        """
+        source = Path(cutover.__file__).read_text(encoding="utf-8")
+        writes = [
+            line.strip()
+            for line in source.splitlines()
+            if "os.environ[BACKEND_ENV]" in line or "os.environ.pop(BACKEND_ENV" in line
+        ]
+        self.assertEqual(
+            writes,
+            ["os.environ.pop(BACKEND_ENV, None)", "os.environ[BACKEND_ENV] = backend"],
+        )
 
     def test_checkpoint_refusal_surfaces_from_the_real_post_switch_phase(self) -> None:
         checkpoint = SimpleNamespace(status="blocked", reason="checkpoint failed")
