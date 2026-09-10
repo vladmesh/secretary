@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -59,6 +60,23 @@ INSTALLED_PRECONDITIONS = {
         "satisfied": True,
         "detail": "every declared unit is installed",
         **inventory().evidence(),
+    },
+    "pipeline_pause": {
+        "requirement": "pause",
+        "source": "secretary pause-status, judged by backup create",
+        "phase": "current_kanboard_backup_checkpoint",
+        "freeze_owner": None,
+        "pause": {"paused": False, "mode": None, "actor": None, "reason": None},
+        "resume_command": None,
+        "satisfied": True,
+        "detail": "not paused",
+    },
+    "doctor": {
+        "requirement": "doctor",
+        "command": "python3 -P -m secretary doctor --json --offline --instance /instance",
+        "findings": [],
+        "satisfied": True,
+        "detail": "no findings",
     },
     "root_commands": [],
 }
@@ -178,6 +196,16 @@ class CutoverFixture(unittest.TestCase):
         self._inventory = mock.patch.object(cutover, "inventory_units", return_value=inventory())
         self._inventory.start()
         self.addCleanup(self.host_unit_inventory)
+        # The pipeline pause and doctor --offline are facts about the installation, read by
+        # running its commands.  The fixture answers both as satisfied and
+        # InstallationPreconditionTests drives the real readers instead.
+        self._installation = mock.patch.multiple(
+            cutover,
+            _pipeline_pause_precondition=mock.Mock(return_value=INSTALLED_PRECONDITIONS["pipeline_pause"]),
+            _doctor_precondition=mock.Mock(return_value=INSTALLED_PRECONDITIONS["doctor"]),
+        )
+        self._installation.start()
+        self.addCleanup(self.installation_preconditions)
         # `_serve_backend` is a real process-wide switch, and both controller entrances now
         # reach it.  A case that runs one must not leave the name exported or the decision
         # made for the next case in this interpreter.
@@ -199,6 +227,12 @@ class CutoverFixture(unittest.TestCase):
         if self._inventory is not None:
             self._inventory.stop()
             self._inventory = None
+
+    def installation_preconditions(self) -> None:
+        """Stop answering for the pause and doctor so a test can drive the real readers."""
+        if self._installation is not None:
+            self._installation.stop()
+            self._installation = None
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -1585,7 +1619,7 @@ class PrivilegedPreconditionTests(CutoverFixture):
                 self.compose.unlink(missing_ok=True)
                 prepare()
                 with self.sudo(allowed=True):
-                    report = cutover._privileged_preconditions(self.compose)
+                    report = cutover._privileged_preconditions(self.compose, paths=self.paths)
                 self.assertEqual(report["compose"]["status"], status)
                 self.assertEqual(report["compose"]["satisfied"], status == "ok")
                 self.assertEqual(report["satisfied"], status == "ok")
@@ -1597,7 +1631,7 @@ class PrivilegedPreconditionTests(CutoverFixture):
     def test_sudo_probe_is_read_only_and_reports_a_denied_rule(self) -> None:
         self.install_compose()
         with self.sudo(allowed=True) as run:
-            report = cutover._privileged_preconditions(self.compose)
+            report = cutover._privileged_preconditions(self.compose, paths=self.paths)
         self.assertEqual(
             run.call_args.args[0], ["sudo", "-n", "systemctl", "show", "--property=Version"]
         )
@@ -1606,7 +1640,7 @@ class PrivilegedPreconditionTests(CutoverFixture):
         self.assertEqual(report["root_commands"], [])
 
         with self.sudo(allowed=False):
-            denied = cutover._privileged_preconditions(self.compose)
+            denied = cutover._privileged_preconditions(self.compose, paths=self.paths)
         self.assertFalse(denied["sudo_systemctl"]["satisfied"])
         self.assertFalse(denied["satisfied"])
         self.assertIn("password is required", denied["sudo_systemctl"]["detail"])
@@ -1615,7 +1649,7 @@ class PrivilegedPreconditionTests(CutoverFixture):
         secret = self.instance / "board-store.env"
         secret.write_text("SECRETARY_DB_OWNER_PASSWORD=owner-secret\n", encoding="utf-8")
         with self.sudo(allowed=False), self.assertRaises(cutover.CutoverError) as refusal:
-            cutover._require_privileged_preconditions(self.compose)
+            cutover._require_privileged_preconditions(self.compose, paths=self.paths)
 
         message = str(refusal.exception)
         self.assertIn("performs no root step", message)
@@ -1701,7 +1735,7 @@ class PrivilegedPreconditionTests(CutoverFixture):
         """
         self.install_compose()
         with self.sudo(allowed=True):
-            report = cutover._privileged_preconditions(self.compose)
+            report = cutover._privileged_preconditions(self.compose, paths=self.paths)
 
         self.assertTrue(report["satisfied"])
         self.assertEqual(shape(INSTALLED_PRECONDITIONS), shape(report))
@@ -1776,6 +1810,320 @@ class PrivilegedPreconditionTests(CutoverFixture):
         self.assertEqual(len(commands), len(cutover.START_UNITS))
         for command, unit in zip(commands, cutover.START_UNITS, strict=True):
             self.assertEqual(command, ["sudo", "-n", "systemctl", "restart", unit])
+
+
+RUNNING = {"paused": False, "mode": None, "actor": None, "pause_reason": None}
+DOCTOR_CLEAN = {"schema_version": 1, "ok": True, "findings": [], "status": {}}
+DOCTOR_FINDINGS = {
+    "schema_version": 1,
+    "ok": False,
+    "findings": [
+        {"code": "secret_store", "message": "retired catalog entry is still present: kanboard_api_token"},
+        {"code": "secret_store", "message": "retired catalog entry is still present: kanboard_api_user"},
+        {"code": "secret_store", "message": "retired catalog entry is still present: kanboard_api_url"},
+        {"code": "recovery_credential", "resource": "runtime", "message": "runtime credential is not materialized"},
+    ],
+    "status": {},
+}
+# How the refusal names each of those findings: doctor's code and message, then its other fields.
+DOCTOR_FINDING_LINES = [
+    "secret_store: retired catalog entry is still present: kanboard_api_token",
+    "secret_store: retired catalog entry is still present: kanboard_api_user",
+    "secret_store: retired catalog entry is still present: kanboard_api_url",
+    "recovery_credential: runtime credential is not materialized; resource=runtime",
+]
+THROUGH_CHECKPOINT = ("preflight", "current_kanboard_backup_checkpoint")
+THROUGH_FREEZE = (*THROUGH_CHECKPOINT, "postgresql_provision_migration_verification", "global_freeze")
+
+
+def frozen(actor: str, reason: str = "approved maintenance window") -> dict[str, object]:
+    return {"paused": True, "mode": "freeze", "actor": actor, "pause_reason": reason}
+
+
+class InstallationPreconditionTests(CutoverFixture):
+    """The pipeline pause and doctor --offline, proven on the seam of the privileged steps.
+
+    Apply #6 and #7 of the 2026-09-10 acceptance found both in the middle of the window: a
+    freeze `recover` had left behind refused the Kanboard checkpoint backup, and a doctor
+    with findings refused installed acceptance after freeze, import and the selector switch.
+    The pause is read through `backup create`'s own reader and judged by its own predicate;
+    doctor runs as the acceptance phase runs it.  Only the command boundary is faked.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.host_preconditions()
+        self.installation_preconditions()
+        compose = Path(self.temporary.name) / "opt" / "postgres-compose.yml"
+        compose.parent.mkdir(mode=0o755)
+        compose.write_text(provision.COMPOSE_TEXT, encoding="utf-8")
+        compose.chmod(0o600)
+        self.commands: list[list[str]] = []
+        self.pause_reads: list[list[str]] = []
+        self.doctor: tuple[int, object] | BaseException = (0, DOCTOR_CLEAN)
+        self.pause: dict[str, object] | BaseException = RUNNING
+        for patcher in (
+            mock.patch.object(provision, "DEFAULT_COMPOSE_PATH", compose),
+            mock.patch.object(cutover.subprocess, "run", side_effect=self.host_run),
+            mock.patch("secretary.backup._proc.run", side_effect=self.pause_run),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def host_run(self, argv, **_kwargs):
+        """sudo answers its probe, doctor answers `self.doctor`, any other command succeeds."""
+        self.commands.append(list(argv))
+        if "doctor" in argv:
+            if isinstance(self.doctor, BaseException):
+                raise self.doctor
+            code, document = self.doctor
+            return subprocess.CompletedProcess(argv, code, json.dumps(document) + "\n", "")
+        if list(argv[:2]) == ["sudo", "-n"]:
+            return subprocess.CompletedProcess(argv, 0, "Version=255.4\n", "")
+        return subprocess.CompletedProcess(argv, 0, '{"ok": true}\n', "")
+
+    def pause_run(self, argv, **_kwargs):
+        """`secretary pause-status` answering with the pause protocol document."""
+        self.pause_reads.append(list(argv))
+        if isinstance(self.pause, BaseException):
+            raise self.pause
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"state": self.pause}), "")
+
+    def doctor_argv(self) -> list[str]:
+        return [sys.executable, "-P", "-m", "secretary", "doctor", "--json", "--offline", "--instance", str(self.instance)]
+
+    def resume_command(self) -> str:
+        return f"secretary resume --instance {shlex.quote(str(self.instance))}"
+
+    def retry_state(self, complete: tuple[str, ...]) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        for name in complete:
+            state["phases"][name] = {"status": "complete"}
+        state["status"] = "failed-frozen" if "global_freeze" in complete else "failed"
+        cutover._write_state(self.paths, state)
+
+    def refused(self) -> str:
+        with (
+            mock.patch.object(cutover, "build_plan") as plan,
+            mock.patch.object(cutover, "Operations") as operations,
+            self.assertRaisesRegex(cutover.CutoverError, "privileged apply preconditions") as refusal,
+        ):
+            cutover.apply_cutover(args(), self.paths)
+        plan.assert_not_called()
+        operations.assert_not_called()
+        return str(refusal.exception)
+
+    def refused_retry(self, complete: tuple[str, ...]) -> str:
+        self.retry_state(complete)
+        before = self.paths.state.read_bytes()
+        stamp = self.paths.state.stat().st_mtime_ns
+        message = self.refused()
+        self.assertEqual(self.paths.state.read_bytes(), before)
+        self.assertEqual(self.paths.state.stat().st_mtime_ns, stamp)
+        return message
+
+    def applied(self) -> tuple[dict, list[str]]:
+        calls: list[str] = []
+        with (
+            mock.patch.object(cutover, "build_plan", return_value=PLAN),
+            mock.patch.object(cutover, "Operations", fake_operations(None, calls, {"enabled": False})),
+            mock.patch.object(cutover, "_provenance", return_value={}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+        ):
+            result = cutover.apply_cutover(args(), self.paths)
+        return result, calls
+
+    def plan(self) -> dict:
+        buffer = StringIO()
+        with (
+            mock.patch.object(cutover, "resolve_paths", return_value=self.paths),
+            mock.patch.object(cutover, "build_plan", return_value=dict(PLAN)),
+            redirect_stdout(buffer),
+        ):
+            code = cutover.run_cutover(
+                argparse.Namespace(cutover_command="plan", instance=str(self.instance), expected_revision=REVISION)
+            )
+        self.assertEqual(code, 0)
+        self.assertFalse(self.paths.state.exists())
+        return json.loads(buffer.getvalue())["privileged_preconditions"]
+
+    def test_a_foreign_pause_refuses_a_new_apply_naming_its_holder_and_the_resume_command(self) -> None:
+        self.pause = frozen("steward", "host maintenance")
+
+        message = self.refused()
+
+        self.assertIn("paused (freeze) by actor steward: host maintenance", message)
+        self.assertIn("current_kanboard_backup_checkpoint would refuse it", message)
+        self.assertIn("pipeline is already paused; backup create must own the freeze", message)
+        self.assertIn(f"`{self.resume_command()}`", message)
+        self.assertFalse(self.paths.state.exists())
+        # Read the way `backup create` reads it: its own pause-status call on instance.yaml.
+        self.assertEqual(len(self.pause_reads), 1)
+        self.assertEqual(self.pause_reads[0][-3:], ["pause-status", "--instance", str(self.instance / "instance.yaml")])
+
+    def test_the_freeze_a_recover_leaves_refuses_the_next_identity_before_the_window(self) -> None:
+        """Apply #6: the controller's own freeze, left by recover, still breaks a new backup."""
+        self.pause = frozen(cutover.CUTOVER_ACTOR)
+
+        message = self.refused()
+
+        self.assertIn(f"paused (freeze) by actor {cutover.CUTOVER_ACTOR}", message)
+        self.assertIn("recover leaves its freeze in place on purpose", message)
+        self.assertIn(self.resume_command(), message)
+        self.assertFalse(self.paths.state.exists())
+        self.assertFalse(any("resume" in argv for argv in self.pause_reads + self.commands))
+
+    def test_a_retry_past_the_checkpoint_backup_runs_under_its_own_freeze(self) -> None:
+        scenarios = {
+            "checkpoint done, own freeze": (THROUGH_CHECKPOINT, frozen(cutover.CUTOVER_ACTOR)),
+            "checkpoint done, freeze still ahead": (THROUGH_CHECKPOINT, RUNNING),
+            "freeze done, own freeze": (THROUGH_FREEZE, frozen(cutover.CUTOVER_ACTOR)),
+        }
+        for name, (complete, pause) in scenarios.items():
+            with self.subTest(name):
+                self.retry_state(complete)
+                self.pause = pause
+                report = cutover._privileged_preconditions(paths=self.paths)
+                self.assertTrue(report["pipeline_pause"]["satisfied"], report["pipeline_pause"]["detail"])
+                self.assertEqual(report["pipeline_pause"]["phase"], "postgresql_recovery_backup")
+                self.assertEqual(report["pipeline_pause"]["freeze_owner"], cutover.CUTOVER_ACTOR)
+
+                result, calls = self.applied()
+
+                self.assertEqual(result["status"], "resume-ready")
+                self.assertEqual(calls, [phase for phase in cutover.PHASES if phase not in complete])
+
+    def test_every_pause_a_remaining_phase_would_refuse_leaves_a_retry_byte_and_mtime_identical(self) -> None:
+        drain = {"paused": True, "mode": "drain", "actor": "operator", "pause_reason": "inflow"}
+        foreign = "pipeline freeze is not owned by the declared backup caller"
+        absent = "the declared caller-owned pipeline freeze is absent"
+        scenarios = {
+            "foreign freeze before global_freeze": (THROUGH_CHECKPOINT, frozen("steward"), True, foreign),
+            "drain before global_freeze": (THROUGH_CHECKPOINT, drain, True, foreign),
+            "foreign freeze after global_freeze": (THROUGH_FREEZE, frozen("steward"), False, foreign),
+            "lifted cutover freeze": (THROUGH_FREEZE, RUNNING, False, absent),
+        }
+        for name, (complete, pause, resumable, reason) in scenarios.items():
+            with self.subTest(name):
+                self.pause = pause
+                message = self.refused_retry(complete)
+                self.assertIn("postgresql_recovery_backup", message)
+                self.assertIn(reason, message)
+                if resumable:
+                    self.assertIn(self.resume_command(), message)
+                else:
+                    # The freeze global_freeze took is gone or not the controller's: lifting a
+                    # pause cannot repair that, so no resume is offered.
+                    self.assertNotIn("secretary resume", message)
+                    self.assertIn("RECOVER token", message)
+
+    def test_a_retry_behind_every_phase_that_reads_them_consults_neither(self) -> None:
+        self.retry_state(
+            tuple(
+                phase
+                for phase in cutover.PHASES
+                if phase not in ("resume_ready",)
+            )
+        )
+        self.pause = frozen("steward")
+        self.doctor = (1, DOCTOR_FINDINGS)
+
+        report = cutover._privileged_preconditions(paths=self.paths)
+
+        self.assertTrue(report["pipeline_pause"]["satisfied"])
+        self.assertTrue(report["doctor"]["satisfied"])
+        self.assertEqual(self.pause_reads, [])
+        self.assertFalse(any("doctor" in argv for argv in self.commands))
+
+    def test_doctor_findings_refuse_a_new_apply_listing_them_as_doctor_named_them(self) -> None:
+        self.doctor = (1, DOCTOR_FINDINGS)
+
+        message = self.refused()
+
+        for line in DOCTOR_FINDING_LINES:
+            self.assertIn(f"  - {line}\n", message)
+        self.assertIn("installed_protocol_acceptance fails on them", message)
+        self.assertIn(f"Reproduce with: {shlex.join(self.doctor_argv())}", message)
+        self.assertFalse(self.paths.state.exists())
+        # Doctor ran once, exactly as acceptance runs it, and nothing tried to repair a finding.
+        issued = [argv for argv in self.commands if argv[:2] != ["sudo", "-n"]]
+        self.assertEqual(issued, [self.doctor_argv()])
+
+    def test_doctor_refusal_of_a_retry_leaves_the_durable_state_byte_and_mtime_identical(self) -> None:
+        self.pause = frozen(cutover.CUTOVER_ACTOR)
+        self.doctor = (1, DOCTOR_FINDINGS)
+
+        message = self.refused_retry(THROUGH_FREEZE)
+
+        self.assertIn(DOCTOR_FINDING_LINES[0], message)
+        self.assertNotIn("pipeline is paused", message)
+
+    def test_a_clean_doctor_and_a_running_pipeline_let_a_new_apply_reach_every_phase(self) -> None:
+        result, calls = self.applied()
+
+        self.assertEqual(result["status"], "resume-ready")
+        self.assertEqual(calls, list(cutover.PHASES))
+        self.assertIn(self.doctor_argv(), self.commands)
+        self.assertEqual(len(self.pause_reads), 1)
+
+    def test_the_precondition_and_acceptance_share_one_doctor_judgement(self) -> None:
+        operation = cutover.Operations(self.paths, cutover._new_state(PLAN, args().actor, args().reason))
+        failures = {
+            "findings": (1, DOCTOR_FINDINGS),
+            "error document": (0, {"error": {"code": "broken"}}),
+            "crash": (2, "Traceback: doctor could not start"),
+        }
+        for name, answer in failures.items():
+            with self.subTest(name):
+                self.doctor = answer
+                self.commands.clear()
+                precondition = cutover._privileged_preconditions(paths=self.paths)["doctor"]
+                self.assertFalse(precondition["satisfied"])
+                with self.assertRaises(cutover.CutoverError) as acceptance:
+                    operation.installed_protocol_acceptance()
+                self.assertEqual(str(acceptance.exception), precondition["detail"])
+                doctor_runs = [argv for argv in self.commands if "doctor" in argv]
+                self.assertEqual(doctor_runs, [self.doctor_argv(), self.doctor_argv()])
+                # Acceptance stopped at doctor: its status read ran, and no write followed.
+                self.assertFalse(any("create" in argv for argv in self.commands))
+
+    def test_plan_prints_both_items_in_every_situation_and_never_fails(self) -> None:
+        with self.subTest("blocked"):
+            self.pause = frozen(cutover.CUTOVER_ACTOR)
+            self.doctor = (1, DOCTOR_FINDINGS)
+            report = self.plan()
+            self.assertFalse(report["satisfied"])
+            self.assertFalse(report["pipeline_pause"]["satisfied"])
+            self.assertEqual(report["pipeline_pause"]["pause"]["actor"], cutover.CUTOVER_ACTOR)
+            self.assertEqual(report["pipeline_pause"]["resume_command"], self.resume_command())
+            self.assertFalse(report["doctor"]["satisfied"])
+            self.assertEqual(report["doctor"]["findings"], DOCTOR_FINDING_LINES)
+            self.assertEqual(report["doctor"]["command"], shlex.join(self.doctor_argv()))
+        with self.subTest("clean"):
+            self.pause = RUNNING
+            self.doctor = (0, DOCTOR_CLEAN)
+            report = self.plan()
+            self.assertTrue(report["satisfied"])
+            self.assertTrue(report["pipeline_pause"]["satisfied"])
+            self.assertTrue(report["doctor"]["satisfied"])
+        with self.subTest("unavailable"):
+            self.pause = FileNotFoundError("python3")
+            self.doctor = OSError("exec format error")
+            report = self.plan()
+            self.assertFalse(report["pipeline_pause"]["satisfied"])
+            self.assertIn("could not be read", report["pipeline_pause"]["detail"])
+            self.assertFalse(report["doctor"]["satisfied"])
+            self.assertIn("could not run", report["doctor"]["detail"])
+        # A report and not a gate: plan read the pause and ran doctor, and changed nothing.
+        self.assertTrue(all("pause-status" in argv for argv in self.pause_reads))
+        self.assertFalse(any("resume" in argv or "pause" in argv for argv in self.commands))
+
+    def test_the_installed_fixture_reports_the_shape_the_real_items_return(self) -> None:
+        report = cutover._privileged_preconditions(paths=self.paths)
+
+        self.assertTrue(report["satisfied"])
+        for item in ("pipeline_pause", "doctor"):
+            self.assertEqual(shape(INSTALLED_PRECONDITIONS[item]), shape(report[item]))
 
 
 class InstalledUnitInventoryTests(CutoverFixture):
@@ -1921,7 +2269,7 @@ class InstalledUnitInventoryTests(CutoverFixture):
 
     def test_absent_optional_units_are_a_reported_precondition_and_not_a_refusal(self) -> None:
         with self.systemd(absent=ABSENT_OPTIONAL):
-            report = cutover._require_privileged_preconditions(self.compose)
+            report = cutover._require_privileged_preconditions(self.compose, paths=self.paths)
 
         units = report["units"]
         self.assertTrue(report["satisfied"])

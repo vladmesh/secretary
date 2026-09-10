@@ -3714,6 +3714,43 @@ required. `recover` records the same document beside the restarted services. Tha
 answer to "why did the steward not come back": no hand-maintained inventory file is involved, and
 an operator neither edits the lists nor removes units before the window.
 
+### Pipeline pause and doctor before the window
+
+Two facts of the installation would otherwise surface deep inside the window, so `apply` proves them
+on the same seam as the root steps and the unit inventory — before the lock, the state document and
+the first phase, with no durable effect when it refuses — and `plan` prints them read-only under
+`privileged_preconditions.pipeline_pause` and `privileged_preconditions.doctor`. `plan` never fails on
+either, not even when `pause-status` or `doctor` cannot run at all: it is a report, not a gate.
+
+1. **The pipeline pause.** It is read with the same `pause-status` call `backup create` makes and
+   judged by the same rule, for the next backup phase still ahead. `current_kanboard_backup_checkpoint`
+   takes the freeze itself, so before it any pause refuses — including the freeze `recover` leaves
+   behind. After `recover` the pipeline stays paused on purpose (actor `secretary-postgres-cutover`),
+   and the controller never lifts it. The refusal names the pause's mode, actor and reason, and the
+   command that lifts it:
+
+   ```
+   secretary resume --instance /absolute/instance
+   ```
+
+   A retry whose checkpoint backup is already `complete` runs under its own freeze: the pre-switch
+   recovery backup and the post-switch checkpoint join a freeze held by `secretary-postgres-cutover`,
+   so that freeze passes, and so does a running pipeline while `global_freeze` is still ahead. A
+   foreign freeze or a drain refuses. Once `global_freeze` is complete, a freeze that is missing or
+   is not the controller's refuses without a resume command, because lifting a pause cannot repair
+   it: inspect `status` and use its `RECOVER-...` token.
+2. **`doctor --offline`.** It runs as exactly the command `installed_protocol_acceptance` runs, and
+   the same function judges it, so a doctor that passes here cannot fail acceptance on the same
+   findings. When there are findings, the refusal lists them as doctor named them (code, message,
+   other fields) and prints the exact command that reproduces them. The controller repairs none of
+   them: dropping retired secret-catalog entries, materialising a runtime credential or removing
+   ambient Git credentials are operator steps on the installation. Acceptance still runs doctor again
+   after the selector switch and can find what only the switched installation has; that is the one
+   divergence a check before the window cannot close.
+
+Once every backup phase is complete no remaining phase reads the pause, and once
+`installed_protocol_acceptance` is complete none runs doctor; a retry past them consults neither.
+
 One controller process spans both sides of the card-backend boundary. The pre-switch recovery
 backup and the post-switch checkpoint serve PostgreSQL through the same named switch that selector
 activation uses, and the pre-switch one, which runs while the selector is still Kanboard, restores
@@ -3751,7 +3788,8 @@ After a successful recovery before `final_fenced_import`, the command atomically
 and only then releases the canonical `postgres-v1.json` slot. `status` lists this immutable history
 and the shared successor-eligibility reason. If publication is interrupted, rerun the identical
 `recover`; it verifies and fsyncs the existing archive before finishing canonical release, without
-repeating recovery side effects. Then run `plan` again and apply only its new confirmation token. The
+repeating recovery side effects. Then lift the freeze recovery left in place (see
+*Pipeline pause and doctor before the window*), run `plan` again and apply only its new confirmation token. The
 new plan binds the archived predecessor and therefore has a distinct identity. The old token remains
 refused. Never delete or edit either document.
 

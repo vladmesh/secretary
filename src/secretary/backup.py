@@ -119,14 +119,10 @@ def create_backups(
         ]
         try:
             pre_pause = _pipeline_status(instance_file=instance_file, command=pipeline_command)
-            if pre_pause.get("paused"):
-                if not existing_freeze_actor:
-                    raise RuntimeError("pipeline is already paused; backup create must own the freeze")
-                if pre_pause.get("mode") != "freeze" or pre_pause.get("actor") != existing_freeze_actor:
-                    raise RuntimeError("pipeline freeze is not owned by the declared backup caller")
-            else:
-                if existing_freeze_actor:
-                    raise RuntimeError("the declared caller-owned pipeline freeze is absent")
+            refusal = freeze_refusal(pre_pause, existing_freeze_actor)
+            if refusal:
+                raise RuntimeError(refusal)
+            if not pre_pause.get("paused"):
                 pause_status = _pipeline_action(
                     "pause",
                     instance_file=instance_file,
@@ -366,6 +362,30 @@ def _pipeline_status(
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"pipeline command returned invalid JSON: {exc}") from None
     return _pause_summary(document if isinstance(document, dict) else {})
+
+
+def pipeline_pause(instance_path: Path) -> dict[str, Any]:
+    """The pause facts `create_backups` decides on, read exactly the way it reads them."""
+    return _pipeline_status(instance_file=_instance_file(instance_path), command=None)
+
+
+def freeze_refusal(pause: dict[str, Any], existing_freeze_actor: str | None) -> str | None:
+    """Why `create_backups` refuses the pause it finds, or None when it may proceed.
+
+    Without `existing_freeze_actor` the backup takes the freeze itself, so any pause refuses it;
+    with one, the caller must already hold a freeze under exactly that actor.  The cutover
+    controller asks the same question before its window (secretary-1612), so the two cannot
+    disagree on which pause breaks a backup.
+    """
+    if pause.get("paused"):
+        if not existing_freeze_actor:
+            return "pipeline is already paused; backup create must own the freeze"
+        if pause.get("mode") != "freeze" or pause.get("actor") != existing_freeze_actor:
+            return "pipeline freeze is not owned by the declared backup caller"
+        return None
+    if existing_freeze_actor:
+        return "the declared caller-owned pipeline freeze is absent"
+    return None
 
 
 def _pause_summary(document: dict[str, Any]) -> dict[str, Any]:
