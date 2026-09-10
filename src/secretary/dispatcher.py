@@ -379,6 +379,7 @@ from secretary.tasks import (
     _event_payload,
     assessment_resolution,
     specification_revision,
+    task_audit_for,
 )
 from triggered_agents.runtime import head as head_ops
 from triggered_agents.runtime.codex_preflight import (
@@ -526,6 +527,7 @@ class DispatcherRuntime:
         self.reader = reader
         self.writer = writer
         self.audit = audit
+        self.data_dir = Path(data_dir)
         self.production_state = production_state or ProductionState(data_dir)
         self.pause = pause or ProductionPause(data_dir)
         self.catalog = catalog
@@ -540,7 +542,7 @@ class DispatcherRuntime:
         self.sprints = (
             sprints
             if sprints is not None
-            else SprintReader(reader.client, data_dir=Path(audit.board_dir).parent, thresholds=limits)
+            else SprintReader(reader.client, data_dir=self.data_dir, thresholds=limits)
         )
 
     def head_readiness(self, head: str) -> HeadReadiness:
@@ -7177,13 +7179,17 @@ def runtime_from_args(
     # built by the switch (board/backend.py) rather than by naming one backend here.
     client = board_client(instance_path, serves=(CARD, SPRINT))
     catalog = InstanceCatalog(instance_path)
+    # The audit follows the client: the same `requests`/`board_events` tables the writer commits
+    # to on PostgreSQL, the file journal on Kanboard. The command host reads the same one, so the
+    # TASK.md feedback selector and the report/verdict waits never disagree about what happened.
+    audit = task_audit_for(client, data)
     return DispatcherRuntime(
         TaskReader(client),
         TaskWriter(client, data_dir=data),
-        TaskAudit(data),
+        audit,
         data,
         catalog,
-        CommandHostRuntime(catalog, data, mode=host_mode),
+        CommandHostRuntime(catalog, data, mode=host_mode, audit=audit),
         owner=owner,
         checkpoint=CheckpointWriter(data, catalog.instance_dir),
         checkpoint_push=CheckpointPusher(catalog.instance_dir),

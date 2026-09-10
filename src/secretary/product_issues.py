@@ -23,6 +23,7 @@ from secretary.tasks import (
     _now,
     _positive_int,
     all_project_cards,
+    task_audit_for,
 )
 
 ISSUES_COLUMN = "Issues"
@@ -456,12 +457,7 @@ class ProductIssueStore:
     def __init__(self, client: KanboardClient, *, data_dir: str | Path, instance: str | Path) -> None:
         self.client = client
         self.data_dir = Path(data_dir)
-        if getattr(client, "backend_kind", "kanboard") == "postgres":
-            from secretary.board.sql_audit import SqlTaskAudit
-
-            self.audit = SqlTaskAudit(client)
-        else:
-            self.audit = TaskAudit(data_dir)
+        self.audit = task_audit_for(client, data_dir)
         self.legacy_audit = TaskAudit(data_dir)
         if getattr(client, "backend_kind", "kanboard") == "postgres":
             self.audit.legacy_audit = self.legacy_audit

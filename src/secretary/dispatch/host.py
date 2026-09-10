@@ -777,12 +777,15 @@ class CommandHostRuntime:
         *,
         mode: str = "real",
         production_runtime: ProductionRuntime | None = None,
+        audit: Any | None = None,
     ) -> None:
         self.catalog = catalog
         self.data_dir = data_dir
         # TASK.md is a durable projection, so its feedback selector reads the same audit journal
-        # as the dispatcher rather than depending on a live record or wall-clock ordering.
-        self.audit = TaskAudit(data_dir)
+        # as the dispatcher rather than depending on a live record or wall-clock ordering. The
+        # dispatcher hands its own audit in; built here from the data dir alone it would be the
+        # file journal, which on the PostgreSQL backend nobody writes.
+        self.audit = audit if audit is not None else TaskAudit(data_dir)
         self.mode = mode
         # Fixed once for this dispatcher process. Every lifecycle fence asks this same value rather
         # than independently guessing an interpreter, checkout or workspace namespace.

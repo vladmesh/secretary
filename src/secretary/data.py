@@ -44,7 +44,7 @@ from secretary.infra.kanboard_compose import (
     KANBOARD_COMPOSE_SERVICE,
 )
 from secretary.memory_journal import export_memory_snapshot
-from secretary.tasks import TaskAudit, TaskError, TaskReader
+from secretary.tasks import TaskError, TaskReader, task_audit_for
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
 KANBOARD_DATA_PATH = "/var/www/app/data"
@@ -288,12 +288,7 @@ def export_board(
             reader if reader is not None else TaskReader(board_client(instance_dir, serves=(CARD,)))
         )
         task_client = getattr(task_reader, "client", None)
-        if getattr(task_client, "backend_kind", "kanboard") == "postgres":
-            from secretary.board.sql_audit import SqlTaskAudit
-
-            audit_owner = SqlTaskAudit(task_client)
-        else:
-            audit_owner = TaskAudit(data_dir)
+        audit_owner = task_audit_for(task_client, data_dir)
         audit = audit_owner.status()
         if not audit["ok"]:
             raise RuntimeError(
