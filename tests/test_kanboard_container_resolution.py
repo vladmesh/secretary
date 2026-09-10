@@ -18,12 +18,15 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from secretary.bootstrap import KANBOARD_IMAGE
 from secretary.data import raw_kanboard_dump, resolve_kanboard_container
 from secretary.infra.kanboard_compose import KANBOARD_COMPOSE_SERVICE
+
+STOP_LISTING_TIMEOUT_SECONDS = 30
 
 COMPOSE_TEXT = f"""services:
   {KANBOARD_COMPOSE_SERVICE}:
@@ -105,16 +108,52 @@ class KanboardContainerResolutionTests(unittest.TestCase):
         # Every test but the two refusals wants the service up; restore it for the next one.
         self.addCleanup(self._compose, "start")
 
-    def _container_name(self) -> str:
+    def _listed(self, template: str) -> str:
+        # The container listing, which is what `resolve_kanboard_container` reads too.
         listed = subprocess.run(
-            ["docker", "ps", "--all", "--filter", f"label=com.docker.compose.project={self.project}", "--format", "{{.Names}}"],
+            [
+                "docker",
+                "ps",
+                "--all",
+                "--filter",
+                f"label=com.docker.compose.project={self.project}",
+                "--format",
+                template,
+            ],
             check=True,
             capture_output=True,
             text=True,
         )
-        names = listed.stdout.split()
-        self.assertEqual(len(names), 1, listed.stdout)
+        return listed.stdout
+
+    def _container_name(self) -> str:
+        listed = self._listed("{{.Names}}")
+        names = listed.split()
+        self.assertEqual(len(names), 1, listed)
         return names[0]
+
+    def _stop_until_listed_as_exited(self, container: str) -> None:
+        # `docker compose stop` returns when the engine wakes its stop waiters, and an engine older
+        # than 28.3 (moby#50133) does that before it records the exit in the listing: `docker ps`
+        # can still say `running` for a container that has already stopped. CI runs such an engine,
+        # and the dump then copied from the stopped container instead of refusing. Wait, bounded,
+        # until the listing itself shows the stop.
+        self._compose("stop")
+        deadline = time.monotonic() + STOP_LISTING_TIMEOUT_SECONDS
+        while (state := self._listed("{{.State}}").strip()) != "exited":
+            if time.monotonic() >= deadline:
+                inspected = subprocess.run(
+                    ["docker", "inspect", "--format", "{{.State.Status}}", container],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.fail(
+                    f"{container} is not listed as exited {STOP_LISTING_TIMEOUT_SECONDS}s after "
+                    f"`docker compose stop`: listing says {state!r}, inspect says "
+                    f"{(inspected.stdout or inspected.stderr).strip()!r}"
+                )
+            time.sleep(0.05)
 
     def test_dump_resolves_the_installed_container_without_a_rename(self) -> None:
         expected = self._container_name()
@@ -141,7 +180,7 @@ class KanboardContainerResolutionTests(unittest.TestCase):
 
     def test_refusal_names_the_compose_file_and_service_when_the_container_is_stopped(self) -> None:
         expected = self._container_name()
-        self._compose("stop")
+        self._stop_until_listed_as_exited(expected)
 
         with self.assertRaises(RuntimeError) as caught:
             raw_kanboard_dump(Path(self._tmp.name) / "unused-data", compose_file=self.compose_file)
