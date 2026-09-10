@@ -1469,7 +1469,8 @@ nullable `tasks.date_moved`. The timestamp deliberately stays NULL for history w
 the SQL store never observed.
 
 `0007` upgrades an occupied `0006` store in place. It assigns every existing task a distinct Card
-key in stable reference order, advances `card_board_key_seq` beyond the backfill, then makes the
+key in stable reference order, advances `card_board_key_seq` beyond the backfill, settles the deferred
+foreign-key checks the rewritten rows queued (`SET CONSTRAINTS ALL IMMEDIATE`), then makes the
 column non-null, unique and range-checked. It does not rewrite refs, per-project numbers, ownership,
 archive state, relations, comments or audit records.
 
