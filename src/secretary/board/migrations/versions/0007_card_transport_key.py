@@ -45,6 +45,13 @@ def upgrade() -> None:
         sa.text("SELECT setval('card_board_key_seq', :value, :called)"),
         {"value": max(count, 1), "called": count > 0},
     )
+    # The volatile default rewrote `tasks` in this transaction, so every row the backfill just
+    # updated counts as inserted here, and PostgreSQL then queues the INITIALLY DEFERRED
+    # `tasks.sprint_ref` check of each card inside a sprint for commit time even though the key
+    # did not change. ALTER TABLE refuses a relation with pending trigger events, so settle them
+    # first; a store whose deferred constraints cannot be satisfied is not one this migration
+    # should silently carry.
+    connection.execute(sa.text("SET CONSTRAINTS ALL IMMEDIATE"))
     op.alter_column(
         "tasks",
         "board_key",
