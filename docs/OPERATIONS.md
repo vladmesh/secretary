@@ -3824,4 +3824,7 @@ The packaged disposable PostgreSQL 16 rehearsal proves the mechanism and isolate
 surface. It is not live acceptance. The external operator must still retain the command's actual
 revision, service, source, parity, archive, checkpoint and acceptance evidence before resuming.
 Installed acceptance deliberately leaves a closed canary issue and an archived canary task on the
-selected live sprint as durable protocol evidence.
+selected live sprint as durable protocol evidence. When no sprint is open during the window it
+opens its own canary sprint (product `cutover-<plan prefix>`, observer `none`, one registered
+project) and closes it before the phase completes, so an installation between sprints is not a
+refusal and no reservation outlives the acceptance.

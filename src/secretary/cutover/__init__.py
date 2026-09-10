@@ -967,25 +967,36 @@ def _artifact(paths: Paths, name: str, body: str) -> Path:
     return target
 
 
-def _acceptance_context(sprints: dict[str, Any] | list[Any]) -> tuple[str | None, str | None]:
-    """The open sprint the acceptance canary can borrow, or nothing when none is open.
+def _acceptance_context(
+    sprints: dict[str, Any] | list[Any], canary_product: str | None = None
+) -> tuple[str | None, str | None, bool]:
+    """The open sprint the acceptance can use: a borrowed one, this plan's own canary, or none.
 
     An installation between sprints is the ordinary shape of a maintenance window, not a
     refusal: without an open sprint the acceptance phase opens and closes its own canary
-    sprint on a registered project (see `_acceptance_project`).
+    sprint on a registered project (see `_acceptance_project`). A retry of the phase after
+    that sprint was created finds it open under the canary product and must still close it,
+    so it is reported as the canary rather than borrowed like a foreign sprint.
     """
     if not isinstance(sprints, dict):
         raise CutoverError("sprint list returned an invalid acceptance document")
     rows = sprints.get("sprints", {}).get("items", [])
     if not isinstance(rows, list):
         raise CutoverError("sprint list returned an invalid items collection")
+    borrowed: tuple[str, str] | None = None
     for row in rows:
         if not isinstance(row, dict) or row.get("status") != "open":
             continue
         projects = row.get("reservations") or []
-        if isinstance(projects, list) and projects and row.get("ref"):
-            return str(row["ref"]), str(projects[0])
-    return None, None
+        if not (isinstance(projects, list) and projects and row.get("ref")):
+            continue
+        if canary_product is not None and row.get("product") == canary_product:
+            return str(row["ref"]), str(projects[0]), True
+        if borrowed is None:
+            borrowed = (str(row["ref"]), str(projects[0]))
+    if borrowed is not None:
+        return borrowed[0], borrowed[1], False
+    return None, None, True
 
 
 def _acceptance_project(paths: Paths) -> str:
@@ -1449,12 +1460,13 @@ class Operations:
         issue = _secretary(self.paths, "issue", "list")
         sprint = _secretary(self.paths, "sprint", "list")
         task = _secretary(self.paths, "task", "list")
-        sprint_ref, project = _acceptance_context(_command_document(sprint, "sprint list"))
-        canary_sprint = sprint_ref is None
-        if canary_sprint:
-            project = _acceptance_project(self.paths)
         prefix = self.state["plan_id"][:16]
         product_id = f"cutover-{prefix}"
+        sprint_ref, project, canary_sprint = _acceptance_context(
+            _command_document(sprint, "sprint list"), product_id
+        )
+        if canary_sprint and project is None:
+            project = _acceptance_project(self.paths)
         body = _artifact(
             self.paths,
             f"acceptance-{self.state['plan_id']}.md",
@@ -1540,7 +1552,7 @@ class Operations:
         )
         shown_issue = _secretary(self.paths, "issue", "show", "--ref", issue_ref)
         created_sprint: dict[str, Any] | None = None
-        if canary_sprint:
+        if canary_sprint and sprint_ref is None:
             created_sprint = _secretary(
                 self.paths,
                 "sprint",

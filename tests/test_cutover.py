@@ -938,13 +938,58 @@ class CutoverCommandEvidenceTests(CutoverFixture):
         self.assertIsNotNone(evidence["sprint"]["closed"])
 
     def test_acceptance_borrows_an_open_sprint_and_opens_no_canary(self) -> None:
+        foreign = {"ref": "sprint:1", "status": "open", "reservations": ["p"], "product": "secretary"}
+        own = {"ref": "sprint:2", "status": "open", "reservations": ["q"], "product": "cutover-abc"}
         self.assertEqual(
-            cutover._acceptance_context({"sprints": {"items": [{"ref": "sprint:1", "status": "open", "reservations": ["p"]}]}}),
-            ("sprint:1", "p"),
+            cutover._acceptance_context({"sprints": {"items": [foreign]}}, "cutover-abc"),
+            ("sprint:1", "p", False),
         )
-        self.assertEqual(cutover._acceptance_context({"sprints": {"items": []}}), (None, None))
+        self.assertEqual(cutover._acceptance_context({"sprints": {"items": []}}, "cutover-abc"), (None, None, True))
+        # A retry after the canary sprint was created finds it open and still owns it.
+        self.assertEqual(
+            cutover._acceptance_context({"sprints": {"items": [foreign, own]}}, "cutover-abc"),
+            ("sprint:2", "q", True),
+        )
         with self.assertRaises(cutover.CutoverError):
-            cutover._acceptance_context([])
+            cutover._acceptance_context([], "cutover-abc")
+
+    def test_acceptance_retry_reuses_and_closes_its_own_open_canary_sprint(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        operation = cutover.Operations(self.paths, state)
+        prefix = state["plan_id"][:16]
+        seen: list[tuple[str, ...]] = []
+        repeats: dict[str, int] = {}
+
+        def command(_paths, *argv):
+            seen.append(argv)
+            key = " ".join(argv)
+            repeats[key] = repeats.get(key, 0) + 1
+            document: object = {"ok": True}
+            if argv[:2] == ("sprint", "list"):
+                document = {"sprints": {"items": [
+                    {"ref": "sprint:77", "status": "open", "reservations": ["secretary"], "product": f"cutover-{prefix}"}
+                ]}}
+            elif argv[:2] == ("issue", "create"):
+                document = {"issue": {"ref": "issue:acceptance"}}
+            elif argv[:2] == ("task", "create"):
+                document = {"task": {"ref": "secretary-99"}}
+            elif argv[:2] == ("sprint", "comment"):
+                document = {"comment_id": "evt-sprint", "saved": repeats[key] == 1}
+            elif argv[:2] == ("task", "comment") and "cutover-task-comment-" in key:
+                document = {"event_id": "evt-task", "replayed": repeats[key] > 1}
+            return {"output": json.dumps(document), "document": document}
+
+        with (
+            mock.patch.object(cutover, "_secretary", side_effect=command),
+            mock.patch.object(cutover, "_sql_event_count", return_value={"committed_events": 20}),
+        ):
+            evidence = operation.installed_protocol_acceptance()
+        pairs = [entry[:2] for entry in seen]
+        self.assertNotIn(("sprint", "create"), pairs)
+        self.assertIn(("sprint", "close"), pairs)
+        self.assertTrue(evidence["sprint"]["canary"])
+        self.assertIsNone(evidence["sprint"]["created"])
+        self.assertEqual(evidence["sprint"]["ref"], "sprint:77")
 
 
 class CutoverOperationSeamTests(CutoverFixture):
