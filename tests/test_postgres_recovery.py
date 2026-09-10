@@ -707,6 +707,22 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 "('codegen-product-kit-1', 'codegen-product-kit', 1, 'Kit collision', 'code', "
                 "'ready', now(), now())"
             )
+            # A sprint that holds one of the cards through the two INITIALLY DEFERRED foreign
+            # keys of the live schema. The 0007 upgrade rewrites `tasks` (volatile default) and
+            # then updates every row, so their deferred RI events are queued in the migration's
+            # own transaction; without an explicit SET CONSTRAINTS the following ALTER TABLE
+            # refuses with "pending trigger events" exactly as the preserved 2026-09-09 target did.
+            connection.execute(
+                "INSERT INTO sprints (ref, sprint_number, goal, definition_of_done, status, "
+                "created_at, updated_at, board_key) VALUES "
+                "('sprint:1', 1, 'collision sprint', 'holds butler-1', 'open', now(), now(), 1)"
+            )
+            connection.execute(
+                "UPDATE tasks SET sprint_ref = 'sprint:1' WHERE task_ref = 'butler-1'"
+            )
+            connection.execute(
+                "UPDATE sprints SET current_task_ref = 'butler-1' WHERE ref = 'sprint:1'"
+            )
             connection.execute(
                 "INSERT INTO task_comments (task_ref, marker, body, actor_role, created_at) "
                 "VALUES ('butler-1', 'note', 'butler collision comment', 'worker', now()), "
