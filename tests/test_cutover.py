@@ -386,13 +386,34 @@ class CutoverSuccessorTests(CutoverFixture):
         }
         return state
 
-    def test_successor_eligibility_is_exact_and_activation_always_refuses(self) -> None:
+    def test_successor_eligibility_is_exact_and_activation_needs_its_writeless_proof(self) -> None:
         state = self.eligible_state()
         self.assertTrue(successor.exact_eligibility(state, "kanboard")["eligible"])
-        state["phases"]["selector_activation"] = {"status": "running"}
+        # An activation that never completed, or completed without recording the audit
+        # baseline `recover` compared against, leaves no proof that no SQL write happened.
+        for activation in (
+            {"status": "running"},
+            {"status": "complete"},
+            {"status": "complete", "evidence": {"sql_audit_baseline": {"committed_events": "5"}}},
+        ):
+            with self.subTest(activation=activation):
+                state = self.eligible_state()
+                state["phases"]["selector_activation"] = activation
+                proof = successor.exact_eligibility(state, "kanboard")
+                self.assertFalse(proof["eligible"])
+                self.assertEqual(proof["reason"], "selector-activation-uncertain")
+        # The 2026-09-10 live shape: selector activated, acceptance refused, `recover` read the
+        # SQL audit back at the baseline and restored Kanboard before any write.
+        state = self.eligible_state()
+        state["phases"]["selector_activation"] = {
+            "status": "complete",
+            "evidence": {"backend": "postgres", "sql_audit_baseline": {"committed_events": 5922}},
+        }
+        self.assertTrue(successor.exact_eligibility(state, "kanboard")["eligible"])
+        state["first_sql_write"] = {"recorded_at": "2026-09-10T11:00:00Z", "evidence": {}}
         proof = successor.exact_eligibility(state, "kanboard")
         self.assertFalse(proof["eligible"])
-        self.assertEqual(proof["reason"], "selector-activation-entered")
+        self.assertEqual(proof["reason"], "sql-write-or-audit-uncertainty")
 
         for malformed in (None, {"parity": None}):
             with self.subTest(malformed=malformed):
@@ -861,6 +882,114 @@ class CutoverCommandEvidenceTests(CutoverFixture):
             <= pairs
         )
         self.assertEqual(evidence["write"]["replay"]["document"]["replayed"], True)
+
+
+    def test_acceptance_opens_and_closes_its_own_canary_sprint_when_none_is_open(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        operation = cutover.Operations(self.paths, state)
+        seen: list[tuple[str, ...]] = []
+        repeats: dict[str, int] = {}
+
+        def command(_paths, *argv):
+            seen.append(argv)
+            key = " ".join(argv)
+            repeats[key] = repeats.get(key, 0) + 1
+            document: object = {"ok": True}
+            if argv[:2] == ("sprint", "list"):
+                document = {"sprints": {"items": [{"ref": "sprint:9", "status": "closed", "reservations": ["secretary"]}]}}
+            elif argv[:2] == ("sprint", "create"):
+                self.assertIn("--observer", argv)
+                self.assertEqual(argv[argv.index("--observer") + 1], "none")
+                self.assertEqual(argv[argv.index("--project") + 1], "secretary")
+                self.assertEqual(argv[argv.index("--issue") + 1], "issue:acceptance")
+                document = {"sprint": {"ref": "sprint:77"}}
+            elif argv[:2] == ("issue", "create"):
+                document = {"issue": {"ref": "issue:acceptance"}}
+            elif argv[:2] == ("task", "create"):
+                self.assertEqual(argv[argv.index("--sprint") + 1], "sprint:77")
+                document = {"task": {"ref": "secretary-99"}}
+            elif argv[:2] == ("sprint", "comment"):
+                self.assertEqual(argv[argv.index("--ref") + 1], "sprint:77")
+                document = {"comment_id": "evt-sprint", "saved": repeats[key] == 1}
+            elif argv[:2] == ("sprint", "close"):
+                self.assertEqual(argv[argv.index("--ref") + 1], "sprint:77")
+                decisions = Path(argv[argv.index("--decisions-file") + 1]).read_text(encoding="utf-8")
+                self.assertIn("issue:acceptance", decisions)
+                self.assertIn("already_closed", decisions)
+                document = {"kind": "sprint_closed"}
+            elif argv[:2] == ("task", "comment") and "cutover-task-comment-" in key:
+                document = {"event_id": "evt-task", "replayed": repeats[key] > 1}
+            return {"output": json.dumps(document), "document": document}
+
+        with (
+            mock.patch.object(cutover, "_secretary", side_effect=command),
+            mock.patch.object(cutover, "_acceptance_project", return_value="secretary"),
+            mock.patch.object(cutover, "_sql_event_count", return_value={"committed_events": 20}),
+        ):
+            evidence = operation.installed_protocol_acceptance()
+
+        order = [entry[:2] for entry in seen]
+        self.assertLess(order.index(("issue", "create")), order.index(("sprint", "create")))
+        self.assertLess(order.index(("sprint", "create")), order.index(("sprint", "comment")))
+        self.assertLess(order.index(("task", "archive")), order.index(("sprint", "close")))
+        self.assertLess(order.index(("issue", "close")), order.index(("sprint", "close")))
+        self.assertTrue(evidence["sprint"]["canary"])
+        self.assertEqual(evidence["sprint"]["ref"], "sprint:77")
+        self.assertIsNotNone(evidence["sprint"]["closed"])
+
+    def test_acceptance_borrows_an_open_sprint_and_opens_no_canary(self) -> None:
+        foreign = {"ref": "sprint:1", "status": "open", "reservations": ["p"], "product": "secretary"}
+        own = {"ref": "sprint:2", "status": "open", "reservations": ["q"], "product": "cutover-abc"}
+        self.assertEqual(
+            cutover._acceptance_context({"sprints": {"items": [foreign]}}, "cutover-abc"),
+            ("sprint:1", "p", False),
+        )
+        self.assertEqual(cutover._acceptance_context({"sprints": {"items": []}}, "cutover-abc"), (None, None, True))
+        # A retry after the canary sprint was created finds it open and still owns it.
+        self.assertEqual(
+            cutover._acceptance_context({"sprints": {"items": [foreign, own]}}, "cutover-abc"),
+            ("sprint:2", "q", True),
+        )
+        with self.assertRaises(cutover.CutoverError):
+            cutover._acceptance_context([], "cutover-abc")
+
+    def test_acceptance_retry_reuses_and_closes_its_own_open_canary_sprint(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        operation = cutover.Operations(self.paths, state)
+        prefix = state["plan_id"][:16]
+        seen: list[tuple[str, ...]] = []
+        repeats: dict[str, int] = {}
+
+        def command(_paths, *argv):
+            seen.append(argv)
+            key = " ".join(argv)
+            repeats[key] = repeats.get(key, 0) + 1
+            document: object = {"ok": True}
+            if argv[:2] == ("sprint", "list"):
+                document = {"sprints": {"items": [
+                    {"ref": "sprint:77", "status": "open", "reservations": ["secretary"], "product": f"cutover-{prefix}"}
+                ]}}
+            elif argv[:2] == ("issue", "create"):
+                document = {"issue": {"ref": "issue:acceptance"}}
+            elif argv[:2] == ("task", "create"):
+                document = {"task": {"ref": "secretary-99"}}
+            elif argv[:2] == ("sprint", "comment"):
+                document = {"comment_id": "evt-sprint", "saved": repeats[key] == 1}
+            elif argv[:2] == ("task", "comment") and "cutover-task-comment-" in key:
+                document = {"event_id": "evt-task", "replayed": repeats[key] > 1}
+            return {"output": json.dumps(document), "document": document}
+
+        with (
+            mock.patch.object(cutover, "_secretary", side_effect=command),
+            mock.patch.object(cutover, "_sql_event_count", return_value={"committed_events": 20}),
+        ):
+            evidence = operation.installed_protocol_acceptance()
+        pairs = [entry[:2] for entry in seen]
+        self.assertNotIn(("sprint", "create"), pairs)
+        self.assertIn(("sprint", "close"), pairs)
+        self.assertTrue(evidence["sprint"]["canary"])
+        self.assertIsNone(evidence["sprint"]["created"])
+        self.assertEqual(evidence["sprint"]["ref"], "sprint:77")
 
 
 class CutoverOperationSeamTests(CutoverFixture):

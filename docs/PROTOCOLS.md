@@ -4184,7 +4184,8 @@ absence of that phase admits the two pre-import successor branches.
 
 `secretary cutover prepare-successor` accepts only the exact terminal identity whose final import
 and full parity completed, recovery branch is `kanboard-before-first-write`, selector activation is
-absent, `first_sql_write` is null, backend remains Kanboard, and matching import evidence is readable.
+either absent or completed with the SQL audit baseline `recover` compared against, `first_sql_write`
+is null, backend remains Kanboard, and matching import evidence is readable.
 It requires an absolute explicit instance, exact installed revision, non-empty actor/reason and a
 confirmation derived from plan ID, configured database name and current database OID. Status renders
 the token, phase evidence and exact next command without credentials. At

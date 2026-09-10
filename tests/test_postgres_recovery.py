@@ -14,6 +14,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import psycopg
+
 from secretary import cutover
 from secretary.backup import create_backups
 from secretary.backup_verify import verify_backup
@@ -648,6 +650,68 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             }
             checkpoint = operation.post_switch_checkpoint()
 
+            # The 2026-09-10 live window: no sprint is open, so the acceptance must open and
+            # close its own canary sprint on a registered project instead of refusing after the
+            # switch. The seeded sprint still reserves `secretary`, so the canary takes `canary`.
+            (instance / "projects" / "canary.yaml").write_text(
+                f"id: canary\nrepo: {self.root / 'repository'}\nenabled: false\n"
+                "adapter: secretary\ndefault_branch: main\n",
+                encoding="utf-8",
+            )
+            with psycopg.connect(self.target_config.for_role("owner").conninfo()) as connection:
+                connection.execute(
+                    "INSERT INTO projects (project_id, enabled, registry_present) "
+                    "VALUES ('canary', true, true)"
+                )
+            canary_plan = {**plan, "plan_id": "e" * 64}
+            canary_state = cutover._new_state(canary_plan, "integration", "canary acceptance")
+            canary_state["controller_pid"] = os.getpid()
+            canary_state["phases"]["global_freeze"] = {"status": "complete"}
+            canary_state["phases"]["selector_activation"] = {"status": "complete", "evidence": activated}
+            # The write barrier admits only the controller whose identity the canonical state
+            # names, so the canary controller takes the slot the way a real apply would hold it.
+            cutover._write_state(paths, canary_state)
+            canary_operation = cutover.Operations(
+                paths, canary_state, checkpoint_options={"state_dir": pipeline_state}
+            )
+            with mock.patch.dict(os.environ, {cutover.CONTROLLER_ID_ENV: canary_state["identity"]}):
+                # Close the seeded sprint through the installed protocol first: the canary is
+                # the shape of a window with no open sprint, and the installation admits one.
+                listing = cutover._secretary(paths, "task", "list", "--sprint", "sprint:1")["document"]
+                rows = listing if isinstance(listing, list) else listing.get("tasks") or listing.get("items") or []
+                dispositions = "".join(
+                    f"  - ref: {row['ref']}\n    verdict: drop\n    reason: canary rehearsal closes the seeded sprint\n"
+                    for row in rows
+                    if isinstance(row, dict) and row.get("state") != "done"
+                )
+                declared = cutover._secretary(paths, "sprint", "show", "--ref", "sprint:1")["document"]
+                verdicts = "".join(
+                    f"  - ref: {ref}\n    verdict: open\n    reason: still open\n"
+                    for ref in (declared.get("issues") or [])
+                )
+                decisions = self.root / "seeded-sprint-decisions.yaml"
+                decisions.write_text(
+                    ("issues:\n" + verdicts if verdicts else "")
+                    + ("cards:\n" + dispositions if dispositions else ""),
+                    encoding="utf-8",
+                )
+                closeout = self.root / "seeded-sprint-closeout.md"
+                closeout.write_text("# seeded sprint closed before the canary rehearsal\n", encoding="utf-8")
+                cutover._secretary(
+                    paths, "sprint", "close", "--role", "po", "--actor", "test", "--ref", "sprint:1",
+                    "--reason", "canary rehearsal", "--decisions-file", str(decisions),
+                    "--closeout-file", str(closeout), "--data-dir", str(data),
+                )
+                with mock.patch.object(cutover, "_acceptance_project", return_value="canary"):
+                    canary_accepted = canary_operation.installed_protocol_acceptance()
+            canary_sprint = cutover._secretary(
+                paths, "sprint", "show", "--ref", canary_accepted["sprint"]["ref"]
+            )["document"]
+
+        self.assertTrue(canary_accepted["sprint"]["canary"])
+        self.assertEqual(canary_sprint["status"], "closed")
+        self.assertEqual(canary_sprint["reservations"], ["canary"])
+        self.assertIsNotNone(canary_accepted["sprint"]["closed"])
         self.assertEqual(provisioned["migration_head"], migrate.head_revision())
         self.assertEqual(
             quiescent["source"]["fingerprint"],

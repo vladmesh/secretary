@@ -3615,8 +3615,10 @@ revision. This implementation card did not run the live cutover.
 
 ### Preparing a successor after a completed import
 
-An import that completed before recovery has occupied its PostgreSQL target even when selector
-activation was never entered and no application SQL write exists. It cannot be imported again or
+An import that completed before recovery has occupied its PostgreSQL target even when no
+application SQL write exists, whether or not selector activation was entered: `recover` chooses
+its Kanboard branch only after reading the SQL audit count back at the activation baseline, and
+that proof is what makes the occupied target eligible. It cannot be imported again or
 updated in place: generated request, comment, resume and decision identities do not provide a safe
 merge key. After installing the revision that understands the imported schema, inspect
 `secretary cutover status --instance /absolute/instance`. For the single supported
@@ -3822,4 +3824,7 @@ The packaged disposable PostgreSQL 16 rehearsal proves the mechanism and isolate
 surface. It is not live acceptance. The external operator must still retain the command's actual
 revision, service, source, parity, archive, checkpoint and acceptance evidence before resuming.
 Installed acceptance deliberately leaves a closed canary issue and an archived canary task on the
-selected live sprint as durable protocol evidence.
+selected live sprint as durable protocol evidence. When no sprint is open during the window it
+opens its own canary sprint (product `cutover-<plan prefix>`, observer `none`, one registered
+project) and closes it before the phase completes, so an installation between sprints is not a
+refusal and no reservation outlives the acceptance.

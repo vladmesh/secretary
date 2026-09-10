@@ -92,8 +92,12 @@ def exact_eligibility(
             import_parity = import_result.get("parity") if isinstance(import_result, dict) else None
             if not isinstance(parity_result, dict) or parity_result.get("ok") is not True:
                 reason = "full-parity-not-clean"
-            elif "selector_activation" in phases:
-                reason = "selector-activation-entered"
+            elif "selector_activation" in phases and not _activation_proved_writeless(phases):
+                # `recover` chose kanboard-before-first-write only after reading the SQL audit
+                # count back at the activation baseline, and the eligibility above already
+                # requires that branch with no recorded first write. An activation that never
+                # completed or recorded no baseline leaves that proof without a reference point.
+                reason = "selector-activation-uncertain"
             elif not isinstance(import_parity, dict) or import_parity.get("ok") is not True:
                 reason = "import-parity-not-clean"
     if reason == "eligible-post-import-kanboard-recovery" and artifacts is not None:
@@ -102,6 +106,15 @@ def exact_eligibility(
         except (KeyError, RuntimeError, TypeError, ValueError):
             reason = "import-report-unreadable-or-mismatched"
     return {"eligible": reason == "eligible-post-import-kanboard-recovery", "reason": reason}
+
+
+def _activation_proved_writeless(phases: dict[str, Any]) -> bool:
+    activation = phases.get("selector_activation")
+    if not isinstance(activation, dict) or activation.get("status") != "complete":
+        return False
+    evidence = activation.get("evidence")
+    baseline = evidence.get("sql_audit_baseline") if isinstance(evidence, dict) else None
+    return isinstance(baseline, dict) and isinstance(baseline.get("committed_events"), int)
 
 
 def _config_for_database(config: BoardStoreConfig, name: str) -> BoardStoreConfig:
