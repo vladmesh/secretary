@@ -2162,6 +2162,15 @@ obligation — a closeout or a launch — and never a half-applied board write.
 The audit journal itself — `state/board/events.ndjson` — keeps being written, generated from
 `board_events` by the checkpoint. `board/analytics.py` reads a sealed copy and is untouched.
 
+No live reader may take that generated file for the audit. `tasks.task_audit_for(client, data_dir)`
+is the one place that decides which audit owner a process uses, and it decides from the client the
+switch built: `SqlTaskAudit(client)` on PostgreSQL, `TaskAudit(data_dir)` on Kanboard. `TaskWriter`,
+`SprintReader`/`SprintWriter`, `ProductIssueStore`, the dispatcher runtime and its command host all
+take it from there. The dispatcher built `TaskAudit(data)` beside a PostgreSQL client until
+2026-09-10: a worker's `report:done` committed in `requests` was then invisible to the report wait,
+the worker was declared stalled, and the observer got no wake for the Blocked move
+(sprint:1437, secretary-1614).
+
 ### 7.4 Schema versioning and migrations
 
 **SQLAlchemy models as the schema, Alembic as the migration tool.** The owner decided this on

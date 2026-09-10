@@ -47,6 +47,7 @@ from secretary.tasks import (
     _text,
     is_significant_observer_event,
     reference_allocation_lock,
+    task_audit_for,
 )
 from triggered_agents.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 
@@ -536,12 +537,11 @@ class SprintReader:
         self.thresholds = (
             budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         )
-        if getattr(client, "backend_kind", "kanboard") == "postgres":
-            from secretary.board.sql_audit import SqlTaskAudit
-
-            self.audit = SqlTaskAudit(client)
+        # PostgreSQL needs no data dir for its audit; a Kanboard reader without one has none.
+        if data_dir is not None or getattr(client, "backend_kind", "kanboard") == "postgres":
+            self.audit = task_audit_for(client, data_dir or "")
         else:
-            self.audit = TaskAudit(data_dir) if data_dir is not None else None
+            self.audit = None
 
     def _sprint_rows(self, board_id: int) -> list[dict[str, Any]]:
         """Every row of the sprint board that carries a sprint reference."""
@@ -918,12 +918,7 @@ class SprintWriter:
             budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
         )
         self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
-        if getattr(client, "backend_kind", "kanboard") == "postgres":
-            from secretary.board.sql_audit import SqlTaskAudit
-
-            self.audit = SqlTaskAudit(client)
-        else:
-            self.audit = TaskAudit(data_dir)
+        self.audit = task_audit_for(client, data_dir)
         # Reuse the Product/Issue transaction's staged-intent semantics.
         self.transactions = ProductIssueTransaction(data_dir, self.audit)
         if getattr(client, "backend_kind", "kanboard") == "postgres":

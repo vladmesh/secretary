@@ -1611,6 +1611,25 @@ class TaskAudit:
                 os.unlink(temp)
 
 
+def task_audit_for(client: Any, data_dir: str | os.PathLike[str]) -> Any:
+    """The audit owner that belongs to this card client, decided by the client's own backend.
+
+    The switch is read once where the client is built (`board/backend.py`); every audit reader and
+    writer in the process must follow the client it produced rather than look the backend up again.
+    A file journal (`<data>/board/events.ndjson`) belongs to the Kanboard backend and the
+    `requests`/`board_events` tables to the PostgreSQL one (docs/BOARD_STORE.md §7.3).  Building
+    `TaskAudit(data_dir)` beside a PostgreSQL client reads a journal nobody writes any more: on
+    2026-09-10 the production dispatcher did exactly that, so a worker's `report:done` committed in
+    SQL was never seen, the worker was declared stalled, and the observer got no wake for the
+    Blocked move (sprint:1437, secretary-1614).
+    """
+    if getattr(client, "backend_kind", "kanboard") == "postgres":
+        from secretary.board.sql_audit import SqlTaskAudit
+
+        return SqlTaskAudit(client)
+    return TaskAudit(data_dir)
+
+
 class TaskWriter:
     """Protocol writes, role guards and normalized audit events."""
 
@@ -1633,12 +1652,7 @@ class TaskWriter:
         # follows the client it produced.  A file journal belongs to the Kanboard backend and the
         # `requests`/`board_events` tables to the PostgreSQL one (docs/BOARD_STORE.md §7.3).
         self.backend_kind = getattr(client, "backend_kind", "kanboard")
-        if self.backend_kind == "postgres":
-            from secretary.board.sql_audit import SqlTaskAudit
-
-            self.audit = SqlTaskAudit(client)
-        else:
-            self.audit = TaskAudit(data_dir)
+        self.audit = task_audit_for(client, data_dir)
         # Importing the concrete adapter here keeps the protocol leaves usable
         # by the legacy task reader while giving migrated writes the same audit
         # owner as generic control-plane operations.
