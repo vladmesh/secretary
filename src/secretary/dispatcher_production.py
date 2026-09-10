@@ -1375,7 +1375,7 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
     thresholds = budget_thresholds(instance if isinstance(instance, dict) else None)
     writer = SprintWriter(
         runtime.reader.client,
-        data_dir=Path(runtime.audit.board_dir).parent,
+        data_dir=Path(getattr(runtime, "data_dir", None) or Path(runtime.audit.board_dir).parent),
         thresholds=thresholds,
     )
     events = runtime.audit.events()

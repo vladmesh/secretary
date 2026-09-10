@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -35,8 +36,9 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.board import backend
+from secretary.board.sql_audit import SqlTaskAudit
 from secretary.board.sql_cards import _COLUMN_ID_BY_STATE
-from secretary.tasks import TaskError, TaskReader, TaskWriter
+from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, task_audit_for
 
 # Imported as a module, not by name: a bare import would make unittest collect the Kanboard
 # cases a second time here, once more on the backend they already run on in test_tasks.py.
@@ -1017,6 +1019,40 @@ class SqlTaskWriterParityTests(KanboardFixtureCase, kanboard_cases.TaskWriterTes
 
     def board_client(self):
         return self.client_for(WriteKanboard())
+
+    def test_the_audit_that_follows_the_client_sees_the_report_the_journal_never_gets(self) -> None:
+        """What the dispatcher must read on this backend, and what it read on 2026-09-10.
+
+        The worker's `report:done` is committed to `requests`/`board_events`; the file journal
+        under the same data dir stays empty. A reader built from the data dir alone (`TaskAudit`)
+        would wait for that report forever, which is how secretary-1614 was declared stalled.
+        """
+        # A done report is refused from a dirty checkout, so give the writer a clean one of its
+        # own rather than whatever the test process was started in.
+        workspace = Path(self.tmpdir.name) / "workspace"
+        workspace.mkdir()
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+        subprocess.run(
+            ["git", *identity, "commit", "-q", "--allow-empty", "-m", "seed"],
+            cwd=workspace,
+            check=True,
+        )
+        self.writer.workspace = workspace
+        self.writer.report(
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            kind="done",
+            body="ready",
+            request_id="audit-follows-the-client",
+        )
+        audit = task_audit_for(self.client, self.tmpdir.name)
+        self.assertIsInstance(audit, SqlTaskAudit)
+        reported = audit.events("secretary-468", kind="reported")
+        self.assertEqual([event["request_id"] for event in reported], ["audit-follows-the-client"])
+        self.assertEqual(reported[0]["data"]["marker"], "report:done")
+        self.assertEqual(TaskAudit(self.tmpdir.name).events("secretary-468"), [])
 
     @contextlib.contextmanager
     def open_sprint(self, ref: str = "sprint:test", project: str = "secretary"):
