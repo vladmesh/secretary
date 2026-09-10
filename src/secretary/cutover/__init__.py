@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import pwd
+import shlex
 import stat
 import subprocess
 import sys
@@ -131,6 +132,15 @@ WRITER_COMMANDS = (
 
 class CutoverError(RuntimeError):
     """A bounded refusal which is safe to print to an operator."""
+
+
+class CommandFailed(CutoverError):
+    """A command that ran and exited non-zero; its stdout stays readable for the diagnosis."""
+
+    def __init__(self, message: str, *, exit_code: int, output: str) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.output = output
 
 
 def _now() -> str:
@@ -359,7 +369,164 @@ def _root_commands(compose: dict[str, Any], probe: dict[str, Any]) -> list[str]:
     return commands
 
 
-def _privileged_preconditions(compose_path: Path | None = None) -> dict[str, Any]:
+PRECONDITION_ITEMS = ("compose", "sudo_systemctl", "units", "pipeline_pause", "doctor")
+# Every phase that calls `backup create`, with the freeze owner it declares.  The first one takes
+# the freeze itself; the later ones join the freeze `global_freeze` took as the controller.
+BACKUP_PAUSE_PHASES = (
+    ("current_kanboard_backup_checkpoint", None),
+    ("postgresql_recovery_backup", CUTOVER_ACTOR),
+    ("post_switch_checkpoint", CUTOVER_ACTOR),
+)
+DOCTOR_OFFLINE = ("doctor", "--json", "--offline")
+
+
+def _phase_complete(state: dict[str, Any] | None, name: str) -> bool:
+    if state is None:
+        return False
+    return state.get("phases", {}).get(name, {}).get("status") == "complete"
+
+
+def _pause_holder(pause: dict[str, Any]) -> str:
+    return (
+        f"paused ({pause.get('mode') or 'unknown mode'}) by actor {pause.get('actor') or 'unknown'}: "
+        f"{pause.get('reason') or 'no reason recorded'}"
+    )
+
+
+def _pipeline_pause_precondition(paths: Paths, state: dict[str, Any] | None) -> dict[str, Any]:
+    """Whether the pipeline pause lets every backup phase still ahead of this apply run.
+
+    The pause is read the way `backup create` reads it and judged by its own `freeze_refusal`,
+    for the next phase that will call it and with the freeze owner that phase declares.  The
+    Kanboard checkpoint backup takes the freeze itself, so before it any pause refuses --
+    including the controller's own freeze, which `recover` deliberately leaves in place.  The
+    later backups join the cutover freeze; while `global_freeze` is still ahead a running
+    pipeline passes as well, because that phase takes the freeze first and a repeated freeze
+    keeps whoever already holds it.  Nothing here pauses or resumes the pipeline.
+    """
+    from secretary.backup import freeze_refusal, pipeline_pause
+
+    report: dict[str, Any] = {
+        "requirement": "a pipeline pause every remaining backup phase can run under",
+        "source": "secretary pause-status, judged by backup create",
+        "phase": None,
+        "freeze_owner": None,
+        "pause": None,
+        "resume_command": None,
+    }
+    pending = [item for item in BACKUP_PAUSE_PHASES if not _phase_complete(state, item[0])]
+    if not pending:
+        return {
+            **report,
+            "satisfied": True,
+            "detail": "every backup phase is complete; no remaining phase reads the pipeline pause",
+        }
+    phase, owner = pending[0]
+    report.update(phase=phase, freeze_owner=owner)
+    try:
+        pause = pipeline_pause(paths.instance)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        return {
+            **report,
+            "satisfied": False,
+            "detail": f"the pipeline pause could not be read the way backup create reads it: {exc}",
+        }
+    report["pause"] = pause
+    freeze_ahead = not _phase_complete(state, "global_freeze")
+    if owner and freeze_ahead and not pause.get("paused"):
+        return {
+            **report,
+            "satisfied": True,
+            "detail": f"the pipeline is running; global_freeze takes the cutover freeze before {phase}",
+        }
+    refusal = freeze_refusal(pause, owner)
+    if refusal is None:
+        holder = f"is {_pause_holder(pause)}" if pause.get("paused") else "is not paused"
+        return {**report, "satisfied": True, "detail": f"the pipeline {holder}; {phase} can run under it"}
+    if pause.get("paused") and (owner is None or freeze_ahead):
+        resume = f"secretary resume --instance {shlex.quote(str(paths.instance))}"
+        report["resume_command"] = resume
+        detail = (
+            f"the pipeline is {_pause_holder(pause)}, and {phase} would refuse it: {refusal}. "
+            "The controller never lifts a pause, and recover leaves its freeze in place on purpose; "
+            f"lift it explicitly with `{resume}`, then rerun the identical apply command"
+        )
+    else:
+        holder = _pause_holder(pause) if pause.get("paused") else "not paused"
+        detail = (
+            f"{phase} runs under the freeze global_freeze took as {CUTOVER_ACTOR} and would refuse: "
+            f"{refusal} (the pipeline is {holder}). Neither lifting nor taking a pause by hand "
+            "repairs that; inspect `secretary cutover status` and recover with its RECOVER token"
+        )
+    return {**report, "satisfied": False, "detail": detail}
+
+
+def _doctor_finding(finding: Any) -> str:
+    """One doctor finding in doctor's own words: its code, message and remaining fields."""
+    if not isinstance(finding, dict):
+        return str(finding)
+    parts = [str(finding["message"])] if finding.get("message") else []
+    parts += [f"{key}={finding[key]}" for key in sorted(finding) if key not in ("code", "message")]
+    code = str(finding.get("code") or "finding")
+    return f"{code}: {'; '.join(parts)}" if parts else code
+
+
+def _doctor_findings(output: str) -> list[str]:
+    try:
+        document = json.loads(output)
+    except (TypeError, ValueError):
+        return []
+    findings = document.get("findings") if isinstance(document, dict) else None
+    return [_doctor_finding(item) for item in findings] if isinstance(findings, list) else []
+
+
+def _doctor_offline(paths: Paths) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Run the doctor `installed_protocol_acceptance` runs, and judge it the way that phase does.
+
+    Clean means `_secretary` accepts the run: exit zero and a JSON document that is not an error
+    document.  The apply precondition and the acceptance phase both ask this one function, so
+    a doctor that passes the precondition cannot fail acceptance on the same findings.  The
+    findings of a refusal are read from doctor's own JSON output, as doctor named them; the
+    controller repairs none of them.  Returns the report and, when clean, the command evidence.
+    """
+    command = shlex.join(_secretary_argv(paths, *DOCTOR_OFFLINE))
+    report: dict[str, Any] = {
+        "requirement": "a clean secretary doctor --json --offline",
+        "command": command,
+        "findings": [],
+    }
+    try:
+        evidence = _secretary(paths, *DOCTOR_OFFLINE)
+    except CutoverError as exc:
+        findings = _doctor_findings(exc.output) if isinstance(exc, CommandFailed) else []
+        if findings:
+            detail = (
+                f"secretary doctor --offline reports {len(findings)} finding(s), and "
+                "installed_protocol_acceptance fails on them:\n"
+                + "\n".join(f"  - {finding}" for finding in findings)
+                + "\n  The controller repairs none of them; they are operator steps on this "
+                f"installation. Reproduce with: {command}"
+            )
+        else:
+            detail = f"secretary doctor --offline is not clean: {exc}. Reproduce with: {command}"
+        return {**report, "satisfied": False, "findings": findings, "detail": detail}, None
+    return {**report, "satisfied": True, "detail": "secretary doctor --offline reports no findings"}, evidence
+
+
+def _doctor_precondition(paths: Paths, state: dict[str, Any] | None) -> dict[str, Any]:
+    if _phase_complete(state, "installed_protocol_acceptance"):
+        return {
+            "requirement": "a clean secretary doctor --json --offline",
+            "command": shlex.join(_secretary_argv(paths, *DOCTOR_OFFLINE)),
+            "findings": [],
+            "satisfied": True,
+            "detail": "installed_protocol_acceptance is complete; no remaining phase runs doctor",
+        }
+    report, _evidence = _doctor_offline(paths)
+    return report
+
+
+def _privileged_preconditions(compose_path: Path | None = None, *, paths: Paths) -> dict[str, Any]:
     """Read-only report on what apply needs the installation to already have.
 
     The controller owns none of it: it proves the Compose definition that
@@ -368,6 +535,13 @@ def _privileged_preconditions(compose_path: Path | None = None) -> dict[str, Any
     installed, then prints the root commands for whatever is missing.  It never
     writes the file, the sudo rule or a unit, and reading a LoadState changes
     nothing.
+
+    Two facts of the installation sit beside them because a phase that has not
+    run yet would otherwise find them in the middle of the window: a pipeline
+    pause a remaining backup would refuse, and a doctor --offline that the
+    acceptance phase would fail on.  Both are read with the commands those
+    phases use, judged against the cutover state as it stands, and neither is
+    repaired: no resume, no secret-catalog edit.
     """
     from secretary.board.provision import DEFAULT_COMPOSE_PATH, inspect_compose
 
@@ -388,28 +562,29 @@ def _privileged_preconditions(compose_path: Path | None = None) -> dict[str, Any
         "detail": inventory.describe(),
         **inventory.evidence(),
     }
+    state = _read_state(paths)
     report: dict[str, Any] = {
-        "satisfied": bool(compose["satisfied"] and probe["satisfied"] and units["satisfied"]),
         "compose": compose,
         "sudo_systemctl": probe,
         "units": units,
+        "pipeline_pause": _pipeline_pause_precondition(paths, state),
+        "doctor": _doctor_precondition(paths, state),
     }
+    report["satisfied"] = all(report[item]["satisfied"] for item in PRECONDITION_ITEMS)
     report["root_commands"] = _root_commands(compose, probe)
     return report
 
 
-def _require_privileged_preconditions(compose_path: Path | None = None) -> dict[str, Any]:
-    report = _privileged_preconditions(compose_path)
+def _require_privileged_preconditions(
+    compose_path: Path | None = None, *, paths: Paths
+) -> dict[str, Any]:
+    report = _privileged_preconditions(compose_path, paths=paths)
     if report["satisfied"]:
         return report
-    missing = [
-        item["detail"]
-        for item in (report["compose"], report["sudo_systemctl"], report["units"])
-        if not item["satisfied"]
-    ]
+    missing = [report[item]["detail"] for item in PRECONDITION_ITEMS if not report[item]["satisfied"]]
     message = (
-        "privileged apply preconditions are not installed; the controller verifies them and "
-        "performs no root step:\n" + "\n".join(f"- {detail}" for detail in missing)
+        "privileged apply preconditions are not met; the controller verifies them and "
+        "performs no root step, resume or repair:\n" + "\n".join(f"- {detail}" for detail in missing)
     )
     if report["root_commands"]:
         message += "\nRun as root, then rerun the identical apply command:\n" + "\n".join(
@@ -721,7 +896,11 @@ def _run(argv: list[str], *, env: dict[str, str] | None = None, capture_full: bo
         raise CutoverError(f"could not run {Path(argv[0]).name}: {type(exc).__name__}") from None
     if result.returncode:
         detail = (result.stderr or result.stdout or "failed").strip().splitlines()[-1]
-        raise CutoverError(f"{Path(argv[0]).name} failed: {detail[:500]}")
+        raise CommandFailed(
+            f"{Path(argv[0]).name} failed: {detail[:500]}",
+            exit_code=result.returncode,
+            output=result.stdout or "",
+        )
     output = (result.stdout or "").strip()
     evidence = {
         "command": [Path(argv[0]).name, *argv[1:]],
@@ -734,11 +913,12 @@ def _run(argv: list[str], *, env: dict[str, str] | None = None, capture_full: bo
     return evidence
 
 
+def _secretary_argv(paths: Paths, *args: str) -> list[str]:
+    return [sys.executable, "-P", "-m", "secretary", *args, "--instance", str(paths.instance)]
+
+
 def _secretary(paths: Paths, *args: str) -> dict[str, Any]:
-    evidence = _run(
-        [sys.executable, "-P", "-m", "secretary", *args, "--instance", str(paths.instance)],
-        capture_full=True,
-    )
+    evidence = _run(_secretary_argv(paths, *args), capture_full=True)
     output = evidence.pop("_captured_output")
     if not output:
         raise CutoverError("secretary command returned empty success evidence")
@@ -1239,7 +1419,11 @@ class Operations:
         # has a deterministic request id.  A crash may therefore resume this
         # phase without duplicating a product, issue, comment, task or event.
         status = _secretary(self.paths, "status", "--json")
-        doctor = _secretary(self.paths, "doctor", "--json", "--offline")
+        # The same judgement the apply precondition made before the window, so the two cannot
+        # disagree on what counts as a clean doctor.
+        doctor_report, doctor = _doctor_offline(self.paths)
+        if doctor is None:
+            raise CutoverError(doctor_report["detail"])
         product = _secretary(self.paths, "product", "list")
         issue = _secretary(self.paths, "issue", "list")
         sprint = _secretary(self.paths, "sprint", "list")
@@ -1682,10 +1866,11 @@ def _refresh_first_sql_write(paths: Paths, state: dict[str, Any]) -> None:
 
 
 def apply_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
-    # Both privileged install steps are proven before the lock, the first state
-    # write and the first phase, so a new run leaves no state document behind
-    # and a retry leaves the durable one exactly as it was.
-    _require_privileged_preconditions()
+    # Every precondition -- the privileged install steps, the pipeline pause and
+    # doctor --offline -- is proven before the lock, the first state write and
+    # the first phase, so a new run leaves no state document behind and a retry
+    # leaves the durable one exactly as it was.
+    _require_privileged_preconditions(paths=paths)
     with CutoverLock(paths):
         state = _read_state(paths)
         if state is None:
@@ -1886,7 +2071,7 @@ def run_cutover(args: argparse.Namespace) -> int:
             # reported beside the identity instead of inside the hashed
             # evidence: a saved confirmation token has to survive the operator
             # installing the missing root steps.  Plan only shows them.
-            _render({**plan, "privileged_preconditions": _privileged_preconditions()})
+            _render({**plan, "privileged_preconditions": _privileged_preconditions(paths=paths)})
         elif args.cutover_command == "status":
             state = _read_state(paths)
             recovered_history = _read_recovered_history(paths)

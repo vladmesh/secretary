@@ -687,14 +687,19 @@ appears healthy. `selector_activation` records the imported SQL audit baseline. 
 committed SQL event, `recover` may restore the Kanboard selector only after the frozen Kanboard
 fingerprint is unchanged. At or after the first committed event, recovery is PostgreSQL-only: repair
 or restart PostgreSQL, or restore the verified PostgreSQL recovery backup. It never points writers at
-the stale Kanboard archive. No recovery branch resumes the pipeline automatically.
+the stale Kanboard archive. No recovery branch resumes the pipeline automatically: the freeze stays in
+place on purpose, held by `secretary-postgres-cutover`, and only an explicit `secretary resume` lifts
+it once the operator has inspected the recovered installation.
 
 Every consumer stop, start and restart in `apply` and in all three `recover` branches is issued as
 `sudo -n systemctl ...` and recorded with that argv in the evidence; the controller runs no bare
 `systemctl` and installs no privileged file. The two root-installed preconditions `apply` proves
 before its first phase are described once under *Privileged preconditions installed by root before
-the window* in `docs/OPERATIONS.md`; a refusal there is durable-effect-free and does not need
-recovery, only the root step and the identical rerun.
+the window* in `docs/OPERATIONS.md`, and the two installation facts it proves on the same seam — a
+pipeline pause a remaining backup phase would refuse, which is what that leftover freeze is to the
+next plan's `apply`, and a `doctor --offline` with findings — under *Pipeline pause and doctor
+before the window* there. A refusal on any of them is durable-effect-free and does not need
+recovery, only the operator step it names and the identical rerun.
 
 Which consumers those are is read from the installation, not from a fixed list: a declared unit that
 systemd reports as `LoadState=not-found` is excluded from every stop, start and restart, including
