@@ -3615,8 +3615,10 @@ revision. This implementation card did not run the live cutover.
 
 ### Preparing a successor after a completed import
 
-An import that completed before recovery has occupied its PostgreSQL target even when selector
-activation was never entered and no application SQL write exists. It cannot be imported again or
+An import that completed before recovery has occupied its PostgreSQL target even when no
+application SQL write exists, whether or not selector activation was entered: `recover` chooses
+its Kanboard branch only after reading the SQL audit count back at the activation baseline, and
+that proof is what makes the occupied target eligible. It cannot be imported again or
 updated in place: generated request, comment, resume and decision identities do not provide a safe
 merge key. After installing the revision that understands the imported schema, inspect
 `secretary cutover status --instance /absolute/instance`. For the single supported

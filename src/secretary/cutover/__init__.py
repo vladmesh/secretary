@@ -967,7 +967,13 @@ def _artifact(paths: Paths, name: str, body: str) -> Path:
     return target
 
 
-def _acceptance_context(sprints: dict[str, Any] | list[Any]) -> tuple[str, str]:
+def _acceptance_context(sprints: dict[str, Any] | list[Any]) -> tuple[str | None, str | None]:
+    """The open sprint the acceptance canary can borrow, or nothing when none is open.
+
+    An installation between sprints is the ordinary shape of a maintenance window, not a
+    refusal: without an open sprint the acceptance phase opens and closes its own canary
+    sprint on a registered project (see `_acceptance_project`).
+    """
     if not isinstance(sprints, dict):
         raise CutoverError("sprint list returned an invalid acceptance document")
     rows = sprints.get("sprints", {}).get("items", [])
@@ -979,7 +985,22 @@ def _acceptance_context(sprints: dict[str, Any] | list[Any]) -> tuple[str, str]:
         projects = row.get("reservations") or []
         if isinstance(projects, list) and projects and row.get("ref"):
             return str(row["ref"]), str(projects[0])
-    raise CutoverError("installed acceptance requires one open sprint with a project reservation")
+    return None, None
+
+
+def _acceptance_project(paths: Paths) -> str:
+    """One registered project the canary sprint may reserve while no sprint is open."""
+    from secretary.product_issues import registered_projects
+    from secretary.tasks import TaskError
+
+    try:
+        registered = sorted(registered_projects(paths.instance))
+    except TaskError as exc:
+        raise CutoverError(f"installed acceptance could not read the project registry: {exc}") from None
+    if not registered:
+        raise CutoverError("installed acceptance needs at least one registered project for its canary sprint")
+    # The product's own project reads best in the canary's evidence; any registered one will do.
+    return "secretary" if "secretary" in registered else registered[0]
 
 
 def _serve_backend(backend: str | None) -> None:
@@ -1429,6 +1450,9 @@ class Operations:
         sprint = _secretary(self.paths, "sprint", "list")
         task = _secretary(self.paths, "task", "list")
         sprint_ref, project = _acceptance_context(_command_document(sprint, "sprint list"))
+        canary_sprint = sprint_ref is None
+        if canary_sprint:
+            project = _acceptance_project(self.paths)
         prefix = self.state["plan_id"][:16]
         product_id = f"cutover-{prefix}"
         body = _artifact(
@@ -1515,6 +1539,43 @@ class Operations:
             str(self.paths.data),
         )
         shown_issue = _secretary(self.paths, "issue", "show", "--ref", issue_ref)
+        created_sprint: dict[str, Any] | None = None
+        if canary_sprint:
+            created_sprint = _secretary(
+                self.paths,
+                "sprint",
+                "create",
+                "--role",
+                "po",
+                "--actor",
+                CUTOVER_ACTOR,
+                "--request-id",
+                f"cutover-sprint-{prefix}",
+                "--goal",
+                "PostgreSQL cutover acceptance canary",
+                "--definition-of-done",
+                "The installed protocol writes and reads one canary card through this sprint.",
+                "--product",
+                product_id,
+                "--issue",
+                issue_ref,
+                "--project",
+                str(project),
+                "--observer",
+                "none",
+                "--repository",
+                str(self.paths.instance),
+                "--data-dir",
+                str(self.paths.data),
+            )
+            sprint_created = _command_document(created_sprint, "sprint create")
+            created_ref = None
+            if isinstance(sprint_created, dict):
+                created_ref = sprint_created.get("ref") or (sprint_created.get("sprint") or {}).get("ref")
+            if not created_ref:
+                raise CutoverError("sprint create returned no sprint reference")
+            sprint_ref = str(created_ref)
+        assert sprint_ref is not None
 
         sprint_request = f"cutover-sprint-comment-{prefix}"
         sprint_comment_args = (
@@ -1734,6 +1795,46 @@ class Operations:
         )
         web_commands = _secretary(self.paths, "web-read", "commands", "--json", "--limit", "50")
         web_system = _secretary(self.paths, "web-read", "system", "--json")
+        closed_sprint: dict[str, Any] | None = None
+        if canary_sprint:
+            decisions = _artifact(
+                self.paths,
+                f"acceptance-sprint-decisions-{self.state['plan_id']}.yaml",
+                "issues:\n"
+                f"  - ref: {issue_ref}\n"
+                "    verdict: already_closed\n"
+                "    actual: resolved\n"
+                "    reason: the acceptance flow closed its canary issue after the card was archived\n",
+            )
+            closeout = _artifact(
+                self.paths,
+                f"acceptance-sprint-closeout-{self.state['plan_id']}.md",
+                "# PostgreSQL cutover acceptance canary\n\n"
+                "Opened and closed by `secretary cutover apply` inside installed_protocol_acceptance "
+                "because no sprint was open during the window. Its only card was created, claimed, "
+                "released, commented, moved to Done and archived through the installed protocol.\n",
+            )
+            closed_sprint = _secretary(
+                self.paths,
+                "sprint",
+                "close",
+                "--role",
+                "po",
+                "--actor",
+                CUTOVER_ACTOR,
+                "--request-id",
+                f"cutover-sprint-close-{prefix}",
+                "--ref",
+                sprint_ref,
+                "--reason",
+                "cutover acceptance canary complete",
+                "--decisions-file",
+                str(decisions),
+                "--closeout-file",
+                str(closeout),
+                "--data-dir",
+                str(self.paths.data),
+            )
         tick = _secretary(self.paths, "dispatcher", "production-tick", "--probe", "--host-mode", "noop")
         audit = _sql_event_count(self.paths)
         return {
@@ -1755,9 +1856,12 @@ class Operations:
             },
             "sprint": {
                 "ref": sprint_ref,
+                "canary": canary_sprint,
+                "created": created_sprint,
                 "comment": sprint_comment,
                 "replay": sprint_replay,
                 "delivery": delivery,
+                "closed": closed_sprint,
             },
             "write": {
                 "task_ref": reference,
