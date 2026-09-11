@@ -820,6 +820,7 @@ python3 -P -m secretary issue create --role po --product secretary --kind featur
 python3 -P -m secretary issue list --product secretary
 python3 -P -m secretary issue show --ref issue:123
 python3 -P -m secretary issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
+python3 -P -m secretary issue append --role po --ref issue:123 --reason REASON --body-file BLOCK.md
 python3 -P -m secretary issue close --role po --ref issue:123 --reason resolved
 ```
 
@@ -834,6 +835,17 @@ through this same lifecycle when its decisions file gives one of those four verd
 and the same reasons; it never closes an issue because a sprint that declared it ended, and it never
 records an issue somebody else closed as a verdict of its own. `issue list --closed` includes
 both open and closed issues; without it the list contains only open issues.
+
+`issue append` is the only change an issue description takes after create, and it only adds: the
+`--body-file` block goes after the current text, which stays byte for byte, under a `---` rule and an
+`[issue:appended <UTC time> by <actor>]` line, so `issue show` says what was added and when. There is no
+replacement of the description. Only the PO may append, with a non-empty reason and a non-empty block; a
+closed issue refuses it. It passes the board host like a priority change and writes one `entity.updated`
+event: besides the Issue it carries `data.append` with the SHA-256 of the block as given (`body_sha256`)
+and of the description before and after (`description_sha256_was`, `description_sha256`). A repeat of the
+same `--request-id` with the same ref, reason and block is answered without a second block or event,
+because it is matched by `body_sha256` rather than by rebuilding the text; the same id with anything else
+is `validation`.
 
 A Product and an Issue are not execution tasks and never enter the execution columns: `move` and `claim`
 both reject one before any write, whatever column it currently sits in. Work on an issue is a separate

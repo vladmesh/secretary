@@ -20,6 +20,7 @@ from secretary.tasks import (
     KanboardClient,
     TaskAudit,
     TaskError,
+    _digest,
     _now,
     _positive_int,
     all_project_cards,
@@ -451,6 +452,18 @@ def product_swimlane_id(client: KanboardClient, board_id: int, product: str) -> 
     This is the one implementation of that rule; both secretarial writers call it.
     """
     return ensure_swimlane(client, board_id, product_lane_name(product))
+
+
+def appended_description(current: str, body: str, *, actor: str, at: str) -> str:
+    """The description after one `issue append`: the old text byte for byte, then one dated block.
+
+    A blank line always separates the old text from the rule, because a line of dashes right under
+    text would turn that text into a heading instead of closing it.
+    """
+    trailing = len(current) - len(current.rstrip("\n"))
+    gap = "\n" * (2 - min(trailing, 2)) if current else ""
+    text = body.strip("\n")
+    return f"{current}{gap}---\n\n[issue:appended {at} by {actor}]\n\n{text}\n"
 
 
 class ProductIssueStore:
@@ -1279,6 +1292,7 @@ class ProductIssueStore:
                         or known.actor != Actor("po", actor)
                         or known.reason != reason
                         or known.data.get("priority") != priority
+                        or "append" in known.data
                     ):
                         raise TaskError("validation", "request id belongs to another operation or payload", 2)
                     try:
@@ -1305,6 +1319,79 @@ class ProductIssueStore:
                     operation = Replace(desired, Actor("po", actor), reason, request_id=request_id)
                     self._host_mutation(lambda: host.replace(operation))
                 except Exception as exc:
+                    raise self._host_error(exc) from None
+                return self.show_issue(reference)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def append_description(
+        self, *, reference: str, body: str, reason: str, actor: str, request_id: str | None = None
+    ) -> dict[str, Any]:
+        """Add one dated block after an open Issue's description; the old text is never rewritten."""
+        if not body.strip() or not reason.strip():
+            raise TaskError("validation", "description append requires a non-empty block and reason", 2)
+        request_id = request_id or str(uuid.uuid4())
+        body_sha256 = _digest(body)
+        self._require_sql_legacy_namespace_free(request_id)
+        with self.transactions.reference_lock(reference) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                self._reject_other_pending_reference_operation(reference, request_id)
+                self._reject_other_pending_typed_operation(reference, request_id)
+                from secretary.board import Actor, DescriptionAppend, EntityKind, Issue, Replace
+
+                host = self._host()
+                try:
+                    known = host.canon.event(request_id) if host.canon is not None else None
+                except ValueError as exc:
+                    raise TaskError("validation", str(exc), 2) from None
+                if known is not None:
+                    # The description already holds the block, so the replay is recognized by the
+                    # digest of the block the caller asked for, never by rebuilding the text.
+                    evidence = known.data.get("append")
+                    if (
+                        known.kind.value != "entity.updated"
+                        or known.entity_kind is not EntityKind.ISSUE
+                        or known.ref != reference
+                        or known.actor != Actor("po", actor)
+                        or known.reason != reason
+                        or not isinstance(evidence, dict)
+                        or evidence.get("body_sha256") != body_sha256
+                    ):
+                        raise TaskError("validation", "request id belongs to another operation or payload", 2)
+                    try:
+                        self._host_mutation(lambda: host.recover_product_issue(request_id))
+                    except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                        raise self._host_error(exc) from None
+                    return self.show_issue(reference)
+                current = host.read(EntityKind.ISSUE, reference)
+                if not isinstance(current, Issue):
+                    raise TaskError("validation", "reference is not an Issue", 2)
+                if current.state.value == "closed":
+                    raise TaskError("closed", "cannot append to a closed issue", 3)
+                description = appended_description(current.description, body, actor=actor, at=_now())
+                desired = Issue(
+                    current.ref,
+                    current.title,
+                    current.product_ref,
+                    current.state,
+                    current.priority,
+                    current.issue_kind,
+                    description,
+                    current.close_reason,
+                )
+                try:
+                    operation = Replace(
+                        desired,
+                        Actor("po", actor),
+                        reason,
+                        request_id=request_id,
+                        description_append=DescriptionAppend(
+                            body_sha256, _digest(current.description), _digest(description)
+                        ),
+                    )
+                    self._host_mutation(lambda: host.replace(operation))
+                except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)
             finally:

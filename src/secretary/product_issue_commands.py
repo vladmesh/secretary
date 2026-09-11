@@ -9,7 +9,7 @@ import os
 from secretary.board.backend import PRODUCT_ISSUE, board_client
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.product_issues import ProductIssueStore
-from secretary.task_commands import resolve_data_dir, run_task_command
+from secretary.task_commands import _read_body, resolve_data_dir, run_task_command
 
 
 def _common(parser: argparse.ArgumentParser, *, write: bool = False) -> None:
@@ -96,6 +96,12 @@ def add_product_issue_subcommands(subparsers) -> None:
     priority.add_argument("--priority", required=True, choices=("P0", "P1", "P2", "P3"))
     priority.add_argument("--reason", required=True)
     priority.set_defaults(handler=run_issue_priority)
+    append = issue_sub.add_parser("append", help="add a dated block after the description of an open issue")
+    _common(append, write=True)
+    append.add_argument("--ref", required=True)
+    append.add_argument("--reason", required=True)
+    append.add_argument("--body-file", required=True, help="the block to append, read as UTF-8")
+    append.set_defaults(handler=run_issue_append)
     close = issue_sub.add_parser("close")
     _common(close, write=True)
     close.add_argument("--ref", required=True)
@@ -179,6 +185,19 @@ def run_issue_priority(args):
         lambda store: store.update_priority(
             reference=args.ref,
             priority=args.priority,
+            reason=args.reason,
+            actor=args.actor,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_issue_append(args):
+    return _run(
+        args,
+        lambda store: store.append_description(
+            reference=args.ref,
+            body=_read_body(args.body_file),
             reason=args.reason,
             actor=args.actor,
             request_id=args.request_id,

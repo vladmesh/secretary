@@ -350,6 +350,41 @@ class SqlProductIssueStoreTests(SqlProductIssueFixture, shared.ProductIssueStore
         self.assertTrue(self.store.show_issue(issue["ref"])["closed"])
 
 
+class SqlProductIssueDescriptionAppendTests(
+    SqlProductIssueFixture, shared.ProductIssueDescriptionAppendTests
+):
+    KANBOARD_ONLY = shared.ProductIssueDescriptionAppendTests.KANBOARD_ONLY
+
+    def _claims(self, request_id: str) -> tuple[int, int]:
+        return tuple(
+            int(
+                self.client._query(f"SELECT count(*) FROM {table} WHERE request_id = %s", (request_id,))[0][0]
+            )
+            for table in ("requests", "board_events")
+        )
+
+    def test_failure_after_description_update_rolls_back_the_block_and_the_claim(self) -> None:
+        issue = self._open_issue()
+        original = self.client.records.update
+
+        def fail_after_update(task_id, fields):
+            original(task_id, fields)
+            raise TaskError("backend_error", "injected after description", 1)
+
+        with (
+            mock.patch.object(self.client.records, "update", side_effect=fail_after_update),
+            self.assertRaises(TaskError) as raised,
+        ):
+            self._append(issue["ref"], "block", request_id="update-failure")
+        self.assertNotEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self._claims("update-failure"), (0, 0))
+        self.assertEqual(self.issue(issue["ref"])["description"], self.ORIGINAL)
+
+        self._append(issue["ref"], "block", request_id="update-failure")
+        self.assertEqual(self._claims("update-failure"), (1, 1))
+        self.assertEqual(self.issue(issue["ref"])["description"].count("[issue:appended "), 1)
+
+
 class SqlBackendProductIssueSwitchTests(unittest.TestCase):
     def setUp(self) -> None:
         backend.reset_card_backend()

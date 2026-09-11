@@ -19,6 +19,7 @@ from secretary.board.events import (
 )
 from secretary.board.host import (
     Create,
+    DescriptionAppend,
     MarkerComment,
     MutationResult,
     Replace,
@@ -46,6 +47,7 @@ from secretary.sprints import SprintReader
 from secretary.tasks import (
     KanboardClient,
     TaskReader,
+    _digest,
     _positive_int,
     _target_column_id,
     all_project_cards,
@@ -190,16 +192,19 @@ class KanboardBoardHost:
             self._migration_pending("replace", operation.entity.kind)
         self._require_product_issue_configuration()
         entity = operation.entity
+        append = operation.description_append
         request_id = self._request_id(operation.request_id, "issue-replace")
         related = self._related(entity, operation.related_refs)
-        existing = self._existing(request_id, entity, operation.actor, operation.reason)
+        existing = self._existing(request_id, entity, operation.actor, operation.reason, append=append)
         if existing is not None and self.canon.committed(request_id) is not None:
             return MutationResult(self.read(EntityKind.ISSUE, entity.ref), existing)
         if existing is None:
             current = self.read(EntityKind.ISSUE, entity.ref)
             if not isinstance(current, Issue) or current.state is not IssueState.OPEN:
                 raise BoardProtocolError("cannot replace a closed Issue")
-            if (entity.title, entity.product_ref, entity.state, entity.issue_kind, entity.description) != (
+            if append is not None:
+                _require_description_append(current, entity, append)
+            elif (entity.title, entity.product_ref, entity.state, entity.issue_kind, entity.description) != (
                 current.title,
                 current.product_ref,
                 current.state,
@@ -208,8 +213,16 @@ class KanboardBoardHost:
             ) or entity.priority not in {"P0", "P1", "P2", "P3"}:
                 raise BoardProtocolError("Issue replace only supports a non-empty priority change")
         event = existing or self._entity_event(
-            EventKind.ENTITY_UPDATED, entity, operation.actor, operation.reason, related, request_id
+            EventKind.ENTITY_UPDATED,
+            entity,
+            operation.actor,
+            operation.reason,
+            related,
+            request_id,
+            append=append,
         )
+        if append is not None:
+            return self._append_description(entity, append, event, request_id)
         content = f"[issue:priority]\n{operation.reason}\n[request-id:{request_id}]"
 
         def effect() -> None:
@@ -259,6 +272,39 @@ class KanboardBoardHost:
 
         MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
             effect, confirm=confirm, finish=finish
+        )
+        return MutationResult(self.read(EntityKind.ISSUE, entity.ref), event)
+
+    def _append_description(
+        self, entity: Issue, append: DescriptionAppend, event: Event, request_id: str
+    ) -> MutationResult:
+        """Write the appended description over exactly the text its block was computed from."""
+
+        def effect() -> None:
+            row = self._raw_by_ref(entity.ref)
+            if row is None:
+                raise BoardProtocolError("Issue was not found")
+            if _digest(str(row.get("description") or "")) != append.description_sha256_was:
+                # Nothing is written over a description that changed since the block was computed.
+                raise BoardProtocolError("Issue description changed before the block was appended")
+            try:
+                saved = self.client.call("updateTask", id=self._row_id(row), description=entity.description)
+            except Exception:
+                if getattr(self.client, "backend_kind", "kanboard") == "postgres":
+                    raise
+                # A reply cannot disprove the write; confirmation decides recovery.
+                return
+            if not saved:
+                raise BoardProtocolError("Kanboard rejected the issue description")
+
+        def confirm() -> BoardEntity:
+            row = self._raw_by_ref(entity.ref)
+            if row is None or str(row.get("description") or "") != entity.description:
+                raise BoardProtocolError("Issue description append is not proven")
+            return self._normalized_row(row)
+
+        MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
+            effect, confirm=confirm
         )
         return MutationResult(self.read(EntityKind.ISSUE, entity.ref), event)
 
@@ -598,7 +644,19 @@ class KanboardBoardHost:
         if event.kind is EventKind.ENTITY_CREATED:
             return self.create(Create(entity, event.actor, event.reason, event.related_refs, request_id))
         if event.kind is EventKind.ENTITY_UPDATED and isinstance(entity, Issue):
-            return self.replace(Replace(entity, event.actor, event.reason, event.related_refs, request_id))
+            try:
+                append = (
+                    DescriptionAppend.from_event_data(event.data["append"])
+                    if "append" in event.data
+                    else None
+                )
+            except ValueError as exc:
+                raise BoardProtocolError(
+                    "pending Issue event has invalid description append evidence"
+                ) from exc
+            return self.replace(
+                Replace(entity, event.actor, event.reason, event.related_refs, request_id, append)
+            )
         if event.kind is EventKind.ISSUE_CLOSED and isinstance(entity, Issue):
             return self.transition(
                 TransitionRequest(
@@ -849,6 +907,7 @@ class KanboardBoardHost:
         reason: str,
         *,
         target: str | None = None,
+        append: DescriptionAppend | None = None,
     ) -> Event | None:
         assert self.canon is not None
         event = self.canon.event(request_id)
@@ -860,7 +919,7 @@ class KanboardBoardHost:
             or event.actor != actor
             or event.reason != reason
             or event.target_state != target
-            or event.data != _entity_payload(entity)
+            or event.data != _event_data(entity, append)
         ):
             raise ValueError("request id belongs to another operation or payload")
         return event
@@ -908,21 +967,21 @@ class KanboardBoardHost:
         *,
         source: str | None = None,
         target: str | None = None,
+        append: DescriptionAppend | None = None,
     ) -> Event:
-        payload = json.dumps(
-            {
-                "request_id": request_id,
-                "kind": kind.value,
-                "entity": _entity_payload(entity),
-                "actor": [actor.role, actor.id, actor.head_run_ref],
-                "reason": reason,
-                "related_refs": list(related.refs),
-                "source": source,
-                "target": target,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        identity: dict[str, Any] = {
+            "request_id": request_id,
+            "kind": kind.value,
+            "entity": _entity_payload(entity),
+            "actor": [actor.role, actor.id, actor.head_run_ref],
+            "reason": reason,
+            "related_refs": list(related.refs),
+            "source": source,
+            "target": target,
+        }
+        if append is not None:
+            identity["append"] = append.event_data()
+        payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
         return Event(
             "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32],
             kind,
@@ -934,7 +993,7 @@ class KanboardBoardHost:
             related,
             source,
             target,
-            _entity_payload(entity),
+            _event_data(entity, append),
         )
 
     def _issues_board(self) -> tuple[int, int]:
@@ -1340,6 +1399,41 @@ def _entity_payload(entity: Product | Issue) -> dict[str, Any]:
         "description": entity.description,
         "close_reason": entity.close_reason,
     }
+
+
+def _event_data(entity: Product | Issue, append: DescriptionAppend | None) -> dict[str, Any]:
+    """The normalized entity every Product/Issue event carries, plus an append's digests."""
+    data = _entity_payload(entity)
+    if append is not None:
+        data["append"] = append.event_data()
+    return data
+
+
+def _require_description_append(current: Issue, successor: Issue, append: DescriptionAppend) -> None:
+    """Admit the old description byte for byte followed by a non-empty block, and nothing else."""
+    kept = (
+        successor.title,
+        successor.product_ref,
+        successor.state,
+        successor.priority,
+        successor.issue_kind,
+        successor.close_reason,
+    ) == (
+        current.title,
+        current.product_ref,
+        current.state,
+        current.priority,
+        current.issue_kind,
+        current.close_reason,
+    )
+    if (
+        not kept
+        or len(successor.description) <= len(current.description)
+        or not successor.description.startswith(current.description)
+        or _digest(current.description) != append.description_sha256_was
+        or _digest(successor.description) != append.description_sha256
+    ):
+        raise BoardProtocolError("Issue replace appends only a non-empty block after the current description")
 
 
 def _issue_from_payload(data: dict[str, Any]) -> Issue:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -27,6 +28,41 @@ class Create:
     request_id: str | None = None
 
 
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_DESCRIPTION_APPEND_KEYS = ("body_sha256", "description_sha256_was", "description_sha256")
+
+
+@dataclass(frozen=True, slots=True)
+class DescriptionAppend:
+    """The evidence of the one description change an Issue takes after create: an added block.
+
+    The old text stays byte for byte and the block goes after it.  The replaced Issue already carries
+    the new description; these digests are the identity of the request, because once the block is on
+    the board the description alone cannot tell a replay of the same request from a second append.
+    """
+
+    body_sha256: str
+    description_sha256_was: str
+    description_sha256: str
+
+    def __post_init__(self) -> None:
+        for name in _DESCRIPTION_APPEND_KEYS:
+            value = getattr(self, name)
+            if not isinstance(value, str) or not _SHA256.fullmatch(value):
+                raise ValueError(f"description append {name} must be a SHA-256 hex digest")
+        if self.description_sha256 == self.description_sha256_was:
+            raise ValueError("description append must change the description")
+
+    def event_data(self) -> dict[str, str]:
+        return {name: getattr(self, name) for name in _DESCRIPTION_APPEND_KEYS}
+
+    @classmethod
+    def from_event_data(cls, data: object) -> DescriptionAppend:
+        if not isinstance(data, dict) or set(data) != set(_DESCRIPTION_APPEND_KEYS):
+            raise ValueError("description append evidence must carry exactly its three digests")
+        return cls(*(data[name] for name in _DESCRIPTION_APPEND_KEYS))
+
+
 @dataclass(frozen=True, slots=True)
 class Replace:
     entity: BoardEntity
@@ -34,6 +70,9 @@ class Replace:
     reason: str
     related_refs: RelatedRefs = field(default_factory=RelatedRefs)
     request_id: str | None = None
+    # Only an Issue replace that appends to the description carries it; without it an Issue
+    # replace is the released priority change.
+    description_append: DescriptionAppend | None = None
 
 
 @dataclass(frozen=True, slots=True)
