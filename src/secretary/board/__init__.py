@@ -21,6 +21,7 @@ from secretary.board.fake import FakeBoardHost
 from secretary.board.host import (
     BoardHost,
     Create,
+    DescriptionAppend,
     MarkerComment,
     MutationResult,
     Replace,
@@ -76,6 +77,7 @@ __all__ = [
     "CardState",
     "CardTransitionForbidden",
     "Create",
+    "DescriptionAppend",
     "EntityKind",
     "Event",
     "EventKind",
