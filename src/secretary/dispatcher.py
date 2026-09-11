@@ -247,6 +247,7 @@ from secretary.dispatcher_review import (
 from secretary.dispatcher_state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
     CLAIM_SKIP_RESOURCE_NOT_READY,
+    REVIEW_REJECTION_REASON,
     DispatcherRecord,
     OutcomeTerminalPath,
     now_rfc3339,
@@ -2532,7 +2533,7 @@ class DispatcherRuntime:
             self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
             record.rejected_sha = reviewed
             record.rejected_failure_class = "substantive"
-            record.rejected_failure_reason = "red-review"
+            record.rejected_failure_reason = REVIEW_REJECTION_REASON
             record.rejected_done_reports = 0
             # The only point where both the last review body and the SHA it judged are available.
             # Keep them for the next review packet instead of reconstructing the card from base.

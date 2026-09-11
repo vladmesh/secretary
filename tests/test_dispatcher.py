@@ -8099,6 +8099,102 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._assert_one_generation(2)
         self.assertEqual(self._pilot_record()["attempt_round"], record["attempt_round"])
 
+    def test_a_gate_red_round_keeps_its_gate_cause_through_a_respawn_and_a_stale_bounce(self) -> None:
+        """secretary-1615: the round this attempt's red gate opened is told why, and so is every
+        head that round is handed to afterwards: a replacement for a dead head, and the relaunch a
+        same-SHA done report earns. Both run on the record that holds the gate's rejection."""
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+        document = self._task_document()
+        self.assertIn("## Mechanical gate failure to address", document)
+        self.assertIn("local validation failed", document)
+        self.assertIn("assert False", document)
+        self.assertIn("re-report the", document)
+
+        # Only a document rendered again can bring the section back.
+        (Path(self._pilot_record()["workspace"]) / "TASK.md").unlink()
+        self.host.head_pid = self._dead_pid()
+        current = self.runtime.production_state.records(self.runtime.production_state.load())[
+            "secretary-510-pilot"
+        ]
+        self.host._write_head_pid(
+            "worker",
+            "secretary-510-pilot",
+            head_run=current.worker_head_run,
+            leaf=current.worker_leaf,
+        )
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+        self.assertEqual(self.tick()["action"], "worker-respawned")
+        self._assert_one_generation(2)
+        respawned = self._task_document()
+        self.assertIn("## Mechanical gate failure to address", respawned)
+        self.assertIn("assert False", respawned)
+
+        self.host.worker_status_result = {}
+        self._report_done("the same commit again")
+        self.assertEqual(self.tick()["action"], "stale-done-rework")
+        bounced = self._task_document()
+        self.assertIn("## Mechanical gate failure to address", bounced)
+        self.assertIn("assert False", bounced)
+
+    def test_a_retained_gate_red_continuation_is_handed_its_gate_cause(self) -> None:
+        """secretary-1615: the retained conversation a red gate sends back reads the same section."""
+        self.host.fail_resume_worker_reason = ""
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+
+        self.assertEqual(self.tick()["action"], "gate-red-reused-worker")
+
+        document = self._task_document()
+        self.assertIn("## Mechanical gate failure to address", document)
+        self.assertIn("local validation failed", document)
+        self.assertIn("assert False", document)
+
+    def test_a_new_attempt_after_blocked_does_not_inherit_the_previous_gate_red(self) -> None:
+        """secretary-1615, the secretary-1614 shape: a red gate bounced the card, the rework went
+        Blocked, and after the red was dealt with outside the card it went back to Ready. The
+        new attempt has no rejected SHA, so the same commit is a legitimate report, and its
+        TASK.md must not tell it otherwise from the previous attempt's comment."""
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+        self.assertIn("## Mechanical gate failure to address", self._task_document())
+        first_attempt = self._pilot_record()["attempt_id"]
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="blocked",
+            body="the red is a flake of a suite this card does not touch",
+            classification="external_fact",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+        self.assertEqual(self.tick()["to"], "blocked")
+        self.writer.move(
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
+            target="ready",
+            reason="the failed jobs were rerun green",
+            request_id="po-requeue-after-gate-flake",
+        )
+
+        self.assertEqual(self.tick()["step"], "claim")
+
+        self.assertNotEqual(self._pilot_record()["attempt_id"], first_attempt)
+        comments = self.reader.show("secretary-510-pilot")["comments"]
+        self.assertTrue(any("The mechanical validation gate is red" in item["body"] for item in comments))
+        document = self._task_document()
+        self.assertNotIn("Mechanical gate failure", document)
+        self.assertNotIn("assert False", document)
+        self.assertNotIn("re-report the same commit", document)
+
     def test_three_retained_red_rounds_each_get_their_own_generation(self) -> None:
         """The incident shape: one attempt, one conversation, several rework rounds. Every round
         has to be a different report identity, in the state, in the document and in the wake."""
@@ -12216,35 +12312,80 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn("P1: use a time ceiling, not the terminal title", doc)
         self.assertNotIn("stale finding", doc)  # only the latest red
 
+    @staticmethod
+    def _gate_rejected_record(**rejection: str) -> DispatcherRecord:
+        """A rework round's record the way `_gate_red_to_worker` leaves it, unless overridden."""
+        return DispatcherRecord(
+            worker="secretary-510-pilot-pilot",
+            workspace="",
+            handle="",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="a",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=1.0,
+            report_generation=2,
+            rejected_sha=rejection.get("sha", "abc123"),
+            rejected_failure_class=rejection.get("failure_class", "substantive"),
+            rejected_failure_reason=rejection.get("failure_reason", ""),
+        )
+
+    _GATED_TASK: ClassVar[dict[str, Any]] = {
+        "ref": "secretary-510-pilot",
+        "project": "secretary",
+        "description": "body",
+        "workspace": {"base_branch": "main"},
+        "comments": [
+            {
+                "marker": "dispatcher",
+                "body": (
+                    '[dispatcher]\nThe mechanical validation gate is red: CI red: job "tests", '
+                    'step "pytest" failed on `pipeline/secretary-510-pilot` @ `abc123`. The card '
+                    "is back in In progress for rework.\nTail:\n```\nAssertionError: boom\n```"
+                ),
+            },
+        ],
+    }
+
     def test_rework_task_doc_delivers_latest_gate_red_cause(self) -> None:
         """secretary-766: the worker must see why the mechanical gate bounced the card — the
-        failing job/step and an error-focused log fragment — not just the reviewer findings."""
+        failing job/step and an error-focused log fragment — not just the reviewer findings.
+
+        secretary-1615: the round is identified by its record, the one the gate rejected."""
         with tempfile.TemporaryDirectory() as tmp:
             host = GitBranchHost(Path(tmp))
-            base_task = {
-                "ref": "secretary-510-pilot",
-                "project": "secretary",
-                "description": "body",
-                "workspace": {"base_branch": "main"},
-            }
-            self.assertNotIn("Mechanical gate failure", host._worker_task_doc(base_task, "main", "a", 0))
-            gated = {
-                **base_task,
-                "comments": [
-                    {
-                        "marker": "dispatcher",
-                        "body": (
-                            '[dispatcher]\nThe mechanical validation gate is red: CI red: job "tests", '
-                            'step "pytest" failed on `pipeline/secretary-510-pilot` @ `abc123`. The card '
-                            "is back in In progress for rework.\nTail:\n```\nAssertionError: boom\n```"
-                        ),
-                    },
-                ],
-            }
-            doc = host._worker_task_doc(gated, "main", "a", 1)
+            base_task = {key: value for key, value in self._GATED_TASK.items() if key != "comments"}
+            self.assertNotIn(
+                "Mechanical gate failure",
+                host._worker_task_doc(base_task, "main", "a", 0, record=self._gate_rejected_record()),
+            )
+            doc = host._worker_task_doc(self._GATED_TASK, "main", "a", 2, record=self._gate_rejected_record())
         self.assertIn("Mechanical gate failure", doc)
         self.assertIn('job "tests", step "pytest"', doc)
         self.assertIn("AssertionError: boom", doc)
+
+    def test_gate_red_section_belongs_to_the_attempt_the_gate_rejected(self) -> None:
+        """secretary-1615: the board keeps a gate-red comment forever, and a card claimed again
+        after Blocked still carries its predecessor's. Only a record whose own checkout a
+        mechanical gate rejected renders it: no record (a claim), a fresh or adopted record, a
+        review rejection and a publication refusal leave nothing to forbid re-reporting."""
+        not_this_attempts = {
+            "a claim of a new attempt": None,
+            "a record with no rejection": self._gate_rejected_record(sha=""),
+            "a review rejection": self._gate_rejected_record(failure_reason="red-review"),
+            "a publication refusal": self._gate_rejected_record(failure_class="publication"),
+            "an infrastructure rerun": self._gate_rejected_record(failure_class="infrastructure"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            host = GitBranchHost(Path(tmp))
+            for case, record in not_this_attempts.items():
+                with self.subTest(case):
+                    doc = host._worker_task_doc(self._GATED_TASK, "main", "a", 1, record=record)
+                    self.assertNotIn("Mechanical gate failure", doc)
+                    self.assertNotIn("AssertionError: boom", doc)
+                    self.assertNotIn("re-report the same commit", doc)
 
     def test_review_verdict_request_id_is_distinct_per_round(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
