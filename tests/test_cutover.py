@@ -4,12 +4,15 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -1294,6 +1297,326 @@ class CutoverFailureInjectionTests(CutoverFixture):
             self.assertRaisesRegex(cutover.CutoverError, "expects backend postgres"),
         ):
             cutover.apply_cutover(args(), self.paths)
+
+
+# A detached controller is a fresh interpreter, so no mock in this process reaches it.  This
+# sitecustomize, put on its PYTHONPATH, answers the host facts the way CutoverFixture does and
+# replaces the phases with fakes that record which process ran them.  The CLI entry, the
+# detachment, the lock, the state machine and the barrier stay real.
+DETACHED_FAKES = r'''
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+if os.environ.get("CUTOVER_TEST_FAKES"):
+    from secretary import cutover
+
+    root = Path(os.environ["CUTOVER_TEST_FAKES"])
+    config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+    paths = cutover.Paths(Path(config["instance"]), Path(config["data"]))
+    probe = (
+        "from secretary.cutover.barrier import require_board_write_allowed; "
+        f"require_board_write_allowed({config['data']!r})"
+    )
+
+    class FakeOperations:
+        def __init__(self, _paths, _state):
+            pass
+
+        def __getattr__(self, name):
+            def operation():
+                with (root / "calls").open("a", encoding="utf-8") as calls:
+                    calls.write(name + "\n")
+                if name == config["gate"]:
+                    (root / "controller.json").write_text(
+                        json.dumps(
+                            {
+                                "pid": os.getpid(),
+                                "ppid": os.getppid(),
+                                "sid": os.getsid(0),
+                                "pgid": os.getpgid(0),
+                                "stdout": os.readlink("/proc/self/fd/1"),
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    deadline = time.monotonic() + 60
+                    while not (root / "release").exists():
+                        if time.monotonic() > deadline:
+                            raise RuntimeError("the regression never released the phase")
+                        time.sleep(0.05)
+                    # Output after the caller died: on the caller's pipe this is EPIPE.
+                    for line in range(200):
+                        print(f"controller output {line}", flush=True)
+                        print(f"controller diagnostics {line}", file=sys.stderr, flush=True)
+                    child = subprocess.run(
+                        [sys.executable, "-P", "-c", probe], capture_output=True, text=True, check=False
+                    )
+                    (root / "probe.json").write_text(
+                        json.dumps({"returncode": child.returncode, "stderr": child.stderr}),
+                        encoding="utf-8",
+                    )
+                if name == "selector_activation":
+                    return {"sql_audit_baseline": {"committed_events": 10}}
+                return {"phase": name}
+
+            return operation
+
+    cutover.resolve_paths = lambda _instance: paths
+    cutover._require_privileged_preconditions = lambda **_kwargs: {}
+    cutover._require_backup_space = lambda _paths: {}
+    cutover.build_plan = lambda *_args, **_kwargs: dict(config["plan"])
+    cutover._provenance = lambda *_args: {}
+    cutover._backend = lambda _paths: "kanboard"
+    cutover._sql_event_count = lambda _paths: {"committed_events": 10}
+    cutover.Operations = FakeOperations
+'''
+
+
+def process_gone(pid: int) -> bool:
+    try:
+        line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    return line.rsplit(")", 1)[1].split()[0] in {"Z", "X"}
+
+
+class DetachedControllerTests(CutoverFixture):
+    """`apply` survives the death of the session that ran it (incident 2026-09-10)."""
+
+    # The phase the incident controller died in, past global_freeze so the barrier is armed.
+    gate = "postgresql_recovery_backup"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fakes = Path(self.temporary.name) / "fakes"
+        self.fakes.mkdir()
+        (self.fakes / "sitecustomize.py").write_text(DETACHED_FAKES, encoding="utf-8")
+        (self.fakes / "config.json").write_text(
+            json.dumps(
+                {"instance": str(self.instance), "data": str(self.data), "gate": self.gate, "plan": PLAN}
+            ),
+            encoding="utf-8",
+        )
+        source = Path(cutover.__file__).resolve().parents[2]
+        self.environment = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join((str(self.fakes), str(source))),
+            "CUTOVER_TEST_FAKES": str(self.fakes),
+        }
+        for name in (cutover.CONTROLLER_ID_ENV, cutover.DETACHED_CONTROLLER_ENV):
+            self.environment.pop(name, None)
+        self.addCleanup(self.stop_controller)
+
+    def stop_controller(self) -> None:
+        record = self.fakes / "controller.json"
+        if record.exists():
+            pid = json.loads(record.read_text(encoding="utf-8"))["pid"]
+            if not process_gone(pid):
+                os.kill(pid, signal.SIGKILL)
+
+    def apply_argv(self) -> list[str]:
+        return [
+            sys.executable,
+            "-P",
+            "-m",
+            "secretary",
+            "cutover",
+            "apply",
+            "--instance",
+            str(self.instance),
+            "--expected-revision",
+            REVISION,
+            "--actor",
+            args().actor,
+            "--reason",
+            args().reason,
+            "--confirm",
+            PLAN["confirmation"],
+        ]
+
+    def state(self) -> dict:
+        try:
+            return json.loads(self.paths.state.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+
+    def gate_running(self) -> bool:
+        running = self.state().get("phases", {}).get(self.gate, {}).get("status") == "running"
+        return running and (self.fakes / "controller.json").exists()
+
+    def controller(self) -> dict:
+        return json.loads((self.fakes / "controller.json").read_text(encoding="utf-8"))
+
+    def calls(self) -> list[str]:
+        return (self.fakes / "calls").read_text(encoding="utf-8").split()
+
+    def logs(self) -> str:
+        return "".join(log.read_text(encoding="utf-8") for log in sorted(self.paths.artifacts.glob("apply-*.log")))
+
+    def wait_until(self, condition, *, alive=None) -> None:
+        deadline = time.monotonic() + 60
+        while not condition():
+            if alive is not None and not alive() and not condition():
+                self.fail(f"the process it waited on exited first; controller log:\n{self.logs()}")
+            if time.monotonic() > deadline:
+                self.fail(f"condition did not hold within 60 seconds; controller log:\n{self.logs()}")
+            time.sleep(0.05)
+
+    def end_caller(self, caller: subprocess.Popen) -> None:
+        if caller.poll() is None:
+            os.killpg(caller.pid, signal.SIGKILL)
+        caller.wait()
+        caller.stdout.close()
+
+    def seed_failed_frozen(self) -> None:
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        failed = cutover.PHASES.index("writer_quiescence_proof")
+        for name in cutover.PHASES[:failed]:
+            state["phases"][name] = {"status": "complete", "evidence": {"phase": name}}
+        state["phases"]["writer_quiescence_proof"] = {"status": "failed", "reason": "injected"}
+        state["status"] = "failed-frozen"
+        cutover._write_state(self.paths, state)
+
+    def assert_phase_completes_after_the_callers_group_and_output_die(self, expected_calls) -> None:
+        # The caller is a shell leading its own session, as a terminal or an agent pane does, and
+        # `apply` runs inside its process group exactly as the operator types it.
+        caller = subprocess.Popen(
+            ["/bin/sh", "-c", '"$@"; echo caller-finished', "sh", *self.apply_argv()],
+            env=self.environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        self.addCleanup(self.end_caller, caller)
+        self.wait_until(self.gate_running, alive=lambda: caller.poll() is None)
+        controller = self.controller()
+        launcher = controller["ppid"]
+        self.assertEqual(self.state()["controller_pid"], controller["pid"])
+        self.assertEqual(os.getpgid(launcher), caller.pid)
+        self.assertEqual(os.getsid(launcher), caller.pid)
+        self.assertEqual((controller["sid"], controller["pgid"]), (controller["pid"], controller["pid"]))
+        self.assertEqual(Path(controller["stdout"]).parent, self.paths.artifacts)
+
+        self.end_caller(caller)
+        self.wait_until(lambda: process_gone(launcher))
+        self.assertEqual(self.state()["phases"][self.gate]["status"], "running")
+        (self.fakes / "release").touch()
+
+        self.wait_until(
+            lambda: self.state().get("status") == "resume-ready",
+            alive=lambda: not process_gone(controller["pid"]),
+        )
+        state = self.state()
+        self.assertEqual(set(state["phases"]), set(cutover.PHASES))
+        self.assertEqual({phase["status"] for phase in state["phases"].values()}, {"complete"})
+        # One controller ran every remaining phase once: nobody re-ran `apply`.
+        self.assertEqual(self.calls(), list(expected_calls))
+        self.assertEqual(state["controller_pid"], controller["pid"])
+        probe = json.loads((self.fakes / "probe.json").read_text(encoding="utf-8"))
+        self.assertEqual(probe["returncode"], 0, probe["stderr"])
+        self.wait_until(lambda: process_gone(controller["pid"]))
+        log = Path(controller["stdout"]).read_text(encoding="utf-8")
+        self.assertIn("controller diagnostics 199", log)
+        self.assertEqual(json.loads(log[log.index("{\n") :])["status"], "resume-ready")
+
+    def test_a_new_identity_completes_its_phase_after_the_callers_group_and_output_die(self) -> None:
+        self.assert_phase_completes_after_the_callers_group_and_output_die(cutover.PHASES)
+
+    def test_a_failed_frozen_retry_completes_its_phase_after_the_callers_group_and_output_die(self) -> None:
+        self.seed_failed_frozen()
+        retried = cutover.PHASES[cutover.PHASES.index("writer_quiescence_proof") :]
+        self.assert_phase_completes_after_the_callers_group_and_output_die(retried)
+
+    def test_the_launcher_relays_the_outcome_and_the_barrier_refuses_it(self) -> None:
+        from secretary.cutover.barrier import require_board_write_allowed
+        from secretary.tasks import TaskError
+
+        verdicts: list[object] = []
+
+        def as_the_launcher() -> None:
+            # This thread shares the launcher's pid, parent and environment.
+            try:
+                self.wait_until(self.gate_running)
+                os.environ[cutover.CONTROLLER_ID_ENV] = self.state()["identity"]
+                try:
+                    require_board_write_allowed(self.data)
+                    verdicts.append("admitted")
+                except TaskError as exc:
+                    verdicts.append(exc)
+                finally:
+                    os.environ.pop(cutover.CONTROLLER_ID_ENV, None)
+            except BaseException as exc:  # noqa: BLE001 - surfaced by the assertions below
+                verdicts.append(exc)
+            finally:
+                (self.fakes / "release").touch()
+
+        for name in ("PYTHONPATH", "CUTOVER_TEST_FAKES"):
+            os.environ[name] = self.environment[name]
+        output, diagnostics = StringIO(), StringIO()
+        worker = threading.Thread(target=as_the_launcher)
+        worker.start()
+        try:
+            with (
+                mock.patch.object(cutover, "resolve_paths", return_value=self.paths),
+                redirect_stdout(output),
+                redirect_stderr(diagnostics),
+            ):
+                code = cutover.run_cutover(
+                    argparse.Namespace(cutover_command="apply", instance=str(self.instance), **vars(args()))
+                )
+        finally:
+            worker.join()
+
+        controller = self.controller()
+        self.assertEqual(len(verdicts), 1)
+        self.assertIsInstance(verdicts[0], TaskError)
+        self.assertEqual(controller["ppid"], os.getpid())
+        self.assertNotEqual(controller["pid"], os.getpid())
+        probe = json.loads((self.fakes / "probe.json").read_text(encoding="utf-8"))
+        self.assertEqual(probe["returncode"], 0, probe["stderr"])
+        self.assertEqual(code, 0)
+        relayed = output.getvalue()
+        document = json.loads(relayed[relayed.index("{\n") :])
+        self.assertEqual(document["status"], "resume-ready")
+        self.assertEqual(document["controller_pid"], controller["pid"])
+        notice = diagnostics.getvalue()
+        self.assertIn(f"cutover controller {controller['pid']} runs in its own session", notice)
+        self.assertIn(controller["stdout"], notice)
+        self.assertIn(f"secretary cutover status --instance {self.instance}", notice)
+        status = StringIO()
+        with (
+            mock.patch.object(cutover, "resolve_paths", return_value=self.paths),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            redirect_stdout(status),
+        ):
+            self.assertEqual(
+                cutover.run_cutover(argparse.Namespace(cutover_command="status", instance=str(self.instance))),
+                0,
+            )
+        shown = json.loads(status.getvalue())["state"]
+        self.assertEqual((shown["status"], shown["controller_pid"]), ("resume-ready", controller["pid"]))
+
+    def test_a_controller_outside_its_own_session_refuses_before_the_lock_and_state(self) -> None:
+        # A direct child of this test is never a session leader, whatever session runs the suite.
+        refused = subprocess.run(
+            self.apply_argv(),
+            env={**self.environment, cutover.DETACHED_CONTROLLER_ENV: "1"},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertIn("does not lead its own session", json.loads(refused.stdout)["error"])
+        self.assertFalse(self.paths.state.exists())
+        self.assertFalse(self.paths.lock.exists())
+        self.assertFalse((self.fakes / "calls").exists())
 
 
 class CutoverRecoveryTests(CutoverFixture):

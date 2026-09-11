@@ -4,6 +4,17 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-11 — cutover apply detaches its controller (secretary-1617, sprint:1437)
+
+**`secretary cutover apply` survives the session that ran it.** The command now starts the
+controller in a new session with stdin `/dev/null` and stdout/stderr in
+`<data_dir>/cutover/artifacts/apply-<UTC stamp>-<launcher pid>.log`, then waits as a launcher. Its
+stderr names the controller pid, the log and the `cutover status` command; its stdout is the
+controller's output, and its exit code the controller's. Killing the launcher, its process group or
+its terminal no longer stops a phase; follow the controller with `cutover status`. `controller_pid`
+in the state is the detached process, and the barrier refuses the launcher. The lock, identity,
+barrier and retry rules are unchanged. Do not add `nohup`/`setsid` wrappers.
+
 ## 2026-09-11 — full archives without the model cache; cutover plan checks the backups volume (secretary-1616, sprint:1437)
 
 **A `full` archive no longer carries `memory/fastembed-cache`.** Both the Kanboard and the PostgreSQL

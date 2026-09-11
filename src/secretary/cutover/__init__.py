@@ -47,6 +47,7 @@ HISTORY_RELATIVE = Path("cutover") / "history"
 BACKEND_ENV = "SECRETARY_CARD_BACKEND"
 CUTOVER_ACTOR = "secretary-postgres-cutover"
 CONTROLLER_ID_ENV = "SECRETARY_CUTOVER_CONTROLLER_ID"
+DETACHED_CONTROLLER_ENV = "SECRETARY_CUTOVER_DETACHED_CONTROLLER"
 PREIMPORT_RECOVERY_BRANCHES = frozenset(("no-cutover-effects", "kanboard-before-fingerprint"))
 SUDOERS_DROPIN = Path("/etc/sudoers.d/secretary-systemctl")
 SYSTEMCTL_PATH = "/usr/bin/systemctl"
@@ -2250,6 +2251,78 @@ def _render(payload: dict[str, Any], *, pretty: bool = True) -> None:
     print(json.dumps(payload, indent=2 if pretty else None, sort_keys=True))
 
 
+def _require_own_session() -> None:
+    # A session leader shares neither the session nor the process group of the terminal,
+    # shell or agent pane that ran `apply`, so killing that group cannot reach it.
+    if os.getsid(0) != os.getpid():
+        raise CutoverError(
+            "the cutover controller does not lead its own session; run `secretary cutover apply` "
+            f"without {DETACHED_CONTROLLER_ENV} and it detaches itself"
+        )
+
+
+def _launch_controller(args: argparse.Namespace, paths: Paths) -> int:
+    """Start the controller in a new session and relay its outcome.
+
+    A closed terminal or a torn-down agent session kills the caller's process group, and
+    ``nohup`` covers only SIGHUP.  The controller therefore never runs in the caller's
+    session and never writes to its terminal or pipe.  This process stays behind as a
+    launcher: it takes no lock, reads no state and carries no controller identity.
+    """
+    paths.state.parent.mkdir(mode=0o755, exist_ok=True)
+    _safe_directory(paths.state.parent, "cutover state directory")
+    paths.artifacts.mkdir(mode=0o700, exist_ok=True)
+    _safe_directory(paths.artifacts, "cutover artifacts directory")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    log = paths.artifacts / f"apply-{stamp}-{os.getpid()}.log"
+    argv = [
+        sys.executable,
+        "-P",
+        "-m",
+        "secretary",
+        "cutover",
+        "apply",
+        "--instance",
+        str(paths.instance),
+        "--expected-revision",
+        args.expected_revision,
+        "--actor",
+        args.actor,
+        "--reason",
+        args.reason,
+        "--confirm",
+        args.confirm,
+    ]
+    descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        controller = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=descriptor,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, DETACHED_CONTROLLER_ENV: "1"},
+            start_new_session=True,
+        )
+    except OSError as exc:
+        log.unlink(missing_ok=True)
+        raise CutoverError(f"could not start the cutover controller: {type(exc).__name__}") from None
+    finally:
+        os.close(descriptor)
+    print(
+        f"cutover controller {controller.pid} runs in its own session; output: {log}; "
+        f"progress: secretary cutover status --instance {paths.instance}",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        code = controller.wait()
+    except KeyboardInterrupt:
+        print(f"launcher interrupted; cutover controller {controller.pid} continues", file=sys.stderr)
+        return 130
+    sys.stdout.write(log.read_text(encoding="utf-8", errors="replace"))
+    return code if code >= 0 else 128 - code
+
+
 def run_cutover(args: argparse.Namespace) -> int:
     try:
         if args.cutover_command == "prepare-successor" and not Path(args.instance).is_absolute():
@@ -2296,6 +2369,11 @@ def run_cutover(args: argparse.Namespace) -> int:
                 }
             )
         elif args.cutover_command == "apply":
+            # The one place `apply` decides how it runs: before the lock and the state
+            # document, so a new identity and every retry detach the same way.
+            if os.environ.pop(DETACHED_CONTROLLER_ENV, None) is None:
+                return _launch_controller(args, paths)
+            _require_own_session()
             _render(apply_cutover(args, paths))
         elif args.cutover_command == "recover":
             _render(recover_cutover(args, paths))
@@ -2333,6 +2411,7 @@ def add_cutover_subcommands(subparsers: Any) -> None:
 __all__ = [
     "ARTIFACTS_RELATIVE",
     "BACKEND_ENV",
+    "DETACHED_CONTROLLER_ENV",
     "HISTORY_RELATIVE",
     "LOCK_RELATIVE",
     "PHASES",
