@@ -222,10 +222,12 @@ yet a stable plugin API.
 
 The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` is always the
 project adapter's namespace. It claims its reserved environment with an owner record before creating
-or populating it, and first adds `.secretary-task-env/` to Git's repository-local `info/exclude` so
-a blanket `git add -A` cannot capture runtime files. Linked worktrees share that file; the idempotent
-entry intentionally outlives card cleanup and is redundant but harmless where tracked ignore already
-covers the namespace. Existing project reservation and dispatcher serialization admit one card per
+or populating it, and first adds the paths the pipeline writes (`.secretary-task-env/`, `/TASK.md`,
+`/state/checks/`, declared once as `WORKSPACE_EXCLUDES`) to Git's repository-local `info/exclude` so
+a blanket `git add -A` cannot capture runtime files and a broad-check receipt is never refused on a
+project with a clean `.gitignore`. Linked worktrees share that file; the idempotent entries
+intentionally outlive card cleanup and are redundant but harmless where tracked ignore already
+covers them. Existing project reservation and dispatcher serialization admit one card per
 project, so this hotfix adds no second concurrency subsystem around that shared append. It never
 enables system site packages or writes production package paths into either environment. Projects
 whose adapter declares `broad_check` but omits its interpreter are installed there from their
