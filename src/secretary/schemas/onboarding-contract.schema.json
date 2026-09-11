@@ -365,73 +365,8 @@
       }
     },
     "adapterDraft": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["setup", "smoke", "validation", "artifact_policy"],
-      "properties": {
-        "setup": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["commands"],
-          "properties": {
-            "commands": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
-          }
-        },
-        "smoke": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["command"],
-          "properties": {
-            "command": {"type": "string", "minLength": 1}
-          }
-        },
-        "validation": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["ci"],
-          "properties": {
-            "ci": {"type": "string", "enum": ["github", "local", "none"]},
-            "command": {"type": "string", "minLength": 1},
-            "missing": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-            "required_checks": {
-              "type": "array",
-              "minItems": 1,
-              "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
-            }
-          },
-          "allOf": [
-            {
-              "if": {"required": ["ci"], "properties": {"ci": {"const": "local"}}},
-              "then": {"required": ["command"]}
-            },
-            {
-              "if": {"required": ["ci"], "properties": {"ci": {"const": "none"}}},
-              "then": {"required": ["missing"]}
-            }
-          ]
-        },
-        "artifact_policy": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["write_project_files"],
-          "properties": {
-            "write_project_files": {"type": "boolean"}
-          }
-        },
-        "broad_check": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["interpreter", "import_package"],
-          "properties": {
-            "interpreter": {"type": "string", "minLength": 1},
-            "import_package": {
-              "type": "string",
-              "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$"
-            }
-          }
-        }
-      }
+      "$ref": "adapter.schema.json",
+      "description": "A drafted adapter is the canonical adapter itself: provision-apply publishes the same object to adapters/<project>.yaml and here, and the gate executes those bytes. So it is described by the adapter schema, not by a copy of it; a copy drifted once (broad_check without module/args) and refused every adapter declaring the full broad check contract as canonical_invalid."
     },
     "unresolvedAdapterDraft": {
       "type": "object",

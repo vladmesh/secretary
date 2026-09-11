@@ -158,6 +158,56 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(validate(adapter, "adapter", self.adapter_path.name), [])
         self.assertEqual(validate(draft, "onboarding-contract", self.draft_path.name), [])
 
+    def test_apply_publishes_the_full_broad_check_contract(self):
+        """module and args reach the canonical adapter through provision-apply. The drafted adapter
+        is described by the adapter schema itself, so the draft accepts what the canon accepts,
+        interpreter optional there as here."""
+        task = self.start()["task"]
+        provision = self.drafted_result(task)
+        provision["adapter"]["broad_check"] = {
+            "import_package": "sample_project",
+            "module": "tests.broad",
+            "args": ["--fast", "-k", "a b"],
+        }
+        result_path = self.write_result(provision)
+
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["status"], "drafted")
+        adapter = load_config(self.adapter_path)
+        draft = load_config(self.draft_path)
+        self.assertEqual(adapter["broad_check"], provision["adapter"]["broad_check"])
+        self.assertEqual(draft["provision"]["adapter"], adapter)
+        self.assertEqual(validate(adapter, "adapter", self.adapter_path.name), [])
+        self.assertEqual(validate(draft, "onboarding-contract", self.draft_path.name), [])
+
+    def test_unknown_broad_check_key_is_refused_by_the_adapter_and_the_draft(self):
+        task = self.start()["task"]
+        provision = self.drafted_result(task)
+        provision["adapter"]["broad_check"] = {"import_package": "sample_project", "unexpected": "value"}
+        result_path = self.write_result(provision)
+        draft_bytes = self.draft_path.read_bytes()
+
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+
+        self.assertEqual(code, 1, result)
+        self.assertEqual(result["status"], "adapter_invalid")
+        self.assertFalse(self.adapter_path.exists())
+        self.assertEqual(draft_bytes, self.draft_path.read_bytes())
+
+        del provision["adapter"]["broad_check"]["unexpected"]
+        self.write_result(provision)
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+        self.assertEqual(code, 0, result)
+        draft = load_config(self.draft_path)
+        draft["provision"]["adapter"]["broad_check"]["unexpected"] = "value"
+        errors = validate(draft, "onboarding-contract", self.draft_path.name)
+        self.assertIn(
+            ("provision.adapter.broad_check", "1 unexpected property"),
+            [(error.path, error.message) for error in errors],
+        )
+
     def test_apply_is_idempotent_for_same_result_and_revision(self):
         task = self.start()["task"]
         result_path = self.write_result(self.drafted_result(task))

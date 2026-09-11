@@ -100,8 +100,23 @@ def _project_add_locked(
     # already disabled binding the flag changes nothing, so repeating the request republishes
     # the same bytes instead of wiping a provision run the operator has since applied.
     taking_down = bool(re_onboard) and bool(existing_binding) and existing_binding.get("enabled") is True
+    # A disabled binding on another adapter -- a Phase-2 inventory binding (`adapter:
+    # inventory-only`) the project now gets its own adapter for -- is moved onto this project's
+    # adapter instead of refused. Nothing executes a disabled binding, so the move itself is
+    # safe; what must not survive it is evidence produced for the previous adapter, which is
+    # reset below. An enabled binding keeps refusing: switching what it executes is a takedown.
+    retargeting = (
+        bool(existing_binding)
+        and existing_binding.get("enabled") is False
+        and existing_binding.get("adapter") != identity["adapter"]
+    )
     if existing_binding:
-        conflict = _binding_conflict(existing_binding, identity, allow_enabled=dry_run or re_onboard)
+        conflict = _binding_conflict(
+            existing_binding,
+            identity,
+            allow_enabled=dry_run or re_onboard,
+            allow_adapter=retargeting,
+        )
         if conflict:
             artifact = _base_artifact(repo, project_id, default_branch, _safe_scan(repo, default_branch))
             return 1, _fail_draft(artifact, "draft.invalid", conflict)
@@ -120,7 +135,12 @@ def _project_add_locked(
         if errors:
             return 1, _fail_draft(artifact, "draft.invalid", str(errors[0]))
         draft_identity = existing_draft.get("identity")
-        if not isinstance(draft_identity, dict) or _identity_core(draft_identity) != _identity_core(identity):
+        accepted = {_identity_core(identity)}
+        if retargeting:
+            # The draft written for the previous adapter. The new identity stays accepted too:
+            # an interrupted retarget has published the draft but not yet the binding.
+            accepted.add(_identity_core({**identity, "adapter": existing_binding["adapter"]}))
+        if not isinstance(draft_identity, dict) or _identity_core(draft_identity) not in accepted:
             return 1, _fail_draft(
                 artifact,
                 "draft.invalid",
@@ -139,6 +159,11 @@ def _project_add_locked(
         # the previous run's result and gate receipt can neither be reapplied nor supersede.
         _reset_scanner_derived_state(artifact)
         artifact["onboarding_cycle"] = onboarding_cycle(artifact) + 1
+    if retargeting:
+        # A provision drafted and a gate run for the previous adapter vouch for nothing on this
+        # one. Both go back to pending, and the run ids derive from the adapter, so the previous
+        # adapter's results answer as foreign. Its canonical file is not this project's to delete.
+        _reset_scanner_derived_state(artifact)
 
     # Updating a binding is a merge over what is already there, not a rebuild from a list of
     # fields we happen to remember. Identity is recomputed and overwrites; everything else the
@@ -210,11 +235,17 @@ def _identity(repo: Path, project_id: str, default_branch: str) -> dict[str, Any
 
 
 def _binding_conflict(
-    binding: dict[str, Any], identity: dict[str, Any], *, allow_enabled: bool = False
+    binding: dict[str, Any],
+    identity: dict[str, Any],
+    *,
+    allow_enabled: bool = False,
+    allow_adapter: bool = False,
 ) -> str | None:
     if binding.get("enabled") is True and not allow_enabled:
         return "existing binding is enabled"
     for field in IDENTITY_FIELDS:
+        if field == "adapter" and allow_adapter:
+            continue
         if binding.get(field) != identity[field]:
             return f"existing binding has conflicting {field}"
     errors = validate(binding, "project-binding", "existing binding")

@@ -2698,6 +2698,10 @@ decide whether a takedown is still owed: an interrupted re-onboarding stays visi
 it started from, and a retry carries it through. It does not enable anything and grants the scanner and the
 provision agent nothing.
 
+A disabled binding on another adapter (an inventory binding on `inventory-only`) is moved onto the
+project's own adapter by a plain `project add` and stays disabled; provision and gate state of the previous
+adapter resets to pending, and provision run ids derive from the adapter. An enabled one still refuses.
+
 A takedown opens a new onboarding cycle. The draft records it as `onboarding_cycle` and the provision run
 id derives from it, so provision results and dispatcher-owned exact-SHA gate receipts from an earlier cycle cannot be reused on an
 unchanged scanner head. Evidence is bound to the cycle that produced it.
