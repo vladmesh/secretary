@@ -3785,6 +3785,20 @@ secretary cutover apply --instance /absolute/instance --expected-revision <sha> 
 secretary cutover status --instance /absolute/instance
 ```
 
+`apply` detaches its own controller; `nohup`, `setsid` or `&` are not needed. The process you
+start is only a launcher: before the lock and the state document it starts the controller in a new
+session (own process group, no controlling terminal, stdin `/dev/null`), prints the controller pid
+and log path on stderr, waits, then prints the controller's log, whose last JSON document is the
+result, and exits with its code. The
+controller writes stdout and stderr only to `<data_dir>/cutover/artifacts/apply-<UTC stamp>-<launcher
+pid>.log`, never to your terminal or pipe. Closing the terminal, killing the launcher or tearing down
+the agent session that ran it does not stop the controller: the running phase completes and the
+rest follow. Follow progress with `cutover status` (`state.status`, `state.phases`,
+`state.controller_pid`) and read the log after the controller exits. The precondition checks run
+inside the detached controller too, without a terminal, as the phases do. Detachment covers the
+session and process group only: stopping a systemd unit or cgroup that contains the caller still
+kills the controller, so never start `apply` from a unit the window stops.
+
 Rerun the identical `apply` command after a crash. Never delete or edit the state document. A failed
 phase remains failed and frozen; completed phases are not repeated. `status` prints the recovery
 token. A terminal identity cannot be applied again. Recovery is similarly explicit:
@@ -3811,9 +3825,18 @@ controller rejects symlinked or broadly writable configuration/state and does no
 credentials. The non-secret state fence is owner-writable and runtime-readable (`0644` below a
 `0755` cutover directory), because web and head processes may run under another uid. Controller
 children receive the durable controller identity and are admitted by that identity; an immediate
-child is also recognized by parent pid. The installation data root must remain traversable by those
-runtime service accounts. Process scanning excludes the controller and its invoking parent, and
-otherwise refuses any command line matching the declared writer vocabulary.
+child is also recognized by parent pid. `controller_pid` is the detached process that runs the
+phases; the launcher carries no identity and the barrier refuses it. The installation data root must
+remain traversable by those runtime service accounts. Process scanning excludes the controller and
+its own invocation: the launcher and the process that started it, which is the shell or agent pane
+that ran `apply` (an agent's `bash -c "secretary cutover apply ..."` included). The launcher hands
+both to the controller as pid and start time when it detaches, so once either exits and the kernel
+reuses its pid, that pid is scanned like any other. Every other command line matching the declared
+writer vocabulary refuses quiescence, and the refusal names the surviving pids and commands. Only
+the direct starter of `apply` is exempt. With a wrapper in between (`sudo`, `timeout`) the wrapper
+is that starter and the shell above it is not, and `sudo` with `use_pty` keeps a second `sudo`
+process above the exempt one. Their command lines repeat `--actor` and `--reason`, so when wrapping
+`apply` keep writer-vocabulary words (` task `, ` sprint `, ` issue `, ...) out of them.
 
 If failure occurs before `global_freeze` starts, `recover` records `no-cutover-effects` and does not
 restart services. If the freeze was entered but no final import, selector activation or SQL write
