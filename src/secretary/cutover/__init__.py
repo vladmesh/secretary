@@ -1336,8 +1336,44 @@ def _reconcile_postgres(paths: Paths) -> dict[str, Any]:
     }
 
 
+# This controller's own invocation as its launcher handed it over: the launcher and the
+# process that ran `apply`, each as (pid, start time).  Only the writer scan reads it.
+_CONTROLLER_INVOCATION: frozenset[tuple[int, int]] = frozenset()
+
+
+def _process_start(pid: int) -> int | None:
+    """The kernel's start time of ``pid`` in clock ticks, which a reused pid does not share."""
+    try:
+        line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        return int(line.rsplit(")", 1)[1].split()[19])
+    except (OSError, UnicodeError, IndexError, ValueError):
+        return None
+
+
+def _invocation_handoff() -> str:
+    """This launcher and the process that started it, as ``pid:start`` pairs."""
+    pairs = ((pid, _process_start(pid)) for pid in (os.getpid(), os.getppid()))
+    return " ".join(f"{pid}:{start}" for pid, start in pairs if start is not None)
+
+
+def _read_invocation(handoff: str) -> frozenset[tuple[int, int]]:
+    pairs: set[tuple[int, int]] = set()
+    for item in handoff.split():
+        pid, separator, start = item.partition(":")
+        if not separator or not pid.isdigit() or not start.isdigit():
+            raise CutoverError(
+                "malformed cutover controller handoff; run `secretary cutover apply` "
+                f"without {DETACHED_CONTROLLER_ENV} and it detaches itself"
+            )
+        pairs.add((int(pid), int(start)))
+    return frozenset(pairs)
+
+
 def _writer_processes() -> list[dict[str, Any]]:
-    own = {os.getpid(), os.getppid()}
+    # The controller never counts itself or its own invocation: the launcher and the shell or
+    # agent pane that ran `apply`, whose command lines repeat its arguments.  Each is matched
+    # by pid and start time, so a pid the kernel has since reused is a stranger again.
+    own = {os.getpid()} | {pid for pid, start in _CONTROLLER_INVOCATION if _process_start(pid) == start}
     found: list[dict[str, Any]] = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit() or int(entry.name) in own:
@@ -1427,7 +1463,10 @@ class Operations:
     def writer_quiescence_proof(self) -> dict[str, Any]:
         survivors = _writer_processes()
         if survivors:
-            raise CutoverError(f"writer quiescence refused; {len(survivors)} writer process(es) survive")
+            named = "; ".join(f"{item['pid']} {item['command'][:120].strip()}" for item in survivors[:5])
+            raise CutoverError(
+                f"writer quiescence refused; {len(survivors)} writer process(es) survive: {named}"
+            )
         source = _source_evidence(self.paths)
         planned = self.state.get("planned_source", {}).get("fingerprint")
         if not planned or source["fingerprint"] != planned:
@@ -2300,7 +2339,7 @@ def _launch_controller(args: argparse.Namespace, paths: Paths) -> int:
             stdin=subprocess.DEVNULL,
             stdout=descriptor,
             stderr=subprocess.STDOUT,
-            env={**os.environ, DETACHED_CONTROLLER_ENV: "1"},
+            env={**os.environ, DETACHED_CONTROLLER_ENV: _invocation_handoff()},
             start_new_session=True,
         )
     except OSError as exc:
@@ -2324,6 +2363,7 @@ def _launch_controller(args: argparse.Namespace, paths: Paths) -> int:
 
 
 def run_cutover(args: argparse.Namespace) -> int:
+    global _CONTROLLER_INVOCATION
     try:
         if args.cutover_command == "prepare-successor" and not Path(args.instance).is_absolute():
             raise CutoverError("prepare-successor requires an absolute --instance path")
@@ -2370,10 +2410,13 @@ def run_cutover(args: argparse.Namespace) -> int:
             )
         elif args.cutover_command == "apply":
             # The one place `apply` decides how it runs: before the lock and the state
-            # document, so a new identity and every retry detach the same way.
-            if os.environ.pop(DETACHED_CONTROLLER_ENV, None) is None:
+            # document, so a new identity and every retry detach the same way.  The marker
+            # carries the launcher's handoff of its invocation; phase children never see it.
+            handoff = os.environ.pop(DETACHED_CONTROLLER_ENV, None)
+            if handoff is None:
                 return _launch_controller(args, paths)
             _require_own_session()
+            _CONTROLLER_INVOCATION = _read_invocation(handoff)
             _render(apply_cutover(args, paths))
         elif args.cutover_command == "recover":
             _render(recover_cutover(args, paths))

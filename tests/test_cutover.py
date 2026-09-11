@@ -1330,6 +1330,11 @@ if os.environ.get("CUTOVER_TEST_FAKES"):
             def operation():
                 with (root / "calls").open("a", encoding="utf-8") as calls:
                     calls.write(name + "\n")
+                if name == "writer_quiescence_proof":
+                    # The real scan, run by the detached controller on the real process table.
+                    (root / "writers.json").write_text(
+                        json.dumps(cutover._writer_processes()), encoding="utf-8"
+                    )
                 if name == config["gate"]:
                     (root / "controller.json").write_text(
                         json.dumps(
@@ -1339,6 +1344,8 @@ if os.environ.get("CUTOVER_TEST_FAKES"):
                                 "sid": os.getsid(0),
                                 "pgid": os.getpgid(0),
                                 "stdout": os.readlink("/proc/self/fd/1"),
+                                "invocation": sorted(cutover._CONTROLLER_INVOCATION),
+                                "handoff_in_env": cutover.DETACHED_CONTROLLER_ENV in os.environ,
                             }
                         ),
                         encoding="utf-8",
@@ -1374,6 +1381,16 @@ if os.environ.get("CUTOVER_TEST_FAKES"):
     cutover._sql_event_count = lambda _paths: {"committed_events": 10}
     cutover.Operations = FakeOperations
 '''
+
+
+def last_document(text: str) -> dict:
+    """The JSON document that ends ``text``; anything after it makes this raise."""
+    start = text.rfind("\n{\n")
+    return json.loads(text[start + 1 if start >= 0 else 0 :])
+
+
+def cmdline(pid: int) -> bytes:
+    return Path(f"/proc/{pid}/cmdline").read_bytes()
 
 
 def process_gone(pid: int) -> bool:
@@ -1434,7 +1451,7 @@ class DetachedControllerTests(CutoverFixture):
             if not process_gone(pid):
                 os.kill(pid, signal.SIGKILL)
 
-    def apply_argv(self) -> list[str]:
+    def apply_argv(self, reason: str | None = None) -> list[str]:
         return [
             sys.executable,
             "-P",
@@ -1449,10 +1466,33 @@ class DetachedControllerTests(CutoverFixture):
             "--actor",
             args().actor,
             "--reason",
-            args().reason,
+            reason or args().reason,
             "--confirm",
             PLAN["confirmation"],
         ]
+
+    def caller_script(self, reason: str | None = None) -> str:
+        # The shape an agent's shell tool gives a command: `sh -c "<the whole command line>"`,
+        # which stays alive around it.  Without CUTOVER_TEST_APPLY the same script only sleeps,
+        # so a twin with an identical command line is not a second `apply`.
+        return (
+            f'if [ -n "$CUTOVER_TEST_APPLY" ]; then {shlex.join(self.apply_argv(reason))}; '
+            "else sleep 120; fi; echo caller-finished"
+        )
+
+    def start_caller(self, reason: str | None = None) -> subprocess.Popen:
+        # The caller leads its own session, as a terminal or an agent pane does, and `apply`
+        # runs inside its process group exactly as the operator types it.
+        caller = subprocess.Popen(
+            ["/bin/sh", "-c", self.caller_script(reason)],
+            env={**self.environment, "CUTOVER_TEST_APPLY": "1"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        self.addCleanup(self.end_caller, caller)
+        return caller
 
     def state(self) -> dict:
         try:
@@ -1486,7 +1526,8 @@ class DetachedControllerTests(CutoverFixture):
         if caller.poll() is None:
             os.killpg(caller.pid, signal.SIGKILL)
         caller.wait()
-        caller.stdout.close()
+        if caller.stdout is not None:
+            caller.stdout.close()
 
     def seed_failed_frozen(self) -> None:
         state = cutover._new_state(PLAN, args().actor, args().reason)
@@ -1498,17 +1539,7 @@ class DetachedControllerTests(CutoverFixture):
         cutover._write_state(self.paths, state)
 
     def assert_phase_completes_after_the_callers_group_and_output_die(self, expected_calls) -> None:
-        # The caller is a shell leading its own session, as a terminal or an agent pane does, and
-        # `apply` runs inside its process group exactly as the operator types it.
-        caller = subprocess.Popen(
-            ["/bin/sh", "-c", '"$@"; echo caller-finished', "sh", *self.apply_argv()],
-            env=self.environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        self.addCleanup(self.end_caller, caller)
+        caller = self.start_caller()
         self.wait_until(self.gate_running, alive=lambda: caller.poll() is None)
         controller = self.controller()
         launcher = controller["ppid"]
@@ -1538,7 +1569,43 @@ class DetachedControllerTests(CutoverFixture):
         self.wait_until(lambda: process_gone(controller["pid"]))
         log = Path(controller["stdout"]).read_text(encoding="utf-8")
         self.assertIn("controller diagnostics 199", log)
-        self.assertEqual(json.loads(log[log.index("{\n") :])["status"], "resume-ready")
+        self.assertEqual(last_document(log)["status"], "resume-ready")
+
+    def test_the_real_writer_scan_exempts_the_shell_that_ran_apply_but_not_its_twin(self) -> None:
+        # A writer word inside --reason puts `secretary` and ` task ` on the command line of the
+        # shell that ran `apply`, of the launcher and of the controller alike.
+        reason = "maintenance window for task 7ebdf89a"
+        twin = subprocess.Popen(
+            ["/bin/sh", "-c", self.caller_script(reason)],
+            env=self.environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.addCleanup(self.end_caller, twin)
+        caller = self.start_caller(reason)
+        self.wait_until(self.gate_running, alive=lambda: caller.poll() is None)
+        controller = self.controller()
+        launcher = controller["ppid"]
+        self.assertEqual(cmdline(twin.pid), cmdline(caller.pid))
+        self.assertEqual(
+            {tuple(item) for item in controller["invocation"]},
+            {(launcher, cutover._process_start(launcher)), (caller.pid, cutover._process_start(caller.pid))},
+        )
+        self.assertFalse(controller["handoff_in_env"])
+
+        reported = {item["pid"] for item in json.loads((self.fakes / "writers.json").read_text(encoding="utf-8"))}
+        self.assertIn(twin.pid, reported)
+        self.assertNotIn(caller.pid, reported)
+        self.assertNotIn(launcher, reported)
+        self.assertNotIn(controller["pid"], reported)
+
+        (self.fakes / "release").touch()
+        self.wait_until(
+            lambda: self.state().get("status") == "resume-ready",
+            alive=lambda: not process_gone(controller["pid"]),
+        )
 
     def test_a_new_identity_completes_its_phase_after_the_callers_group_and_output_die(self) -> None:
         self.assert_phase_completes_after_the_callers_group_and_output_die(cutover.PHASES)
@@ -1596,8 +1663,8 @@ class DetachedControllerTests(CutoverFixture):
         probe = json.loads((self.fakes / "probe.json").read_text(encoding="utf-8"))
         self.assertEqual(probe["returncode"], 0, probe["stderr"])
         self.assertEqual(code, 0)
-        relayed = output.getvalue()
-        document = json.loads(relayed[relayed.index("{\n") :])
+        # The launcher relays the whole log, and the controller's result stays its last document.
+        document = last_document(output.getvalue())
         self.assertEqual(document["status"], "resume-ready")
         self.assertEqual(document["controller_pid"], controller["pid"])
         notice = diagnostics.getvalue()
@@ -1633,6 +1700,51 @@ class DetachedControllerTests(CutoverFixture):
         self.assertFalse(self.paths.state.exists())
         self.assertFalse(self.paths.lock.exists())
         self.assertFalse((self.fakes / "calls").exists())
+
+
+class WriterScanInvocationTests(unittest.TestCase):
+    """The writer scan exempts the controller's invocation by pid and start time, never by pid alone."""
+
+    def test_an_invocation_member_is_exempt_only_while_its_start_time_matches(self) -> None:
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", "secretary", "--reason", "window for task 1"],
+            stdin=subprocess.DEVNULL,
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        start = cutover._process_start(process.pid)
+        self.assertIsNotNone(start)
+
+        def reported(invocation) -> set[int]:
+            with mock.patch.object(cutover, "_CONTROLLER_INVOCATION", frozenset(invocation)):
+                return {item["pid"] for item in cutover._writer_processes()}
+
+        self.assertIn(process.pid, reported(()))
+        self.assertNotIn(process.pid, reported({(process.pid, start)}))
+        # The same pid under another start time is what a pid the kernel reused looks like.
+        self.assertIn(process.pid, reported({(process.pid, start + 1)}))
+
+    def test_the_handoff_names_the_launcher_and_its_invoker_and_nothing_malformed_parses(self) -> None:
+        self.assertEqual(
+            cutover._read_invocation(cutover._invocation_handoff()),
+            {
+                (os.getpid(), cutover._process_start(os.getpid())),
+                (os.getppid(), cutover._process_start(os.getppid())),
+            },
+        )
+        self.assertEqual(cutover._read_invocation(""), frozenset())
+        for malformed in ("1", "12:", ":34", "12:ab", "12:34:56"):
+            with self.subTest(handoff=malformed), self.assertRaisesRegex(cutover.CutoverError, "handoff"):
+                cutover._read_invocation(malformed)
+
+    def test_the_quiescence_refusal_names_the_survivors(self) -> None:
+        survivors = [{"pid": 4242, "command": "python -m secretary task report --ref x"}]
+        operations = cutover.Operations(cutover.Paths(Path("/nonexistent"), Path("/nonexistent")), {})
+        with (
+            mock.patch.object(cutover, "_writer_processes", return_value=survivors),
+            self.assertRaisesRegex(cutover.CutoverError, r"1 writer process\(es\) survive: 4242 python -m secretary task"),
+        ):
+            operations.writer_quiescence_proof()
 
 
 class CutoverRecoveryTests(CutoverFixture):

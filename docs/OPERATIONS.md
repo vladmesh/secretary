@@ -3788,7 +3788,8 @@ secretary cutover status --instance /absolute/instance
 `apply` detaches its own controller; `nohup`, `setsid` or `&` are not needed. The process you
 start is only a launcher: before the lock and the state document it starts the controller in a new
 session (own process group, no controlling terminal, stdin `/dev/null`), prints the controller pid
-and log path on stderr, waits, then prints the controller's output and exits with its code. The
+and log path on stderr, waits, then prints the controller's log, whose last JSON document is the
+result, and exits with its code. The
 controller writes stdout and stderr only to `<data_dir>/cutover/artifacts/apply-<UTC stamp>-<launcher
 pid>.log`, never to your terminal or pipe. Closing the terminal, killing the launcher or tearing down
 the agent session that ran it does not stop the controller: the running phase completes and the
@@ -3827,10 +3828,15 @@ children receive the durable controller identity and are admitted by that identi
 child is also recognized by parent pid. `controller_pid` is the detached process that runs the
 phases; the launcher carries no identity and the barrier refuses it. The installation data root must
 remain traversable by those runtime service accounts. Process scanning excludes the controller and
-its parent (the launcher while it lives), and otherwise refuses any command line matching the
-declared writer vocabulary. A wrapper that keeps running around `apply` (`sudo`, `timeout`) is not
-excluded, and its command line repeats `--actor` and `--reason`: keep writer-vocabulary words out of
-them.
+its own invocation: the launcher and the process that started it, which is the shell or agent pane
+that ran `apply` (an agent's `bash -c "secretary cutover apply ..."` included). The launcher hands
+both to the controller as pid and start time when it detaches, so once either exits and the kernel
+reuses its pid, that pid is scanned like any other. Every other command line matching the declared
+writer vocabulary refuses quiescence, and the refusal names the surviving pids and commands. Only
+the direct starter of `apply` is exempt. With a wrapper in between (`sudo`, `timeout`) the wrapper
+is that starter and the shell above it is not, and `sudo` with `use_pty` keeps a second `sudo`
+process above the exempt one. Their command lines repeat `--actor` and `--reason`, so when wrapping
+`apply` keep writer-vocabulary words (` task `, ` sprint `, ` issue `, ...) out of them.
 
 If failure occurs before `global_freeze` starts, `recover` records `no-cutover-effects` and does not
 restart services. If the freeze was entered but no final import, selector activation or SQL write
