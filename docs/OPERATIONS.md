@@ -3660,7 +3660,10 @@ The later owner/operator order is: install, externally upgrade the preserved tar
 `0007_card_transport_key`; run
 `prepare-successor` with the status token; inspect status and immutable history; create a fresh
 `cutover plan`; then schedule a separate maintenance window for `cutover apply`. Preparing the target
-does not activate PostgreSQL and this implementation card performed no live action.
+does not activate PostgreSQL and this implementation card performed no live action. Rerunning the
+completed `prepare-successor` command is a read-only replay only while the canonical slot is free.
+Once the fresh plan's identity occupies it, the old token refuses; read the completed history with
+`cutover status` instead.
 
 The 2026-09-09 authorized attempt recovered safely before the first SQL application write after its
 preserved imported target exposed duplicate public suffixes (`butler-1` and
@@ -3823,11 +3826,19 @@ secretary cutover recover --instance /absolute/instance --expected-revision <sha
 ```
 
 After a successful recovery before `final_fenced_import`, the command atomically archives the exact
-`recovered-frozen` document under `<data_dir>/cutover/history/postgres-v1-<plan-id>.json`, fsyncs it,
-and only then releases the canonical `postgres-v1.json` slot. `status` lists this immutable history
-and the shared successor-eligibility reason. If publication is interrupted, rerun the identical
-`recover`; it verifies and fsyncs the existing archive before finishing canonical release, without
-repeating recovery side effects. Then lift the freeze recovery left in place (see
+`recovered-frozen` document under `<data_dir>/cutover/history/postgres-v1-<plan-id>.json` with
+`successor.canonical_slot: release-intent` and fsyncs it. It then unlinks the canonical
+`postgres-v1.json` and fsyncs its directory, and only then links the immutable receipt
+`<data_dir>/cutover/history/successor-release-<plan-id>.json` (`kind: postgres-preimport-release`,
+bound to the plan and the archive checksum). The archive never claims the release. `status` lists
+the immutable history and the shared successor-eligibility reason, and shows
+`successor.canonical_slot: released-after-receipt` with `successor_release.status: complete` only
+for the matching pair, `pending` otherwise. If publication is interrupted, rerun the identical
+`recover`. Before the unlink it verifies and fsyncs the existing archive and finishes the release;
+after the unlink it finds the pending archive by the same token and revision and publishes only the
+receipt. `status` prints that command, and `plan` refuses until the receipt exists. Neither retry
+repeats recovery side effects. The 2026-09-09 archive, which says `released-after-archive` and has
+no receipt, is read as the one legacy terminal shape; do not add a receipt beside it. Then lift the freeze recovery left in place (see
 *Pipeline pause and doctor before the window*), run `plan` again and apply only its new confirmation token. The
 new plan binds the archived predecessor and therefore has a distinct identity. The old token remains
 refused. Never delete or edit either document.

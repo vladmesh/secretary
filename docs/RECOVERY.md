@@ -721,10 +721,13 @@ records `no-cutover-effects` without touching services. A freeze that stopped co
 before import or activation records `kanboard-before-fingerprint` only after confirming the
 Kanboard selector and obtaining a fresh stable source fence, then reconciles consumers. Neither
 branch claims rollback from an imported target. Once either recovery is durable, `recover` archives
-the exact terminal identity and fsyncs the history directory before removing the canonical file. A
-crash leaves either the canonical recovered document, which the same `recover` completes, or the
-archived document and an already free canonical slot. `status` exposes both the canonical state and
-recovered history.
+the exact terminal identity, recording only the intent to release, and fsyncs the history directory.
+It then removes the canonical file, fsyncs its directory and publishes an immutable release receipt.
+A crash leaves one of three states. The canonical recovered document, or the archive beside an
+already free canonical slot but no receipt, is finished by the same `recover` without repeating
+service recovery; the complete pair is terminal. `status` exposes the canonical state and recovered
+history, reports an archive without its receipt as pending, and prints the command that finishes
+it.
 
 The state document contains no credentials and is deliberately readable by runtime service uids;
 only its owner may write it. Writers enforce it only while status is `applying` or `failed-frozen`.

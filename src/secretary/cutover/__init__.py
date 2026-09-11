@@ -691,8 +691,8 @@ def build_plan(
     ]
     if pending_release:
         raise CutoverError(
-            "successor canonical release is awaiting its immutable release receipt; "
-            "rerun the exact prepare-successor command shown by status"
+            "recovered canonical release is awaiting its immutable release receipt; "
+            "rerun the exact recover or prepare-successor command shown by status"
         )
     evidence = {
         "version": STATE_VERSION,
@@ -897,38 +897,105 @@ def _publish_recovered_archive(paths: Paths, state: dict[str, Any]) -> Path:
 
 
 def _release_recovered_identity(paths: Paths, state: dict[str, Any]) -> dict[str, Any]:
-    """Archive a safe pre-write recovery, then release the canonical plan slot."""
+    """Archive a safe pre-write recovery, release the canonical slot, then publish its receipt.
+
+    The successor route's order and code: the archive records only the intent to release and
+    is fsynced before the canonical file is unlinked, and only the immutable receipt published
+    after that unlink lets the shared resolver call the slot released.
+    """
+    from secretary.cutover.successor import (
+        LEGACY_RELEASED_SLOT,
+        RELEASE_INTENT_SLOT,
+        release_canonical,
+    )
+
     eligibility = _successor_eligibility(state)
     state["successor_eligibility"] = eligibility
     if not eligibility["eligible"]:
         raise CutoverError(
             f"cutover identity is not eligible for a successor: {eligibility['reason']}"
         )
+    archive_path = _recovered_archive_path(paths, state)
+    marker = state.get("successor")
+    legacy = isinstance(marker, dict) and marker.get("canonical_slot") == LEGACY_RELEASED_SLOT
+    if legacy and not _archive_published(archive_path):
+        # A release the previous version recorded but never archived: nothing immutable claims
+        # it yet, so it restarts on the receipt route instead of minting another legacy archive.
+        del state["successor"]
+        legacy = False
     successor = state.setdefault(
         "successor",
         {
-            "archive": str(_recovered_archive_path(paths, state)),
+            "archive": str(archive_path),
             "prepared_at": _now(),
-            "canonical_slot": "released-after-archive",
+            "canonical_slot": RELEASE_INTENT_SLOT,
         },
     )
-    if successor.get("archive") != str(_recovered_archive_path(paths, state)):
+    if successor.get("archive") != str(archive_path):
         raise CutoverError("recovered cutover successor evidence is inconsistent")
     _write_state(paths, state)
     archive = _publish_recovered_archive(paths, state)
-    current = _read_state(paths)
-    if current != state:
-        raise CutoverError("canonical cutover state changed before successor publication")
+    release_canonical(paths, state)
+    if legacy:
+        # The previous version already linked this archive byte for byte; finishing its unlink
+        # leaves the one legacy shape the resolver reads, and creates no new one.
+        return {**state, "archived_state": str(archive), "successor_ready": True}
+    return _publish_preimport_receipt(paths, state)
+
+
+def _archive_published(archive: Path) -> bool:
     try:
-        paths.state.unlink()
-        descriptor = os.open(paths.state.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        archive.lstat()
+    except FileNotFoundError:
+        return False
     except OSError as exc:
-        raise CutoverError(f"could not release recovered canonical cutover state: {exc}") from None
-    return {**state, "archived_state": str(archive), "successor_ready": True}
+        raise CutoverError(f"could not inspect recovered cutover archive: {exc}") from None
+    return True
+
+
+def _publish_preimport_receipt(paths: Paths, state: dict[str, Any]) -> dict[str, Any]:
+    """Publish the receipt of a released pre-import slot and answer the resolved terminal state."""
+    from secretary.cutover.successor import publish_release_receipt
+
+    try:
+        publish_release_receipt(paths, state)
+    except (CutoverError, OSError) as exc:
+        raise CutoverError(
+            "pre-import canonical release completed but its release receipt is pending; "
+            f"rerun the identical recover command: {exc}"
+        ) from None
+    released = [
+        item
+        for item in _read_recovered_history(paths)
+        if item["state"].get("plan_id") == state["plan_id"]
+    ]
+    if len(released) != 1 or released[0].get("successor_release", {}).get("status") != "complete":
+        raise CutoverError("pre-import release receipt did not resolve terminal completion")
+    return {**released[0]["state"], "archived_state": released[0]["path"], "successor_ready": True}
+
+
+def _resume_preimport_release(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
+    """Finish a pre-import release whose canonical file is already gone but whose receipt is not."""
+    pending = [
+        item
+        for item in _read_recovered_history(paths)
+        if item.get("successor_release", {}).get("status") == "pending"
+        and "successor_preparation" not in item["state"]
+    ]
+    if not pending:
+        raise CutoverError("there is no durable cutover state to recover")
+    matching = [
+        item for item in pending if args.confirm == f"RECOVER-{item['state']['plan_id'][:16]}"
+    ]
+    if len(matching) != 1:
+        raise CutoverError(
+            "recovery confirmation token must name the pending pre-import release shown by status"
+        )
+    state = matching[0]["state"]
+    if state.get("expected_revision") != args.expected_revision:
+        raise CutoverError("recovery revision does not match the cutover identity")
+    _provenance(paths, args.expected_revision)
+    return _publish_preimport_receipt(paths, state)
 
 
 def _finish_recovery(paths: Paths, state: dict[str, Any]) -> dict[str, Any]:
@@ -2196,7 +2263,8 @@ def recover_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
     with CutoverLock(paths):
         state = _read_state(paths)
         if state is None:
-            raise CutoverError("there is no durable cutover state to recover")
+            # An interruption between canonical unlink and receipt leaves only the archive.
+            return _resume_preimport_release(args, paths)
         if state.get("expected_revision") != args.expected_revision:
             raise CutoverError("recovery revision does not match the cutover identity")
         expected_token = f"RECOVER-{state['plan_id'][:16]}"
@@ -2395,7 +2463,7 @@ def run_cutover(args: argparse.Namespace) -> int:
                 if len(pending) == 1:
                     from secretary.cutover.successor import history_status
 
-                    successor_preparation = history_status(pending[0])
+                    successor_preparation = history_status(pending[0], paths.instance)
             _render(
                 {
                     "state": state,

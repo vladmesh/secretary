@@ -976,7 +976,10 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 cutover._new_state(successor_plan, "later-operator", "separate future cutover"),
             )
             status_after_plan = cutover._read_recovered_history(paths)
-            replay_after_plan = successor.prepare(prepare_args, paths)
+            # The completed token authorizes nothing against the next canonical identity, not
+            # even a replay; status renders the same history without one.
+            with self.assertRaisesRegex(cutover.CutoverError, "now holds the slot.*cutover status"):
+                successor.prepare(prepare_args, paths)
 
         self.assertEqual(attempts, len(injected) + 1)
         self.assertTrue(all(not pending for pending in injected.values()))
@@ -1024,10 +1027,6 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         after_content = content_snapshot(access_copy)
         self.assertEqual(after_content, before_content)
         self.assertEqual(status_after_plan, status_before_plan)
-        self.assertTrue(replay_after_plan["idempotent_replay"])
-        self.assertEqual(
-            replay_after_plan["successor_preparation"]["status"], "complete"
-        )
         self.assertNotEqual(successor_plan["plan_id"], state["plan_id"])
         self.assertTrue(replay["idempotent_replay"])
         predecessor = successor_plan["recovered_predecessors"][0]["successor_preparation"]

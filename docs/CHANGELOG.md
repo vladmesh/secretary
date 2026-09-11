@@ -4,6 +4,22 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-11 — pre-import recover releases through a receipt; an old successor token refuses beside a new plan (secretary-1621, sprint:1437)
+
+**A pre-import `cutover recover` now ends with an immutable release receipt.** Its archive
+`cutover/history/postgres-v1-<plan-id>.json` records `successor.canonical_slot: release-intent`.
+Before this it said `released-after-archive`, written before the canonical file was unlinked.
+After the unlink, `recover` links `successor-release-<plan-id>.json` with
+`kind: postgres-preimport-release`. The result and `status` show `released-after-receipt` with the
+receipt path and checksum. An archive without its receipt shows `successor_release.status:
+pending`, `status.successor_preparation.next_command` is then the identical `recover` command, and
+`plan` refuses until it runs. Archives already written in the old form, such as the 2026-09-09 one,
+read exactly as before; a receipt beside one is refused.
+
+**`prepare-successor` with a completed token refuses while a canonical identity exists.** It used to
+replay the completed preparation whatever held the canonical slot. It now refuses, names both plan
+IDs and points at `cutover status`; with the slot free the replay is unchanged.
+
 ## 2026-09-11 — cutover apply detaches its controller (secretary-1617, sprint:1437)
 
 **`secretary cutover apply` survives the session that ran it.** The command now starts the
