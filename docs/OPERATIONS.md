@@ -1877,7 +1877,8 @@ python3 -P -m secretary backup verify ARCHIVE.tar [--strict]
 `create` writes a plain tar into `backups/` (`core`, `full` or `both`), unencrypted. Backend selection
 happens before an engine-specific snapshot. `core` is portable on either backend. Kanboard `full`
 retains its raw data directory; PostgreSQL `full` carries a custom-format `postgres:16` data dump
-under `engine/`, in addition to the normalized export. Staging files and pgpass are mode `0600`, the
+under `engine/`, in addition to the normalized export. The memory model cache `memory/fastembed-cache` is
+not in a `full` archive: after a restore the reindex downloads the model again. Staging files and pgpass are mode `0600`, the
 password is absent from argv and logs, and `board-store.env` is excluded from every archive.
 `verify` returns `0` on success, `1` for findings or strict warnings, and `2` for an unreadable
 archive. It selects the component matrix from the manifest, so a PostgreSQL archive neither needs
@@ -3767,7 +3768,15 @@ The expected outage begins at `global_freeze` and ends only after an operator in
 secretary cutover plan --instance /absolute/instance --expected-revision <40-char-sha>
 ```
 
-`plan` is read-only. Save its `confirmation`, inspect its source fence and parity, then use the exact
+`plan` is read-only. It refuses with exit `1`, and a new `apply` refuses before its state document
+exists, when the volume holding `<data_dir>/backups` cannot take the window's backups: three full
+archives, one per backup phase, which the 48-hour retention keeps for the whole window, plus the
+staging copy of the last one, each sized as a full archive would be written now. The refusal names
+the volume, the free and required bytes and the number of archives. The check deletes nothing, so
+older archives that retention would remove during the window still count; free space on that volume
+and plan again. With enough room the plan is unchanged.
+
+Save its `confirmation`, inspect its source fence and parity, then use the exact
 token, revision, actor and reason:
 
 ```

@@ -206,6 +206,11 @@ class CutoverFixture(unittest.TestCase):
         )
         self._installation.start()
         self.addCleanup(self.installation_preconditions)
+        # Free space on the backups volume is a fact about the host as well.  The fixture answers
+        # it as ample and BackupSpaceTests sets it per case.
+        volume = mock.patch.object(cutover, "_volume_free_bytes", return_value=1 << 50)
+        volume.start()
+        self.addCleanup(volume.stop)
         # `_serve_backend` is a real process-wide switch, and both controller entrances now
         # reach it.  A case that runs one must not leave the name exported or the decision
         # made for the next case in this interpreter.
@@ -1967,6 +1972,96 @@ THROUGH_FREEZE = (*THROUGH_CHECKPOINT, "postgresql_provision_migration_verificat
 
 def frozen(actor: str, reason: str = "approved maintenance window") -> dict[str, object]:
     return {"paused": True, "mode": "freeze", "actor": actor, "pause_reason": reason}
+
+
+class BackupSpaceTests(CutoverFixture):
+    """Plan and a new apply refuse a backups volume that cannot hold the window's archives.
+
+    The window's last backup ran out of space on 2026-09-10, after the freeze and the switch.
+    Free bytes are answered per case; the archive size is the real estimate over a data dir
+    whose model cache would, if it were counted, dwarf everything else.
+    """
+
+    CACHE_BYTES = 4 * 1024 * 1024
+
+    def setUp(self) -> None:
+        super().setUp()
+        orca = mock.patch("secretary.backup.ORCA_STATE_DIRS", ())
+        orca.start()
+        self.addCleanup(orca.stop)
+        memory = self.data / "memory"
+        cache = memory / "fastembed-cache" / "models--bge-m3"
+        cache.mkdir(parents=True)
+        (cache / "model.onnx").write_bytes(b"\0" * self.CACHE_BYTES)
+        (memory / "export.ndjson").write_text("{}\n" * 20000, encoding="utf-8")
+        self.space = cutover._backup_space(self.paths)
+
+    def plan(self) -> tuple[int, dict]:
+        buffer = StringIO()
+        with (
+            mock.patch.object(cutover, "resolve_paths", return_value=self.paths),
+            mock.patch.object(cutover, "build_plan", return_value=dict(PLAN)),
+            redirect_stdout(buffer),
+        ):
+            code = cutover.run_cutover(
+                argparse.Namespace(
+                    cutover_command="plan",
+                    instance=str(self.instance),
+                    expected_revision=REVISION,
+                )
+            )
+        return code, json.loads(buffer.getvalue())
+
+    def test_the_window_needs_every_archive_it_writes_and_one_staging_copy(self) -> None:
+        self.assertEqual(self.space["archives"], len(cutover.BACKUP_PAUSE_PHASES))
+        self.assertEqual(self.space["archives"], 3)
+        self.assertEqual(self.space["staging_copies"], 1)
+        self.assertEqual(self.space["required_bytes"], 4 * self.space["archive_bytes"])
+        self.assertEqual(self.space["backups_dir"], str(self.data / "backups"))
+        # No backup has run yet, so the nearest existing directory stands for the volume.
+        cutover._volume_free_bytes.assert_called_with(self.data)
+        # The estimate leaves out what the archive leaves out: the export is in it, the cache is not.
+        self.assertGreater(self.space["archive_bytes"], 60000)
+        self.assertLess(self.space["archive_bytes"], self.CACHE_BYTES)
+
+    def test_plan_refuses_and_names_the_volume_the_bytes_and_the_archives(self) -> None:
+        free = self.space["required_bytes"] - 1
+        with mock.patch.object(cutover, "_volume_free_bytes", return_value=free):
+            code, document = self.plan()
+
+        self.assertEqual(code, 1)
+        self.assertFalse(document["ok"])
+        error = document["error"]
+        self.assertIn(f"on volume {self.space['volume']} ", error)
+        self.assertIn(f"{free} bytes free", error)
+        self.assertIn(f"{self.space['required_bytes']} bytes required", error)
+        self.assertIn("for 3 full archives", error)
+        self.assertNotIn("privileged_preconditions", document)
+        self.assertFalse(self.paths.state.exists())
+
+    def test_plan_with_room_for_the_window_is_the_plan_as_before(self) -> None:
+        with mock.patch.object(cutover, "_volume_free_bytes", return_value=self.space["required_bytes"]):
+            code, document = self.plan()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(document, {**PLAN, "privileged_preconditions": INSTALLED_PRECONDITIONS})
+        self.assertFalse(self.paths.state.exists())
+
+    def test_a_new_apply_refuses_on_the_same_decision_before_the_state_file_exists(self) -> None:
+        free = self.space["required_bytes"] - 1
+        with mock.patch.object(cutover, "_volume_free_bytes", return_value=free):
+            _code, document = self.plan()
+            with (
+                mock.patch.object(cutover, "build_plan", return_value=dict(PLAN)),
+                mock.patch.object(cutover, "Operations") as operations,
+                self.assertRaises(cutover.CutoverError) as refusal,
+            ):
+                cutover.apply_cutover(args(), self.paths)
+
+        self.assertEqual(str(refusal.exception), document["error"])
+        operations.assert_not_called()
+        self.assertFalse(self.paths.state.exists())
+        self.assertIsNone(cutover._read_state(self.paths))
 
 
 class InstallationPreconditionTests(CutoverFixture):

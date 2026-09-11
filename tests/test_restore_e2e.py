@@ -134,6 +134,10 @@ def _seed_producer(data_dir: Path, instance_dir: Path) -> tuple[list[dict[str, o
 
     # Derived state a restore must never treat as canon.
     (data_dir / "memory" / "index.sqlite").write_bytes(b"stale-vector-index")
+    # The embedding model cache: a full archive leaves it out, the reindex downloads the model again.
+    cache = data_dir / "memory" / "fastembed-cache" / "models--e2e"
+    cache.mkdir(parents=True)
+    (cache / "model.onnx").write_bytes(b"model-weights")
     debug = data_dir / "debug" / "orca-state"
     debug.mkdir(parents=True)
     (debug / "inventory.json").write_text('{"sessions": ["live-session"]}', encoding="utf-8")
@@ -277,6 +281,10 @@ class RestoreEndToEndTests(unittest.TestCase):
 
             # A full archive carries the raw dump and every card, done ones included.
             self.assertTrue(list((data_dir / "board").glob("kanboard-raw-*")))
+            # It carries no model cache, and the reindex below rebuilds the index without one.
+            with tarfile.open(fixture.archive) as archive:
+                self.assertFalse([name for name in archive.getnames() if "/memory/fastembed-cache" in name])
+            self.assertFalse((data_dir / "memory" / "fastembed-cache").exists())
             self.assertEqual(
                 import_normalized_board(data_dir, client=_EmptyWriteKanboard()), len(fixture.cards)
             )

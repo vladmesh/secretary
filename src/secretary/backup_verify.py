@@ -16,6 +16,7 @@ from secretary.backup_policy import (
     component_archive_name,
     is_memory_journal_git_entry,
     is_memory_journal_git_runtime_entry,
+    is_memory_model_cache_entry,
     policy_for,
     should_skip_data_entry,
 )
@@ -250,9 +251,12 @@ def verify_restore_payload(plain_archive: Path, manifest: dict[str, Any], policy
                 if member.name.startswith(data_prefix):
                     data_relative = relative.removeprefix("secretary-data/")
                     path = Path(data_relative)
-                    if should_skip_data_entry(path, policy=policy) and (
-                        not is_memory_journal_git_runtime_entry(path)
-                        or path.parts[3:5] == ("objects", "info")
+                    if should_skip_data_entry(path, policy=policy) and not (
+                        is_memory_model_cache_entry(path)
+                        or (
+                            is_memory_journal_git_runtime_entry(path)
+                            and path.parts[3:5] != ("objects", "info")
+                        )
                     ):
                         return [f"unexpected data component: {data_relative}"]
                 if member.isdir():

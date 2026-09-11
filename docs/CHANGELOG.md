@@ -4,6 +4,20 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-11 — full archives without the model cache; cutover plan checks the backups volume (secretary-1616, sprint:1437)
+
+**A `full` archive no longer carries `memory/fastembed-cache`.** Both the Kanboard and the PostgreSQL
+full policy skip it through the existing data predicate; the rest of `memory/`, the `core` archive and
+the archive format are unchanged. A full archive written before this still verifies, and restore
+drops its cache entries instead of calling them unsafe. The reindex downloads the model again.
+
+**`secretary cutover plan` refuses when the backups volume is short.** It exits `1` with
+`{"ok": false, "error": ...}` naming the volume, the free and required bytes and the number of
+archives, when the volume under `<data_dir>/backups` cannot hold three full archives (one per backup
+phase of the window) plus one staging copy. A new `apply` refuses with the same message before its
+state document exists. With enough room the plan output is unchanged; a retry of an existing
+identity is not checked.
+
 ## 2026-09-07 — the command history, and what became of a request id (secretary-1579, sprint:1431)
 
 **Two new protocol reads, and no new machinery.** `command_history(cursor, limit)` answers a page of

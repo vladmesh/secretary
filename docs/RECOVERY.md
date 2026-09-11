@@ -37,6 +37,7 @@ archive is version 2 and instead contains `engine/postgres.dump`, a custom-forma
 made and listed by the pinned `postgres:16` client. Its manifest records the source Alembic head,
 server/client version, table counts and the dump's local-recovery purpose. It contains no database
 password, role secret, `board-store.env`, or claim that the dump restores Kanboard.
+Neither `full` archive carries the memory model cache `memory/fastembed-cache`; the index rebuild after a restore downloads the model again.
 
 Use `SECRETARY_CARD_BACKEND=postgres secretary restore-postgres ARCHIVE --instance TARGET` only
 with a distinct disposable target whose `board-store.env`, container, database and owner/app/read
