@@ -47,6 +47,11 @@ class OutcomeTerminalPath(str, Enum):
     FOLLOWS_ACCEPTED_REPORT = "follows_accepted_report"
 
 
+# `rejected_failure_reason` of a checkout a red review rejected, as opposed to one a mechanical
+# gate bounced: both rejections are `substantive`, and only the reason tells them apart.
+REVIEW_REJECTION_REASON = "red-review"
+
+
 def outcome_terminal_path(value: Any, *, state: str) -> OutcomeTerminalPath:
     """Read the durable path, conservatively classifying pre-field records."""
     if value in {path.value for path in OutcomeTerminalPath}:

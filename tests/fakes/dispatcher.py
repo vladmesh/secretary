@@ -908,6 +908,7 @@ class FakeHost:
         generation: int,
         decision: str = "",
         protocol_prerequisites: tuple[str, ...] = (),
+        record=None,
     ) -> None:
         """Write the TASK.md this bring-up would hand the worker, from the real builder.
 
@@ -926,6 +927,7 @@ class FakeHost:
             generation,
             decision,
             protocol_prerequisites,
+            record=record,
         )
         (workspace / "TASK.md").write_text(document, encoding="utf-8")
         if self.crash_after_task_doc is not None:
@@ -1359,6 +1361,7 @@ class FakeHost:
             record.report_generation,
             record.report_decision,
             record.report_protocol_prerequisites,
+            record=record,
         )
         self.prepared.append(task["ref"])
         launched = self._launched(
@@ -1706,6 +1709,7 @@ class FakeHost:
             record.report_generation,
             record.report_decision,
             record.report_protocol_prerequisites,
+            record=record,
         )
         self.resumed_continuations.append(
             head_ops.NudgePointer.at_document(
