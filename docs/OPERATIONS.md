@@ -1156,10 +1156,15 @@ it is untested against the real thing, and that is the state of the evidence.
 
 Every newly prepared card workspace contains the dispatcher-owned
 `.secretary-task-env/venv`, claimed before creation and kept separate from the adapter-owned `.venv`.
-Before creating the namespace, the dispatcher adds `.secretary-task-env/` to Git's repository-local
-`info/exclude`; linked worktrees share this file. The idempotent entry intentionally remains after
-card cleanup and is redundant but harmless when the repository's tracked ignore already covers the
-namespace. Existing project reservation and dispatcher serialization permit only one card for the
+Before creating the namespace, the dispatcher adds everything the pipeline writes into a workspace
+to Git's repository-local `info/exclude`: `.secretary-task-env/`, the root-anchored `/TASK.md` and
+the `secretary check broad` receipt directory `/state/checks/` (`WORKSPACE_EXCLUDES`). A project's
+`.gitignore` therefore needs no pipeline entries and a receipt is not refused as
+`receipt_not_ignored`; `TASK.md` or `state/checks/` deeper in the tree stay the project's own.
+The reviewer's document is written outside the checkout and needs no entry. Linked worktrees share
+this file, so the project's main checkout ignores the same root paths too. Only missing lines are
+appended; the entries intentionally remain after card cleanup and are redundant but harmless when
+the repository's tracked ignore already covers them. Existing project reservation and dispatcher serialization permit only one card for the
 project at a time, so this hotfix adds no separate locking protocol around that append. The namespace
 remains absent from `git status` and from a blanket `git add -A`. When the adapter declares
 `broad_check` but omits `broad_check.interpreter`, the candidate's `.[dev]` contract is installed

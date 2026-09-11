@@ -275,7 +275,7 @@ from triggered_agents.runtime.prompt_document import (
 from triggered_agents.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
-from triggered_agents.runtime.role_env import WORKSPACE_ENV_DIR
+from triggered_agents.runtime.role_env import WORKSPACE_ENV_DIR, WORKSPACE_EXCLUDES
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
 
@@ -2874,7 +2874,12 @@ class CommandHostRuntime:
         return environment
 
     def _exclude_workspace_environment(self, root: Path) -> None:
-        """Keep the reserved runtime namespace out of this repository's candidate content."""
+        """Keep everything the pipeline writes here out of this repository's candidate content.
+
+        Only the lines of `WORKSPACE_EXCLUDES` the file lacks are appended, after whatever it already
+        holds, so a set a crash left half-written is completed by the next bring-up. For a linked
+        worktree Git resolves this to the repository's shared exclude file.
+        """
         located = self._run(
             ["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
             "workspace Git exclude",
@@ -2889,12 +2894,13 @@ class CommandHostRuntime:
             current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
         except (OSError, UnicodeError) as exc:
             raise HostError(f"workspace Git exclude could not be read: {exc}") from None
-        pattern = f"{Path(WORKSPACE_ENV_DIR).parts[0]}/"
-        if pattern in {line.strip() for line in current.splitlines()}:
+        present = {line.strip() for line in current.splitlines()}
+        missing = [pattern for pattern in WORKSPACE_EXCLUDES if pattern not in present]
+        if not missing:
             return
         separator = "" if not current or current.endswith("\n") else "\n"
         try:
-            write_text_atomic(exclude, f"{current}{separator}{pattern}\n")
+            write_text_atomic(exclude, current + separator + "".join(f"{pattern}\n" for pattern in missing))
         except RuntimeError as exc:
             raise HostError(f"workspace Git exclude could not be written: {exc}") from None
 

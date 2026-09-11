@@ -7,10 +7,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from secretary.broad_check import load_receipt, receipt_path, run_broad_check
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.runtime_provenance import RuntimeProvenance
 from secretary.dispatcher_gate import GateResult
@@ -309,6 +311,119 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(staged.stdout, "")
+
+    def _clean_project_worktree(self, tmp: str) -> tuple[Path, Path]:
+        """A linked task worktree of a project whose committed `.gitignore` is empty."""
+        repository = Path(tmp) / "clean-project"
+        _git_workspace(repository)
+        (repository / ".gitignore").write_text("", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repository), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(repository), "commit", "-qm", "empty ignore"], check=True)
+        workspace = Path(tmp) / "clean-task-worktree"
+        subprocess.run(
+            ["git", "-C", str(repository), "worktree", "add", "-qb", "task", str(workspace)],
+            check=True,
+        )
+        return repository, workspace
+
+    @staticmethod
+    def _ignored(workspace: Path, path: str) -> bool:
+        return (
+            subprocess.run(["git", "-C", str(workspace), "check-ignore", "-q", path], check=False).returncode
+            == 0
+        )
+
+    @staticmethod
+    def _exclude_file(workspace: Path) -> Path:
+        located = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--git-path", "info/exclude"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        exclude = Path(located)
+        return exclude if exclude.is_absolute() else workspace / exclude
+
+    def test_pipeline_written_paths_are_excluded_in_a_project_with_a_clean_gitignore(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, workspace = self._clean_project_worktree(tmp)
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+            )
+
+            host._prepare_workspace_environment(str(workspace))
+
+            for path in ("state/checks/broad-x.json", "TASK.md", ".secretary-task-env/owner.json"):
+                self.assertTrue(self._ignored(workspace, path), f"{path} must be excluded")
+            (workspace / "TASK.md").write_text("task\n", encoding="utf-8")
+            (workspace / "state" / "checks").mkdir(parents=True)
+            (workspace / "state" / "checks" / "broad-x.json").write_text("{}\n", encoding="utf-8")
+            status = subprocess.run(
+                ["git", "-C", str(workspace), "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(status.stdout, "")
+            self.assertEqual((workspace / ".gitignore").read_text(encoding="utf-8"), "")
+
+    def test_same_names_deeper_in_the_project_stay_candidate_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, workspace = self._clean_project_worktree(tmp)
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+            )
+
+            host._prepare_workspace_environment(str(workspace))
+
+            for path in ("docs/TASK.md", "docs/state/checks/broad-x.json"):
+                self.assertFalse(self._ignored(workspace, path), f"{path} belongs to the project")
+            (workspace / "docs").mkdir()
+            (workspace / "docs" / "TASK.md").write_text("project doc\n", encoding="utf-8")
+            status = subprocess.run(
+                ["git", "-C", str(workspace), "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(status.stdout, "?? docs/\n")
+
+    def test_broad_receipt_is_written_in_a_clean_project_workspace_after_bring_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, workspace = self._clean_project_worktree(tmp)
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+            )
+
+            host._prepare_workspace_environment(str(workspace))
+            code, _ = run_broad_check("true", root=workspace, stream=StringIO())
+
+            self.assertEqual(code, 0)
+            self.assertIsNotNone(load_receipt(receipt_path(workspace, "true")))
+            status = subprocess.run(
+                ["git", "-C", str(workspace), "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(status.stdout, "")
+
+    def test_repeated_bring_up_appends_only_the_missing_exclude_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, workspace = self._clean_project_worktree(tmp)
+            exclude = self._exclude_file(workspace)
+            # A foreign rule, a set an earlier bring-up only partly wrote, and no final newline.
+            exclude.write_text("foreign-rule\n.secretary-task-env/", encoding="utf-8")
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+            )
+
+            host._prepare_workspace_environment(str(workspace))
+            first = exclude.read_text(encoding="utf-8")
+            host._prepare_workspace_environment(str(workspace))
+
+            self.assertEqual(first, "foreign-rule\n.secretary-task-env/\n/TASK.md\n/state/checks/\n")
+            self.assertEqual(exclude.read_text(encoding="utf-8"), first)
 
     def test_rework_prepares_a_missing_pre_upgrade_environment_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
