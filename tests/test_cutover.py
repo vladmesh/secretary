@@ -1389,9 +1389,27 @@ class DetachedControllerTests(CutoverFixture):
 
     # The phase the incident controller died in, past global_freeze so the barrier is armed.
     gate = "postgresql_recovery_backup"
+    # A worker head carries the live installation's selector and instance.  Left in place, the
+    # CLI skips binding the fixture's runtime.env and these tests pass only beside a live host.
+    ambient_installation = (
+        "SECRETARY_CARD_BACKEND",
+        "SECRETARY_INSTANCE",
+        "SECRETARY_RUNTIME_ENV_FILE",
+        "TA_RUNTIME_ENV_FILE",
+        cutover.CONTROLLER_ID_ENV,
+        cutover.DETACHED_CONTROLLER_ENV,
+    )
 
     def setUp(self) -> None:
         super().setUp()
+        # The real CLI binds the card backend from the instance's runtime.env, which an
+        # installation keeps private and out of its checkout; the fixture's plain directory with
+        # a group-readable file would refuse before `apply` is ever reached.
+        self.runtime.chmod(0o600)
+        (self.instance / ".gitignore").write_text("runtime.env\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.instance), "init", "-q"], check=True)
+        for name in self.ambient_installation:
+            os.environ.pop(name, None)
         self.fakes = Path(self.temporary.name) / "fakes"
         self.fakes.mkdir()
         (self.fakes / "sitecustomize.py").write_text(DETACHED_FAKES, encoding="utf-8")
@@ -1407,8 +1425,6 @@ class DetachedControllerTests(CutoverFixture):
             "PYTHONPATH": os.pathsep.join((str(self.fakes), str(source))),
             "CUTOVER_TEST_FAKES": str(self.fakes),
         }
-        for name in (cutover.CONTROLLER_ID_ENV, cutover.DETACHED_CONTROLLER_ENV):
-            self.environment.pop(name, None)
         self.addCleanup(self.stop_controller)
 
     def stop_controller(self) -> None:
