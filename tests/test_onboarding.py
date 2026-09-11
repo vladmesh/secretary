@@ -549,6 +549,114 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(artifact["draft"]["findings"][-1]["message"], "existing binding is enabled")
         self.assertEqual(before, (self.binding.read_bytes(), adapter.read_bytes()))
 
+    def inventory_binding(self) -> Path:
+        """A Phase-2 inventory binding: registered and disabled on the shared inventory-only
+        adapter, with no draft of its own. Returns the shared adapter's file."""
+        project_add(str(self.repo), str(self.instance), dry_run=False)
+        binding = load_config(self.binding)
+        binding["adapter"] = "inventory-only"
+        binding["plane"] = "project"
+        self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        self.draft.unlink()
+        shared = self.instance / "adapters" / "inventory-only.yaml"
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.write_text("version: 1\nid: inventory-only\n", encoding="utf-8")
+        return shared
+
+    def test_add_moves_a_disabled_binding_onto_the_project_adapter(self):
+        shared = self.inventory_binding()
+        shared_bytes = shared.read_bytes()
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0, artifact)
+        binding = load_config(self.binding)
+        self.assertEqual(binding["adapter"], "sample-project")
+        self.assertFalse(binding["enabled"])
+        self.assertEqual(binding["plane"], "project")
+        self.assertEqual(artifact["identity"]["adapter"], "sample-project")
+        self.assertEqual(artifact["provision"]["status"], "pending")
+        self.assertEqual(load_config(self.draft), artifact)
+        self.assertEqual(validate(binding, "project-binding", self.binding.name), [])
+        self.assertEqual(validate(artifact, "onboarding-contract", self.draft.name), [])
+        self.assertEqual(shared.read_bytes(), shared_bytes)
+
+        before = self.binding.read_bytes(), self.draft.read_bytes()
+        code, _ = project_add(str(self.repo), str(self.instance), dry_run=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(before, (self.binding.read_bytes(), self.draft.read_bytes()))
+
+    def test_an_enabled_binding_on_another_adapter_still_refuses(self):
+        self.inventory_binding()
+        binding = load_config(self.binding)
+        binding["enabled"] = True
+        self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        before = self.binding.read_bytes()
+
+        for re_onboard, message in (
+            (False, "existing binding is enabled"),
+            (True, "existing binding has conflicting adapter"),
+        ):
+            code, artifact = project_add(
+                str(self.repo), str(self.instance), dry_run=False, re_onboard=re_onboard
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(artifact["draft"]["findings"][-1]["message"], message)
+            self.assertEqual(before, self.binding.read_bytes())
+            self.assertFalse(self.draft.exists())
+
+    def test_a_draft_of_another_identity_still_refuses_the_move(self):
+        """Only the draft of the binding's previous adapter is taken over; a draft naming some
+        other identity is still refused, and nothing moves."""
+        project_add(str(self.repo), str(self.instance), dry_run=False)
+        binding = load_config(self.binding)
+        binding["adapter"] = "inventory-only"
+        self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        draft = load_config(self.draft)
+        draft["identity"]["adapter"] = "someone-else"
+        self.draft.write_text(yaml.safe_dump(draft), encoding="utf-8")
+        before = self.binding.read_bytes(), self.draft.read_bytes()
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            artifact["draft"]["findings"][-1]["message"], "existing draft identity does not match binding"
+        )
+        self.assertEqual(before, (self.binding.read_bytes(), self.draft.read_bytes()))
+
+    def test_a_move_interrupted_before_the_binding_is_completed_by_a_retry(self):
+        """The draft is published first: a kill before the binding leaves the binding on the
+        previous adapter and the draft already on the new one, which the retry accepts."""
+        self.inventory_binding()
+        real_replace = os.replace
+        calls = 0
+
+        def crash_after_first(source, target):
+            nonlocal calls
+            calls += 1
+            result = real_replace(source, target)
+            if calls == 1:
+                raise KeyboardInterrupt("host crash")
+            return result
+
+        with (
+            mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(load_config(self.binding)["adapter"], "inventory-only")
+        self.assertEqual(load_config(self.draft)["identity"]["adapter"], "sample-project")
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0, artifact)
+        self.assertEqual(load_config(self.binding)["adapter"], "sample-project")
+        self.assertFalse(load_config(self.binding)["enabled"])
+        self.assertEqual(load_config(self.draft), artifact)
+
     def test_scanner_cannot_add_a_target(self):
         _, artifact = project_add(str(self.repo), str(self.instance), dry_run=True)
         artifact["scanner"]["repo"]["path"] = "/different/repo"

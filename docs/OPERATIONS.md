@@ -528,13 +528,22 @@ What each stage does:
   id is a digest of identity and the scanner head, so a new head yields a new run.
 - `provision-apply` reads `--result PATH` or the default result path for the run, publishes the canonical
   adapter and keeps the binding disabled. A result carrying a foreign run id or a foreign scanner head is
-  rejected.
+  rejected. The draft's copy of the adapter is validated by the adapter schema itself, so whatever the
+  canonical adapter may declare, `broad_check.module`/`args` included, passes here and reaches the gate
+  unedited.
 - `project gate` builds a temporary worktree at the recorded head, runs setup, smoke and validation, and is
   the only stage that sets the binding to enabled.
 
 `project add` on an enabled binding refuses with an "existing binding is enabled" error. That is not a
 reason to edit YAML: run `project gate` on the live binding first. It will clear the enable itself if the
 input is stale and return the project to the disabled state the recovery works from.
+
+A disabled binding on another adapter, typically an inventory binding on `adapter: inventory-only`, is not a
+conflict: `project add` moves it onto the project's own adapter and it stays disabled. Provision and gate
+state earned by the previous adapter resets to pending (run ids derive from the adapter, so its results are
+foreign), a stale `adapters/<id>.yaml` is deleted, and the previous adapter's file is left alone. Then run
+provisioning and the gate as above. An enabled binding on another adapter still refuses, with
+`--re-onboard` too ("existing binding has conflicting adapter").
 
 ### Re-onboarding an enabled legacy project
 

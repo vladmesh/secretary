@@ -66,7 +66,10 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "PyYAML>=6.0",
-    "jsonschema>=4.10",
+    # 4.18 is the first release whose validators take a `referencing` registry (its own
+    # dependency from then on): secretary/config.py resolves one bundled schema's `$ref` to
+    # another through it.
+    "jsonschema>=4.18",
     # The secret store is part of the product, not an extra: an installation that
     # cannot open its own secrets is not recoverable. 41.0 is the first release
     # with the AEAD and KDF surface secretary/secret_store.py uses.

@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator
+from referencing import Registry
+from referencing.jsonschema import DRAFT202012
 
 from secretary.sprints import budget_thresholds, open_sprint_limit_invalid
 from secretary.tasks import TaskError
@@ -65,8 +67,28 @@ def load_schema(name: str) -> dict[str, Any]:
         filename = SCHEMAS[name]
     except KeyError:
         raise ValueError(f"unknown schema: {name}") from None
+    return _read_schema(filename)
+
+
+def _read_schema(filename: str) -> dict[str, Any]:
     text = resources.files("secretary.schemas").joinpath(filename).read_text("utf-8")
     return json.loads(text)
+
+
+@cache
+def _schema_registry() -> Registry:
+    """Every bundled schema under its ``$id``, so one schema can ``$ref`` another by file name.
+
+    A contract that embeds another artifact names that artifact's schema instead of copying it:
+    the onboarding contract's drafted adapter is ``adapter.schema.json``, so the two cannot
+    disagree about what a canonical adapter is. Read from the package, not through
+    ``load_schema``, so a caller that patches one schema for a test does not leak it into the
+    cached registry.
+    """
+    return Registry().with_resources(
+        (schema["$id"], DRAFT202012.create_resource(schema))
+        for schema in (_read_schema(filename) for filename in SCHEMAS.values())
+    )
 
 
 def load_config(path: Path) -> Any:
@@ -166,7 +188,7 @@ def _safe_message(error: Any) -> str:
 
 def validate(data: Any, schema_name: str, source: str) -> list[SchemaError]:
     """Validate ``data`` against a named schema. Returns errors, never raises."""
-    validator = Draft202012Validator(load_schema(schema_name))
+    validator = Draft202012Validator(load_schema(schema_name), registry=_schema_registry())
     errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
     return [
         SchemaError(source=source, path=_field_path(e.absolute_path), message=_safe_message(e))

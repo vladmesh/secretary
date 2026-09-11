@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import tempfile
 import unittest
@@ -38,7 +39,9 @@ class GateTests(unittest.TestCase):
     def adapter(self) -> Path:
         return self.instance / "adapters" / "sample-project.yaml"
 
-    def provision(self, *, setup="true", smoke="true", validation="true", no_tests=False) -> None:
+    def provision(
+        self, *, setup="true", smoke="true", validation="true", no_tests=False, broad_check=None
+    ) -> None:
         adapter = {
             "setup": {"commands": [setup]},
             "smoke": {"command": smoke},
@@ -47,10 +50,12 @@ class GateTests(unittest.TestCase):
             else {"ci": "local", "command": validation},
             "artifact_policy": {"write_project_files": False},
         }
+        if broad_check is not None:
+            adapter["broad_check"] = broad_check
         result = {
             "version": 1,
             "run_id": self.task["run_id"],
-            "identity": {"id": "sample-project", "adapter": "sample-project"},
+            "identity": {"id": "sample-project", "adapter": self.task["identity"]["adapter"]},
             "input_revision": dict(self.task["input_revision"]),
             "status": "drafted",
             "adapter": adapter,
@@ -303,6 +308,69 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "conflict")
         self.assertTrue(load_config(self.binding)["enabled"])
+
+    def test_full_broad_check_contract_goes_from_apply_to_gate_without_a_hand_edit(self):
+        """provision-apply publishes an adapter declaring the whole broad check contract, and the
+        gate passes on exactly those bytes: no edit of adapters/<id>.yaml in between."""
+        broad_check = {
+            "import_package": "sample_project",
+            "module": "tests.broad",
+            "args": ["-k", "a b"],
+            "interpreter": ".venv/bin/python",
+        }
+        self.provision(broad_check=broad_check)
+        published = self.adapter.read_bytes()
+        draft = load_config(self.instance / "adapter-drafts/sample-project.yaml")
+        self.assertEqual(load_config(self.adapter)["broad_check"], broad_check)
+        self.assertEqual(draft["provision"]["adapter"]["broad_check"], broad_check)
+
+        code, result = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["adapter_digest"], "sha256:" + hashlib.sha256(published).hexdigest())
+        self.assertEqual(self.adapter.read_bytes(), published)
+        self.assertTrue(load_config(self.binding)["enabled"])
+
+    def test_moving_a_binding_off_another_adapter_voids_what_that_adapter_earned(self):
+        """A disabled binding provisioned on another adapter is moved onto the project's own by
+        project add. The drafted provision does not survive as valid: the gate refuses it, the old
+        result is foreign, and the other adapter's file is left as it was."""
+        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
+        binding = load_config(self.binding)
+        binding["adapter"] = "inventory-only"
+        draft = load_config(draft_path)
+        draft["identity"]["adapter"] = "inventory-only"
+        self.binding.write_text(yaml.safe_dump(binding, sort_keys=False), encoding="utf-8")
+        draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
+        code, started = start_provision(str(self.instance), "sample-project")
+        self.assertEqual(code, 0, started)
+        self.task = started["task"]
+        self.provision()
+        previous = self.instance / "adapters" / "inventory-only.yaml"
+        previous_bytes = previous.read_bytes()
+        self.assertEqual(load_config(draft_path)["provision"]["status"], "drafted")
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0, artifact)
+        self.assertEqual(load_config(self.binding)["adapter"], "sample-project")
+        self.assertFalse(load_config(self.binding)["enabled"])
+        self.assertEqual(artifact["provision"]["status"], "pending")
+        self.assertEqual(artifact["gate"]["status"], "pending")
+        self.assertEqual(previous.read_bytes(), previous_bytes)
+        self.assertFalse(self.adapter.exists())
+
+        code, result = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 1, result)
+        self.assertEqual(result, {"status": "conflict", "finding": "provision is not drafted"})
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.instance / "result.yaml")
+        )
+        self.assertEqual(code, 1, result)
+        self.assertEqual(result["status"], "result_foreign")
+        self.assertFalse(self.adapter.exists())
+        self.assertFalse(load_config(self.binding)["enabled"])
 
 
 if __name__ == "__main__":
