@@ -12,8 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.backup import create_backups, verify_backup
-from secretary.backup_policy import POLICIES, should_skip_data_entry
+from secretary.backup import create_backups, estimate_archive_bytes, verify_backup
+from secretary.backup_policy import POLICIES, POSTGRES_FULL_POLICY, should_skip_data_entry
 from secretary.data import DataExport
 from tests.restore_fixtures import create_backup
 
@@ -118,6 +118,9 @@ class BackupTests(unittest.TestCase):
             (git_dir / "modules" / "nested").mkdir(parents=True)
             (git_dir / "modules" / "nested" / "config").write_text("[core]\npager = bad\n", encoding="utf-8")
             (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            cache = data_dir / "memory" / "fastembed-cache" / "models--bge-m3"
+            cache.mkdir(parents=True)
+            (cache / "model.onnx").write_bytes(b"onnx")
 
             raw = data_dir / "board" / "kanboard-raw-test"
             (raw / "data").mkdir(parents=True)
@@ -147,12 +150,98 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/config", names)
             self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/hooks/post-checkout", names)
             self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/modules/nested/config", names)
+            self.assertIn("secretary-backup/secretary-data/memory/export.ndjson", names)
+            self.assertEqual(
+                [name for name in names if "secretary-data/memory/fastembed-cache" in name], []
+            )
             self.assertEqual(
                 verify_backup(
                     result.archive,
                 ).code,
                 0,
             )
+
+    def _full_backup_with_model_cache(self, root: Path, *, cache_bytes: int = 4) -> tuple[Path, Path]:
+        instance = root / "instance"
+        data_dir = root / "secretary-data"
+        _write_instance(instance, data_dir)
+        _write_export_surface(data_dir)
+        (data_dir / "memory" / "export.ndjson").write_text("{}\n" * 20000, encoding="utf-8")
+        cache = data_dir / "memory" / "fastembed-cache" / "models--bge-m3"
+        cache.mkdir(parents=True)
+        (cache / "model.onnx").write_bytes(b"\0" * cache_bytes)
+        raw = data_dir / "board" / "kanboard-raw-test"
+        (raw / "data").mkdir(parents=True)
+        (raw / "data" / "db.sqlite").write_bytes(b"sqlite")
+        (raw / "manifest.json").write_text("{}", encoding="utf-8")
+        orca = root / "orca"
+        orca.mkdir()
+        (orca / "state.json").write_text("{}", encoding="utf-8")
+        return instance, data_dir
+
+    def _create_full(self, instance: Path, data_dir: Path):
+        exports = {
+            "board": DataExport(data_dir / "board" / "cards.json", 1, "test"),
+            "memory": DataExport(data_dir / "memory" / "export.ndjson", 1, "test"),
+            "runs": DataExport(data_dir / "runs" / "runs.ndjson", 1, "test"),
+            "transcripts": DataExport(data_dir / "transcripts" / "inventory.json", 1, "test"),
+            "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "test"),
+        }
+        with (
+            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("secretary.backup._pipeline_action", return_value=None),
+            mock.patch(
+                "secretary.backup.raw_kanboard_dump",
+                return_value=SimpleNamespace(dump_dir=data_dir / "board" / "kanboard-raw-test"),
+            ),
+            mock.patch("secretary.backup.export_all", return_value=exports),
+        ):
+            return create_backup(instance)
+
+    def test_estimate_covers_the_archive_and_leaves_the_model_cache_out(self):
+        cache_bytes = 4 * 1024 * 1024
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance, data_dir = self._full_backup_with_model_cache(root, cache_bytes=cache_bytes)
+            with mock.patch("secretary.backup.ORCA_STATE_DIRS", (root / "orca",)):
+                estimate = estimate_archive_bytes(
+                    instance, data_dir, backup_kind="full", backend="kanboard"
+                )
+                result = self._create_full(instance, data_dir)
+
+            self.assertGreaterEqual(estimate, result.archive.stat().st_size)
+            self.assertLess(estimate, cache_bytes)
+
+    def test_a_full_archive_written_with_the_model_cache_still_verifies_and_restores_without_it(self):
+        from secretary.backup_policy import is_memory_model_cache_entry
+        from secretary.restore import restore_backup
+
+        def before_the_exclusion(relative, *, policy):
+            if is_memory_model_cache_entry(relative):
+                return False
+            return should_skip_data_entry(relative, policy=policy)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance, data_dir = self._full_backup_with_model_cache(root)
+            with mock.patch("secretary.backup.should_skip_data_entry", side_effect=before_the_exclusion):
+                result = self._create_full(instance, data_dir)
+            with tarfile.open(result.archive, "r") as archive:
+                names = set(archive.getnames())
+            self.assertIn(
+                "secretary-backup/secretary-data/memory/fastembed-cache/models--bge-m3/model.onnx", names
+            )
+
+            self.assertEqual(verify_backup(result.archive).code, 0)
+            target = root / "target-instance"
+            restored = root / "restored-data"
+            _write_instance(target, restored)
+            restore_backup(result.archive, target)
+
+            self.assertEqual(
+                (restored / "memory" / "export.ndjson").read_text(encoding="utf-8"), "{}\n" * 20000
+            )
+            self.assertFalse((restored / "memory" / "fastembed-cache").exists())
 
     def test_create_rejects_claimed_worker_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1010,6 +1099,22 @@ class ShouldSkipDataEntryTests(unittest.TestCase):
                 with self.subTest(kind=kind, relative=relative):
                     self.assertFalse(should_skip_data_entry(Path(relative), policy=policy))
 
+    def test_full_archives_leave_out_only_the_memory_model_cache(self):
+        for policy in (POLICIES["full"], POSTGRES_FULL_POLICY):
+            for relative in (
+                "memory/fastembed-cache",
+                "memory/fastembed-cache/models--bge-m3/snapshots/model.onnx",
+            ):
+                with self.subTest(backend=policy.backend, relative=relative):
+                    self.assertTrue(should_skip_data_entry(Path(relative), policy=policy))
+            for relative in (
+                "memory/export.ndjson",
+                "memory/fastembed-cache-notes/readme.md",
+                "memory/facts/global/one.md",
+            ):
+                with self.subTest(backend=policy.backend, relative=relative):
+                    self.assertFalse(should_skip_data_entry(Path(relative), policy=policy))
+
 
 def _write_instance(instance: Path, data_dir: Path) -> None:
     instance.mkdir()
@@ -1262,6 +1367,8 @@ class PostgresBackupPolicyTests(unittest.TestCase):
                     '{"version":1,"events":[]}\n', encoding="utf-8"
                 )
                 (path / "board" / "audit.ndjson").write_text("", encoding="utf-8")
+                (path / "memory" / "fastembed-cache").mkdir(exist_ok=True)
+                (path / "memory" / "fastembed-cache" / "model.onnx").write_bytes(b"onnx")
                 return result
 
             metadata = {
@@ -1307,6 +1414,8 @@ class PostgresBackupPolicyTests(unittest.TestCase):
                 )
             self.assertNotIn("board-store.env", names)
             self.assertNotIn(secret.encode(), body)
+            self.assertIn("secretary-backup/secretary-data/memory/export.ndjson", names)
+            self.assertEqual([name for name in names if "memory/fastembed-cache" in name], [])
 
     def test_unusable_postgres_fails_before_pause_or_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:

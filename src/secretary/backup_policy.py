@@ -13,6 +13,7 @@ POSTGRES_BACKUP_VERSION = 2
 
 BackupKind = Literal["core", "full"]
 RestoreAction = Literal["restore", "exclude"]
+MEMORY_MODEL_CACHE = ("memory", "fastembed-cache")
 
 
 @dataclass(frozen=True)
@@ -253,9 +254,20 @@ def should_skip_data_entry(relative: Path, *, policy: BackupPolicy) -> bool:
         return True
     if policy.kind == "core":
         return _skip_core_data_entry(relative)
+    if is_memory_model_cache_entry(relative):
+        return True
     if policy.backend == "postgres" and relative.parts[:1] == ("board",):
         return len(relative.parts) > 1 and relative.parts[1].startswith("kanboard-raw-")
     return False
+
+
+def is_memory_model_cache_entry(relative: Path) -> bool:
+    """The embedding model cache: a full archive leaves it out, the memory runtime downloads it again.
+
+    Full archives written before the exclusion still carry it, so verify accepts it and restore
+    drops it instead of calling such an archive unsafe.
+    """
+    return relative.parts[:2] == MEMORY_MODEL_CACHE
 
 
 def is_memory_journal_git_entry(relative: Path) -> bool:

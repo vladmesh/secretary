@@ -21,6 +21,7 @@ from secretary.backup_policy import (
     POSTGRES_BACKUP_VERSION,
     BackupPolicy,
     is_memory_journal_git_runtime_entry,
+    is_memory_model_cache_entry,
     policy_for,
     restore_plan_components,
     should_skip_data_entry,
@@ -1420,6 +1421,11 @@ def _stage_and_publish(plain_archive: Path, target: Path, *, policy: BackupPolic
                         continue
                     relative = Path(member.name.removeprefix(prefix))
                     if is_memory_journal_git_runtime_entry(relative):
+                        continue
+                    # A full archive from before the model cache left the policy still carries it.
+                    if is_memory_model_cache_entry(relative) and not _allowed_data_path(
+                        relative.as_posix(), policy
+                    ):
                         continue
                     if _unsafe_member(member) or not _allowed_data_path(relative.as_posix(), policy):
                         raise RestoreError(f"unsafe archive entry: {member.name}")

@@ -16,6 +16,7 @@ import json
 import os
 import pwd
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -591,6 +592,78 @@ def _require_privileged_preconditions(
             report["root_commands"]
         )
     raise CutoverError(message)
+
+
+# Every backup phase writes one full archive, and the 48-hour full retention removes none of them
+# while the window runs, so all of them are on the volume at once.
+WINDOW_FULL_ARCHIVES = len(BACKUP_PAUSE_PHASES)
+# `backup create` builds an archive from a copy of its payload in the temporary directory and moves
+# the finished tar into `backups` with os.replace, which works only within one filesystem: while the
+# last archive is being written, its payload copy is on the same volume as the archives before it.
+WINDOW_STAGING_COPIES = 1
+
+
+def _volume_free_bytes(path: Path) -> int:
+    return shutil.disk_usage(path).free
+
+
+def _full_archive_bytes(paths: Paths) -> int:
+    from secretary.backup import estimate_archive_bytes
+
+    # The window's first archive is a Kanboard one; the two after it leave the raw Kanboard dumps
+    # out and carry a dump of the same board instead, so this one size stands for all three.
+    return estimate_archive_bytes(paths.instance, paths.data, backup_kind="full", backend="kanboard")
+
+
+def _mount_point(path: Path) -> Path:
+    path = path.resolve()
+    while not os.path.ismount(path) and path != path.parent:
+        path = path.parent
+    return path
+
+
+def _backup_space(paths: Paths) -> dict[str, Any]:
+    """Whether the volume under `<data>/backups` holds everything the window's backups will write.
+
+    Nothing is written and nothing is cleaned up: the free bytes are read as they stand, so an
+    older archive that retention would delete during the window still counts as occupied.
+    """
+    backups = paths.data / "backups"
+    existing = backups
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    archive_bytes = _full_archive_bytes(paths)
+    required = archive_bytes * (WINDOW_FULL_ARCHIVES + WINDOW_STAGING_COPIES)
+    free = _volume_free_bytes(existing)
+    return {
+        "volume": str(_mount_point(existing)),
+        "backups_dir": str(backups),
+        "free_bytes": free,
+        "required_bytes": required,
+        "archives": WINDOW_FULL_ARCHIVES,
+        "staging_copies": WINDOW_STAGING_COPIES,
+        "archive_bytes": archive_bytes,
+        "satisfied": free >= required,
+    }
+
+
+def _require_backup_space(paths: Paths) -> dict[str, Any]:
+    """The one decision `plan` and a new `apply` both refuse on before any state document exists.
+
+    Unlike the privileged preconditions, which plan only shows, a volume that cannot hold the
+    window's archives fails the window in its last backup phase, after the freeze and the switch
+    (ENOSPC in `post_switch_checkpoint`, 2026-09-10), so plan refuses it outright.
+    """
+    report = _backup_space(paths)
+    if report["satisfied"]:
+        return report
+    raise CutoverError(
+        f"not enough free space for the cutover window's backups on volume {report['volume']} "
+        f"(archives go to {report['backups_dir']}): {report['free_bytes']} bytes free, "
+        f"{report['required_bytes']} bytes required for {report['archives']} full archives of about "
+        f"{report['archive_bytes']} bytes each plus {report['staging_copies']} staging copy; "
+        "free space on that volume, then plan again"
+    )
 
 
 def build_plan(
@@ -1992,6 +2065,7 @@ def apply_cutover(args: argparse.Namespace, paths: Paths) -> dict[str, Any]:
         if state is None:
             plan = build_plan(paths, args.expected_revision)
             _validate_mutation(args, plan)
+            _require_backup_space(paths)
             state = _new_state(plan, args.actor.strip(), args.reason.strip())
             _write_state(paths, state)
         else:
@@ -2183,6 +2257,7 @@ def run_cutover(args: argparse.Namespace) -> int:
         paths = resolve_paths(args.instance)
         if args.cutover_command == "plan":
             plan = build_plan(paths, args.expected_revision)
+            _require_backup_space(paths)
             # The preconditions describe the host, not the plan, so they are
             # reported beside the identity instead of inside the hashed
             # evidence: a saved confirmation token has to survive the operator

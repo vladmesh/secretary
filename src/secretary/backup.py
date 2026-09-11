@@ -216,6 +216,54 @@ def create_backups(
     return results
 
 
+# A member's header block, with room for the PAX record tarfile adds for a long name.
+TAR_MEMBER_BYTES = 3 * tarfile.BLOCKSIZE
+# What one file adds to the checksums in versions.json beyond its name: the digest and JSON framing.
+CHECKSUM_LINE_BYTES = 100
+# The rest of versions.json, and the few directory members the payload root adds.
+MANIFEST_BYTES = 64 * 1024
+
+
+def estimate_archive_bytes(
+    instance_dir: Path, data_dir: Path, *, backup_kind: BackupKind, backend: str
+) -> int:
+    """The size one archive of this kind would have if `create_backups` wrote it now.
+
+    The instance configuration and the data dir are walked with the traversal and the predicates
+    the snapshot copies them with, so whatever the archive leaves out -- the memory model cache,
+    the backups themselves -- the estimate leaves out by the same decision.  Each member is counted
+    as tar writes it: a header budget, and a file padded to the block and listed in the checksums.
+    The exports are rewritten when the archive is made, so their current size stands in for
+    theirs; a full archive's Orca inventory is built here exactly as it would be written.
+    """
+    policy = policy_for(backup_kind, backend)
+    if policy is None:
+        raise RuntimeError(f"unsupported backup kind: {backup_kind}")
+
+    def skip_data(relative: Path) -> bool:
+        return should_skip_data_entry(relative, policy=policy)
+
+    total = TAR_MEMBER_BYTES + MANIFEST_BYTES
+    for source, root, skip in (
+        (instance_dir, "instance", _skip_instance_config_entry),
+        (data_dir, "secretary-data", skip_data),
+    ):
+        for path, relative in _filtered_entries(source, skip=skip):
+            total += TAR_MEMBER_BYTES
+            if not path.is_file():
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            total += _tar_padded(size) + len(f"{root}/{relative.as_posix()}") + CHECKSUM_LINE_BYTES
+    if backup_kind == "full":
+        inventory = len(_json_text(_orca_debug_inventory()).encode("utf-8"))
+        total += TAR_MEMBER_BYTES + _tar_padded(inventory) + CHECKSUM_LINE_BYTES
+    # The two zero blocks that end the archive, and the padding to a whole tar record.
+    return _tar_padded(total + 2 * tarfile.BLOCKSIZE, tarfile.RECORDSIZE)
+
+
 def _reject_claimed_worker_context() -> None:
     if os.environ.get("BOARD_ROLE") == "worker" or _claimed_workspace_from_cwd() is not None:
         raise RuntimeError("backup create must not run from a claimed worker; use an operator context")
@@ -425,16 +473,16 @@ def _pause_owned_by_backup(status: dict[str, Any]) -> bool:
     )
 
 
-def _copy_instance_config(source: Path, destination: Path) -> None:
-    _copy_tree_filtered(
-        source,
-        destination,
-        skip=lambda relative: (
-            ".git" in relative.parts
-            or relative.name in {"runtime.env", STORE_FILE}
-            or relative.name.startswith(".env")
-        ),
+def _skip_instance_config_entry(relative: Path) -> bool:
+    return (
+        ".git" in relative.parts
+        or relative.name in {"runtime.env", STORE_FILE}
+        or relative.name.startswith(".env")
     )
+
+
+def _copy_instance_config(source: Path, destination: Path) -> None:
+    _copy_tree_filtered(source, destination, skip=_skip_instance_config_entry)
 
 
 def _copy_data_snapshot(data_dir: Path, destination: Path, *, backup_kind: BackupKind) -> None:
@@ -484,13 +532,18 @@ def _filter_core_board_export(board_dir: Path) -> int:
     return len(filtered)
 
 
-def _copy_tree_filtered(source: Path, destination: Path, *, skip: Callable[[Path], bool]) -> None:
+def _filtered_entries(source: Path, *, skip: Callable[[Path], bool]) -> Iterator[tuple[Path, Path]]:
     for path in sorted(source.rglob("*")):
         relative = path.relative_to(source)
         if skip(relative):
             continue
         if path.is_symlink():
             continue
+        yield path, relative
+
+
+def _copy_tree_filtered(source: Path, destination: Path, *, skip: Callable[[Path], bool]) -> None:
+    for path, relative in _filtered_entries(source, skip=skip):
         target = destination / relative
         if path.is_dir():
             target.mkdir(parents=True, exist_ok=True)
@@ -500,6 +553,11 @@ def _copy_tree_filtered(source: Path, destination: Path, *, skip: Callable[[Path
 
 
 def _write_orca_debug_snapshot(destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    _write_json(destination / "inventory.json", _orca_debug_inventory())
+
+
+def _orca_debug_inventory() -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     for root in ORCA_STATE_DIRS:
         if not root.exists():
@@ -516,8 +574,15 @@ def _write_orca_debug_snapshot(destination: Path) -> None:
                     "mtime": int(stat.st_mtime),
                 }
             )
-    destination.mkdir(parents=True, exist_ok=True)
-    _write_json(destination / "inventory.json", {"version": 1, "files": entries})
+    return {"version": 1, "files": entries}
+
+
+def _json_text(payload: Any) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def _tar_padded(size: int, block: int = tarfile.BLOCKSIZE) -> int:
+    return -(-size // block) * block
 
 
 def _write_tar(destination: Path, source: Path) -> None:
@@ -530,7 +595,7 @@ def _write_tar(destination: Path, source: Path) -> None:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(_json_text(payload), encoding="utf-8")
 
 
 def _payload_checksums(payload: Path) -> dict[str, str]:
