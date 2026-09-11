@@ -113,6 +113,7 @@ from secretary.dispatcher_review import (
     command_terminal_status as _command_terminal_status,
 )
 from secretary.dispatcher_state import (
+    REVIEW_REJECTION_REASON,
     DispatcherRecord,
 )
 from secretary.dispatcher_state import (
@@ -1060,6 +1061,7 @@ class CommandHostRuntime:
                 record.report_generation,
                 record.report_decision,
                 record.report_protocol_prerequisites,
+                record=record,
             ),
         )
         return self._launch(
@@ -3672,7 +3674,13 @@ class CommandHostRuntime:
         self._write_prompt(
             workspace / "TASK.md",
             self._worker_task_doc(
-                task, base, record.attempt_id, generation, decision, protocol_prerequisites
+                task,
+                base,
+                record.attempt_id,
+                generation,
+                decision,
+                protocol_prerequisites,
+                record=record,
             ),
         )
         # The continuation travels as a pointer at the document just written, not as the round typed
@@ -3871,6 +3879,8 @@ class CommandHostRuntime:
         generation: int = 0,
         decision: str = "",
         protocol_prerequisites: tuple[str, ...] = (),
+        *,
+        record: DispatcherRecord | None = None,
     ) -> str:
         branch = _legacy_worker_branch(task["ref"])
         # The generation keeps the report request-id distinct per round: a rework reuses the same
@@ -3979,7 +3989,19 @@ class CommandHostRuntime:
                 review_red,
                 "",
             ]
-        gate_red = _last_gate_red_body(task)
+        # The board keeps every gate-red comment of every attempt; this round inherits one only when
+        # a mechanical gate rejected this attempt's checkout. That rejection lives on the record the
+        # same-SHA rule reads (`rejected_sha`), and the record goes with the attempt, so a card
+        # claimed again after Blocked is not told to avoid a commit no rule would refuse. A later
+        # review red replaces the rejection, and its rework reads the review findings above.
+        gate_red = (
+            _last_gate_red_body(task)
+            if record is not None
+            and record.rejected_sha
+            and record.rejected_failure_class == "substantive"
+            and record.rejected_failure_reason != REVIEW_REJECTION_REASON
+            else None
+        )
         if gate_red:
             sections += [
                 "## Mechanical gate failure to address (CI/local validation was RED)",
