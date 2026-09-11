@@ -776,6 +776,233 @@ class CutoverSuccessorTests(CutoverFixture):
         with self.assertRaisesRegex(cutover.CutoverError, "malformed release evidence"):
             cutover._read_recovered_history(self.paths)
 
+    def released_successor(self, plan_id: str) -> dict:
+        """One completed successor preparation: its history link, canonical unlink and receipt."""
+        state = self.eligible_state()
+        state["plan_id"] = plan_id
+        state["identity"] = f"postgres-{plan_id[:20]}"
+        state["successor_preparation"] = {
+            "version": 1,
+            "status": "preparing",
+            "instance": str(self.paths.instance),
+            "actor": "operator",
+            "reason": "preserve imported target",
+            "expected_revision": REVISION,
+            "confirmation": "token",
+            "started_at": "2026-09-10T00:00:00Z",
+            "database": {
+                "original_oid": 41,
+                "original_name": "secretary",
+                "archive_name": f"secretary_archive_{plan_id[:20]}_41",
+                "owner": "owner",
+                "successor_oid": 42,
+            },
+            "dump": {"path": str(self.paths.artifacts / f"{plan_id}.dump"), "sha256": "d" * 64},
+            "phases": {
+                **{
+                    name: {
+                        "status": "complete",
+                        "started_at": "2026-09-10T00:00:01Z",
+                        "completed_at": "2026-09-10T00:00:01Z",
+                        "evidence": {},
+                    }
+                    for name in successor.PHASES[: successor.PHASES.index("history_publication")]
+                },
+                "history_publication": {"status": "intent", "started_at": "2026-09-10T00:00:01Z"},
+            },
+        }
+        cutover._write_state(self.paths, state)
+        with mock.patch.object(successor, "resolve", return_value=SimpleNamespace(dbname="secretary")):
+            successor.SuccessorOperations(self.paths, state).history_publication()
+        cutover._write_state(self.paths, state)
+        successor.release_canonical(self.paths, state)
+        successor.publish_release_receipt(self.paths, state)
+        return state
+
+    def test_the_legacy_preimport_archive_reads_as_before_beside_receipts_and_a_canonical_plan(self) -> None:
+        """The live 2026-09-09 shape: a pre-import archive released before receipts existed."""
+        successor_plans = ("0c" + "a" * 62, "98" + "b" * 62)
+        for plan_id in successor_plans:
+            self.released_successor(plan_id)
+        legacy_plan = "da1355977c64cb8e9d19e75ffa3d616f33c5e2410f03289af584a2c0e3be29e6"
+        legacy = cutover._new_state(
+            {"plan_id": legacy_plan, "expected_revision": REVISION},
+            "secretary-po",
+            "Recover pre-import stale source plan",
+        )
+        legacy["status"] = "recovered-frozen"
+        legacy["controller_pid"] = 4242
+        legacy["phases"] = {
+            name: {"status": "complete", "evidence": {}}
+            for name in (
+                "preflight",
+                "current_kanboard_backup_checkpoint",
+                "postgresql_provision_migration_verification",
+                "writer_quiescence_proof",
+            )
+        }
+        legacy["phases"]["global_freeze"] = {"status": "failed", "reason": "stale source"}
+        legacy["recovery"] = {
+            "actor": "secretary-po",
+            "branch": "kanboard-before-fingerprint",
+            "completed_at": "2026-09-09T09:52:13Z",
+            "reason": "Recover pre-import stale source plan",
+            "evidence": {"source": {"fingerprint": "stale"}},
+        }
+        legacy["successor_eligibility"] = cutover._successor_eligibility(legacy)
+        legacy["successor"] = {
+            "archive": str(self.paths.history / f"postgres-v1-{legacy_plan}.json"),
+            "canonical_slot": "released-after-archive",
+            "prepared_at": "2026-09-09T09:52:13Z",
+        }
+        # Published by the same function the released version used, so byte for byte its shape.
+        legacy_archive = cutover._publish_recovered_archive(self.paths, legacy)
+        completed = cutover._new_state(
+            {"plan_id": "c" * 64, "expected_revision": REVISION}, "owner", "completed cutover"
+        )
+        completed["status"] = "resume-ready"
+        cutover._write_state(self.paths, completed)
+        before = {path.name: path.read_bytes() for path in self.paths.history.iterdir()}
+        canonical = self.paths.state.read_bytes()
+
+        history = cutover._read_recovered_history(self.paths)
+        by_plan = {item["state"]["plan_id"]: item for item in history}
+        self.assertEqual(set(by_plan), {legacy_plan, *successor_plans})
+        # The legacy item is the archive exactly as read, with no projection added to it.
+        self.assertEqual(
+            by_plan[legacy_plan],
+            {
+                "path": str(legacy_archive),
+                "archive_sha256": successor.sha256_file(legacy_archive),
+                "state": legacy,
+            },
+        )
+        for plan_id in successor_plans:
+            self.assertEqual(by_plan[plan_id]["successor_release"]["status"], "complete")
+            self.assertEqual(
+                by_plan[plan_id]["state"]["successor"]["canonical_slot"], "released-after-receipt"
+            )
+
+        shown = StringIO()
+        with (
+            mock.patch.object(cutover, "resolve_paths", return_value=self.paths),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            redirect_stdout(shown),
+        ):
+            self.assertEqual(
+                cutover.run_cutover(
+                    argparse.Namespace(cutover_command="status", instance=str(self.instance))
+                ),
+                0,
+            )
+        status = json.loads(shown.getvalue())
+        self.assertEqual(status["recovered_history"], history)
+        self.assertEqual(status["state"]["status"], "resume-ready")
+        self.assertEqual(status["successor_eligibility"]["reason"], "completed-cutover-terminal")
+
+        seams = (
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(cutover, "_provenance", return_value={"revision": REVISION}),
+            mock.patch.object(
+                cutover,
+                "_source_evidence",
+                return_value={"fingerprint": "new-source", "parity": {"ok": True}},
+            ),
+        )
+        with seams[0], seams[1], seams[2]:
+            with self.assertRaisesRegex(
+                cutover.CutoverError, "canonical cutover identity is still present"
+            ):
+                cutover.build_plan(self.paths, REVISION)
+            self.assertEqual(self.paths.state.read_bytes(), canonical)
+            # Once the canonical slot is free, the next plan binds the legacy predecessor exactly
+            # as it did before receipts existed.
+            self.paths.state.unlink()
+            plan = cutover.build_plan(self.paths, REVISION)
+        predecessors = {entry["plan_id"]: entry for entry in plan["recovered_predecessors"]}
+        self.assertEqual(
+            predecessors[legacy_plan],
+            {
+                "identity": legacy["identity"],
+                "plan_id": legacy_plan,
+                "archive_sha256": by_plan[legacy_plan]["archive_sha256"],
+            },
+        )
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in self.paths.history.iterdir()}, before
+        )
+
+        # A receipt cannot be added beside the legacy archive afterwards: it is an orphan.
+        receipt = successor.release_receipt_path(self.paths, legacy_plan)
+        receipt.write_text("{}\n", encoding="utf-8")
+        receipt.chmod(0o444)
+        with self.assertRaisesRegex(cutover.CutoverError, "no matching recovered history"):
+            cutover._read_recovered_history(self.paths)
+
+    def test_a_completed_successor_token_replays_only_while_the_canonical_slot_is_free(self) -> None:
+        state = self.eligible_state()
+        cutover._write_state(self.paths, state)
+        run_args = args(confirm=successor.confirmation(state["plan_id"], 41, "secretary"))
+        real_operations = successor.SuccessorOperations
+
+        class Operations:
+            def __init__(self, operation_paths, operation_state):
+                self.real = real_operations(operation_paths, operation_state)
+
+            def __getattr__(self, name):
+                def operation(operation_name=name):
+                    if operation_name == "dump_publication":
+                        return {"sha256": "d" * 64, "bytes": 10, "tool_version": "PostgreSQL 16"}
+                    if operation_name == "database_create":
+                        return {"oid": 42, "name": "secretary"}
+                    if operation_name in {"history_publication", "canonical_release"}:
+                        return getattr(self.real, operation_name)()
+                    if operation_name == "release_receipt":
+                        return successor.publish_release_receipt(self.real.paths, self.real.state)
+                    return {"phase": operation_name}
+
+                return operation
+
+        with (
+            mock.patch.object(cutover, "_provenance", return_value={}),
+            mock.patch.object(cutover, "_backend", return_value="kanboard"),
+            mock.patch.object(successor, "resolve", return_value=SimpleNamespace(dbname="secretary")),
+            mock.patch.object(
+                successor,
+                "inspect_database",
+                return_value={"oid": 41, "name": "secretary", "owner": "owner", "allow_connections": True},
+            ),
+            mock.patch.object(
+                successor, "inspect_schema_revision", return_value="0007_card_transport_key"
+            ),
+            mock.patch.object(successor, "_verify_completed_targets", return_value=None) as verify,
+            mock.patch.object(successor, "SuccessorOperations", Operations),
+        ):
+            self.assertTrue(successor.prepare(run_args, self.paths)["successor_ready"])
+            self.assertIsNone(cutover._read_state(self.paths))
+            # With the slot free the old token is the documented read-only replay.
+            replay = successor.prepare(run_args, self.paths)
+            self.assertTrue(replay["idempotent_replay"])
+            self.assertEqual(replay["successor_preparation"]["status"], "complete")
+
+            later = cutover._new_state(
+                {"plan_id": "e" * 64, "expected_revision": REVISION}, "owner", "later cutover"
+            )
+            cutover._write_state(self.paths, later)
+            canonical = self.paths.state.read_bytes()
+            history = cutover._read_recovered_history(self.paths)
+            verified = verify.call_count
+            with self.assertRaisesRegex(
+                cutover.CutoverError,
+                rf"{state['plan_id'][:16]} already completed.*{'e' * 16} now holds the slot"
+                rf".*secretary cutover status --instance {self.paths.instance}",
+            ):
+                successor.prepare(run_args, self.paths)
+            # Refused before any database probe, and nothing moved.
+            self.assertEqual(verify.call_count, verified)
+            self.assertEqual(self.paths.state.read_bytes(), canonical)
+            self.assertEqual(cutover._read_recovered_history(self.paths), history)
+
 
 class CutoverCommandEvidenceTests(CutoverFixture):
     def test_active_controller_can_revalidate_its_plan_while_public_successor_planning_refuses(self) -> None:
@@ -1951,18 +2178,50 @@ class CutoverRecoveryTests(CutoverFixture):
                     ):
                         recovered = cutover.recover_cutover(recovery_args, paths)
                     self.assertTrue(recovered["successor_ready"])
+                    # History fsync precedes the canonical unlink and its directory fsync, as
+                    # before; the receipt, linked and fsynced into history, now comes last.
                     self.assertEqual(
-                        events[-3:],
+                        events[-4:],
                         [
                             "history-fsync-open",
                             "canonical-unlink",
                             "canonical-parent-fsync-open",
+                            "history-fsync-open",
                         ],
                     )
                     self.assertIsNone(cutover._read_state(paths))
                     history = cutover._read_recovered_history(paths)
                     self.assertEqual(len(history), 1)
-                    self.assertEqual(history[0]["state"], interrupted)
+                    # The immutable archive is the interrupted canonical document, which records
+                    # only the intent; the released slot is projected from the receipt alone.
+                    self.assertEqual(json.loads(archive.read_text(encoding="utf-8")), interrupted)
+                    self.assertEqual(
+                        interrupted["successor"]["canonical_slot"], successor.RELEASE_INTENT_SLOT
+                    )
+                    receipt = successor.release_receipt_path(paths, original_plan["plan_id"])
+                    self.assertEqual(
+                        history[0]["state"],
+                        {
+                            **interrupted,
+                            "successor": {
+                                **interrupted["successor"],
+                                "canonical_slot": "released-after-receipt",
+                                "release_receipt": {
+                                    "path": str(receipt),
+                                    "sha256": successor.sha256_file(receipt),
+                                    "immutable": True,
+                                },
+                            },
+                        },
+                    )
+                    self.assertEqual(
+                        recovered,
+                        {
+                            **history[0]["state"],
+                            "archived_state": str(archive),
+                            "successor_ready": True,
+                        },
+                    )
                     self.assertEqual(history[0]["state"]["identity"], original["identity"])
                     self.assertEqual(history[0]["state"]["recovery"]["branch"], branch)
                     self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o444)
@@ -2003,6 +2262,303 @@ class CutoverRecoveryTests(CutoverFixture):
                     self.assertEqual(
                         systemctl.call_count,
                         0 if branch == "no-cutover-effects" else 1,
+                    )
+
+    def preimport_paths(self, root: Path, branch: str) -> cutover.Paths:
+        """An installation whose failed identity recovers through the given pre-import branch."""
+        paths = cutover.Paths(root / "instance", root / "data")
+        paths.instance.mkdir(mode=0o700)
+        paths.data.mkdir(mode=0o700)
+        (paths.instance / "runtime.env").write_text(
+            "SECRETARY_CARD_BACKEND=kanboard\n", encoding="utf-8"
+        )
+        state = cutover._new_state(PLAN, args().actor, args().reason)
+        state["status"] = "failed"
+        if branch == "kanboard-before-fingerprint":
+            state["status"] = "failed-frozen"
+            state["phases"]["global_freeze"] = {"status": "complete"}
+        cutover._write_state(paths, state)
+        return paths
+
+    def preimport_seams(self, stack: ExitStack) -> mock.Mock:
+        stack.enter_context(mock.patch.object(cutover, "_backend", return_value="kanboard"))
+        stack.enter_context(
+            mock.patch.object(cutover, "_provenance", return_value={"installed_revision": REVISION})
+        )
+        stack.enter_context(
+            mock.patch.object(
+                cutover,
+                "_source_evidence",
+                return_value={"fingerprint": "stable-source", "parity": {"ok": True}},
+            )
+        )
+        return stack.enter_context(mock.patch.object(cutover, "_systemctl", return_value={}))
+
+    def status_document(self, paths: cutover.Paths) -> dict:
+        shown = StringIO()
+        with (
+            mock.patch.object(cutover, "resolve_paths", return_value=paths),
+            redirect_stdout(shown),
+        ):
+            self.assertEqual(
+                cutover.run_cutover(
+                    argparse.Namespace(cutover_command="status", instance=str(paths.instance))
+                ),
+                0,
+            )
+        return json.loads(shown.getvalue())
+
+    def test_preimport_release_interruptions_stay_pending_and_resume_without_service_recovery(self) -> None:
+        recovery_args = args(confirm="RECOVER-" + "1" * 16)
+        for branch in sorted(cutover.PREIMPORT_RECOVERY_BRANCHES):
+            for interruption in ("before-canonical-unlink", "before-receipt"):
+                with (
+                    self.subTest(branch=branch, interruption=interruption),
+                    tempfile.TemporaryDirectory() as raw,
+                    ExitStack() as stack,
+                ):
+                    systemctl = self.preimport_seams(stack)
+                    paths = self.preimport_paths(Path(raw), branch)
+                    archive = paths.history / f"postgres-v1-{PLAN['plan_id']}.json"
+                    receipt = successor.release_receipt_path(paths, PLAN["plan_id"])
+                    real_unlink, real_link = Path.unlink, os.link
+
+                    def unlink(
+                        path,
+                        *unlink_args,
+                        state_path=paths.state,
+                        original=real_unlink,
+                        **unlink_kwargs,
+                    ):
+                        if path == state_path:
+                            raise OSError("injected before canonical unlink")
+                        return original(path, *unlink_args, **unlink_kwargs)
+
+                    def link(
+                        source,
+                        target,
+                        *link_args,
+                        receipt_path=receipt,
+                        original=real_link,
+                        **link_kwargs,
+                    ):
+                        if Path(target) == receipt_path:
+                            raise OSError("injected before receipt link")
+                        return original(source, target, *link_args, **link_kwargs)
+
+                    injection = (
+                        mock.patch("pathlib.Path.unlink", side_effect=unlink, autospec=True)
+                        if interruption == "before-canonical-unlink"
+                        else mock.patch.object(os, "link", side_effect=link)
+                    )
+                    with injection, self.assertRaisesRegex(cutover.CutoverError, "injected before"):
+                        cutover.recover_cutover(recovery_args, paths)
+                    service_calls = systemctl.call_count
+                    self.assertEqual(service_calls, 0 if branch == "no-cutover-effects" else 1)
+
+                    # Neither the canonical file, while it exists, nor the immutable archive
+                    # claims the release before the receipt.
+                    published = json.loads(archive.read_text(encoding="utf-8"))
+                    self.assertEqual(published["recovery"]["branch"], branch)
+                    self.assertEqual(
+                        published["successor"],
+                        {
+                            "archive": str(archive),
+                            "prepared_at": published["successor"]["prepared_at"],
+                            "canonical_slot": successor.RELEASE_INTENT_SLOT,
+                        },
+                    )
+                    self.assertFalse(receipt.exists())
+                    canonical = cutover._read_state(paths)
+                    if interruption == "before-canonical-unlink":
+                        self.assertEqual(canonical, published)
+                    else:
+                        self.assertIsNone(canonical)
+                    status = self.status_document(paths)
+                    [item] = status["recovered_history"]
+                    self.assertEqual(item["successor_release"]["status"], "pending")
+                    self.assertEqual(
+                        item["state"]["successor"]["canonical_slot"], successor.RELEASE_INTENT_SLOT
+                    )
+                    if interruption == "before-receipt":
+                        self.assertEqual(
+                            status["successor_preparation"],
+                            {
+                                "status": "pending",
+                                "recovery_branch": branch,
+                                "next_command": (
+                                    f"secretary cutover recover --instance {paths.instance} "
+                                    f"--expected-revision {REVISION} "
+                                    f"--actor {shlex.quote(args().actor)} "
+                                    f"--reason {shlex.quote(args().reason)} "
+                                    f"--confirm {recovery_args.confirm}"
+                                ),
+                                "release_receipt": item["successor_release"],
+                            },
+                        )
+                    with self.assertRaisesRegex(
+                        cutover.CutoverError,
+                        "canonical cutover identity"
+                        if interruption == "before-canonical-unlink"
+                        else "awaiting its immutable release receipt",
+                    ):
+                        cutover.build_plan(paths, REVISION)
+
+                    recovered = cutover.recover_cutover(recovery_args, paths)
+
+                    self.assertEqual(systemctl.call_count, service_calls)
+                    self.assertTrue(recovered["successor_ready"])
+                    self.assertEqual(
+                        recovered["successor"]["canonical_slot"], "released-after-receipt"
+                    )
+                    self.assertIsNone(cutover._read_state(paths))
+                    self.assertEqual(json.loads(archive.read_text(encoding="utf-8")), published)
+                    self.assertEqual(stat.S_IMODE(receipt.stat().st_mode), 0o444)
+                    self.assertEqual(
+                        json.loads(receipt.read_text(encoding="utf-8")),
+                        {
+                            "version": 1,
+                            "kind": successor.PREIMPORT_RECEIPT_KIND,
+                            "plan_id": PLAN["plan_id"],
+                            "released_at": published["successor"]["prepared_at"],
+                            "history": {
+                                "path": str(archive),
+                                "sha256": successor.sha256_file(archive),
+                            },
+                            "recovery": {"branch": branch},
+                        },
+                    )
+                    [item] = cutover._read_recovered_history(paths)
+                    self.assertEqual(item["successor_release"]["status"], "complete")
+                    self.assertEqual(item["state"], {key: value for key, value in recovered.items() if key not in {"archived_state", "successor_ready"}})
+                    self.assertIsNone(self.status_document(paths)["successor_preparation"])
+                    # A completed release leaves nothing for the token to recover.
+                    with self.assertRaisesRegex(cutover.CutoverError, "no durable cutover state"):
+                        cutover.recover_cutover(recovery_args, paths)
+                    self.assertEqual(systemctl.call_count, service_calls)
+
+    def test_a_preimport_receipt_must_match_and_its_archive_may_claim_only_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, ExitStack() as stack:
+            self.preimport_seams(stack)
+            paths = self.preimport_paths(Path(raw), "no-cutover-effects")
+            cutover.recover_cutover(args(confirm="RECOVER-" + "1" * 16), paths)
+            archive = paths.history / f"postgres-v1-{PLAN['plan_id']}.json"
+            receipt = successor.release_receipt_path(paths, PLAN["plan_id"])
+            body = receipt.read_text(encoding="utf-8")
+            archived = archive.read_text(encoding="utf-8")
+
+            def replace(path: Path, text: str) -> None:
+                path.chmod(0o600)
+                path.write_text(text, encoding="utf-8")
+                path.chmod(0o444)
+
+            for forged in (
+                {"kind": successor.RECEIPT_KIND},
+                {"released_at": "2026-09-11T00:00:00Z"},
+                {"history": {"path": str(archive), "sha256": "0" * 64}},
+            ):
+                with self.subTest(forged=sorted(forged)):
+                    replace(
+                        receipt,
+                        json.dumps({**json.loads(body), **forged}, indent=2, sort_keys=True) + "\n",
+                    )
+                    with self.assertRaisesRegex(
+                        cutover.CutoverError, "does not match recovered history"
+                    ):
+                        cutover._read_recovered_history(paths)
+            replace(receipt, body)
+            self.assertEqual(
+                cutover._read_recovered_history(paths)[0]["successor_release"]["status"],
+                "complete",
+            )
+
+            orphan = successor.release_receipt_path(paths, "2" * 64)
+            orphan.write_text(body, encoding="utf-8")
+            orphan.chmod(0o444)
+            with self.assertRaisesRegex(cutover.CutoverError, "no matching recovered history"):
+                cutover._read_recovered_history(paths)
+            orphan.chmod(0o600)
+            orphan.unlink()
+
+            # An archive that says more about the slot than the intent is not one this route
+            # published, so no receipt can agree with it.
+            for claim in (
+                {"canonical_slot": "released-after-receipt"},
+                {"release_receipt": {"path": str(receipt)}},
+                {
+                    "canonical_slot": successor.LEGACY_RELEASED_SLOT,
+                    "archive": str(paths.history / "elsewhere.json"),
+                },
+            ):
+                with self.subTest(claim=sorted(claim)):
+                    document = json.loads(archived)
+                    document["successor"].update(claim)
+                    replace(archive, json.dumps(document, indent=2, sort_keys=True) + "\n")
+                    with self.assertRaisesRegex(cutover.CutoverError, "release evidence"):
+                        cutover._read_recovered_history(paths)
+            # Relabelled as a legacy archive, it still meets its own receipt, which refuses.
+            document = json.loads(archived)
+            document["successor"]["canonical_slot"] = successor.LEGACY_RELEASED_SLOT
+            replace(archive, json.dumps(document, indent=2, sort_keys=True) + "\n")
+            with self.assertRaisesRegex(cutover.CutoverError, "no matching recovered history"):
+                cutover._read_recovered_history(paths)
+            replace(archive, archived)
+            self.assertEqual(
+                cutover._read_recovered_history(paths)[0]["successor_release"]["status"],
+                "complete",
+            )
+
+    def test_a_legacy_release_left_in_flight_across_the_upgrade_mints_no_new_legacy_archive(self) -> None:
+        for archived in (False, True):
+            with (
+                self.subTest(archived=archived),
+                tempfile.TemporaryDirectory() as raw,
+                ExitStack() as stack,
+            ):
+                systemctl = self.preimport_seams(stack)
+                paths = self.preimport_paths(Path(raw), "kanboard-before-fingerprint")
+                archive = paths.history / f"postgres-v1-{PLAN['plan_id']}.json"
+                receipt = successor.release_receipt_path(paths, PLAN["plan_id"])
+                # What the previous version wrote to the canonical file before its archive link.
+                state = cutover._read_state(paths)
+                state["recovery"] = {
+                    "branch": "kanboard-before-fingerprint",
+                    "actor": args().actor,
+                    "reason": args().reason,
+                    "completed_at": "2026-09-09T09:52:13Z",
+                    "evidence": {},
+                }
+                state["status"] = "recovered-frozen"
+                state["successor_eligibility"] = cutover._successor_eligibility(state)
+                state["successor"] = {
+                    "archive": str(archive),
+                    "prepared_at": "2026-09-09T09:52:13Z",
+                    "canonical_slot": successor.LEGACY_RELEASED_SLOT,
+                }
+                cutover._write_state(paths, state)
+                if archived:
+                    cutover._publish_recovered_archive(paths, state)
+
+                recovered = cutover.recover_cutover(args(confirm="RECOVER-" + "1" * 16), paths)
+
+                systemctl.assert_not_called()
+                self.assertTrue(recovered["successor_ready"])
+                self.assertIsNone(cutover._read_state(paths))
+                [item] = cutover._read_recovered_history(paths)
+                if archived:
+                    # The already linked legacy archive finishes as it stands.
+                    self.assertEqual(item["state"], state)
+                    self.assertNotIn("successor_release", item)
+                    self.assertFalse(receipt.exists())
+                else:
+                    # Nothing immutable claimed the release, so it took the receipt route.
+                    published = json.loads(archive.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        published["successor"]["canonical_slot"], successor.RELEASE_INTENT_SLOT
+                    )
+                    self.assertEqual(item["successor_release"]["status"], "complete")
+                    self.assertEqual(
+                        item["state"]["successor"]["canonical_slot"], "released-after-receipt"
                     )
 
     def test_successor_eligibility_matrix_refuses_every_post_import_or_completed_state(self) -> None:

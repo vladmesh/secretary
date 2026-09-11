@@ -42,6 +42,14 @@ UPGRADE_PREREQUISITE = (
     "rerun prepare-successor"
 )
 RECEIPT_KIND = "postgres-successor-release"
+# A pre-import recovery created no database and no dump, so its receipt binds the same
+# envelope (plan, history path and checksum) under its own kind instead of inventing OIDs.
+PREIMPORT_RECEIPT_KIND = "postgres-preimport-release"
+# What a pre-import archive may say about the canonical slot before its receipt exists.
+RELEASE_INTENT_SLOT = "release-intent"
+# The one legacy exception: pre-import archives published before release receipts existed
+# claimed the release inside the archive itself.  They stay readable; none is created again.
+LEGACY_RELEASED_SLOT = "released-after-archive"
 
 
 def confirmation(plan_id: str, database_oid: int, database_name: str) -> str:
@@ -488,37 +496,108 @@ class SuccessorOperations:
         return evidence
 
     def canonical_release(self) -> dict[str, Any]:
-        from secretary.cutover import _read_state
-
-        current = _read_state(self.paths)
-        if current != self.state:
-            raise RuntimeError("canonical cutover state changed before successor release")
-        try:
-            self.paths.state.unlink()
-            descriptor = os.open(self.paths.state.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        except OSError as exc:
-            raise RuntimeError(f"could not release recovered canonical cutover state: {exc}") from None
-        if self.paths.state.exists():
-            raise RuntimeError("canonical cutover state remains after successor release")
-        return {
-            "ordering": "history-fsync-before-canonical-unlink",
-            "released": True,
-            "directory_fsync": True,
-        }
+        return release_canonical(self.paths, self.state)
 
     def release_receipt(self) -> dict[str, Any]:
         _verify_completed_targets(self.paths, self.state)
         return publish_release_receipt(self.paths, self.state)
 
 
+def release_canonical(paths: Any, state: dict[str, Any]) -> dict[str, Any]:
+    """Unlink the canonical file whose archive is already fsynced, then fsync its directory.
+
+    Both release routes, successor preparation and pre-import recovery, call this between the
+    history link and the receipt.  It proves nothing by itself: only the receipt does.
+    """
+    from secretary.cutover import CutoverError, _read_state
+
+    current = _read_state(paths)
+    if current != state:
+        raise CutoverError("canonical cutover state changed before successor release")
+    try:
+        paths.state.unlink()
+        descriptor = os.open(paths.state.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise CutoverError(f"could not release recovered canonical cutover state: {exc}") from None
+    if paths.state.exists():
+        raise CutoverError("canonical cutover state remains after successor release")
+    return {
+        "ordering": "history-fsync-before-canonical-unlink",
+        "released": True,
+        "directory_fsync": True,
+    }
+
+
+def _release_route(item: dict[str, Any]) -> str:
+    """Which evidence proves that this archive's canonical slot was released."""
+    from secretary.cutover import PREIMPORT_RECOVERY_BRANCHES
+
+    state = item["state"]
+    if "successor_preparation" in state:
+        return "successor"
+    recovery = state.get("recovery")
+    marker = state.get("successor")
+    branch = recovery.get("branch") if isinstance(recovery, dict) else None
+    slot = marker.get("canonical_slot") if isinstance(marker, dict) else None
+    if branch in PREIMPORT_RECOVERY_BRANCHES and slot == RELEASE_INTENT_SLOT:
+        return "preimport"
+    if (
+        branch in PREIMPORT_RECOVERY_BRANCHES
+        and slot == LEGACY_RELEASED_SLOT
+        and marker.get("archive") == item.get("path")
+    ):
+        return "legacy"
+    return "unrecognized"
+
+
+def _preimport_receipt_document(item: dict[str, Any]) -> dict[str, Any]:
+    from secretary.cutover import PREIMPORT_RECOVERY_BRANCHES, CutoverError
+
+    state = item["state"]
+    marker = state.get("successor")
+    recovery = state.get("recovery")
+    eligibility = state.get("successor_eligibility")
+    phases = state.get("phases")
+    required = (
+        isinstance(marker, dict)
+        # Exactly the intent: an archive that says anything more about the slot is not one
+        # this route published, and a receipt must not be minted to agree with it.
+        and set(marker) == {"archive", "prepared_at", "canonical_slot"}
+        and marker["archive"] == item.get("path")
+        and marker["canonical_slot"] == RELEASE_INTENT_SLOT
+        and isinstance(marker["prepared_at"], str)
+        and isinstance(recovery, dict)
+        and recovery.get("branch") in PREIMPORT_RECOVERY_BRANCHES
+        and isinstance(eligibility, dict)
+        and eligibility.get("eligible") is True
+        and isinstance(phases, dict)
+        and "final_fenced_import" not in phases
+        and state.get("first_sql_write") is None
+        and isinstance(item.get("archive_sha256"), str)
+        and len(item["archive_sha256"]) == 64
+    )
+    if not required:
+        raise CutoverError("pre-import recovered history has malformed release evidence")
+    return {
+        "version": 1,
+        "kind": PREIMPORT_RECEIPT_KIND,
+        "plan_id": state["plan_id"],
+        "released_at": marker["prepared_at"],
+        "history": {"path": item["path"], "sha256": item["archive_sha256"]},
+        "recovery": {"branch": recovery["branch"]},
+    }
+
+
 def _receipt_document(item: dict[str, Any]) -> dict[str, Any]:
     from secretary.cutover import CutoverError
 
     state = item.get("state")
+    if isinstance(state, dict) and "successor_preparation" not in state:
+        return _preimport_receipt_document(item)
     prep = state.get("successor_preparation") if isinstance(state, dict) else None
     phases = prep.get("phases") if isinstance(prep, dict) else None
     history = phases.get("history_publication") if isinstance(phases, dict) else None
@@ -600,56 +679,62 @@ def _terminal_state(
     state: dict[str, Any], receipt: dict[str, Any], receipt_path: Path, receipt_sha: str
 ) -> dict[str, Any]:
     completed = deepcopy(state)
-    prep = completed["successor_preparation"]
-    phases = prep["phases"]
-    started_at = phases["canonical_release"]["started_at"]
-    phases["canonical_release"] = {
-        "status": "complete",
-        "started_at": started_at,
-        "completed_at": receipt["released_at"],
-        "evidence": {
-            "ordering": "history-fsync-before-canonical-unlink",
-            "released": True,
-            "directory_fsync": True,
-        },
-    }
-    phases["release_receipt"] = {
-        "status": "complete",
-        "started_at": phases["release_receipt"].get("started_at"),
-        "completed_at": receipt["released_at"],
-        "evidence": {
-            "path": str(receipt_path),
-            "sha256": receipt_sha,
-            "immutable": True,
-        },
-    }
-    prep["status"] = "complete"
-    prep["completed_at"] = receipt["released_at"]
-    completed["successor_eligibility"] = {
-        "eligible": True,
-        "reason": "successor-target-prepared",
-    }
+    receipt_evidence = {"path": str(receipt_path), "sha256": receipt_sha, "immutable": True}
+    prep = completed.get("successor_preparation")
+    if prep is not None:
+        phases = prep["phases"]
+        started_at = phases["canonical_release"]["started_at"]
+        phases["canonical_release"] = {
+            "status": "complete",
+            "started_at": started_at,
+            "completed_at": receipt["released_at"],
+            "evidence": {
+                "ordering": "history-fsync-before-canonical-unlink",
+                "released": True,
+                "directory_fsync": True,
+            },
+        }
+        phases["release_receipt"] = {
+            "status": "complete",
+            "started_at": phases["release_receipt"].get("started_at"),
+            "completed_at": receipt["released_at"],
+            "evidence": receipt_evidence,
+        }
+        prep["status"] = "complete"
+        prep["completed_at"] = receipt["released_at"]
+        completed["successor_eligibility"] = {
+            "eligible": True,
+            "reason": "successor-target-prepared",
+        }
     completed["successor"] = {
         "archive": receipt["history"]["path"],
         "prepared_at": receipt["released_at"],
         "canonical_slot": "released-after-receipt",
-        "release_receipt": phases["release_receipt"]["evidence"],
+        "release_receipt": dict(receipt_evidence),
     }
     return completed
 
 
 def resolve_history(paths: Any, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Validate successor history/receipt pairs and project terminal state once."""
+    """Validate history/receipt pairs of both release routes and project terminal state once.
+
+    Successor preparation and pre-import recovery archives are terminal only beside their
+    matching receipt; without it they are pending.  A legacy pre-import archive, published
+    before receipts existed, is passed through unchanged and must have no receipt.
+    """
     from secretary.cutover import CutoverError, _safe_regular
 
     resolved: list[dict[str, Any]] = []
     expected_receipts: set[Path] = set()
     for source in history:
         item = dict(source)
-        state = item.get("state")
-        if not isinstance(state, dict) or "successor_preparation" not in state:
+        state = item["state"]
+        route = _release_route(item)
+        if route == "legacy":
             resolved.append(item)
             continue
+        if route == "unrecognized":
+            raise CutoverError("recovered cutover history carries no recognized release evidence")
         expected = _receipt_document(item)
         receipt_path = release_receipt_path(paths, state["plan_id"])
         expected_receipts.add(receipt_path)
@@ -747,9 +832,28 @@ def publish_release_receipt(paths: Any, state: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def history_status(item: dict[str, Any]) -> dict[str, Any]:
+def history_status(item: dict[str, Any], instance: Path) -> dict[str, Any]:
     state = item["state"]
-    prep = state["successor_preparation"]
+    prep = state.get("successor_preparation")
+    if prep is None:
+        # A pre-import release finishes by repeating the recover that began it.
+        recovery = state["recovery"]
+        pending = item["successor_release"]["status"] == "pending"
+        return {
+            "status": item["successor_release"]["status"],
+            "recovery_branch": recovery["branch"],
+            "next_command": (
+                "secretary cutover recover "
+                f"--instance {shlex.quote(str(instance))} "
+                f"--expected-revision {state['expected_revision']} "
+                f"--actor {shlex.quote(str(recovery.get('actor') or '<actor>'))} "
+                f"--reason {shlex.quote(str(recovery.get('reason') or '<reason>'))} "
+                f"--confirm RECOVER-{state['plan_id'][:16]}"
+            )
+            if pending
+            else None,
+            "release_receipt": item["successor_release"],
+        }
     command = (
         "secretary cutover prepare-successor "
         f"--instance {shlex.quote(prep['instance'])} "
@@ -834,6 +938,16 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
         ]
         if len(completed_matches) == 1:
             completed = completed_matches[0]["state"]
+            if state is not None:
+                # The completed preparation released its slot; whatever holds it now is another
+                # identity, and an old token authorizes nothing against it, not even a replay.
+                raise CutoverError(
+                    f"successor preparation {completed['plan_id'][:16]} already completed and "
+                    f"canonical cutover identity {str(state.get('plan_id'))[:16]} now holds the "
+                    "slot; an old prepare-successor token authorizes nothing against it; inspect "
+                    f"the completed history read-only with `secretary cutover status --instance "
+                    f"{shlex.quote(str(paths.instance))}`"
+                )
             _verify_completed_targets(paths, completed)
             return {
                 **completed,

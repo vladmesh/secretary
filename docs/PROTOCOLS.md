@@ -4185,11 +4185,31 @@ Every phase has `running`, `failed` or `complete` evidence. A failed phase canno
 same command retries it. `resume_ready` means probes and SQL-sourced recovery artifacts passed, not
 that work resumed.
 
-A successful pre-import `recover` publishes its exact `recovered-frozen` JSON under the
-installation's cutover history and fsyncs that archive before releasing the canonical state slot.
+A successful pre-import `recover` (`no-cutover-effects`, `kanboard-before-fingerprint`) releases
+the canonical state slot in the successor route's order and through its code. It publishes its exact
+`recovered-frozen` JSON under the installation's cutover history with
+`successor.canonical_slot: release-intent`, fsyncs that archive, verifies the canonical file is
+unchanged, unlinks it and fsyncs its directory. Only then does it link the immutable
+`successor-release-<plan-id>.json` receipt: `kind: postgres-preimport-release`, plan ID,
+`released_at`, history path and checksum, and recovery branch. It has no database OID or dump,
+because this route created neither. Neither the canonical file nor the archive ever says the slot
+was released. The shared resolver projects `successor.canonical_slot: released-after-receipt` only
+from a matching pair and reports an archive without its receipt as `successor_release.status:
+pending`. It refuses a mismatched or orphan receipt, and an archive whose `successor` record says
+more than that intent.
+
+Pre-import archives published before receipts existed are the one legacy exception. They carry
+`canonical_slot: released-after-archive` inside the archive and have no receipt. They stay readable
+as terminal history, passed through unchanged, and a receipt beside one is refused as an orphan.
+No new archive of that form is created: a canonical file an older version left with that marker
+finishes as that legacy archive only if the archive is already linked; otherwise it restarts on the
+receipt route.
 
 Repeating recovery after an interrupted publication verifies the same archive and completes the
-release without replaying service recovery. The next `plan` includes predecessor identities and
+release without replaying service recovery. After an interruption between the canonical unlink and
+the receipt, the identical `recover` finds the pending archive by its `RECOVER-...` token and
+revision and publishes only the receipt. `status` renders that command, and `plan` refuses while
+any release receipt is pending. The next `plan` includes predecessor identities and
 archive digests in its input, so its confirmation and identity differ and the recovered token cannot
 be reused. A completed final import also keeps its canonical identity because its target is occupied,
 regardless of whether a later application write exists. Completed cutovers, PostgreSQL-only recovery,
@@ -4215,7 +4235,10 @@ applies only to the new empty canonical database. Every effect has a durable int
 OID-based replay. History is fsynced before canonical unlink and directory fsync; only a matching
 immutable receipt then proves terminal release. The shared resolver makes status, replay and planning
 consume that pair monotonically. Old cutover, recovery and successor tokens do not authorize a new
-plan or apply.
+plan or apply. A completed `PREPARE-SUCCESSOR-...` token replays its completed history read-only only
+while the canonical slot is free. Once any canonical identity holds the slot, that replay refuses
+before any database probe, names both plan IDs and points at `cutover status`, which renders the
+same history without a token.
 
 Each product subprocess must exit successfully and return a nonempty JSON object or array. Empty,
 non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public
