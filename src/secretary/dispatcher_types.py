@@ -41,6 +41,23 @@ class GateTransportError(HostError):
     """
 
 
+class ProjectGitAccessError(HostError):
+    """A registered project's remote Git access was refused by name, before or by the remote.
+
+    A missing, locked or rejected managed GitHub credential, an unsupported HTTPS host or an
+    unreadable origin is a determinate answer about access. It is deliberately not a
+    `GateTransportError`: asking again on the next tick cannot change it, so it never enters the
+    bounded transport retry. `code` is one of `github_credential.PROJECT_ACCESS_REFUSALS` and
+    `reason` is fixed, secret-free vocabulary.
+    """
+
+    def __init__(self, project: str, code: str, reason: str) -> None:
+        super().__init__(f"project {project!r} Git access refused ({code}): {reason}")
+        self.project = project
+        self.code = code
+        self.reason = reason
+
+
 class HeadLaunchAborted(HostError):
     """A worker or reviewer bring-up that failed after its terminal was already created.
 

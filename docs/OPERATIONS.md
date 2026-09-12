@@ -129,7 +129,7 @@ userinfo remains sensitive.
 Instance config holds no secret materialisation inputs. `reconcile` builds the host plan from bindings
 and config and never decrypts the store.
 
-### Checkpoint GitHub access
+### Checkpoint and project GitHub access
 
 For a private HTTPS GitHub instance remote, enter the one checkpoint token with `secret checkpoint-github
 set --instance INSTANCE --stdin` or a caller-owned, regular mode-0600 `--file`. Use the same command to
@@ -138,6 +138,27 @@ pusher disables ambient Git helpers and uses its own native credential helper, s
 `~/.git-credentials` entry as proof of checkpoint readiness. Read `checkpoint.credential` in
 `secretary status --json --instance INSTANCE` for managed-ready, locked/unverifiable,
 missing/unavailable, or ambient/manual-bypass state.
+
+The same `github.checkpoint-token` value, set by the same command, now supplies every managed Secretary
+GitHub operation: the checkpoint and the dispatcher's registered-project Git traffic (gate base fetch,
+remote card-branch read, `--force-with-lease` card-branch publish, review-recovery fetch, non-PR release
+push and post-merge checkout refresh). There is no second token. The dispatcher classifies each project
+checkout's effective `origin` after `url.*.insteadOf`/`pushInsteadOf` rewriting: GitHub HTTPS runs as the
+checkout's resolved Git child with ambient helpers, credential files and askpass disabled; local/file and
+SSH (and a non-HTTPS network URL) keep their ordinary Git behaviour as explicit manual bypass; any HTTPS
+host other than `github.com` is refused by name. The token
+needs read and write access to every registered GitHub HTTPS project repository, not only the instance
+remote.
+
+Before a Ready card is claimed, the dispatcher performs a bounded `ls-remote` preflight for the project.
+A missing, locked or rejected managed credential blocks the card with `step: git-access-preflight` and
+a refusal code (`credential-missing`, `credential-locked`, `credential-rejected`, `unsupported-https`,
+`unsupported-transport`, `unsafe-remote`, `remote-unresolved`); no workspace or head is created, and the
+block is not retried. A preflight that gets no answer leaves the card in Ready. A credential refused
+later, at the gate, blocks the gate with `git_access_refusal` rather than entering the transport retry.
+To recover, inspect the `project-git:<project>` rows of `secretary doctor --instance INSTANCE`, rotate or
+unlock the managed token with the command above, then return the card to Ready. None of these steps
+prints or compares the value.
 
 On a clean recovery, provide `--bootstrap-credential-file` (or `--bootstrap-credential-stdin`) for the
 initial clone, and use `--recovery-phrase-file` separately to restore the installation key. Repeating
@@ -379,6 +400,13 @@ environment is bound to the inspected installation; a matching declared override
 rewrites, ambient helpers/files, SSH or manual transport, and retired Kanboard catalog entries. Every
 unsupported row carries `supported_next_action`. A bypass finding does not make a managed credential
 missing, and legacy Kanboard entries never override `board-transport.env`.
+
+`credential_consumers` also carries one `project-git:<project>` row per registered project: the
+effective `transport` of its checkout's `origin`, `managed_readiness` of the encrypted store (reported
+whatever the transport), `state`, `source` and `supported_next_action`. GitHub HTTPS rows take the managed
+state; local rows are `not-applicable`, SSH and other non-HTTPS rows `ambient/manual-bypass`, other
+HTTPS hosts `refused`. Advice on an ambient credential helper or file depends on these rows: while any registered
+project uses an unmanaged HTTPS origin, doctor says to keep it rather than calling its removal safe.
 
 It reports managed services and timers, projects and configured heads, active dispatcher attempts, their
 workspace, watchdog pane, progress and respawn state, sprint observer heads, pause state, checkpoint

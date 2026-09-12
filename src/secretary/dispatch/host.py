@@ -153,6 +153,7 @@ from secretary.dispatcher_types import (
     HeadLaunchAborted,
     HeadPaneNotReady,
     HostError,
+    ProjectGitAccessError,
     ReviewLaunch,
     review_pane_label,
 )
@@ -187,6 +188,14 @@ from secretary.dispatcher_watchdog import (
     pid_file_path as _pid_file_path,
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
+from secretary.infra.github_credential import (
+    PROJECT_ACCESS_REFUSALS,
+    CredentialError,
+    ProjectGitAccess,
+    RemoteExecution,
+    project_access_failure_code,
+    project_remote_execution,
+)
 from secretary.memory import access as memory_access
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
 from secretary.projects.availability import ProjectAvailability
@@ -1888,7 +1897,9 @@ class CommandHostRuntime:
             return False
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         try:
-            self._run(["git", "-C", record.workspace, "fetch", "origin", base], "review recovery fetch")
+            self._remote_git_checked(
+                task["project"], record.workspace, ["fetch", "origin", base], "review recovery fetch"
+            )
             remote_head = self._run(
                 ["git", "-C", record.workspace, "rev-parse", f"origin/{base}"],
                 "review recovery remote head",
@@ -2075,7 +2086,7 @@ class CommandHostRuntime:
             return
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         if _same_repo(repo, Path(self.catalog.instance_dir)):
-            self._complete_green_instance_repo(record, branch, base, repo)
+            self._complete_green_instance_repo(record, branch, base, repo, project=task["project"])
             self._require_production_runtime("release-after")
             return
         # Publish onto the card's integration base (a non-fast-forward push is rejected, never
@@ -2084,8 +2095,11 @@ class CommandHostRuntime:
         # `main`: `integration_bases` makes a non-default base sanctioned for the first time
         # (secretary-1541), and pushing a card that declared one onto `main` anyway would land an
         # increment on a branch it was never validated against.
-        self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:{base}"], "merge push")
-        self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
+        project = task["project"]
+        self._remote_git_checked(
+            project, record.workspace, ["push", "origin", f"{branch}:{base}"], "merge push"
+        )
+        self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
         self._require_production_runtime("release-after")
 
@@ -2127,10 +2141,14 @@ class CommandHostRuntime:
         branch: str,
         base: str,
         repo: Path,
+        *,
+        project: str,
     ) -> None:
         """Publish an instance-repo card without racing checkpoint commits."""
         with state_repo.state_repo_lock(repo):
-            self._run(["git", "-C", record.workspace, "fetch", "origin", base], "merge preflight fetch")
+            self._remote_git_checked(
+                project, record.workspace, ["fetch", "origin", base], "merge preflight fetch"
+            )
             branch_head = self._run(
                 ["git", "-C", record.workspace, "rev-parse", branch],
                 "merge preflight branch head",
@@ -2164,8 +2182,10 @@ class CommandHostRuntime:
                     ],
                     "merge preflight checkpoint sync",
                 )
-            self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:{base}"], "merge push")
-            self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
+            self._remote_git_checked(
+                project, record.workspace, ["push", "origin", f"{branch}:{base}"], "merge push"
+            )
+            self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
             self._run(
                 [
                     "git",
@@ -2231,9 +2251,8 @@ class CommandHostRuntime:
         # ff-only impossible: never report an already-merged card as failed because it did not apply.
         try:
             refresh_branch = base if base == default_branch else default_branch
-            self._run(
-                ["git", "-C", str(repo), "fetch", "origin", refresh_branch],
-                "post-merge fetch",
+            self._remote_git_checked(
+                task["project"], repo, ["fetch", "origin", refresh_branch], "post-merge fetch"
             )
             self._run(
                 ["git", "-C", str(repo), "merge", "--ff-only", f"origin/{refresh_branch}"],
@@ -2679,7 +2698,7 @@ class CommandHostRuntime:
         except HostError:
             pass
 
-    def _fetch_seed(self, repo: Path, seed: str) -> str:
+    def _fetch_seed(self, repo: Path, seed: str, *, project: str) -> str:
         """Bring `seed` into the project checkout and return the start point a worktree is cut at.
 
         A branch seed is fetched by name and cut at its remote-tracking ref, which is what every
@@ -2689,7 +2708,7 @@ class CommandHostRuntime:
         card's own contract failing, not a checkout to invent.
         """
         if _is_exact_ref_sha(seed):
-            self._run(["git", "-C", str(repo), "fetch", "origin"], "git fetch")
+            self._remote_git_checked(project, repo, ["fetch", "origin"], "git fetch")
             try:
                 self._run(["git", "-C", str(repo), "cat-file", "-e", f"{seed}^{{commit}}"], "git seed probe")
             except HostError:
@@ -2699,7 +2718,7 @@ class CommandHostRuntime:
                     bring_up_cause=CAUSE_BASE_BRANCH_CONTRACT,
                 ) from None
             return seed
-        self._run(["git", "-C", str(repo), "fetch", "origin", seed], "git fetch")
+        self._remote_git_checked(project, repo, ["fetch", "origin", seed], "git fetch")
         return f"origin/{seed}"
 
     def _create_workspace(self, project: str, worker_id: str, seed: str, *, expected: str = "") -> str:
@@ -2725,7 +2744,7 @@ class CommandHostRuntime:
         if not repo.is_absolute() or not repo.is_dir():
             raise HostError(f"project repo for {project!r} is unavailable")
         registration = self._orca_repo(project)
-        start = self._fetch_seed(repo, seed)
+        start = self._fetch_seed(repo, seed, project=project)
         result = self._run_json(
             [
                 "orca",
@@ -4430,6 +4449,95 @@ class CommandHostRuntime:
             "\n".join(_safe_one_line(part, limit=4000) for part in (names, summary) if part)
             or "(no changed paths)"
         )
+
+    def project_git_access(self, project: str) -> ProjectGitAccess:
+        """Bounded, non-mutating proof of a registered project's remote Git access, before a claim.
+
+        Asked of the project's own checkout, the one every card workspace is cut from, through the
+        same boundary and resolved Git child every later gate and release operation uses. A
+        project with no checkout yet is `not-applicable`: the bring-up already names that failure.
+        """
+        if self.mode == "noop":
+            return ProjectGitAccess("not-applicable", "unknown", "noop")
+        try:
+            repo = Path(str(self.catalog.binding(project)["repo"])).expanduser()
+        except (KeyError, HostError) as exc:
+            return ProjectGitAccess(
+                "not-applicable", "unknown", "none", "project-unavailable", scrub_host_output(str(exc))[:240]
+            )
+        if not (repo / ".git").exists():
+            return ProjectGitAccess(
+                "not-applicable",
+                "unknown",
+                "none",
+                "checkout-unavailable",
+                "project checkout is not provisioned",
+            )
+        try:
+            execution = project_remote_execution(
+                repo, instance_dir=getattr(self.catalog, "instance_dir", None)
+            )
+        except CredentialError as exc:
+            return ProjectGitAccess("refused", "unknown", "none", exc.code, str(exc))
+        return execution.preflight_project(repo)
+
+    def remote_git(
+        self, project: str, checkout: str | Path, args: list[str], label: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Run one remote Git operation of a registered project's checkout and return Git's answer.
+
+        The one door the dispatcher's gate and release Git traffic walks through. The transport is
+        decided from the checkout's effective remote, after URL rewriting: GitHub HTTPS runs as the
+        resolved Git child with ambient helpers disabled and the managed credential selected;
+        local/file, SSH and non-HTTPS network URLs keep their explicit non-managed command; any
+        other HTTPS host is refused by name. A refused credential raises `ProjectGitAccessError`, a child that could not run or
+        timed out raises plain `HostError`, and every other non-zero exit is returned.
+        """
+        checkout = Path(checkout)
+        execution = self._project_remote(project, checkout)
+        if execution.transport in {"local", "ssh", "unmanaged"}:
+            return self.run_capture(["git", "-C", str(checkout), *args], label)
+        return self._managed_remote_git(project, execution, checkout, args, label)
+
+    def _remote_git_checked(
+        self, project: str, checkout: str | Path, args: list[str], label: str
+    ) -> subprocess.CompletedProcess[str]:
+        """`remote_git` under `_run`'s contract: a non-zero exit is a HostError."""
+        checkout = Path(checkout)
+        execution = self._project_remote(project, checkout)
+        if execution.transport in {"local", "ssh", "unmanaged"}:
+            return self._run(["git", "-C", str(checkout), *args], label)
+        completed = self._managed_remote_git(project, execution, checkout, args, label)
+        if completed.returncode != 0:
+            raise HostError(f"{label} failed: {_tail((completed.stderr or completed.stdout or '').strip())}")
+        return completed
+
+    def _project_remote(self, project: str, checkout: Path) -> RemoteExecution:
+        try:
+            return project_remote_execution(
+                checkout, instance_dir=getattr(self.catalog, "instance_dir", None)
+            )
+        except CredentialError as exc:
+            raise ProjectGitAccessError(project, exc.code, str(exc)) from None
+
+    def _managed_remote_git(
+        self, project: str, execution: RemoteExecution, checkout: Path, args: list[str], label: str
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            completed = execution.run_project(checkout, args, label=label)
+        except CredentialError as exc:
+            if exc.code in PROJECT_ACCESS_REFUSALS:
+                raise ProjectGitAccessError(project, exc.code, str(exc)) from None
+            raise HostError(f"{label} failed: {exc}") from None
+        if completed.returncode != 0 and project_access_failure_code(
+            completed.stderr or completed.stdout or ""
+        ):
+            raise ProjectGitAccessError(
+                project,
+                "credential-rejected",
+                f"{label}: managed GitHub credential was refused by the remote: authentication failed",
+            )
+        return completed
 
     def _run_shell(self, command: str, cwd: Path, label: str) -> None:
         self._run(["bash", "-lc", command], label, cwd=cwd)

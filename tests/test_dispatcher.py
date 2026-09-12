@@ -13082,6 +13082,13 @@ class _RecordingMergeHost(CommandHostRuntime):
         # What GitHub says the open pull request targets; the merge refuses any other answer.
         self.pr_base = pr_base
 
+    def _project_remote(self, project, checkout):  # type: ignore[override]
+        # No checkout exists behind the stubbed `_run`; its origin is declared local, so remote Git
+        # keeps the explicit non-managed command this fixture records.
+        from secretary.infra.github_credential import PROJECT_GIT_PHASE, RemoteExecution
+
+        return RemoteExecution(str(self.data_dir / "origin.git"), PROJECT_GIT_PHASE)
+
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
         if args[:3] == ["gh", "pr", "view"] and "baseRefName" in args:
@@ -14969,9 +14976,9 @@ class DispatcherGateTests(unittest.TestCase):
         seen: list[str] = []
         real = gate_module._backend_call
 
-        def spy(host, args, label, *, cwd=None):
+        def spy(host, args, label, *, cwd=None, project=""):
             seen.append(label)
-            return real(host, args, label, cwd=cwd)
+            return real(host, args, label, cwd=cwd, project=project)
 
         return seen, mock.patch.object(gate_module, "_backend_call", spy)
 
