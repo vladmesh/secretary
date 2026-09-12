@@ -2677,9 +2677,13 @@ secretary upgrade --instance ~/secretary-instance
 # the head profiles: edit the canonical registry, then regenerate the pair the standard way
 $EDITOR ~/secretary-instance/heads/heads.toml
 cd ~/secretary && python3 -P -m secretary upgrade --instance ~/secretary-instance --no-pull
+
+# ...and on this installation only, while the host conflict below stands, the restart by hand:
+sudo systemctl restart secretary-web.service            # the front is PartOf= and comes with it
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/system   # 200
 ```
 
-Two things about that second one are worth knowing before it surprises somebody.
+Three things about that second one are worth knowing before they surprise somebody.
 
 **Never edit `heads/heads.yaml` by hand.** It is a generated snapshot and `heads/source.yaml` pins
 its `snapshot_sha256`; an edited snapshot no longer matches its pin and the live tick rejects the
@@ -2692,6 +2696,13 @@ instance of the general property: everything this process resolved at import —
 validation callables, the config module — is fixed for the life of the process, while every file it
 reads lazily comes from the checkout as it is *now*. The `web` step of `secretary upgrade` exists
 because those two can disagree; see *Updating the published application to `main`*.
+
+**A regenerated snapshot is one of that step's restart reasons**, so on an installation whose
+`upgrade` reaches its `web` step the `--no-pull` line above *is* the whole procedure: the step
+prints `restarted secretary-web.service and probed … -> 200: the head registry snapshot changed`.
+The third line is written out here because this installation's `upgrade` stops at `host` — the box
+below — and therefore never reaches `web`. When the pin moves but the snapshot does not, no restart
+is owed and none happens: the running process cached the snapshot, not the pin.
 
 > **Known: `secretary upgrade` stops at its `host` step on this installation** with `unowned names
 > in our namespace: codegen-product-kit, secretary-web-front.service, secretary-web.service`. The
@@ -2806,24 +2817,46 @@ secretary upgrade --instance ~/secretary-instance      # `pull` fast-forwards ~/
 ```
 
 `upgrade` moves the checkout, re-materialises the installation onto it, and then — in its `web`
-step, after `pull`, `dependencies` and `host` have all succeeded — restarts
+step, after `pull`, `dependencies`, `head-registry` and `host` have all succeeded — restarts
 `secretary-web.service` and reads it back. The ordering is the contract: a restart is the moment
 the new code becomes the code that answers, so the checkout, the installed dependencies, the
-bundled schemas and the unit files are all in place before it happens, and a failure in any of
-them stops the run *before* the restart rather than after it. `secretary-web-front.service` is
-`PartOf=` the transport and comes along; there is no separate front restart to remember.
+bundled schemas, the head registry snapshot and the unit files are all in place before it happens,
+and a failure in any of them stops the run *before* the restart rather than after it.
+`secretary-web-front.service` is `PartOf=` the transport and comes along; there is no separate
+front restart to remember.
+
+The restart reasons are every process-local input the upgrade materialises, and the step names the
+ones that applied:
+
+| reason | what moved |
+| --- | --- |
+| `product code or dependencies changed` | anything under `src/secretary/` or `src/triggered_agents/`, any of `pyproject.toml`/`uv.lock`/`requirements.txt`, or a reinstall `dependencies` performed |
+| `bundled schemas changed` | anything under `src/secretary/schemas/` — the half of the split the process reads lazily |
+| `a web unit file changed` | `secretary-web.service` or the `PartOf=` front, as reconcile applied it or as the target revision will |
+| `the head registry snapshot changed` | `heads/heads.yaml` was regenerated; `load_registry` caches per process |
+
+Those are **repository-relative paths, exactly as `git diff --name-only` prints them here**, which is
+worth saying because getting it wrong is how the reconciliation can be present and inert: a prefix
+of `secretary/` matches nothing in this tree, and the revision that took the transport down is
+spelled `src/secretary/config.py` and `src/secretary/schemas/onboarding-contract.schema.json`.
+The set is derived once per run — from the pull, from the re-executed schedule's handoff marker, or
+from the `--dry-run` comparison against the upstream target — and every later step reads that one
+derivation.
 
 What the step prints is what it did, and there are four answers:
 
 | line | what it means |
 | --- | --- |
 | `changed   web: restarted secretary-web.service and probed http://127.0.0.1:8787/api/system -> 200: ...` | the process was replaced and the new one answered; the reason it was restarted is named |
-| `unchanged web: secretary-web.service already runs this checkout, these schemas and these dependencies` | nothing moved, so nothing was restarted — a repeated upgrade is a no-op here |
+| `unchanged web: secretary-web.service already runs this checkout, these schemas, these dependencies and this head registry` | nothing moved, so nothing was restarted — a repeated upgrade is a no-op here |
 | `skipped   web: secretary-web.service is not installed …` / `… is installed but not active; an upgrade does not start it` | the unit is optional and an upgrade never starts it for you |
 | `failed    web: …` | either the restart or the probe failed; see *When the restart or the probe fails* below |
 
-`--dry-run` names the restart and the address it would read (`would restart … and probe …`) and
-touches nothing.
+`--dry-run` plans against the upstream target rather than the installed revision: it fetches,
+compares `HEAD` with `origin/<branch>`, and names the dependency, unit and web actions that revision
+would cause — `would restart secretary-web.service and probe http://127.0.0.1:8787/api/system: …` —
+while leaving the checkout exactly where it was. It is the honest way to ask what an upgrade is
+about to do; it writes nothing, and a unit change it names is one that is still only in the diff.
 
 Run the upgrade as the installation owner and out of the installed checkout
 (`/home/dev/secretary/.venv/bin/secretary`), not out of a task workspace: without `--product-root`

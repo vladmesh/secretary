@@ -381,6 +381,59 @@ class LongLivedProcessDriftTests(unittest.TestCase):
         self.assertEqual(self.units.generations, generation)
         self.assertEqual(self._read()[0], 200)
 
+    def test_a_head_registry_materialization_replaces_the_cached_web_process(self) -> None:
+        """The `--no-pull` sequence `docs/OPERATIONS.md` documents for `heads.toml`.
+
+        `load_registry` caches per process, so a profile added to the canon is invisible to the
+        running transport until it is replaced — the reason that procedure always carried a manual
+        `systemctl restart` line. This drives the real `step_head_registry`, whose only doubles are
+        the snapshot writer and the ownership handoff, and then the real `step_web`: nothing is
+        pulled, so the regenerated snapshot is the only reason there is.
+        """
+        self._move_checkout()
+        self._serve()
+        self.assertEqual(self._read()[0], 200)
+        generation = self.units.generations
+        context = _context(self.units, pull=False)
+
+        with (
+            mock.patch.object(upgrade, "canonical_path", return_value=(self.tmp / "heads.toml", "instance")),
+            mock.patch.object(upgrade, "materialize_snapshot", return_value=True),
+            mock.patch.object(upgrade, "record_source", return_value=False),
+            mock.patch.object(upgrade, "_set_runtime_owner"),
+        ):
+            registry = upgrade.step_head_registry(context)
+        web = upgrade.step_web(context)
+
+        self.assertEqual(registry.status, "changed")
+        self.assertTrue(context.head_registry_changed)
+        self.assertEqual(context.changed_paths, (), "nothing was pulled")
+        self.assertFalse(context.code_changed)
+        self.assertEqual(web.status, "changed")
+        self.assertIn("the head registry snapshot changed", web.detail)
+        self.assertIn(("restart", WEB_UNIT), self.units.calls)
+        self.assertEqual(self.units.generations, generation + 1)
+        self.assertEqual(self._read()[0], 200, "the replacement process serves")
+
+    def test_an_unchanged_head_registry_is_not_a_restart_reason(self) -> None:
+        self._move_checkout()
+        self._serve()
+        generation = self.units.generations
+        context = _context(self.units, pull=False)
+
+        with (
+            mock.patch.object(upgrade, "canonical_path", return_value=(self.tmp / "heads.toml", "instance")),
+            mock.patch.object(upgrade, "materialize_snapshot", return_value=False),
+            mock.patch.object(upgrade, "record_source", return_value=False),
+            mock.patch.object(upgrade, "_set_runtime_owner"),
+        ):
+            registry = upgrade.step_head_registry(context)
+
+        self.assertEqual(registry.status, "unchanged")
+        self.assertFalse(context.head_registry_changed)
+        self.assertEqual(upgrade.step_web(context).status, "unchanged")
+        self.assertEqual(self.units.generations, generation)
+
     def test_a_restart_whose_process_cannot_answer_fails_the_step(self) -> None:
         """The probe is the evidence: a unit that restarts into a broken process is a failure."""
         self._serve()
@@ -438,6 +491,7 @@ class WebStepTests(unittest.TestCase):
             ("code_changed", "product code or dependencies changed"),
             ("schemas_changed", "bundled schemas changed"),
             ("web_unit_changed", "a web unit file changed"),
+            ("head_registry_changed", "the head registry snapshot changed"),
         ):
             with self.subTest(reason=field):
                 units = self.units()
@@ -543,6 +597,293 @@ class WebStepOrderingTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual([step.name for step in result.steps], ["dependencies"])
         self.assertEqual(units.calls, [])
+
+
+# -- the supported pull path, with Git's real repository-relative paths ---------------------------
+
+
+BASELINE = {
+    "src/secretary/config.py": "SCHEMAS = {}\n",
+    "src/secretary/schemas/onboarding-contract.schema.json": '{"$id": "onboarding-contract.schema.json"}\n',
+    "src/triggered_agents/runtime/paths.py": "ROOT = None\n",
+    "packaging/systemd/secretary-web.service": "[Service]\nExecStart=/x --host 127.0.0.1 --port 8787\n",
+    "packaging/systemd/README.md": "not a unit\n",
+    "pyproject.toml": '[project]\nname = "secretary"\n',
+    "docs/OPERATIONS.md": "how to run it\n",
+    # The product checkout carries its own virtualenv, and `step_pull` refuses a dirty checkout.
+    ".gitignore": ".venv/\n",
+}
+
+#: The file list of `f9cabc3` — the revision that actually took the transport down — written out
+#: rather than read from history, so this stays a statement about the prefixes and not about the
+#: repository's reflog. Every one of these is how Git spells a path in this repository.
+OUTAGE_REVISION_PATHS = (
+    "docs/OPERATIONS.md",
+    "docs/PROTOCOLS.md",
+    "pyproject.toml",
+    "src/secretary/config.py",
+    "src/secretary/onboarding.py",
+    "src/secretary/schemas/onboarding-contract.schema.json",
+    "tests/test_gate.py",
+    "tests/test_onboarding.py",
+    "tests/test_provision.py",
+)
+
+
+class ChangePathTests(unittest.TestCase):
+    """The prefixes are about this repository, so they are checked against this repository.
+
+    `MEMORY_CODE_PATHS` said `secretary/` and `SCHEMA_PATHS` said `secretary/schemas/`. Nothing Git
+    reports here starts that way — the packages live under `src/` — so both matched nothing, every
+    flag stayed false, and the one revision this card exists because of moved none of them.
+    """
+
+    def test_every_declared_prefix_names_something_this_repository_has(self) -> None:
+        for prefix in (*upgrade.PRODUCT_SOURCE_PATHS, *upgrade.SCHEMA_PATHS, upgrade.PACKAGED_UNIT_ROOT):
+            with self.subTest(prefix=prefix):
+                self.assertTrue((REPO_ROOT / prefix).is_dir(), f"{prefix} names no directory")
+        for path in upgrade.DEPENDENCY_PATHS:
+            with self.subTest(path=path):
+                # A manifest may legitimately be absent; a prefix that is a directory is the bug.
+                self.assertFalse((REPO_ROOT / path).is_dir())
+
+    def test_the_revision_that_took_the_transport_down_moves_both_flags(self) -> None:
+        upgrade.record_change_plan(context := _context(FakeUnitInstaller()), OUTAGE_REVISION_PATHS)
+
+        self.assertTrue(context.code_changed)
+        self.assertTrue(context.schemas_changed)
+
+    def test_a_documentation_only_revision_moves_neither(self) -> None:
+        upgrade.record_change_plan(context := _context(FakeUnitInstaller()), ("docs/OPERATIONS.md",))
+
+        self.assertFalse(context.code_changed)
+        self.assertFalse(context.schemas_changed)
+
+    def test_a_packaged_unit_is_recognised_by_its_own_file_name(self) -> None:
+        changed = (
+            "packaging/systemd/secretary-web.service",
+            "packaging/systemd/secretary-memory.service",
+            "packaging/systemd/README.md",
+            "src/secretary/web/server.py",
+        )
+
+        self.assertEqual(upgrade.planned_unit_names(changed, "secretary-web"), ("secretary-web.service",))
+        self.assertEqual(upgrade.planned_unit_names(changed, "secretary-nothing"), ())
+
+
+class PulledRevisionTests(unittest.TestCase):
+    """`step_pull` to `step_web` over two real Git revisions, with nothing preloaded.
+
+    The previous round asserted `step_web`'s decisions with `code_changed`/`schemas_changed` set by
+    hand, which is exactly the seam the defect lived in: the flags were right and nothing ever set
+    them. So these drive the real handoff — a real checkout, a real upstream, a real fast-forward,
+    and Git's own path spellings — and the only thing handed in is which file the upstream revision
+    edits.
+    """
+
+    ENV: ClassVar[dict[str, str]] = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    def setUp(self) -> None:
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.upstream = self.tmp / "upstream"
+        self.product = self.tmp / "product"
+        self._seed_upstream()
+        self._git(self.tmp, "clone", "--quiet", str(self.upstream), str(self.product))
+        self.baseline = self._head(self.product)
+        self.units = FakeUnitInstaller(present={WEB_UNIT: _unit_text(8787)}, active={WEB_UNIT})
+        self.probe = self.enterContext(mock.patch.object(upgrade, "probe_web", return_value=200))
+
+    # -- the two repositories ------------------------------------------------------------------
+
+    def _git(self, cwd: Path, *args: str) -> str:
+        env = {**self.ENV, "HOME": str(self.tmp)}
+        done = subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True)
+        return done.stdout.strip()
+
+    def _head(self, root: Path) -> str:
+        return self._git(root, "rev-parse", "HEAD")
+
+    def _write(self, root: Path, files: dict[str, str]) -> None:
+        for name, text in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+    def _seed_upstream(self) -> None:
+        self.upstream.mkdir()
+        self._git(self.upstream, "init", "--initial-branch=main", "--quiet")
+        self._write(self.upstream, BASELINE)
+        self._git(self.upstream, "add", "-A")
+        self._git(self.upstream, "commit", "--quiet", "-m", "seed")
+
+    def publish(self, files: dict[str, str]) -> str:
+        """One upstream revision editing exactly these paths. Nothing is applied to the product."""
+        self._write(self.upstream, files)
+        self._git(self.upstream, "add", "-A")
+        self._git(self.upstream, "commit", "--quiet", "-m", "next")
+        return self._head(self.upstream)
+
+    def context(self, **overrides) -> upgrade.UpgradeContext:
+        return _context(self.units, product_root=self.product, **overrides)
+
+    def venv(self) -> None:
+        """A stub interpreter, so `step_dependencies` plans instead of skipping."""
+        python = self.product / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        python.chmod(0o755)
+
+    # -- the applied path ----------------------------------------------------------------------
+
+    def test_a_source_only_revision_reaches_the_web_step_as_a_named_reason(self) -> None:
+        self.publish({"src/secretary/config.py": "SCHEMAS = {'adapter': 1}\n"})
+        context = self.context()
+
+        pulled = upgrade.step_pull(context)
+        result = upgrade.step_web(context)
+
+        self.assertEqual(pulled.status, "changed")
+        self.assertEqual(context.changed_paths, ("src/secretary/config.py",))
+        self.assertEqual(result.status, "changed")
+        self.assertIn("product code or dependencies changed", result.detail)
+        self.assertIn(("restart", WEB_UNIT), self.units.calls)
+        self.probe.assert_called_once()
+
+    def test_a_schema_only_revision_reaches_the_web_step_as_a_named_reason(self) -> None:
+        """The revision shape that caused the outage: one bundled schema file and nothing else."""
+        self.publish(
+            {"src/secretary/schemas/onboarding-contract.schema.json": '{"$ref": "adapter.schema.json"}\n'}
+        )
+        context = self.context()
+
+        upgrade.step_pull(context)
+        result = upgrade.step_web(context)
+
+        self.assertTrue(context.schemas_changed)
+        self.assertEqual(result.status, "changed")
+        self.assertIn("bundled schemas changed", result.detail)
+        self.assertIn(("restart", WEB_UNIT), self.units.calls)
+
+    def test_a_revision_in_the_other_product_package_reaches_the_web_step(self) -> None:
+        """The transport imports `triggered_agents` too, so that source root is a reason as well."""
+        self.publish({"src/triggered_agents/runtime/paths.py": "ROOT = '/x'\n"})
+        context = self.context()
+
+        upgrade.step_pull(context)
+
+        self.assertTrue(context.code_changed)
+        self.assertEqual(upgrade.step_web(context).status, "changed")
+
+    def test_a_documentation_only_revision_restarts_nothing(self) -> None:
+        """The no-op has to survive the wider prefixes: not every revision is a restart."""
+        self.publish({"docs/OPERATIONS.md": "how to run it, revised\n"})
+        context = self.context()
+
+        pulled = upgrade.step_pull(context)
+        result = upgrade.step_web(context)
+
+        self.assertEqual(pulled.status, "changed")
+        self.assertEqual(result.status, "unchanged")
+        self.assertEqual(self.units.calls, [])
+        self.probe.assert_not_called()
+
+    def test_an_upstream_that_moved_nothing_is_a_no_op_through_to_the_web_step(self) -> None:
+        context = self.context()
+
+        pulled = upgrade.step_pull(context)
+
+        self.assertEqual(pulled.status, "unchanged")
+        self.assertEqual(context.changed_paths, ())
+        self.assertEqual(upgrade.step_web(context).status, "unchanged")
+        self.assertEqual(self.units.calls, [])
+
+    def test_the_handoff_marker_derives_the_same_facts_as_the_pull_that_wrote_it(self) -> None:
+        """The applied path re-executes the pulled schedule, so the marker is a fourth entry point.
+
+        `run_upgrade` reads the marker and hands its path set to the same recorder; before this
+        round it derived `code_changed` there and left `schemas_changed` false, which meant the real
+        `secretary upgrade` — the one that re-executes — never saw a schema move at all.
+        """
+        self.publish(
+            {"src/secretary/schemas/onboarding-contract.schema.json": '{"$ref": "adapter.schema.json"}\n'}
+        )
+        pulling = self.context()
+        upgrade.step_pull(pulling)
+
+        handed_off = self.context(pull=False, handoff_before=self.baseline, handoff_after="f" * 40)
+        upgrade.record_change_plan(handed_off, pulling.changed_paths)
+
+        self.assertEqual(handed_off.schemas_changed, pulling.schemas_changed)
+        self.assertEqual(handed_off.code_changed, pulling.code_changed)
+        self.assertIn("bundled schemas changed", upgrade.step_web(handed_off).detail)
+
+    # -- the planned path ----------------------------------------------------------------------
+
+    def test_dry_run_plans_the_upstream_target_and_moves_nothing(self) -> None:
+        target = self.publish(
+            {
+                "src/secretary/config.py": "SCHEMAS = {'adapter': 1}\n",
+                "src/secretary/schemas/onboarding-contract.schema.json": '{"x": 1}\n',
+                "pyproject.toml": '[project]\nname = "secretary"\nversion = "2"\n',
+                "packaging/systemd/secretary-web.service": "[Service]\nExecStart=/y --port 8787\n",
+            }
+        )
+        self.venv()
+        context = self.context(dry_run=True)
+
+        pulled = upgrade.step_pull(context)
+        dependencies = upgrade.step_dependencies(context)
+        web = upgrade.step_web(context)
+
+        self.assertEqual(pulled.status, "changed")
+        self.assertIn("not applied", pulled.detail)
+        # The checkout is exactly where it was, and clean.
+        self.assertEqual(self._head(self.product), self.baseline)
+        self.assertNotEqual(self._head(self.product), target)
+        self.assertEqual(self._git(self.product, "status", "--porcelain"), "")
+        # And the plan is the target revision's, not the installed revision's.
+        self.assertIn("src/secretary/config.py", context.changed_paths)
+        self.assertIn("a dependency manifest moved", dependencies.detail)
+        self.assertEqual(web.status, "changed")
+        self.assertIn(f"would restart {WEB_UNIT}", web.detail)
+        self.assertIn("http://127.0.0.1:8787/api/system", web.detail)
+        for reason in (
+            "a web unit file changed",
+            "bundled schemas changed",
+            "product code or dependencies changed",
+        ):
+            with self.subTest(reason=reason):
+                self.assertIn(reason, web.detail)
+        self.assertEqual(self.units.calls, [])
+        self.probe.assert_not_called()
+
+    def test_dry_run_names_a_pending_web_unit_change_the_host_step_cannot_see_yet(self) -> None:
+        """Under `--dry-run` the unit file on disk is still the old one; only the plan knows."""
+        self.publish({"packaging/systemd/secretary-web.service": "[Service]\nExecStart=/z --port 8787\n"})
+        context = self.context(dry_run=True)
+
+        upgrade.step_pull(context)
+        result = upgrade.step_web(context)
+
+        self.assertFalse(context.web_unit_changed, "step_host never ran, so reconcile said nothing")
+        self.assertEqual(result.status, "changed")
+        self.assertIn("a web unit file changed", result.detail)
+        self.assertEqual(self.units.calls, [])
+
+    def test_dry_run_over_a_current_upstream_plans_no_restart(self) -> None:
+        context = self.context(dry_run=True)
+
+        pulled = upgrade.step_pull(context)
+
+        self.assertEqual(pulled.status, "unchanged")
+        self.assertEqual(upgrade.step_web(context).status, "unchanged")
+        self.assertEqual(self.units.calls, [])
 
 
 # -- the probe -----------------------------------------------------------------------------------

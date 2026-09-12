@@ -82,14 +82,24 @@ from triggered_agents.runtime.paths import configured_product_root
 
 MEMORY_COMPONENT = "memory"
 WEB_COMPONENT = "web"
-# Changes here require restarting the memory service even if its unit is unchanged.
-MEMORY_CODE_PATHS = ("secretary/", "pyproject.toml", "uv.lock", "requirements.txt")
+# Git's own spelling, for this repository. Every path in a `git diff --name-only` here starts with
+# `src/`, because that is where the product's packages live; a prefix of `secretary/` matched none
+# of them, so a source-only or schema-only revision — `f9cabc3`, the one that took the web process
+# down — moved no flag at all and no long-lived process was ever restarted for it. The prefixes are
+# therefore derived from the tree, and `tests/test_web_process_coherence.py` fails if a listed
+# prefix stops naming a directory that exists (secretary-1624 rework).
+PRODUCT_SOURCE_PATHS = ("src/secretary/", "src/triggered_agents/")
 DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock", "requirements.txt")
 # The bundled JSON Schemas are product data a long-lived process reads from the checkout through
 # `importlib.resources` *after* it started, while its validation callables were loaded at start. So
 # a schema move is its own named restart reason, not a detail of "code changed": it is the half of
 # the split that makes an unrestarted process fail on files its own build shipped (secretary-1624).
-SCHEMA_PATHS = ("secretary/schemas/",)
+SCHEMA_PATHS = ("src/secretary/schemas/",)
+# Where the shipped unit files live in the repository. A revision that edits one of them is a unit
+# change `step_host` cannot see yet under `--dry-run`, because the checkout has not moved.
+PACKAGED_UNIT_ROOT = "packaging/systemd/"
+# Changes here require restarting a long-lived service even if its unit file is unchanged.
+MEMORY_CODE_PATHS = (*PRODUCT_SOURCE_PATHS, *DEPENDENCY_PATHS)
 # How long a restarted web transport is given to answer one bounded loopback read.
 WEB_PROBE_TIMEOUT_SECONDS = 20.0
 RUFF_VERSION_RE = re.compile(r"^ruff==([^;\s]+)$")
@@ -125,6 +135,9 @@ class UpgradeContext:
     schemas_changed: bool = False
     unit_changed: bool = False
     web_unit_changed: bool = False
+    # A regenerated head snapshot is process-local state too: `load_registry` caches per process,
+    # so a profile added to the canon is invisible to the running transport until it is replaced.
+    head_registry_changed: bool = False
     # Product-pack changes require incremental memory reconciliation.
     memory_pack_changed: bool = False
     memory_pack: Any = None
@@ -209,6 +222,38 @@ def _touches(changed: tuple[str, ...], prefixes: tuple[str, ...]) -> bool:
     return any(path.startswith(prefix) for path in changed for prefix in prefixes)
 
 
+def planned_unit_names(changed: tuple[str, ...], name_prefix: str) -> tuple[str, ...]:
+    """The shipped units under ``name_prefix`` a revision move edits, by unit file name.
+
+    `step_host` answers the same question from the live host, and on the apply path the two agree,
+    because by then the checkout has moved and reconcile has seen the new bytes. Under `--dry-run`
+    only this one can answer it: the files are still the old ones on disk, and the change exists
+    only in the diff against the target revision.
+    """
+    return tuple(
+        name
+        for path in changed
+        if path.startswith(PACKAGED_UNIT_ROOT)
+        for name in (path[len(PACKAGED_UNIT_ROOT) :],)
+        if "/" not in name and name.startswith(name_prefix)
+    )
+
+
+def record_change_plan(context: UpgradeContext, changed: tuple[str, ...]) -> None:
+    """Turn one revision move into the facts every later step reads. The only place that happens.
+
+    Three entry points reach the same schedule — a fresh `pull`, the re-executed pulled schedule
+    arriving through its handoff marker, and `--dry-run` planning against the upstream target — and
+    each of them used to derive its own subset of these facts. `--dry-run` derived none at all, so
+    it returned before it knew anything and no later step could name a pending action; the handoff
+    derived `code_changed` and silently left `schemas_changed` false. Both were one defect with
+    three spellings, so there is now one recorder and the entry points only supply the path set.
+    """
+    context.changed_paths = changed
+    context.code_changed = _touches(changed, MEMORY_CODE_PATHS)
+    context.schemas_changed = _touches(changed, SCHEMA_PATHS)
+
+
 def step_pull(context: UpgradeContext) -> StepResult:
     if context.pull_result is not None:
         return context.pull_result
@@ -225,20 +270,24 @@ def step_pull(context: UpgradeContext) -> StepResult:
         if dirty:
             return StepResult("pull", "failed", "product checkout has uncommitted changes")
         if context.dry_run:
+            # Plan against the target revision and write nothing: `fetch` and `diff` read, and the
+            # checkout is left exactly where it was. This is what makes every later step's
+            # `would-change` line about the revision an operator is about to apply rather than
+            # about the one already installed.
             _git(context.product_root, ["fetch", "--quiet", "origin", context.base_branch])
             head = _git(context.product_root, ["rev-parse", "HEAD"])
             target = _git(context.product_root, ["rev-parse", f"origin/{context.base_branch}"])
+            record_change_plan(context, _changed_paths(context.product_root, head, target))
             if head == target:
                 return StepResult("pull", "unchanged", head[:12])
             return StepResult("pull", "changed", f"{head[:12]} -> {target[:12]} (not applied)")
         before, after = fast_forward(context.product_root, context.base_branch)
+        changed = _changed_paths(context.product_root, before, after)
     except GitError as exc:
         return StepResult("pull", "failed", str(exc))
     if before == after:
         return StepResult("pull", "unchanged", after[:12])
-    context.changed_paths = _changed_paths(context.product_root, before, after)
-    context.code_changed = _touches(context.changed_paths, MEMORY_CODE_PATHS)
-    context.schemas_changed = _touches(context.changed_paths, SCHEMA_PATHS)
+    record_change_plan(context, changed)
     context.pulled_before = before
     context.pulled_after = after
     return StepResult("pull", "changed", f"{before[:12]} -> {after[:12]}")
@@ -550,6 +599,9 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
             _set_runtime_owner(source_path(context.instance_path), context.runtime_user)
     except (HeadRegistryConfigError, GitError) as exc:
         return StepResult("head-registry", "failed", str(exc))
+    # The snapshot, not the pin: the pin records which canon won and where the checkout is, while
+    # `heads.yaml` is the file a running process actually read and cached.
+    context.head_registry_changed = bool(changed)
     if not changed and not repinned:
         return StepResult("head-registry", "unchanged", f"{target} matches {canonical}")
     verb = "would regenerate" if context.dry_run else "regenerated"
@@ -958,9 +1010,18 @@ def step_web(context: UpgradeContext) -> StepResult:
 
     Only `secretary-web.service` is restarted. `secretary-web-front.service` is `PartOf=` it and
     comes along, which is also why a change to either unit file is a reason to restart this one.
+
+    The restart reasons are every process-local input this upgrade materializes: the product source
+    and its dependencies, the bundled schemas, the shipped web unit files, and the head registry
+    snapshot — `load_registry` caches per process, so a profile added to the canon by a `--no-pull`
+    run is invisible to the running transport until it is replaced, and that made the documented
+    `heads.toml` procedure need a manual restart nobody was reminded of. A unit change is read from
+    both sides: `web_unit_changed` is what reconcile actually did, and `planned_unit_names` is what
+    the target revision will do, which is the only one of the two that can answer under `--dry-run`.
     """
     report = context.report
-    unit = f"{_component_unit_prefix(report, WEB_COMPONENT)}.service"
+    name_prefix = _component_unit_prefix(report, WEB_COMPONENT)
+    unit = f"{name_prefix}.service"
     installed = context.units.installed(unit)
     if installed is None:
         return StepResult("web", "skipped", f"{unit} is not installed; this host serves no web transport")
@@ -969,17 +1030,19 @@ def step_web(context: UpgradeContext) -> StepResult:
             "web", "skipped", f"{unit} is installed but not active; an upgrade does not start it"
         )
     reasons = []
-    if context.web_unit_changed:
+    if context.web_unit_changed or planned_unit_names(context.changed_paths, name_prefix):
         reasons.append("a web unit file changed")
     if context.schemas_changed:
         reasons.append("bundled schemas changed")
     if context.code_changed:
         reasons.append("product code or dependencies changed")
+    if context.head_registry_changed:
+        reasons.append("the head registry snapshot changed")
     if not reasons:
         return StepResult(
             "web",
             "unchanged",
-            f"{unit} already runs this checkout, these schemas and these dependencies",
+            f"{unit} already runs this checkout, these schemas, these dependencies and this head registry",
         )
     try:
         target = target_from_unit(installed)
@@ -1255,8 +1318,7 @@ def run_upgrade(args) -> int:
         context.pull = False
         context.handoff_before = before
         context.handoff_after = after
-        context.changed_paths = tuple(changed_paths)
-        context.code_changed = _touches(context.changed_paths, MEMORY_CODE_PATHS)
+        record_change_plan(context, tuple(changed_paths))
     elif context.pull and not context.dry_run:
         pulled = step_pull(context)
         if pulled.failed:
