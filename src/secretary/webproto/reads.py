@@ -7,10 +7,10 @@ here for a future need, and no operation that writes anything at all.
 
 Everything below is assembled from sources that already exist and already own their meaning --
 `collect_status` for installation health, the validated project bindings for the registry,
-`TaskReader` for cards, the board audit journal for history, the dispatcher's durable production
-state plus the launch heartbeats for agents. Nothing here is a second collector of a fact somebody
-already collects, and nothing here writes: no dispatcher tick, no repair, no board mutation, not
-even a cache file.
+`TaskReader` for cards, the audit owner of the installation's own card client for history, the
+dispatcher's durable production state plus the launch heartbeats for agents. Nothing here is a
+second collector of a fact somebody already collects, and nothing here writes: no dispatcher tick,
+no repair, no board mutation, not even a cache file.
 
 The sources fail independently, so each section of a snapshot carries its own availability record
 (:mod:`secretary.webproto.sources`) instead of the whole read failing. A dead Kanboard must not
@@ -30,13 +30,13 @@ from secretary.config import InstanceReport, validate_instance
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_types import HostError
 from secretary.status import collect_status
-from secretary.tasks import TaskError, TaskReader
+from secretary.tasks import TaskError, TaskReader, task_audit_for
 from secretary.webproto import agents as agent_reads
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
-from secretary.webproto.cursor import Cursor, decode
-from secretary.webproto.errors import InstallationUnavailable, TaskNotFound
-from secretary.webproto.journal import DEFAULT_LIMIT, EventJournal, EventPage
+from secretary.webproto.cursor import POSITION_OFFSET, POSITION_ORDINAL, Cursor, decode
+from secretary.webproto.errors import InstallationUnavailable, InvalidCursor, TaskNotFound
+from secretary.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventJournal, EventPage
 
 SCHEMA_VERSION = 1
 
@@ -77,6 +77,7 @@ class ReadLayer(ProtocolBoundary):
         self.instance = Path(instance)
         self._data_dir = Path(data_dir) if data_dir is not None else None
         self._board_client = board_client
+        self._resolved_client: Any | None = board_client
         self._status_reader = status_reader
         self.offline = offline
         self._clock = clock
@@ -112,9 +113,68 @@ class ReadLayer(ProtocolBoundary):
         return report.data_dir
 
     def _client(self) -> Any:
-        """The board client of this installation: an injected one, or the switch's (§2.2)."""
-        return self._board_client or board_client(
-            self.instance.parent if self.instance.is_file() else self.instance, serves=(CARD,)
+        """The board client of this installation: an injected one, or the switch's (§2.2).
+
+        Resolved once per layer and kept, so one operation cannot be assembled half from one
+        backend's client and half from another's -- and so a read that consults the card and its
+        history asks the switch a single time. A construction that failed is not kept: the next
+        operation asks again rather than replaying a refusal.
+        """
+        if self._resolved_client is None:
+            self._resolved_client = self._board_client or board_client(
+                self.instance.parent if self.instance.is_file() else self.instance, serves=(CARD,)
+            )
+        return self._resolved_client
+
+    def _events(self, data_dir: Path) -> tuple[Any, str]:
+        """The reader of this card's history, and the position semantics its cursors carry.
+
+        The one place this layer decides where a card's events come from, and it decides it the way
+        every other live audit reader of this installation does: resolve the card client, ask
+        :func:`secretary.tasks.task_audit_for` for that client's audit owner, read that owner. On
+        Kanboard the owner is the file journal and the reader seeks in it by byte offset, unchanged;
+        on `SECRETARY_CARD_BACKEND=postgres` the owner is `requests`/`board_events` and the reader
+        pages its ordered traversal, with the file projection under `<data>/board` not consulted at
+        all (`docs/BOARD_STORE.md` §7.3).
+
+        Until this existed, `task_snapshot` and `task_events` opened `board/events.ndjson` whatever
+        the installation was, so a migrated one answered a card's history from a file its writers do
+        not touch: unavailable where the projection was swept, and a successful empty or stale page
+        where an old one was left behind -- with every committed record, a product run's included,
+        invisible.
+        """
+        client = self._client()
+        if getattr(client, "backend_kind", "kanboard") == "postgres":
+            audit = task_audit_for(client, data_dir)
+            return CommittedAudit(audit, backend="postgres"), POSITION_ORDINAL
+        return EventJournal(data_dir), POSITION_OFFSET
+
+    def _unselected(
+        self, ref: str, cursor: str | None, exc: Exception, data_dir: Path, *, now: float
+    ) -> EventPage:
+        """A card backend that could not be established, said as the source fact it is.
+
+        Not an empty history and not a fall back to the file: which store holds this card's events is
+        the client's answer, and without a client there is no answer to read. The cursor the caller
+        came with is handed back untouched when it parses at all, so a client that keeps polling
+        resumes where it stopped once the backend answers again.
+        """
+        position: Cursor | None = None
+        if cursor not in (None, ""):
+            try:
+                position = decode(str(cursor), ref=ref)
+            except InvalidCursor:
+                position = None
+        return EventPage(
+            items=(),
+            next_cursor=position or Cursor(ref=ref, offset=0),
+            has_more=False,
+            source=sources.unavailable(
+                f"the card backend that owns this card's history could not be established: "
+                f"{_reason(exc)}",
+                now=now,
+                evidence=data_dir / "board",
+            ),
         )
 
     def _production_path(self, data_dir: Path) -> Path:
@@ -155,7 +215,7 @@ class ReadLayer(ProtocolBoundary):
         report = self.report()
         data_dir = self.data_dir(report)
         card, card_source = self._card(reference, data_dir, now=now)
-        page = EventJournal(data_dir).tail(reference, limit=events, now=now)
+        page = self._tail(reference, data_dir, limit=events, now=now)
         attempt, record, attempt_source = self._attempt(reference, data_dir, now=now)
         rows = agent_reads.agent_rows(record, reference) if record is not None else []
         project = _text(card.get("project")) if card else None
@@ -185,16 +245,46 @@ class ReadLayer(ProtocolBoundary):
 
         The cursor is the whole contract: read with the ``next_cursor`` of a page and you get what
         was appended after it, exactly once; read the same cursor twice and you get the same page.
-        Both hold because the position is a place in an append-only journal rather than a time or a
+        Both hold because the position is a place in an append-only history rather than a time or a
         recomputed index -- see :mod:`secretary.webproto.cursor`.
+
+        Which store that history is in is the card client's answer (:meth:`_events`): a byte in
+        `board/events.ndjson` on Kanboard, an ordinal in the committed `requests` traversal on
+        PostgreSQL. A cursor says which of the two it measures, so one issued in the other store --
+        a byte offset kept by a client across an installation's migration, say -- is refused by
+        name instead of read as a position here, and the caller gets its continuation from a fresh
+        :meth:`task_snapshot`.
         """
         now = self._clock()
         reference = str(ref or "")
         if not reference:
             raise TaskNotFound("a task reference is required")
-        position: Cursor | None = None if cursor in (None, "") else decode(str(cursor), ref=reference)
-        page = EventJournal(self.data_dir()).page(reference, cursor=position, limit=limit, now=now)
+        data_dir = self.data_dir()
+        try:
+            reader, semantics = self._events(data_dir)
+        except _SOURCE_FAILURES as exc:
+            page = self._unselected(reference, cursor, exc, data_dir, now=now)
+            return _events_document(reference, page, now=now, cursor=cursor)
+        position: Cursor | None = (
+            None
+            if cursor in (None, "")
+            else decode(str(cursor), ref=reference, position=semantics)
+        )
+        page = reader.page(reference, cursor=position, limit=limit, now=now)
         return _events_document(reference, page, now=now, cursor=cursor)
+
+    def _tail(self, ref: str, data_dir: Path, *, limit: int, now: float) -> EventPage:
+        """The opening page of a card's history, from the reader its backend owns.
+
+        A backend that cannot be established takes this section away and nothing else, exactly as an
+        unreadable journal does: a snapshot whose events are unavailable still carries the card, the
+        project and the attempt.
+        """
+        try:
+            reader, _semantics = self._events(data_dir)
+        except _SOURCE_FAILURES as exc:
+            return self._unselected(ref, None, exc, data_dir, now=now)
+        return reader.tail(ref, limit=limit, now=now)
 
     # -- sections --------------------------------------------------------------------------
 

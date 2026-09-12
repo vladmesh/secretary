@@ -182,6 +182,7 @@ class FileAuditOwnershipTests(unittest.TestCase):
             "task_commands.py",
             "webproto/command_reads.py",
             "webproto/ops.py",
+            "webproto/reads.py",
             "webproto/sprint_reads.py",
             "board/kanboard.py",
             "sprints.py",
@@ -200,6 +201,88 @@ class FileAuditOwnershipTests(unittest.TestCase):
         parameters = inspect.signature(_AuditOnce.__init__).parameters
         self.assertEqual([name for name in parameters if name != "self"], ["events", "audit"])
         self.assertEqual(_AuditOnce().events(), [])
+
+
+# The *indirect* file readers: a class that opens `<data>/board/events.ndjson` itself, so a
+# construction of it is a file audit read without a `TaskAudit(...)` call for the test above to see.
+# `secretary-1622`'s first submission is why this list exists: the product-run events had moved to
+# `requests` while `ReadLayer.task_snapshot` and `task_events` still built `EventJournal(data_dir)`,
+# so a migrated installation answered a card's history from a projection its writers never touch --
+# unavailable where it had been swept, a successful empty or stale page where an old one remained.
+# Each entry names the one function the construction may live in, which is the function that has
+# already asked the client which backend it is.
+FILE_EVENT_READER_CONSTRUCTIONS = {
+    "webproto/reads.py": (
+        "_events",
+        (
+            "the Kanboard branch of the read layer's backend-selected event reader, chosen after "
+            "the card client has been asked what it is; the PostgreSQL branch pages the audit "
+            "owner's own traversal through `CommittedAudit`"
+        ),
+    ),
+}
+
+
+class IndirectFileAuditReaderTests(unittest.TestCase):
+    """A reader that opens the journal itself is selected by the backend, like every other."""
+
+    def _constructions(self, name: str) -> dict[str, list[tuple[str, int]]]:
+        """Every `<name>(...)` call in `src/secretary`, by module, with its enclosing function."""
+        found: dict[str, list[tuple[str, int]]] = {}
+        for path in sorted((ROOT / "src" / "secretary").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for holder in ast.walk(tree):
+                if not isinstance(holder, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                for node in ast.walk(holder):
+                    target = node.func if isinstance(node, ast.Call) else None
+                    if isinstance(target, ast.Name) and target.id == name:
+                        key = str(path.relative_to(ROOT / "src" / "secretary"))
+                        found.setdefault(key, []).append((holder.name, node.lineno))
+        return found
+
+    def test_only_the_named_modules_open_the_file_event_reader(self) -> None:
+        """Anything else pages a file the installation's backend may never write."""
+        built = self._constructions("EventJournal")
+        self.assertEqual(
+            sorted(set(built) - set(FILE_EVENT_READER_CONSTRUCTIONS)),
+            [],
+            "these modules build webproto.journal.EventJournal, which opens "
+            "<data>/board/events.ndjson itself, instead of reading the audit owner of their card "
+            "client (secretary.tasks.task_audit_for)",
+        )
+        self.assertEqual(sorted(built), sorted(FILE_EVENT_READER_CONSTRUCTIONS))
+
+    def test_each_one_sits_in_the_function_that_selected_the_backend(self) -> None:
+        """The allowance is the selection seam itself, not the module as a whole."""
+        for module, (function, _reason) in FILE_EVENT_READER_CONSTRUCTIONS.items():
+            with self.subTest(module=module):
+                self.assertEqual(
+                    sorted({holder for holder, _line in self._constructions("EventJournal")[module]}),
+                    [function],
+                )
+
+    def test_the_read_layer_selects_its_event_reader_from_its_client(self) -> None:
+        """Both card-event operations read the owner the client names, and neither a file by default."""
+        source = (ROOT / "src" / "secretary" / "webproto" / "reads.py").read_text(encoding="utf-8")
+        self.assertIn("task_audit_for(", source)
+        self.assertIn("CommittedAudit(", source)
+        for operation in ("def task_snapshot", "def task_events"):
+            with self.subTest(operation=operation):
+                body = source[source.index(operation) :]
+                body = body[: body.index("\n    def ", 1)]
+                self.assertNotIn("EventJournal(", body)
+
+    def test_the_sql_reader_never_touches_a_path(self) -> None:
+        """`CommittedAudit` has no data directory to read: it pages what its audit owner traverses."""
+        from secretary.webproto.journal import CommittedAudit
+
+        parameters = inspect.signature(CommittedAudit.__init__).parameters
+        self.assertEqual([name for name in parameters if name != "self"], ["audit", "backend"])
+        source = inspect.getsource(CommittedAudit)
+        for forbidden in ("open(", "Path(", "events.ndjson"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
 
 
 class CardBackendSwitchTests(unittest.TestCase):

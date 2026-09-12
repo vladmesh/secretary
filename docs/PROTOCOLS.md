@@ -2946,22 +2946,40 @@ the invariant above in words, so a row can be read correctly without knowing thi
 
 ### Continuing a read
 
-The cursor is a position in the board's append-only audit journal
-(`<data>/board/events.ndjson`), which is where the order of what happened to a card actually
-lives. It is opaque to the client — a base64 document carrying the card and a byte offset — and
-three properties follow from it being a place in an append-only file rather than a timestamp or a
-recomputed index:
+The cursor is a position in the committed board audit, which is where the order of what happened to
+a card actually lives. **Which store that audit is, is the card client's answer** and never this
+layer's: the reader resolves the installation's card client and asks
+`secretary.tasks.task_audit_for` for its audit owner, so on Kanboard a card's history is
+`<data>/board/events.ndjson` and on `SECRETARY_CARD_BACKEND=postgres` it is the committed `requests`
+traversal (`docs/BOARD_STORE.md` §7.3). The file projection is not consulted beside a PostgreSQL
+client: it holds nothing that backend wrote, so answering from it published an unavailable history
+where the file had been swept and a successful empty or stale one where an old file remained, with
+every committed record — a product run's included — invisible.
+
+The cursor is opaque to the client: a base64 document carrying the card, a position and which of the
+two kinds of position it is — `offset`, a byte in the file journal, or `ordinal`, how many of this
+card's committed records stand before the next one. It carries that because the numbers are not
+interchangeable: byte 4212 of a journal is not the 4212th committed request. A reader handed the
+other kind refuses it (`validation`) rather than seeking to a plausible-looking wrong place, which
+is what a cursor kept by a client across an installation's migration is. A cursor issued before
+this existed carries no kind at all and is read as the byte offset it is, so released Kanboard
+cursors keep working unchanged. What a client does after a refusal is read a fresh task snapshot,
+whose `next_cursor` is the continuation in the store the installation actually has.
+
+Three properties follow from a position being a place in an append-only history rather than a
+timestamp or a recomputed index, and they hold in both stores — a committed record's place in claim
+order never changes, as a byte before the end of an append-only file never changes:
 
 * reading with a page's `next_cursor` returns what was appended after that page, exactly once;
 * reading the same cursor twice returns the same page;
 * a cursor issued before new events, read after them, returns exactly those new events.
 
 A page ends with `next_cursor` (always present, even when the page is empty) and `has_more`, which
-is true only when the page was cut short by `limit`. Both record shapes on the journal are
+is true only when the page was cut short by `limit`. Both record shapes in the audit are
 returned — the typed board protocol events and the released generic audit records beside them,
 told apart by `typed` — because a history with the transitions in it and the creations missing is
 not a history. Staged records that have not committed are not events and no cursor lands inside
-them. Omitting `--cursor` starts at the beginning of the journal; the `next_cursor` a task
+them. Omitting `--cursor` starts at the beginning of the history; the `next_cursor` a task
 snapshot returns is the end of it, so a client that polls a card is never handed an event it was
 just shown.
 

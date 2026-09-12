@@ -26,14 +26,26 @@ installation is never answered from `board/events.ndjson`, a file its writers do
   history, while a missing file journal on Kanboard still refuses the source as before.
 - **A product run's `product_run.started` / `.finished`** are published into the store the run's own
   card client names. The run protocol, its request ids and its fields are unchanged.
+- **A card's own history — `web-read task` and `web-read events`** — is paged from the store its card
+  client names. On PostgreSQL that is the committed `requests` traversal for that card; the file
+  projection is not opened at all, so an absent one is no longer an unavailable history and a stale
+  or empty one no longer a successful page with every committed record missing. This is what made a
+  migrated installation's product runs invisible to the two reads that are supposed to show them.
 - **`BoardEventCanon`** takes the audit its caller's client named; constructed with neither an audit
   nor a data directory it now refuses (`BoardEventCanonUnowned`) instead of guessing the file journal.
 - **The test suite clears an inherited `SECRETARY_CARD_BACKEND`.** A worker or operator shell on a
   migrated installation exports `postgres`; inherited, it ran the suite against a store it has not
   got. A case that means PostgreSQL opts in explicitly.
 
-`task_events`' byte-offset paging over `board/events.ndjson` is deliberately unchanged: its cursor is
-a released position in that file, so serving it from SQL is its own protocol change.
+**One protocol value gained a field, and old cursors still work.** An event cursor now says which
+kind of position it carries: `offset`, a byte in `board/events.ndjson`, or `ordinal`, how many of
+this card's committed records stand before the next one. The cursor stays opaque base64 and a cursor
+issued before this release carries no kind, so it is read as the byte offset it is and Kanboard
+paging is byte-identical to before. What changes is that a reader handed the *other* kind refuses it
+(`validation`) instead of seeking with it — a client that kept a cursor across an installation's
+cutover is told so rather than silently shown the wrong slice of history. The continuation after
+such a refusal is the `next_cursor` of a fresh task snapshot, which is the same recovery a client
+already has for a cursor it lost.
 
 ## 2026-09-11 — pre-import recover releases through a receipt; an old successor token refuses beside a new plan (secretary-1621, sprint:1437)
 

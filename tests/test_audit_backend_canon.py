@@ -40,14 +40,18 @@ from secretary.board.sql_audit import SqlTaskAudit
 from secretary.checkpoint import CheckpointWriter
 from secretary.sprints import SprintReader
 from secretary.task_commands import run_task_verify_audit
-from secretary.tasks import TaskAudit, task_audit_for
+from secretary.tasks import TaskAudit, TaskError, task_audit_for
 from secretary.webproto.command_reads import (
     STATE_COMMITTED,
     STATE_NOT_FOUND,
     STATE_PENDING,
     CommandReadLayer,
 )
+from secretary.webproto.cursor import POSITION_ORDINAL, Cursor
+from secretary.webproto.errors import InvalidCursor
+from secretary.webproto.journal import CommittedAudit
 from secretary.webproto.ops import OperationLayer
+from secretary.webproto.reads import ReadLayer
 from secretary.webproto.run_events import STARTED, publish_started, request_id_for
 from secretary.webproto.runs import ProductRun
 from tests.fakes.tasks import FakeKanboard
@@ -412,6 +416,202 @@ class ProductRunPublicationTests(SqlAuditCase):
             [record["kind"] for record in self.audit.events("secretary-468", kind=STARTED)],
             [STARTED],
         )
+
+
+class CardHistoryReadTests(SqlAuditCase):
+    """AC4/AC9: `task_snapshot` and `task_events` page the store the card client names.
+
+    The defect this class exists for: product-run publication had moved to `requests` while both of
+    these read `EventJournal(<data>/board/events.ndjson)`, so a migrated installation answered a
+    card's history from a projection nobody writes — unavailable where it had been swept, a
+    successful empty or stale page where an old one was left behind. Every case below therefore says
+    what the file holds while SQL answers: absent, empty, or holding a board that is not this one.
+    """
+
+    REF = "secretary-468"
+
+    def layer(self, **kwargs: Any) -> ReadLayer:
+        options: dict[str, Any] = {
+            "data_dir": self.data_dir,
+            "board_client": self.client,
+            "clock": lambda: 1788652800.0,
+            "offline": True,
+        }
+        options.update(kwargs)
+        return ReadLayer(self.instance_dir, **options)
+
+    def empty_projection(self) -> None:
+        """The third shape of the same fact: a file that is there and holds nothing."""
+        self.journal().write_text("", encoding="utf-8")
+
+    def _run_record(self) -> ProductRun:
+        return ProductRun(
+            run_id="run_1",
+            request_id="req-run-1",
+            ref=self.REF,
+            project="secretary",
+            role="worker",
+            profile="claude-worker",
+            adapter="claude",
+            runtime="local-pty",
+            workspace=str(self.tmp / "workspace"),
+            run_dir=str(self.tmp / "run"),
+            started_at=1788652800.0,
+        )
+
+    def test_the_layer_reads_the_card_history_of_the_backend_its_client_names(self) -> None:
+        reader, semantics = self.layer()._events(self.data_dir)
+
+        self.assertIsInstance(reader, CommittedAudit)
+        self.assertIsInstance(reader.audit, SqlTaskAudit)
+        self.assertEqual(semantics, POSITION_ORDINAL)
+
+    def test_the_snapshot_tail_holds_the_sql_events_with_no_projection_at_all(self) -> None:
+        self.commit("req-1", event_id="evt_1", minute=1)
+        publish_started(self.audit, self._run_record())
+        self.no_projection()
+
+        events = self.layer().task_snapshot(self.REF)["events"]
+
+        self.assertEqual(events["source"]["state"], "available")
+        self.assertEqual([row["kind"] for row in events["items"]], ["card.started", STARTED])
+        self.assertEqual(events["items"][0]["event_id"], "evt_1")
+        self.assertFalse(self.journal().exists())
+
+    def test_an_empty_projection_is_not_an_empty_history(self) -> None:
+        self.commit("req-1", event_id="evt_1", minute=1)
+        publish_started(self.audit, self._run_record())
+        self.empty_projection()
+
+        page = self.layer().task_events(self.REF, None, limit=10)
+
+        self.assertEqual(page["source"]["state"], "available")
+        self.assertEqual([row["kind"] for row in page["items"]], ["card.started", STARTED])
+        self.assertEqual(TaskAudit(self.data_dir).events(self.REF), [])
+
+    def test_a_stale_projection_is_in_no_page_and_in_no_snapshot(self) -> None:
+        self.commit("req-1", event_id="evt_1", minute=1)
+        self.stale_projection()
+
+        page = self.layer().task_events(self.REF, None, limit=10)
+        snapshot = self.layer().task_snapshot(self.REF)["events"]
+
+        self.assertEqual([row["event_id"] for row in page["items"]], ["evt_1"])
+        self.assertNotIn(STALE_JOURNAL_REF, [row["ref"] for row in page["items"]])
+        self.assertEqual([row["event_id"] for row in snapshot["items"]], ["evt_1"])
+        self.assertEqual(
+            self.layer().task_events(STALE_JOURNAL_REF, None, limit=10)["items"], []
+        )
+
+    def test_a_page_continues_once_and_repeats_the_same_page(self) -> None:
+        self.no_projection()
+        for index in range(5):
+            self.commit(f"req-{index}", event_id=f"evt_{index}", minute=index)
+
+        first = self.layer().task_events(self.REF, None, limit=2)
+        again = self.layer().task_events(self.REF, None, limit=2)
+        second = self.layer().task_events(self.REF, first["next_cursor"], limit=2)
+        repeated = self.layer().task_events(self.REF, first["next_cursor"], limit=2)
+
+        self.assertEqual([row["event_id"] for row in first["items"]], ["evt_0", "evt_1"])
+        self.assertEqual(again["items"], first["items"])
+        self.assertTrue(first["has_more"])
+        self.assertEqual([row["event_id"] for row in second["items"]], ["evt_2", "evt_3"])
+        self.assertEqual(repeated["items"], second["items"])
+        last = self.layer().task_events(self.REF, second["next_cursor"], limit=2)
+        self.assertEqual([row["event_id"] for row in last["items"]], ["evt_4"])
+        self.assertFalse(last["has_more"])
+        drained = self.layer().task_events(self.REF, last["next_cursor"], limit=2)
+        self.assertEqual(drained["items"], [])
+
+    def test_a_cursor_issued_before_the_backend_moved_is_refused_and_the_snapshot_replaces_it(
+        self,
+    ) -> None:
+        """A file byte offset is never read as an ordinal, and the refusal has a way out."""
+        self.no_projection()
+        self.commit("req-1", event_id="evt_1", minute=1)
+        released = Cursor(ref=self.REF, offset=137).encode()
+
+        with self.assertRaises(InvalidCursor) as refused:
+            self.layer().task_events(self.REF, released, limit=10)
+
+        self.assertIn("'offset'", str(refused.exception))
+        self.assertIn("fresh task snapshot", str(refused.exception))
+        continuation = self.layer().task_snapshot(self.REF)["events"]["next_cursor"]
+        self.assertEqual(self.layer().task_events(self.REF, continuation, limit=10)["items"], [])
+        self.commit("req-2", event_id="evt_2", minute=2)
+        resumed = self.layer().task_events(self.REF, continuation, limit=10)
+        self.assertEqual([row["event_id"] for row in resumed["items"]], ["evt_2"])
+
+    def test_a_cursor_of_another_card_and_one_past_the_end_are_both_refused(self) -> None:
+        self.no_projection()
+        self.commit("req-1", event_id="evt_1", minute=1)
+        mine = self.layer().task_events(self.REF, None, limit=1)["next_cursor"]
+
+        with self.assertRaises(InvalidCursor):
+            self.layer().task_events("secretary-12", mine, limit=1)
+        beyond = Cursor(ref=self.REF, offset=99, position=POSITION_ORDINAL).encode()
+        with self.assertRaises(InvalidCursor):
+            self.layer().task_events(self.REF, beyond, limit=1)
+
+    def test_a_store_that_will_not_answer_is_unavailable_and_never_an_empty_history(self) -> None:
+        self.stale_projection()
+        layer = self.layer(board_client=_RefusingClient())
+
+        page = layer.task_events(self.REF, None, limit=10)
+
+        self.assertEqual(page["source"]["state"], "unavailable")
+        self.assertIn(STORE_REFUSAL, page["source"]["reason"])
+        self.assertNotIn("password", page["source"]["reason"].lower())
+        self.assertEqual(page["items"], [])
+
+    def test_a_card_backend_that_cannot_be_established_takes_the_events_and_nothing_else(
+        self,
+    ) -> None:
+        self.stale_projection()
+        self.commit("req-1", event_id="evt_1", minute=1)
+        layer = ReadLayer(self.instance_dir, data_dir=self.data_dir, clock=lambda: 1788652800.0)
+
+        with mock.patch(
+            "secretary.webproto.reads.board_client",
+            side_effect=TaskError("backend_unavailable", STORE_REFUSAL, 1),
+        ):
+            page = layer.task_events(self.REF, None, limit=10)
+
+        self.assertEqual(page["source"]["state"], "unavailable")
+        self.assertIn("could not be established", page["source"]["reason"])
+        self.assertEqual(page["items"], [])
+
+    def test_a_kanboard_client_still_pages_the_file_journal_by_byte_offset(self) -> None:
+        """The released behavior, unchanged, beside the same data plane: file in, offsets out."""
+        record = {
+            "schema_version": 1,
+            "event_id": "evt_file",
+            "kind": "commented",
+            "ref": self.REF,
+            "occurred_at": "2026-09-07T12:00:00Z",
+            "actor": {"role": "po", "id": "owner"},
+            "outcome": "success",
+            "request_id": "file-request",
+            "payload": {},
+        }
+        self.journal().write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+        kanboard = FakeKanboard()
+        layer = self.layer(board_client=kanboard)
+
+        reader, semantics = layer._events(self.data_dir)
+        page = layer.task_events(self.REF, None, limit=10)
+
+        self.assertEqual(semantics, "offset")
+        self.assertEqual(reader.path, self.journal())
+        self.assertEqual([row["event_id"] for row in page["items"]], ["evt_file"])
+        self.assertEqual(
+            page["next_cursor"], Cursor(ref=self.REF, offset=self.journal().stat().st_size).encode()
+        )
+        with self.assertRaises(InvalidCursor):
+            layer.task_events(
+                self.REF, Cursor(ref=self.REF, offset=1, position=POSITION_ORDINAL).encode()
+            )
 
 
 class TypedCanonAndSprintReadTests(SqlAuditCase):

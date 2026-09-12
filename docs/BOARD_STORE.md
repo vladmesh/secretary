@@ -2184,16 +2184,25 @@ Every other live reader follows the same rule since secretary-1622, and the list
 | `webproto.ops` product-run publication | the `requests` row of the generic `product_run.*` record, in the store its own card client names |
 | `BoardEventCanon` | the audit its caller's client named; a canon with neither an audit nor a data directory refuses instead of guessing one |
 | `SprintReader` / sprint status reads | `requests` through `task_audit_for`; the shared traversal `_AuditOnce` has no data-directory construction at all |
+| `ReadLayer.task_snapshot` / `task_events` | the committed `requests` traversal for that card, paged by ordinal; the file projection under `<data>/board` is not opened, so an absent one is not an outage and a stale one is not a history |
 
 Three file-audit constructions remain deliberate and each is named with its reason in that test: the
 selector's own Kanboard branch, the pre-v2 pending-layout gate and unmigrated-claim check in
 `product_issues.py` (statements about the file layout itself, run *because* the client is
 PostgreSQL), and the default of a command host built with no audit, which only tests do.
 
-One reader is deliberately *not* in that list: `webproto.journal.EventJournal`, which pages one
-card's slice of `board/events.ndjson` by byte offset for `task_events`. Its cursor is a position in
-that file — a released protocol value, not an implementation detail — so serving it from SQL is a
-paging contract of its own and belongs to its own card, not to the selection this section describes.
+The read layer's card-event readers are selected the same way, and the selection is the only place
+they are chosen: `ReadLayer._events` resolves the card client, asks `task_audit_for` for its audit
+owner, and returns either `webproto.journal.EventJournal` — the released byte-offset reader of
+`board/events.ndjson`, unchanged down to its cursor — or `webproto.journal.CommittedAudit`, which
+pages that owner's ordered committed traversal and opens no file at all. `task_snapshot` and
+`task_events` both read through it, so a migrated installation's card page and API cannot publish
+the file projection's emptiness. The cursor carries which kind of position it is, `offset` or
+`ordinal`, because a byte offset in a journal is not an ordinal in `requests`: a cursor of the other
+kind is refused rather than reinterpreted, and a fresh task snapshot hands the client the
+continuation its own store can honour. `tests/test_architecture.py` holds that as a list too —
+`EventJournal` may be constructed in that one selection function and nowhere else, so an indirect
+file reader cannot come back as a bypass the `TaskAudit(...)` scan would not see.
 
 ### 7.4 Schema versioning and migrations
 
