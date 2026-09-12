@@ -138,3 +138,4 @@ packaging tests/test_upgrade.py
 component tests/test_reslice_seed.py
 unit tests/test_web_front.py
 unit tests/test_web_transport.py
+unit tests/test_web_process_coherence.py
