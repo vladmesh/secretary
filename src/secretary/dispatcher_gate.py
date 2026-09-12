@@ -44,7 +44,7 @@ from secretary.dispatcher_helpers import (
     safe_one_line,
     scrub_host_output,
 )
-from secretary.dispatcher_types import GateTransportError, HostError
+from secretary.dispatcher_types import GateTransportError, HostError, ProjectGitAccessError
 
 # Pending CI has a bounded watchdog so missing checks cannot strand a card.
 GATE_PENDING_STALL_SECONDS = int(os.environ.get("SECRETARY_GATE_PENDING_STALL_SECONDS", str(6 * 3600)))
@@ -149,7 +149,7 @@ def _backend_answered(text: str, args: list[str]) -> bool:
     return bool(_ANSWERED_RE.search(text))
 
 
-def _backend_call(host, args: list[str], label: str, *, cwd: Path | None = None):
+def _backend_call(host, args: list[str], label: str, *, cwd: Path | None = None, project: str = ""):
     """Ask the gate's backend, and be the one place that decides no answer came back.
 
     Every question this gate puts to a remote goes through here and nothing else does, which is
@@ -157,9 +157,20 @@ def _backend_call(host, args: list[str], label: str, *, cwd: Path | None = None)
     Returns the CompletedProcess, non-zero ones that carry an answer included; raises
     GateTransportError when the tool could not run or its output says it never got through. The
     tool's own text always travels with the failure — the classification has nothing else to read.
+
+    A remote Git question about a registered project's checkout (`project` set, `args` shaped
+    `git -C <checkout> ...`) crosses the host's project Git access boundary. Its named refusal is
+    an answer about access and propagates as `ProjectGitAccessError`, never as silence to retry.
     """
     try:
-        completed = host.run_capture(args, label, cwd=cwd)
+        if project:
+            if args[:2] != ["git", "-C"] or len(args) < 4:
+                raise HostError(f"{label}: a project remote Git operation must name its checkout")
+            completed = host.remote_git(project, args[2], args[3:], label)
+        else:
+            completed = host.run_capture(args, label, cwd=cwd)
+    except ProjectGitAccessError:
+        raise
     except HostError as exc:
         # The command never finished: it timed out waiting for the backend, or could not be run
         # at all. Either way no answer exists, and the tool's own text travels with it.
@@ -225,7 +236,7 @@ def gate_check(host, task: dict, record) -> GateResult:
     if not workspace or not Path(workspace).is_dir():
         raise HostError("gate workspace is missing")
     base = host.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
-    if ci != "none" and _recover_base(host, workspace, base) == "conflict":
+    if ci != "none" and _recover_base(host, workspace, base, task["project"]) == "conflict":
         return GateResult(
             "red",
             f"branch fell behind base {base!r} and the merge conflicts — resolve it in the "
@@ -342,10 +353,12 @@ def validation_ci(host, task: dict) -> str:
     return _validation(host, task).get("ci") or "none"
 
 
-def _recover_base(host, workspace: str, base: str) -> str:
+def _recover_base(host, workspace: str, base: str, project: str) -> str:
     """Fast-forward the worker branch onto the latest base. Returns "clean" (already current),
     "recovered" (merged base in), or "conflict" (a textual conflict, aborted)."""
-    fetch = _backend_call(host, ["git", "-C", workspace, "fetch", "origin", base], "gate base fetch")
+    fetch = _backend_call(
+        host, ["git", "-C", workspace, "fetch", "origin", base], "gate base fetch", project=project
+    )
     if fetch.returncode != 0:
         # An answered refusal (a base branch the remote does not have, a rejected credential) is
         # a determinate gate failure, exactly as it was before this call moved here.
@@ -452,12 +465,13 @@ def _remember_published_ref(host, record, branch: str, sha: str) -> None:
         record.gate_published_ref = dict(entry)
 
 
-def _remote_branch_sha(host, workspace: str, branch: str) -> str:
+def _remote_branch_sha(host, workspace: str, branch: str, project: str) -> str:
     """The object id `origin/<branch>` carries right now, or "" when the remote has no such ref."""
     listing = _backend_call(
         host,
         ["git", "-C", workspace, "ls-remote", "origin", f"refs/heads/{branch}"],
         "gate remote branch sha",
+        project=project,
     )
     if listing.returncode != 0:
         raise HostError(
@@ -484,7 +498,7 @@ def _contained_in_candidate(host, workspace: str, sha: str, head: str) -> bool:
     return contained.returncode == 0
 
 
-def _push_leased(host, workspace: str, branch: str, expected: str):
+def _push_leased(host, workspace: str, branch: str, expected: str, project: str):
     """Push the candidate under a lease on `expected` — the empty string meaning "must not exist"."""
     return _backend_call(
         host,
@@ -498,10 +512,11 @@ def _push_leased(host, workspace: str, branch: str, expected: str):
             f"{branch}:refs/heads/{branch}",
         ],
         "gate publish branch",
+        project=project,
     )
 
 
-def _publish_branch(host, record, workspace: str, branch: str, sha: str) -> GateResult | None:
+def _publish_branch(host, record, workspace: str, branch: str, sha: str, project: str) -> GateResult | None:
     """Publish the candidate branch under a lease, or refuse and say what moved.
 
     A worker held between rounds rebases, so its branch is routinely not a fast-forward of what
@@ -517,20 +532,21 @@ def _publish_branch(host, record, workspace: str, branch: str, sha: str) -> Gate
     whose record write was lost, or the human repair that force-pushed this very head.
 
     Returns None when the branch is published, and a typed publication red otherwise. `HostError`
-    still means a determinate failure that is not about where the branch points.
+    still means a determinate failure that is not about where the branch points, and its
+    `ProjectGitAccessError` form names a refused credential before or instead of a push.
     """
     expected = str(_published_ref_entry(record, branch).get("sha") or "")
     leased = bool(expected)
     if not leased:
-        expected = _remote_branch_sha(host, workspace, branch)
-    push = _push_leased(host, workspace, branch, expected)
+        expected = _remote_branch_sha(host, workspace, branch, project)
+    push = _push_leased(host, workspace, branch, expected, project)
     if push.returncode != 0:
         text = _tail((push.stderr or push.stdout or "").strip())
         if not _LEASE_REFUSED_RE.search(text):
             raise HostError(f"gate publish branch failed: {text}")
-        observed = _remote_branch_sha(host, workspace, branch)
+        observed = _remote_branch_sha(host, workspace, branch, project)
         if leased and _contained_in_candidate(host, workspace, observed, sha):
-            push = _push_leased(host, workspace, branch, observed)
+            push = _push_leased(host, workspace, branch, observed, project)
             text = _tail((push.stderr or push.stdout or "").strip())
         if push.returncode != 0:
             if not _LEASE_REFUSED_RE.search(text):
@@ -569,7 +585,7 @@ def _github_gate(
     branch = _legacy_worker_branch(task["ref"])
     no_diff_research = _is_no_diff_research_candidate(host, task, workspace, base)
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
-    refused = _publish_branch(host, record, workspace, branch, sha)
+    refused = _publish_branch(host, record, workspace, branch, sha, task["project"])
     if refused is not None:
         return refused
     if no_diff_research:

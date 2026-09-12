@@ -27,10 +27,14 @@ if TYPE_CHECKING:
     # Registry of claim skips: Ready records these and continues scanning.
 CLAIM_SKIP_RESOURCE_NOT_READY = "resource-not-ready"
 CLAIM_SKIP_FAILOVER_COLLAPSE = "failover-collapses-roles"
+# The project's remote gave the bounded Git access preflight no answer: nothing is known about the
+# credential, so the card stays Ready rather than being blocked on silence.
+CLAIM_SKIP_GIT_ACCESS_UNREACHABLE = "project-git-access-unreachable"
 CLAIM_SKIP_ACTIONS = frozenset(
     {
         CLAIM_SKIP_RESOURCE_NOT_READY,
         CLAIM_SKIP_FAILOVER_COLLAPSE,
+        CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
     }
 )
 

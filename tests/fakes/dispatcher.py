@@ -1534,6 +1534,21 @@ class FakeHost:
         if self.fail_result_reason:
             raise HostError(self.fail_result_reason)
 
+    # The project Git access preflight answer, scriptable per test. It is deliberately kept out of
+    # `calls`: that log is the ordering of card work, and this read precedes any claim.
+    git_access = None
+    git_access_probe = None
+
+    def project_git_access(self, project: str):
+        from secretary.infra.github_credential import ProjectGitAccess
+
+        self.__dict__.setdefault("git_access_checks", []).append(project)
+        if callable(self.git_access_probe):
+            self.git_access_probe(project)
+        if isinstance(self.git_access, Exception):
+            raise self.git_access
+        return self.git_access or ProjectGitAccess("ready", "local", "local")
+
     def gate_check(self, task: dict, record) -> GateResult:
         self.calls.append("gate_check")
         self.gate_calls.append(task["ref"])

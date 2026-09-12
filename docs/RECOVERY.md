@@ -162,6 +162,22 @@ explicitly selects Secretary's native Git credential helper. The helper emits th
 credential protocol, never to command arguments, repository config, logs, or status. A locked, missing,
 malformed, or rejected value stops the HTTPS checkpoint push.
 
+The released `secret checkpoint-github` producer is also the managed credential for the dispatcher's
+registered-project GitHub HTTPS operations (gate fetch, card-branch read and leased publish, release
+push, post-merge refresh). Their transport is read from each checkout's effective `origin` after URL
+rewriting, and they run through the same boundary as the checkout's resolved Git child. After a
+recovery, verify without printing the value:
+
+1. `secretary doctor --instance INSTANCE` shows `checkpoint-github` and every GitHub HTTPS
+   `project-git:<project>` row as `managed-ready`; local rows `not-applicable`, SSH rows
+   `ambient/manual-bypass`. A `refused` row names a transport the dispatcher will not use.
+2. If a row is `locked/unverifiable`, restore the installation key; if `missing/unavailable`, set the
+   token with `secret checkpoint-github set --stdin`. The token must reach every such project repository.
+3. A card blocked at `git-access-preflight` created no workspace; return it to Ready after step 2.
+
+Do not remove an ambient credential helper or `.git-credentials` file because doctor lists it: keep it
+while a registered project uses an unmanaged HTTPS origin or anything outside Secretary still needs it.
+
 A clean host cannot fetch an inaccessible private repository from the encrypted store inside it. Supply
 one external bootstrap credential for the initial clone. The same recover command is safe after an
 interruption: its existing-checkout fetch uses that supplied bootstrap credential when present, or the

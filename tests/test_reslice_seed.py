@@ -26,6 +26,7 @@ from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatcher_gate import GateResult, _impossible_trigger_reason, gate_check
 from secretary.dispatcher_launch import BRING_UP_CAUSE_CLASSES, CAUSE_BASE_BRANCH_CONTRACT
 from secretary.dispatcher_types import HostError
+from secretary.infra.github_credential import PROJECT_GIT_PHASE, RemoteExecution
 from secretary.projects.integration_base import (
     IntegrationBaseError,
     integration_base_refusal,
@@ -484,6 +485,11 @@ class _MergeHost(CommandHostRuntime):
         self.pr_base = pr_base
         self.runs: list[list[str]] = []
 
+    def _project_remote(self, project, checkout):  # type: ignore[override]
+        # No checkout exists behind the stubbed `_run`; its origin is declared local, so remote Git
+        # keeps the explicit non-managed command this fixture records.
+        return RemoteExecution(str(self.data_dir / "origin.git"), PROJECT_GIT_PHASE)
+
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
         if args[:3] == ["gh", "pr", "view"] and "baseRefName" in args:
@@ -579,14 +585,18 @@ class SeedFetchTests(unittest.TestCase):
         return git(self.fixture.repo, "rev-parse", f"{ref}^{{commit}}")
 
     def test_a_branch_seed_is_fetched_by_name_and_cut_at_its_tracking_ref(self) -> None:
-        start = self.host._fetch_seed(self.fixture.repo, "pipeline/codegen-orchestrator-1235")
+        start = self.host._fetch_seed(
+            self.fixture.repo, "pipeline/codegen-orchestrator-1235", project="codegen-orchestrator"
+        )
 
         self.assertEqual(start, "origin/pipeline/codegen-orchestrator-1235")
         self.assertEqual(self._resolves(start), self.fixture.candidate_sha)
 
     def test_an_object_id_seed_is_cut_at_the_object_itself(self) -> None:
         """A remote will not serve an object id by name, so the whole remote is fetched instead."""
-        start = self.host._fetch_seed(self.fixture.repo, self.fixture.candidate_sha)
+        start = self.host._fetch_seed(
+            self.fixture.repo, self.fixture.candidate_sha, project="codegen-orchestrator"
+        )
 
         self.assertEqual(start, self.fixture.candidate_sha)
         self.assertEqual(self._resolves(start), self.fixture.candidate_sha)
@@ -596,7 +606,7 @@ class SeedFetchTests(unittest.TestCase):
         absent = "0" * 39 + "1"
 
         with self.assertRaises(HostError) as refused:
-            self.host._fetch_seed(self.fixture.repo, absent)
+            self.host._fetch_seed(self.fixture.repo, absent, project="codegen-orchestrator")
 
         self.assertEqual(getattr(refused.exception, "bring_up_cause", ""), CAUSE_BASE_BRANCH_CONTRACT)
         self.assertIn(absent[:12], str(refused.exception))
@@ -604,7 +614,7 @@ class SeedFetchTests(unittest.TestCase):
 
     def test_a_branch_seed_the_remote_does_not_carry_is_a_determinate_git_refusal(self) -> None:
         with self.assertRaises(HostError) as refused:
-            self.host._fetch_seed(self.fixture.repo, "pipeline/never-existed")
+            self.host._fetch_seed(self.fixture.repo, "pipeline/never-existed", project="codegen-orchestrator")
 
         self.assertIn("git fetch", str(refused.exception))
 
@@ -748,6 +758,11 @@ class _PushHost(CommandHostRuntime):
             production_runtime=registered_production_runtime(root),
         )
         self.runs: list[list[str]] = []
+
+    def _project_remote(self, project, checkout):  # type: ignore[override]
+        # No checkout exists behind the stubbed `_run`; its origin is declared local, so remote Git
+        # keeps the explicit non-managed command this fixture records.
+        return RemoteExecution(str(self.data_dir / "origin.git"), PROJECT_GIT_PHASE)
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))

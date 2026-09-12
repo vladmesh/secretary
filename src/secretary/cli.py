@@ -784,7 +784,18 @@ def _recovery_findings(recovery: dict[str, object]) -> list[dict[str, object]]:
             }
         )
     for row in recovery.get("credential_consumers", []):
-        if not isinstance(row, dict) or row.get("consumer") != "checkpoint-github":
+        if not isinstance(row, dict):
+            continue
+        consumer = str(row.get("consumer") or "")
+        if consumer.startswith("project-git:"):
+            # A registered project the dispatcher can issue work for, whose Git access would be refused.
+            if row.get("enabled") is not True or row.get("state") not in {
+                "refused",
+                "locked/unverifiable",
+                "missing/unavailable",
+            }:
+                continue
+        elif consumer != "checkpoint-github":
             continue
         if row.get("state") in {"managed-ready", "ambient/manual-bypass", "unknown"}:
             continue
@@ -1136,9 +1147,14 @@ def print_recovery_inventory(recovery: dict[str, object]) -> None:
                 continue
             verified = row.get("verified_at") or "never"
             reason = f" - {row['reason']}" if row.get("reason") else ""
+            transport = (
+                f"transport={row['transport']}, managed={row.get('managed_readiness')}, "
+                if row.get("transport")
+                else ""
+            )
             print(
                 f"  {row['consumer']}: {row['state']}{reason} "
-                f"[source={row['source']}, verification={row['verification_source']} at {verified}; "
+                f"[{transport}source={row['source']}, verification={row['verification_source']} at {verified}; "
                 f"capability={row['capability']}]"
             )
     for key, title in (

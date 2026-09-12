@@ -12,7 +12,13 @@ from typing import Any
 from secretary import _proc, head_registry, state_repo
 from secretary.checkpoint import DEFAULT_REMOTE
 from secretary.head_health import PROBE_TTL_SECONDS, HeadHealth, HeadReadiness, run_probe
-from secretary.infra.github_credential import RemoteExecution
+from secretary.infra.github_credential import (
+    CredentialError,
+    CredentialReadiness,
+    RemoteExecution,
+    checkpoint_credential_readiness_for_child,
+    project_remote_execution,
+)
 from secretary.secret_store import (
     LEGACY_BOARD_SECRET_IDS,
     SecretStoreError,
@@ -36,9 +42,10 @@ def collect_recovery_inventory(
     instance_dir = report.instance_path.parent
     resources, registry_error = _resource_rows(report, inspect_live=inspect_live, now=stamp)
     checkpoint = checkpoint or {}
-    consumers = _credential_consumers(instance_dir, resources, checkpoint)
+    projects = _project_git_consumers(report, instance_dir)
+    consumers = _credential_consumers(instance_dir, resources, checkpoint, projects)
     paths = _path_rows(report)
-    bypasses = _git_bypasses(instance_dir)
+    bypasses = _git_bypasses(instance_dir, projects)
     bypasses.extend(_legacy_board_bypasses(instance_dir))
     materializations = _materialization_rows(instance_dir)
     store = store_health(instance_dir)
@@ -166,8 +173,127 @@ def _recorded(entry: object, resource: str) -> HeadReadiness | None:
     )
 
 
+_UNMANAGED_HTTP_TRANSPORTS = frozenset({"https-unsupported", "unmanaged"})
+
+
+def _project_git_consumers(report, instance_dir: Path) -> list[dict[str, Any]]:
+    """One dispatcher Git consumer per registered project, from its checkout's effective origin.
+
+    The transport is classified after URL rewriting, exactly as the dispatcher's boundary will
+    classify it; reading remote configuration contacts no remote. Managed-store readiness is
+    inspected once, as the Git child, and reported on every row independently of its transport.
+    """
+    bindings = sorted(
+        (
+            binding
+            for binding in (getattr(report, "bindings", None) or [])
+            if isinstance(binding, dict) and isinstance(binding.get("id"), str) and binding.get("id")
+        ),
+        key=lambda binding: str(binding["id"]),
+    )
+    if not bindings:
+        return []
+    # Readiness is per Git child: a project checkout may belong to a different user than the
+    # instance checkout, and the dispatcher's preflight reads the store as that project's child.
+    readiness_by_child: dict[tuple[int, int], CredentialReadiness] = {}
+    rows: list[dict[str, Any]] = []
+    for binding in bindings:
+        repo = binding.get("repo")
+        transport = "unknown"
+        checkout = Path(repo).expanduser() if isinstance(repo, str) and repo else None
+        if checkout is None or not checkout.exists():
+            # An unprovisioned project has no Git consumer on this host yet; the dispatcher answers
+            # `not-applicable` for it and project availability names the missing checkout.
+            continue
+        if (checkout / ".git").exists():
+            try:
+                transport = project_remote_execution(checkout, instance_dir=instance_dir).transport
+            except CredentialError:
+                transport = "unknown"
+        try:
+            child = state_repo.git_child_identity(checkout)
+        except state_repo.StateRepoError as exc:
+            managed = CredentialReadiness("missing/unavailable", " ".join(str(exc).split())[:240])
+        else:
+            key = (child.uid, child.gid)
+            if key not in readiness_by_child:
+                readiness_by_child[key] = checkpoint_credential_readiness_for_child(instance_dir, child)
+            managed = readiness_by_child[key]
+        rows.append(_project_git_row(str(binding["id"]), binding.get("enabled") is True, transport, managed))
+    return rows
+
+
+def _project_git_row(
+    project: str, enabled: bool, transport: str, managed: CredentialReadiness
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "consumer": f"project-git:{project}",
+        "capability": "dispatcher gate fetch, branch publication, release push and checkout refresh",
+        "project": project,
+        "enabled": enabled,
+        "transport": transport,
+        "managed_readiness": managed.state,
+        "canonical_source": f"not-applicable ({transport} transport)",
+        "verification_source": "effective-remote-classification",
+        "verified_at": None,
+        "verification_age_minutes": None,
+    }
+    if transport == "github-https":
+        row.update(
+            source="managed-store",
+            canonical_source="encrypted-store:github.checkpoint-token",
+            state=managed.state,
+            reason=managed.reason,
+            verification_source="managed-store-readiness",
+            supported_next_action="none"
+            if managed.ready
+            else "unlock the store or set the token with `secretary secret checkpoint-github set --stdin`, "
+            "then rerun doctor",
+        )
+    elif transport == "local":
+        row.update(
+            source="local",
+            state="not-applicable",
+            reason="local/file transport needs no credential",
+            supported_next_action="none",
+        )
+    elif transport == "unmanaged":
+        row.update(
+            source="manual-bypass",
+            state="ambient/manual-bypass",
+            reason="a non-HTTPS network transport is used as configured; Secretary manages no credential for it",
+            supported_next_action="use an https://github.com origin for the managed credential, or SSH",
+        )
+    elif transport == "ssh":
+        row.update(
+            source="manual-bypass",
+            state="ambient/manual-bypass",
+            reason="SSH transport uses the runtime user's SSH access; Secretary manages no SSH key",
+            supported_next_action="keep the runtime user's SSH access working, or use an https://github.com "
+            "origin for the managed credential",
+        )
+    elif transport == "unknown":
+        row.update(
+            source="none",
+            state="unknown",
+            reason="project checkout or its origin remote is unavailable",
+            supported_next_action="restore the project checkout, then rerun doctor",
+        )
+    else:
+        row.update(
+            source="none",
+            state="refused",
+            reason=f"the dispatcher refuses Git access over {transport} transport",
+            supported_next_action="point origin at an https://github.com, SSH or local remote",
+        )
+    return row
+
+
 def _credential_consumers(
-    instance_dir: Path, resources: list[dict[str, Any]], checkpoint: dict[str, Any]
+    instance_dir: Path,
+    resources: list[dict[str, Any]],
+    checkpoint: dict[str, Any],
+    projects: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     credential = checkpoint.get("credential") if isinstance(checkpoint.get("credential"), dict) else {}
@@ -205,6 +331,7 @@ def _credential_consumers(
             "supported_next_action": "use `secretary secret checkpoint-github set --stdin` if managed readiness is unavailable",
         }
     )
+    rows.extend(projects or [])
     for resource in resources:
         adapters = resource.get("consumers") or []
         rows.append(
@@ -340,7 +467,25 @@ def _path_row(
     }
 
 
-def _git_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
+def _ambient_credential_action(projects: list[dict[str, Any]], subject: str) -> str:
+    """Advice about an ambient credential, conditional on the consumers actually inventoried."""
+    dependents = sorted(
+        str(row.get("project")) for row in projects if row.get("transport") in _UNMANAGED_HTTP_TRANSPORTS
+    )
+    if dependents:
+        return (
+            f"keep the ambient {subject}: registered project(s) {', '.join(dependents)} use an unmanaged "
+            "HTTPS origin that manual Git may authenticate through it; move them to https://github.com or "
+            "SSH before retiring it"
+        )
+    return (
+        f"Secretary's managed GitHub operations disable the ambient {subject}; retire it only after "
+        "confirming nothing outside the inventoried consumers needs it"
+    )
+
+
+def _git_bypasses(instance_dir: Path, projects: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    projects = projects or []
     rows: list[dict[str, Any]] = []
     if not (instance_dir / ".git").exists():
         return rows
@@ -355,6 +500,8 @@ def _git_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
         transport = RemoteExecution(remote, "checkpoint", instance_dir=instance_dir).transport
     except state_repo.StateRepoError:
         return rows
+    # Ambient helpers and credential files matter as soon as any inventoried consumer authenticates.
+    authenticated = transport != "local" or any(row.get("transport") != "local" for row in projects)
     # A local/file remote is the supported hermetic checkpoint transport. It needs no
     # authentication and therefore adds no transport row. Applicable rewrites and ambient Git
     # configuration are still inventoried below because Git can apply them before transport.
@@ -396,10 +543,13 @@ def _git_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
             kind = "insteadOf"
             reason = "an applicable Git URL rewrite can bypass the declared checkpoint transport"
         else:
-            if transport == "local":
+            if not authenticated:
                 continue
             kind = "credential-helper"
-            reason = "ambient Git credential configuration exists; managed pushes disable it, but manual Git may use it"
+            reason = (
+                "ambient Git credential configuration exists; managed Secretary GitHub operations disable it, "
+                "but manual Git may use it"
+            )
         rows.append(
             {
                 "capability": "checkpoint-git-authentication",
@@ -409,10 +559,12 @@ def _git_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
                 "configuration_key": "url.*.insteadOf" if kind == "insteadOf" else "credential.*",
                 "configuration_scope": _git_configuration_scope(origin, instance_dir),
                 "reason": reason,
-                "supported_next_action": "remove the ambient Git bypass after confirming no unrelated repository needs it",
+                "supported_next_action": "remove the ambient Git bypass after confirming no unrelated repository needs it"
+                if kind == "insteadOf"
+                else _ambient_credential_action(projects, "credential helper"),
             }
         )
-    if transport == "local":
+    if not authenticated:
         # Credential helpers and files cannot authenticate a local transport. URL rewriting was
         # still inspected above because an applicable rule can change which transport Git uses.
         return rows
@@ -433,7 +585,7 @@ def _git_bypasses(instance_dir: Path) -> list[dict[str, Any]]:
                     "supported": False,
                     "path": str(path),
                     "reason": "an ambient Git credential file exists; its contents were not read",
-                    "supported_next_action": "remove or retire the ambient credential file after checking its other consumers",
+                    "supported_next_action": _ambient_credential_action(projects, "credential file"),
                 }
             )
     return rows

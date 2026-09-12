@@ -246,6 +246,7 @@ from secretary.dispatcher_review import (
 )
 from secretary.dispatcher_state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
+    CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
     CLAIM_SKIP_RESOURCE_NOT_READY,
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
@@ -296,6 +297,7 @@ from secretary.dispatcher_types import (
     GateTransportError,
     HeadLaunchAborted,
     HostError,
+    ProjectGitAccessError,
 )
 from secretary.dispatcher_watchdog import (
     HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
@@ -344,6 +346,7 @@ from secretary.head_health import (
     HeadReadiness,
     resolve_head_chain,
 )
+from secretary.infra.github_credential import ProjectGitAccess
 from secretary.projects.contract import (
     CONTRACT_FIT,
     CONTRACT_REFUSED,
@@ -917,6 +920,19 @@ class DispatcherRuntime:
             f"the broad-check contract of registered project {task.get('project')!r} cannot "
             f"attest this card: {refusal.detail()}"
         )
+        failure = self._unclaimed_preflight_failure(
+            task, attempt_id=attempt_id, head=head, review_head=review_head, detail=detail
+        )
+        reason = (
+            "the card was not given to a worker: this project's broad-check contract cannot "
+            f"attest it, so no workspace and no head were created. {detail}\n{failure.clause()}"
+        )
+        return failure, reason
+
+    def _unclaimed_preflight_failure(
+        self, task: dict[str, Any], *, attempt_id: str, head: str, review_head: str, detail: str
+    ) -> BringUpFailure:
+        """A pre-claim refusal as the bring-up taxonomy names it: infrastructure, never retried."""
         # The card has no record and will get none. The classifier reads one only to count the
         # bring-up attempts of a pane that was never ready, which this failure is not; the claim's
         # own identity is what the outcome carries.
@@ -932,7 +948,7 @@ class DispatcherRuntime:
             state="",
             claimed_at=0.0,
         )
-        failure = _classify_bring_up_failure(
+        return _classify_bring_up_failure(
             None,
             unclaimed,
             WORKER_ROLE,
@@ -940,11 +956,78 @@ class DispatcherRuntime:
             attempt_id=attempt_id,
             detail=detail,
         )
+
+    def _project_git_access(self, task: dict[str, Any]) -> ProjectGitAccess:
+        """The registered project's remote Git access, asked before anything is claimed."""
+        try:
+            return self.host.project_git_access(str(task.get("project") or ""))
+        except HostError as exc:
+            # The host could not even ask. That is silence about the credential, not a refusal.
+            return ProjectGitAccess(
+                "unreachable", "unknown", "none", "host", scrub_host_output(str(exc))[:240]
+            )
+
+    def _git_access_preflight_outcome(
+        self,
+        task: dict[str, Any],
+        access: ProjectGitAccess,
+        *,
+        attempt_id: str,
+        head: str,
+        review_head: str,
+    ) -> tuple[BringUpFailure, str]:
+        """The typed outcome for a card whose project's remote Git access was refused by name.
+
+        Pure, like `_contract_preflight_outcome`: it names the project, the refusal code, the
+        transport and the fixed-vocabulary reason, and touches neither board nor host. A refused
+        credential is a determinate host condition, so the card is blocked uncharged and no
+        attempt is scheduled to come back; it is not the transport class the gate retries.
+        """
+        detail = (
+            f"registered project {task.get('project')!r} refused remote Git access "
+            f"(refusal={access.code}, transport={access.transport}): {access.reason}"
+        )
+        failure = self._unclaimed_preflight_failure(
+            task, attempt_id=attempt_id, head=head, review_head=review_head, detail=detail
+        )
         reason = (
-            "the card was not given to a worker: this project's broad-check contract cannot "
-            f"attest it, so no workspace and no head were created. {detail}\n{failure.clause()}"
+            "the card was not given to a worker: this project's remote Git access was refused "
+            f"before the claim, so no workspace and no head were created. {detail}\n{failure.clause()}"
         )
         return failure, reason
+
+    def _git_access_preflight_blocked(
+        self,
+        task: dict[str, Any],
+        ref: str,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        *,
+        attempt_id: str,
+        access: ProjectGitAccess,
+        failure: BringUpFailure,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Write the Git access refusal decided before the claim, immediately after it."""
+        self._write_claim_preflight_block(
+            task,
+            ref,
+            records,
+            payload,
+            attempt_id=attempt_id,
+            action="git-access-preflight-blocked",
+            failure=failure,
+            reason=reason,
+        )
+        return {
+            "status": "blocked",
+            "step": "git-access-preflight",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "reason": "project Git access preflight refused",
+            "git_access": {"project": str(task.get("project") or ""), **access.to_json()},
+            **failure.outcome_fields(reason),
+        }
 
     def _contract_preflight_blocked(
         self,
@@ -958,9 +1041,40 @@ class DispatcherRuntime:
         failure: BringUpFailure,
         reason: str,
     ) -> dict[str, Any]:
-        """Write the outcome decided before the claim, immediately after it.
+        """Write the outcome decided before the claim, immediately after it."""
+        self._write_claim_preflight_block(
+            task,
+            ref,
+            records,
+            payload,
+            attempt_id=attempt_id,
+            action="contract-preflight-blocked",
+            failure=failure,
+            reason=reason,
+        )
+        return {
+            "status": "blocked",
+            "step": "contract-preflight",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "reason": "broad-check contract preflight failed",
+            "contract_refusal": refusal.evidence(),
+            **failure.outcome_fields(reason),
+        }
 
-        Nothing is computed here and nothing is read: the transition is the first statement made
+    def _write_claim_preflight_block(
+        self,
+        task: dict[str, Any],
+        ref: str,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        *,
+        attempt_id: str,
+        action: str,
+        failure: BringUpFailure,
+        reason: str,
+    ) -> None:
+        """Nothing is computed here and nothing is read: the transition is the first statement made
         about the claimed card, and the dispatcher's own bookkeeping only follows it.
         """
         self.terminal_effect(
@@ -982,7 +1096,7 @@ class DispatcherRuntime:
             reason=reason,
             request_id=_attempt_request_id(
                 attempt_id,
-                _bring_up_blocked_action("contract-preflight-blocked", failure),
+                _bring_up_blocked_action(action, failure),
                 ref,
             ),
             terminal_state="blocked",
@@ -991,15 +1105,6 @@ class DispatcherRuntime:
         )
         records.pop(ref, None)
         self.save_records(payload, records)
-        return {
-            "status": "blocked",
-            "step": "contract-preflight",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "reason": "broad-check contract preflight failed",
-            "contract_refusal": refusal.evidence(),
-            **failure.outcome_fields(reason),
-        }
 
     def _claim(
         self,
@@ -1033,6 +1138,22 @@ class DispatcherRuntime:
         head = worker_choice.head
         review_head = review_choice.head or review_choice.preferred
         contract_verdict = self._broad_check_contract_verdict(task)
+        # Project Git access is a separate preflight at the same boundary. It is asked only when the
+        # contract does not already refuse the card, so that refusal stays what it was: decided off
+        # the registry with the host untouched. An unanswered probe leaves the card in Ready.
+        git_access = None if contract_verdict.state == CONTRACT_REFUSED else self._project_git_access(task)
+        if git_access is not None and git_access.state == "unreachable":
+            return {
+                "status": "skipped",
+                "step": "git-access-preflight",
+                "action": CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
+                "pilot_ref": ref,
+                "git_access": {"project": str(task.get("project") or ""), **git_access.to_json()},
+                "reason": (
+                    f"project {task.get('project')!r} remote gave the Git access preflight no answer: "
+                    f"{git_access.reason or git_access.code}"
+                ),
+            }
         # A card the dispatcher still holds a record for, back in Ready with its claim already
         # committed under the current attempt, is a re-run. An attempt id otherwise lives as long as
         # the record, so the claim would replay idempotently, return the old event and leave the card
@@ -1050,6 +1171,7 @@ class DispatcherRuntime:
                 "worker-wait-stall",
                 "rework-blocked",
                 "contract-preflight-blocked",
+                "git-access-preflight-blocked",
                 "gate-blocked",
                 "gate-red-blocked",
                 "gate-pending-stall",
@@ -1100,6 +1222,13 @@ class DispatcherRuntime:
             head=head,
             review_head=review_head,
         )
+        git_access_outcome = (
+            self._git_access_preflight_outcome(
+                task, git_access, attempt_id=attempt_id, head=head, review_head=review_head
+            )
+            if contract_outcome is None and git_access is not None and git_access.state == "refused"
+            else None
+        )
         self.writer.claim(
             role="dispatcher",
             actor=self.owner,
@@ -1120,6 +1249,18 @@ class DispatcherRuntime:
                 payload,
                 attempt_id=attempt_id,
                 refusal=refusal,
+                failure=failure,
+                reason=blocked_reason,
+            )
+        if git_access_outcome is not None and git_access is not None:
+            failure, blocked_reason = git_access_outcome
+            return self._git_access_preflight_blocked(
+                task,
+                ref,
+                records,
+                payload,
+                attempt_id=attempt_id,
+                access=git_access,
                 failure=failure,
                 reason=blocked_reason,
             )
@@ -4001,7 +4142,16 @@ class DispatcherRuntime:
             )
             records.pop(ref, None)
             self.save_records(payload, records)
-            return {"status": "blocked", "step": "gate", "pilot_ref": ref, "reason": "validation gate failed"}
+            outcome = {
+                "status": "blocked",
+                "step": "gate",
+                "pilot_ref": ref,
+                "reason": "validation gate failed",
+            }
+            if isinstance(exc, ProjectGitAccessError):
+                # A refused credential is its own determinate class, never the transport retry.
+                outcome["git_access_refusal"] = {"project": exc.project, "code": exc.code}
+            return outcome
         self._gate_answered(ref, record, records, payload)
         if result.status == "green":
             return self._accept_green_gate(
