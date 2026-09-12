@@ -203,7 +203,9 @@ credential failure from an old failed push, or treat an ambient helper as suppor
 
 Six writers touch the repository, each with its own pathspec:
 
-- tick writer: `state/board`, `state/runs`, at the end of a dispatcher tick under the tick lock;
+- tick writer: `state/board`, `state/runs`, at most once per five-minute dispatcher cadence window
+  under the tick and shared repository locks. A due 30-minute remote window forces one fresh,
+  verified preparation in that tick before it can push; it does not add another export cycle;
 - memory writer: `state/memory`, on `propose`/`commit`/`supersede`;
 - knowledge writer: `state/knowledge`, on `secretary knowledge write`;
 - secret writer: `secrets/`, on `secret init/set/import/remove`.
@@ -218,6 +220,52 @@ The pathspecs do not overlap, so none of them picks up another's half-written tr
 concurrent writes, so every writer takes a shared repository lock for the duration of staging and
 commit. The memory, knowledge and secret writers commit immediately rather than waiting for a tick;
 the 30-minute push carries the commit out with the rest of the checkpoint.
+
+The five-minute cadence applies only to the periodic board/run projection. The knowledge, memory,
+secret, head-registry and `.gitignore` writers above remain synchronous and retain the same shared
+writer lock. Explicit checkpoint users such as install, recover and cutover also remain synchronous;
+they do not pass through the periodic coordinator.
+
+## Checkpoint readers and freshness
+
+`state/board` and `state/runs` are recovery and offline-analytics artifacts, not a live read model.
+Their in-product consumers are `installation.materialize_checkpoint` and `restore.py` during a
+deliberate recovery, and `board.analytics.project_analytics_checkpoint`, which first verifies the
+sealed board manifest and then projects that immutable cut. `status` and `doctor` inspect Git and
+the dispatcher's production-state telemetry for freshness only; they do not read derived cards or
+runs as current state.
+
+Live card, sprint, audit and command reads use the selected board backend through `TaskReader`,
+`TaskAudit` and the web protocol read layer. On PostgreSQL those are live SQL reads; on Kanboard
+they are the live board and its audit owner. Dispatcher lifecycle state comes from
+`dispatcher/production-state.json` and live run journals, not from the checkpoint projection. A
+reader requiring fresher state therefore has no route through the five-minute artifact. The detailed
+backend-audit ownership table is in `BOARD_STORE.md` §7.3.
+
+## Local Git packing controls
+
+Install, recover and upgrade idempotently set only these local settings in the private instance
+repository:
+
+```
+pack.threads=1
+pack.windowMemory=128m
+pack.deltaCacheSize=64m
+```
+
+They use `git -C INSTANCE config --local --replace-all`, never a global configuration or a registered
+project repository. `doctor` names missing, drifted or duplicate values with the instance path and the
+exact remediation.
+To roll them back locally, run:
+
+```
+git -C INSTANCE config --local --unset-all pack.threads
+git -C INSTANCE config --local --unset-all pack.windowMemory
+git -C INSTANCE config --local --unset-all pack.deltaCacheSize
+```
+
+These knobs constrain Git's packing choices. They are not a hard RSS limit and do not prove a peak
+memory bound.
 
 ## Validation gate
 
@@ -321,14 +369,17 @@ values.
 
 ## Observability
 
-`status` and `doctor` show checkpoint freshness: the time and hash of the last commit, the time of the
+`status` and `doctor` show checkpoint freshness: the time and hash of the last commit, last successful
+preparation, a not-yet-due skip, retry state, last failed preparation and its reason, the time of the
 last successful push, the last operation attempt and its age, checkpoint lag in minutes and commits,
-the reason the gate is blocked, and the `remote diverged` state. The attempt timestamp belongs to the
-current operation outcome; it does not replace the timestamp of the last successful push.
+and the `remote diverged` state. A quiet skip is never reported as a fresh preparation. The attempt
+timestamp belongs to the current operation outcome; it does not replace the timestamp of the last
+successful push.
 
 A blocked checkpoint degrades the production tick and its durable telemetry. The dispatcher still
-contains the failure and retries the checkpoint on the next tick, but unit health and the steward must
-not read the tick as healthy while the recoverable snapshot cannot be written.
+contains the failure and retries the checkpoint on the next bounded tick. If the remote window was due,
+its push is recorded as withheld instead of sending the older local snapshot. Unit health and the
+steward must not read the tick as healthy while the recoverable snapshot cannot be written.
 
 `status --json` carries a `secret_store` section: whether the store is initialised, how many secrets it
 holds, when the catalog last changed, whether a usable installation key exists, and a summary of

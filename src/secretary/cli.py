@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from secretary import state_repo
 from secretary.backup import create_backups, verify_backup
 from secretary.board_transport import findings as _board_transport_findings
 from secretary.check_commands import add_check_subcommands
@@ -1098,8 +1099,14 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
         return []
     data_dir = report.data_dir
     production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
+    findings = checkpoint_findings(report) if findings is None else findings
     if "checkpoint" not in production and "checkpoint_push" not in production:
-        return []
+        if findings:
+            print()
+            print("checkpoint findings:")
+            for finding in findings:
+                print(f"  {finding}")
+        return findings
 
     snapshot = checkpoint_snapshot(
         report.instance_path.parent,
@@ -1111,7 +1118,6 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
     for line in render_checkpoint_lines(snapshot):
         print(f"  {line}")
 
-    findings = checkpoint_findings(report) if findings is None else findings
     if findings:
         print("checkpoint findings:")
         for finding in findings:
@@ -1123,27 +1129,49 @@ def checkpoint_findings(report) -> list[str]:
     if report.data_dir is None:
         return []
     production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
-    if "checkpoint" not in production and "checkpoint_push" not in production:
-        return []
-    snapshot = checkpoint_snapshot(
-        report.instance_path.parent,
-        write_state=production.get("checkpoint"),
-        push_state=production.get("checkpoint_push"),
-    )
     findings: list[str] = []
-    if snapshot["remote_diverged"]:
-        findings.append(f"remote diverged: {snapshot['push_reason'] or 'push stopped, resolve by hand'}")
-    elif snapshot["push_status"] == "failed":
-        attempted = snapshot["push_attempted_at"] or "unknown time"
-        findings.append(
-            f"checkpoint push failed at {attempted}: "
-            f"{snapshot['push_reason'] or 'push failure reason unavailable'}"
+    if "checkpoint" in production or "checkpoint_push" in production:
+        snapshot = checkpoint_snapshot(
+            report.instance_path.parent,
+            write_state=production.get("checkpoint"),
+            push_state=production.get("checkpoint_push"),
         )
-    if snapshot["blocked_reason"]:
-        findings.append(f"checkpoint gate blocked: {snapshot['blocked_reason']}")
-    lag = snapshot["lag_minutes"]
-    if isinstance(lag, int) and lag > 2 * PUSH_INTERVAL_MINUTES:
-        findings.append(f"checkpoint lag is {lag} min, past the {PUSH_INTERVAL_MINUTES} min RPO")
+        if snapshot["remote_diverged"]:
+            findings.append(f"remote diverged: {snapshot['push_reason'] or 'push stopped, resolve by hand'}")
+        elif snapshot["push_status"] == "failed":
+            attempted = snapshot["push_attempted_at"] or "unknown time"
+            findings.append(
+                f"checkpoint push failed at {attempted}: "
+                f"{snapshot['push_reason'] or 'push failure reason unavailable'}"
+            )
+        if snapshot["blocked_reason"]:
+            findings.append(f"checkpoint gate blocked: {snapshot['blocked_reason']}")
+        lag = snapshot["lag_minutes"]
+        if isinstance(lag, int) and lag > 2 * PUSH_INTERVAL_MINUTES:
+            findings.append(f"checkpoint lag is {lag} min, past the {PUSH_INTERVAL_MINUTES} min RPO")
+    instance = report.instance_path.parent
+    # Example and pre-install configuration documents are intentionally not
+    # instance repositories. The lifecycle cannot have established local Git
+    # controls there, so doctor keeps its existing configuration-only contract.
+    if (instance / ".git").exists():
+        try:
+            packing = state_repo.packing_controls(instance)
+        except state_repo.StateRepoError as exc:
+            findings.append(f"instance Git packing controls unavailable at {instance}: {exc}")
+        else:
+            drifted = [
+                f"{key}={actual!r} (expected {expected!r})"
+                for key, expected in state_repo.PACKING_CONTROLS
+                if (actual := packing.get(key)) != expected
+            ]
+            if drifted:
+                commands = "; ".join(
+                    f"git -C {instance} config --local --replace-all {key} {expected}"
+                    for key, expected in state_repo.PACKING_CONTROLS
+                )
+                findings.append(
+                    f"instance Git packing controls drifted at {instance}: {', '.join(drifted)}; remediate: {commands}"
+                )
     return findings
 
 

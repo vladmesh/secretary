@@ -546,6 +546,22 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
     return StepResult("head-registry", "changed", f"{verb} {what}")
 
 
+def step_instance_packing(context: UpgradeContext) -> StepResult:
+    """Keep the private instance repo's packing controls bounded and local."""
+    try:
+        drifted = state_repo.configure_packing_controls(context.instance_path, dry_run=context.dry_run)
+    except state_repo.StateRepoError as exc:
+        return StepResult("instance-packing", "failed", str(exc))
+    if not drifted:
+        return StepResult("instance-packing", "unchanged", "local Git packing controls match")
+    action = "would set" if context.dry_run else "set"
+    return StepResult(
+        "instance-packing",
+        "changed",
+        f"{action} local Git packing controls: {', '.join(drifted)}",
+    )
+
+
 def step_publish_head_registry(context: UpgradeContext) -> StepResult:
     """Commit and publish the installed head pair as one recovery-canon update."""
     if context.dry_run:
@@ -1036,6 +1052,7 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_board_store_roles,
     step_memory_clients,
     step_head_registry,
+    step_instance_packing,
     step_publish_head_registry,
     step_worktrees,
     step_role_skills,

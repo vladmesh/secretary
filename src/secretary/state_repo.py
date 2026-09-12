@@ -42,6 +42,15 @@ HEADS_PATHSPEC = ("heads/heads.yaml", "heads/source.yaml")
 HEADS_CHECKPOINT_MESSAGE = "checkpoint(heads): publish installed head registry"
 RECOVERY_RECONCILIATION_MESSAGE = "recovery(instance): reconcile retained head registry checkpoint"
 
+# These are deliberately repository-local controls for the private instance
+# checkout. They reduce Git's peak packing appetite; they are not a process RSS
+# limit and must never escape into a user's global configuration or a project.
+PACKING_CONTROLS = (
+    ("pack.threads", "1"),
+    ("pack.windowMemory", "128m"),
+    ("pack.deltaCacheSize", "64m"),
+)
+
 # Variables with which the caller's environment selects a *different* repository than
 # the one named on the command line.  Git honours them ahead of `-C`, so an inherited
 # `GIT_DIR` silently redirects an instance write into whatever repository the caller
@@ -321,6 +330,42 @@ def require_repo(instance_dir: Path) -> Path:
     if not (instance_dir / ".git").exists():
         raise StateRepoError(f"instance repo is not a git repository: {instance_dir}")
     return instance_dir
+
+
+def packing_controls(instance_dir: Path) -> dict[str, str | None]:
+    """Read only the instance checkout's local packing controls.
+
+    ``--local`` is part of the command rather than an assumption about Git's
+    default scope. This makes the boundary mechanically visible in lifecycle
+    and doctor paths and leaves global and registered-project configuration out.
+    """
+    instance = require_repo(instance_dir)
+    values: dict[str, str | None] = {}
+    for key, _ in PACKING_CONTROLS:
+        result = run_git(instance, ["config", "--local", "--get-all", key], label=f"inspect {key}")
+        if result.returncode not in {0, 1}:
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            raise StateRepoError(f"inspect {key} failed: {detail[-1] if detail else 'git error'}")
+        values[key] = result.stdout.strip() if result.returncode == 0 else None
+    return values
+
+
+def configure_packing_controls(instance_dir: Path, *, dry_run: bool = False) -> tuple[str, ...]:
+    """Idempotently set the three supported local instance packing controls."""
+    instance = require_repo(instance_dir)
+    current = packing_controls(instance)
+    drifted = tuple(key for key, expected in PACKING_CONTROLS if current.get(key) != expected)
+    if not drifted or dry_run:
+        return drifted
+    with state_repo_lock(instance):
+        # Re-read while holding the repository writer lock. A concurrent local
+        # lifecycle run can then converge without one writer undoing another.
+        current = packing_controls(instance)
+        drifted = tuple(key for key, expected in PACKING_CONTROLS if current.get(key) != expected)
+        for key, expected in PACKING_CONTROLS:
+            if key in drifted:
+                git(instance, ["config", "--local", "--replace-all", key, expected], label=f"set {key}")
+    return drifted
 
 
 def head(instance_dir: Path) -> str | None:

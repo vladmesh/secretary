@@ -3,8 +3,9 @@
 Contract: docs/RECOVERY.md, sections "Layout", "Cadence and RPO", "Writers", "Validation gate",
 "Failure and divergence", "Observability". The writer regenerates the normalized board and runs
 exports, validates the snapshot, and commits `state/board` and `state/runs` into the private
-repo. It runs at the end of a dispatcher tick under `tick_lock`, and also takes the instance repo
-writer lock so checkpoint writes cannot overlap a green-card publish against the same checkout.
+repo. The dispatcher invokes it at most once in a five-minute cadence window, or once for a due
+remote recovery window, under `tick_lock`; it also takes the instance repo writer lock so
+checkpoint writes cannot overlap a green-card publish against the same checkout.
 
 Memory (`state/memory`) and knowledge (`state/knowledge`) are written by their own writers
 directly into the same repo, so both are deliberately outside this pathspec; `state_repo_lock`
@@ -680,22 +681,27 @@ class CheckpointPusher:
         self._clock = clock
         self._credential: dict[str, Any] = {"state": "ambient/manual-bypass", "reason": "not verified"}
 
-    def push(self, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    def due(self, state: dict[str, Any] | None = None, *, now: float | None = None) -> bool:
+        """Whether the next remote publication window is due.
+
+        The dispatcher asks this before preparing its periodic checkpoint, so a due
+        remote window can share one fresh, verified preparation with the ordinary
+        five-minute cadence.  Keep the decision beside ``push``: callers must not
+        grow a second interpretation of a 30-minute window.
+        """
+        stamp = float(self._clock()) if now is None else float(now)
+        return self._due(dict(state or {}), stamp)
+
+    def push(self, state: dict[str, Any] | None = None, *, now: float | None = None) -> dict[str, Any]:
         """Run the push if its window is due; return the new push state."""
         current = dict(state or {})
-        now = float(self._clock())
-        if not self._due(current, now):
+        stamp = float(self._clock()) if now is None else float(now)
+        if not self._due(current, stamp):
             return current
-        return self._record(current, self._attempt(), now)
+        return self._record(current, self._attempt(), stamp)
 
     def _due(self, state: dict[str, Any], now: float) -> bool:
-        if state.get("remote_diverged") or state.get("status") == "diverged":
-            return True
-        attempted = _float_field(state, "attempted_epoch")
-        if attempted <= 0:
-            return True
-        # A clock that jumped backwards must not park the push forever.
-        return now < attempted or now - attempted >= self.interval_seconds
+        return is_push_due(state, now, interval_seconds=self.interval_seconds)
 
     def _attempt(self) -> PushOutcome:
         try:
@@ -767,8 +773,10 @@ class CheckpointPusher:
                     "remote_diverged": False,
                 }
             )
+            state.pop("retry_pending", None)
         elif outcome.status == "skipped":
             state["remote_diverged"] = False
+            state.pop("retry_pending", None)
         else:
             state["failures"] = int(_float_field(state, "failures")) + 1
             state["remote_diverged"] = outcome.status == "diverged"
@@ -891,6 +899,29 @@ class CheckpointPusher:
         return (result.stderr or result.stdout or "").strip()
 
 
+def is_push_due(state: dict[str, Any], now: float, *, interval_seconds: float) -> bool:
+    """The public remote-window predicate shared by production and its fakes.
+
+    A diverged remote is intentionally rechecked promptly, while a regular
+    failed delivery retains the normal publication interval. Keeping this
+    state-only rule separate lets the dispatcher coordinate preparation
+    cadence without growing a second interpretation of the pusher window.
+    """
+    # A due remote window that was withheld because fresh preparation failed
+    # must retry with that preparation on the next bounded dispatcher tick.
+    # Treating its recorded attempt as a completed 30-minute window would
+    # silently extend the RPO after a local checkpoint failure.
+    if state.get("retry_pending"):
+        return True
+    if state.get("remote_diverged") or state.get("status") == "diverged":
+        return True
+    attempted = _float_field(state, "attempted_epoch")
+    if attempted <= 0:
+        return True
+    # A clock that jumped backwards must not park the push forever.
+    return now < attempted or now - attempted >= interval_seconds
+
+
 def checkpoint_snapshot(
     instance_dir: Path,
     *,
@@ -902,6 +933,33 @@ def checkpoint_snapshot(
     write = dict(write_state or {})
     push = dict(push_state or {})
     stamp = time.time() if now is None else float(now)
+    write_status = str(write.get("status") or "pending")
+    # A pre-cadence payload had one outcome only.  It is deliberately not
+    # upgraded into a successful preparation: the coordinator makes the first
+    # upgraded tick fresh.  Status still renders the old result honestly.
+    successful_at = str(write.get("last_success_at") or "")
+    successful_epoch = _float_field(write, "last_success_epoch")
+    successful_status = str(write.get("last_success_status") or "")
+    if not successful_at and write_status in {"committed", "unchanged"}:
+        successful_at = str(write.get("at") or "")
+        successful_epoch = _float_field(write, "attempted_epoch")
+        successful_status = write_status
+    successful_age = (
+        max(0, int((stamp - successful_epoch) // 60))
+        if successful_epoch > 0
+        else (_age_minutes(successful_at, stamp) if successful_at else None)
+    )
+    failed_at = str(write.get("last_failure_at") or "")
+    failed_epoch = _float_field(write, "last_failure_epoch")
+    failure_reason = str(write.get("last_failure_reason") or "")
+    if not failure_reason and write_status == "blocked":
+        failed_at = str(write.get("at") or "")
+        failed_epoch = _float_field(write, "attempted_epoch")
+        failure_reason = str(write.get("reason") or "")
+    skipped_at = str(write.get("skip_at") or "")
+    skipped_epoch = _float_field(write, "skip_epoch")
+    next_due_at = str(write.get("next_due_at") or "")
+    next_due_epoch = _float_field(write, "next_due_epoch")
     commit, commit_at = _last_commit(Path(instance_dir))
     pushed = str(push.get("last_push_commit") or "")
     lag_commits, oldest_at = _unpushed(Path(instance_dir), pushed)
@@ -915,6 +973,22 @@ def checkpoint_snapshot(
     return {
         "last_commit": commit,
         "last_commit_at": commit_at,
+        "checkpoint_status": write_status,
+        "last_checkpoint_prepared_at": successful_at,
+        "last_checkpoint_prepared_epoch": successful_epoch,
+        "last_checkpoint_prepared_status": successful_status,
+        "last_checkpoint_prepared_commit": str(write.get("last_success_commit") or ""),
+        "last_checkpoint_prepared_age_minutes": successful_age,
+        "checkpoint_attempted_at": str(write.get("attempted_at") or ""),
+        "checkpoint_attempted_epoch": _float_field(write, "attempted_epoch"),
+        "checkpoint_skipped_at": skipped_at,
+        "checkpoint_skipped_epoch": skipped_epoch,
+        "checkpoint_next_due_at": next_due_at,
+        "checkpoint_next_due_epoch": next_due_epoch,
+        "checkpoint_retry_pending": bool(write.get("retry_pending")),
+        "checkpoint_last_failure_at": failed_at,
+        "checkpoint_last_failure_epoch": failed_epoch,
+        "checkpoint_last_failure_reason": failure_reason,
         "last_push_at": str(push.get("last_push_at") or ""),
         "last_push_commit": pushed,
         "push_attempted_at": attempted_at,
@@ -934,7 +1008,7 @@ def checkpoint_snapshot(
         "push_reason": str(push.get("reason") or ""),
         "push_failures": int(_float_field(push, "failures")),
         "remote_diverged": bool(push.get("remote_diverged")),
-        "blocked_reason": str(write.get("reason") or "") if write.get("status") == "blocked" else "",
+        "blocked_reason": failure_reason,
         "credential": _credential_snapshot(Path(instance_dir), _object_field(push, "credential"), stamp),
     }
 
@@ -1001,6 +1075,15 @@ def render_checkpoint_lines(snapshot: dict[str, Any]) -> list[str]:
     lines = [
         f"last commit: {snapshot.get('last_commit') or '(none)'} "
         f"{snapshot.get('last_commit_at') or ''}".strip(),
+        f"last preparation: {snapshot.get('last_checkpoint_prepared_at') or '(never)'}"
+        + (
+            f" ({snapshot['last_checkpoint_prepared_age_minutes']} min ago, "
+            f"{snapshot.get('last_checkpoint_prepared_status')})"
+            if snapshot.get("last_checkpoint_prepared_age_minutes") is not None
+            else ""
+        ),
+        f"checkpoint: {snapshot.get('checkpoint_status') or 'pending'}"
+        + (" (retry pending)" if snapshot.get("checkpoint_retry_pending") else ""),
         f"last push: {snapshot.get('last_push_at') or '(never)'}",
         f"last push attempt: {snapshot.get('push_attempted_at') or '(never)'}"
         + (
@@ -1014,6 +1097,12 @@ def render_checkpoint_lines(snapshot: dict[str, Any]) -> list[str]:
     reason = snapshot.get("push_reason")
     if reason:
         lines.append(f"push reason: {reason}")
+    skipped = snapshot.get("checkpoint_skipped_at")
+    if skipped:
+        lines.append(f"checkpoint last skipped: {skipped} (not due)")
+    next_due = snapshot.get("checkpoint_next_due_at")
+    if next_due:
+        lines.append(f"checkpoint next due: {next_due}")
     blocked = snapshot.get("blocked_reason")
     if blocked:
         lines.append(f"blocked: {blocked}")

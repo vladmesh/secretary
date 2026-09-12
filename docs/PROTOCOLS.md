@@ -2485,7 +2485,7 @@ command uses this to freeze the pipeline from inside a worker.
 A freeze set by an automation on the configured allowlist expires after a configurable TTL (45 minutes by
 default): the tick checks this before skipping on freeze and lifts the pause through the ordinary `resume`
 under the same tick lock. A freeze set by a person holds until an explicit `resume`. A frozen tick moves no
-cards but still writes and pushes the checkpoint.
+cards but retains the normal checkpoint cadence and due-push coordination.
 
 ### The pause as protocol operations
 

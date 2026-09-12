@@ -41,6 +41,9 @@ def _init_instance_repo(instance_dir: Path, instance_yaml: str) -> None:
     _git(instance_dir, "config", "user.name", "operator")
     _git(instance_dir, "config", "user.email", "operator@example.invalid")
     _git(instance_dir, "config", "commit.gpgsign", "false")
+    _git(instance_dir, "config", "--local", "pack.threads", "1")
+    _git(instance_dir, "config", "--local", "pack.windowMemory", "128m")
+    _git(instance_dir, "config", "--local", "pack.deltaCacheSize", "64m")
     _git(instance_dir, "add", "instance.yaml")
     _git(instance_dir, "commit", "--quiet", "-m", "config")
 
