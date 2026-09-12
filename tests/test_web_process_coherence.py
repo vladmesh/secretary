@@ -35,6 +35,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest import mock
 
@@ -84,15 +85,31 @@ class _Report:
 
 
 def _context(units: Any, **overrides) -> upgrade.UpgradeContext:
+    report = overrides.pop("report", None)
+    instance_path = overrides.pop("instance_path", None)
+    if report is None or instance_path is None:
+        root = getattr(units, "_web_receipt_test_root", None)
+        if root is None:
+            root = Path(tempfile.mkdtemp(prefix="secretary-web-process-coherence-"))
+            units._web_receipt_test_root = root
+        if instance_path is None:
+            instance_path = root / "instance"
+        if report is None:
+            report = SimpleNamespace(
+                host={"unit_prefix": UNIT_PREFIX},
+                instance={"host": {"unit_prefix": UNIT_PREFIX}, "data_dir": str(root / "data")},
+                data_dir=root / "data",
+                bindings=[],
+            )
     base = upgrade.UpgradeContext(
-        instance_path=Path("/tmp/instance"),
+        instance_path=instance_path,
         product_root=upgrade.running_product_root(),
         base_branch="main",
         dry_run=False,
         units=units,
         orca=FakeRegistrar(),
         automations=None,
-        report=_Report(),
+        report=report,
     )
     return replace(base, **overrides)
 
@@ -368,17 +385,18 @@ class LongLivedProcessDriftTests(unittest.TestCase):
         self.assertEqual(self._read()[0], 200, "the replaced process reads the schemas it shipped with")
 
     def test_a_second_upgrade_over_the_coherent_process_restarts_nothing(self) -> None:
-        """The no-op: a current checkout, schemas, unit and process leave the process alone."""
+        """The no-op follows the one-time receipt-establishing restart."""
         self._move_checkout()
         self._serve()
         self.assertEqual(self._read()[0], 200)
         generation = self.units.generations
 
+        first = upgrade.step_web(_context(self.units))
         result = upgrade.step_web(_context(self.units))
 
+        self.assertEqual(first.status, "changed")
         self.assertEqual(result.status, "unchanged")
-        self.assertEqual(self.units.calls, [])
-        self.assertEqual(self.units.generations, generation)
+        self.assertEqual(self.units.generations, generation + 1)
         self.assertEqual(self._read()[0], 200)
 
     def test_a_head_registry_materialization_replaces_the_cached_web_process(self) -> None:
@@ -431,8 +449,9 @@ class LongLivedProcessDriftTests(unittest.TestCase):
 
         self.assertEqual(registry.status, "unchanged")
         self.assertFalse(context.head_registry_changed)
+        self.assertEqual(upgrade.step_web(context).status, "changed")
         self.assertEqual(upgrade.step_web(context).status, "unchanged")
-        self.assertEqual(self.units.generations, generation)
+        self.assertEqual(self.units.generations, generation + 1)
 
     def test_a_restart_whose_process_cannot_answer_fails_the_step(self) -> None:
         """The probe is the evidence: a unit that restarts into a broken process is a failure."""
@@ -502,9 +521,13 @@ class WebStepTests(unittest.TestCase):
                 self.assertIn(reason, result.detail)
                 self.assertIn(("restart", WEB_UNIT), units.calls)
 
-    def test_a_current_process_is_left_alone_and_not_probed(self) -> None:
+    def test_a_receipt_bound_current_process_is_left_alone_and_not_probed(self) -> None:
         units = self.units()
 
+        first = upgrade.step_web(_context(units))
+        self.assertEqual(first.status, "changed")
+        units.calls.clear()
+        self.probe.reset_mock()
         result = upgrade.step_web(_context(units))
 
         self.assertEqual(result.status, "unchanged")
@@ -780,8 +803,8 @@ class PulledRevisionTests(unittest.TestCase):
         self.assertTrue(context.code_changed)
         self.assertEqual(upgrade.step_web(context).status, "changed")
 
-    def test_a_documentation_only_revision_restarts_nothing(self) -> None:
-        """The no-op has to survive the wider prefixes: not every revision is a restart."""
+    def test_a_documentation_only_checkout_advance_establishes_a_new_process_receipt(self) -> None:
+        """The receipt binds the exact checkout revision, not only files selected by change flags."""
         self.publish({"docs/OPERATIONS.md": "how to run it, revised\n"})
         context = self.context()
 
@@ -789,19 +812,20 @@ class PulledRevisionTests(unittest.TestCase):
         result = upgrade.step_web(context)
 
         self.assertEqual(pulled.status, "changed")
-        self.assertEqual(result.status, "unchanged")
-        self.assertEqual(self.units.calls, [])
-        self.probe.assert_not_called()
+        self.assertEqual(result.status, "changed")
+        self.assertIn("web process receipt is missing", result.detail)
+        self.assertIn(("restart", WEB_UNIT), self.units.calls)
 
-    def test_an_upstream_that_moved_nothing_is_a_no_op_through_to_the_web_step(self) -> None:
+    def test_an_upstream_that_moved_nothing_establishes_then_reuses_the_receipt(self) -> None:
         context = self.context()
 
         pulled = upgrade.step_pull(context)
 
         self.assertEqual(pulled.status, "unchanged")
         self.assertEqual(context.changed_paths, ())
+        self.assertEqual(upgrade.step_web(context).status, "changed")
         self.assertEqual(upgrade.step_web(context).status, "unchanged")
-        self.assertEqual(self.units.calls, [])
+        self.assertEqual(self.units.calls, [("restart", WEB_UNIT)])
 
     def test_the_handoff_marker_derives_the_same_facts_as_the_pull_that_wrote_it(self) -> None:
         """The applied path re-executes the pulled schedule, so the marker is a fourth entry point.
@@ -876,13 +900,15 @@ class PulledRevisionTests(unittest.TestCase):
         self.assertIn("a web unit file changed", result.detail)
         self.assertEqual(self.units.calls, [])
 
-    def test_dry_run_over_a_current_upstream_plans_no_restart(self) -> None:
+    def test_dry_run_over_a_current_upstream_plans_the_missing_receipt_restart(self) -> None:
         context = self.context(dry_run=True)
 
         pulled = upgrade.step_pull(context)
 
         self.assertEqual(pulled.status, "unchanged")
-        self.assertEqual(upgrade.step_web(context).status, "unchanged")
+        web = upgrade.step_web(context)
+        self.assertEqual(web.status, "changed")
+        self.assertIn("web process receipt is missing", web.detail)
         self.assertEqual(self.units.calls, [])
 
 

@@ -14,6 +14,9 @@ POSTGRES_BACKUP_VERSION = 2
 BackupKind = Literal["core", "full"]
 RestoreAction = Literal["restore", "exclude"]
 MEMORY_MODEL_CACHE = ("memory", "fastembed-cache")
+# A process-bound applied-state receipt is recreated by ``secretary upgrade`` after a live probe;
+# restoring it would let a historical process identity masquerade as the current generation.
+WEB_PROCESS_RECEIPT = ("web", "process-receipt.json")
 
 
 @dataclass(frozen=True)
@@ -242,6 +245,8 @@ def should_skip_data_entry(relative: Path, *, policy: BackupPolicy) -> bool:
     allowed_roots = {"board", "memory", "runs", "transcripts", "artifacts"}
     if not relative.parts:
         return False
+    if relative.parts == WEB_PROCESS_RECEIPT:
+        return True
     if relative.name.startswith(".env") or relative.name == "index.sqlite":
         return True
     if relative.parts[0] == "backups":
