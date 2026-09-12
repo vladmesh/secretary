@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
-from secretary import status, upgrade
+from secretary import state_repo, status, upgrade
 from secretary.automations import (
     AutomationSpec,
     create_argv,
@@ -1489,6 +1489,16 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
 
     def _publish(self) -> tuple[upgrade.StepResult, upgrade.StepResult]:
         return upgrade.step_head_registry(self.context), upgrade.step_publish_head_registry(self.context)
+
+    def test_lifecycle_sets_only_the_local_instance_packing_controls_idempotently(self) -> None:
+        first = upgrade.step_instance_packing(self.context)
+        second = upgrade.step_instance_packing(self.context)
+
+        self.assertEqual(first.status, "changed")
+        self.assertEqual(second.status, "unchanged")
+        self.assertEqual(
+            state_repo.packing_controls(self.instance), dict(state_repo.PACKING_CONTROLS)
+        )
 
     def test_changed_pair_is_scoped_committed_published_and_cleanly_restored(self):
         # These are deliberately all outside the registry writer's pathspec.

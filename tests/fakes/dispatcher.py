@@ -1776,7 +1776,7 @@ class FakePusher:
         self.outcome = outcome
         self.calls: list[dict] = []
 
-    def push(self, state: dict | None = None) -> dict:
+    def push(self, state: dict | None = None, *, now: float | None = None) -> dict:
         self.calls.append(dict(state or {}))
         if isinstance(self.outcome, Exception):
             raise self.outcome

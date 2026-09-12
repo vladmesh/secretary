@@ -1395,6 +1395,36 @@ class CheckpointSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["blocked_reason"], "")
         self.assertEqual(snapshot["push_status"], "pending")
 
+    def test_cadence_snapshot_keeps_a_failure_visible_across_a_quiet_skip(self):
+        snapshot = checkpoint_snapshot(
+            self.instance_dir,
+            write_state={
+                "status": "skipped",
+                "reason": "not due",
+                "last_success_epoch": 1_000.0,
+                "last_success_at": "1970-01-01T00:16:40Z",
+                "last_success_status": "unchanged",
+                "last_failure_epoch": 1_050.0,
+                "last_failure_at": "1970-01-01T00:17:30Z",
+                "last_failure_reason": "audit pending",
+                "retry_pending": True,
+                "skip_epoch": 1_060.0,
+                "skip_at": "1970-01-01T00:17:40Z",
+                "next_due_epoch": 1_300.0,
+                "next_due_at": "1970-01-01T00:21:40Z",
+            },
+            now=1_120.0,
+        )
+
+        self.assertEqual(snapshot["checkpoint_status"], "skipped")
+        self.assertEqual(snapshot["last_checkpoint_prepared_status"], "unchanged")
+        self.assertEqual(snapshot["checkpoint_last_failure_reason"], "audit pending")
+        self.assertEqual(snapshot["blocked_reason"], "audit pending")
+        self.assertTrue(snapshot["checkpoint_retry_pending"])
+        lines = "\n".join(render_checkpoint_lines(snapshot))
+        self.assertIn("checkpoint: skipped (retry pending)", lines)
+        self.assertIn("checkpoint last skipped: 1970-01-01T00:17:40Z (not due)", lines)
+
     def test_non_https_remote_is_reported_as_bypass_before_the_first_push(self):
         with mock.patch(
             "secretary.checkpoint.state_repo.git", return_value="ssh://example.invalid/private.git\n"

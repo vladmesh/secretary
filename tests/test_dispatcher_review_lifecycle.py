@@ -2483,6 +2483,7 @@ class ProductionPauseTests(unittest.TestCase):
         self.assertEqual(self.reader.show(self.ref)["state"], "ready")
 
     def test_a_failing_push_on_a_frozen_tick_is_reported_not_raised(self) -> None:
+        self.runtime.checkpoint = FakeCheckpoint(CheckpointResult(status="unchanged", board_cards=2))
         self.runtime.checkpoint_push = FakePusher(RuntimeError("ssh agent is gone"))
         self.pause("freeze")
 

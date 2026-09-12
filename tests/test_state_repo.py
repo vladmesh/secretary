@@ -239,5 +239,32 @@ class ForeignRepositorySelectionTests(unittest.TestCase):
         self.assertNotEqual(snapshot["last_commit"], self.foreign_head)
 
 
+class InstancePackingControlTests(unittest.TestCase):
+    """Lifecycle packing controls stay in the one private instance checkout."""
+
+    def test_controls_are_idempotent_local_and_do_not_touch_global_or_project_repositories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance"
+            project = root / "project"
+            global_config = root / "global.gitconfig"
+            _init_repo(instance)
+            _init_repo(project)
+            global_config.write_text("[user]\n\tname = untouched\n", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(global_config)}, clear=False):
+                changed = state_repo.configure_packing_controls(instance)
+                again = state_repo.configure_packing_controls(instance)
+
+            self.assertEqual(changed, tuple(key for key, _ in state_repo.PACKING_CONTROLS))
+            self.assertEqual(again, ())
+            self.assertEqual(
+                state_repo.packing_controls(instance), dict(state_repo.PACKING_CONTROLS)
+            )
+            self.assertEqual(global_config.read_text(encoding="utf-8"), "[user]\n\tname = untouched\n")
+            project_config = (project / ".git" / "config").read_text(encoding="utf-8")
+            self.assertNotIn("[pack]", project_config)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,9 @@ def init_instance_repo(instance_dir: Path) -> None:
     git(instance_dir, "config", "user.name", "operator")
     git(instance_dir, "config", "user.email", "operator@example.invalid")
     git(instance_dir, "config", "commit.gpgsign", "false")
+    git(instance_dir, "config", "--local", "pack.threads", "1")
+    git(instance_dir, "config", "--local", "pack.windowMemory", "128m")
+    git(instance_dir, "config", "--local", "pack.deltaCacheSize", "64m")
     git(instance_dir, "add", "instance.yaml")
     git(instance_dir, "commit", "--quiet", "-m", "config")
 
@@ -189,6 +192,9 @@ class CliTests(unittest.TestCase):
         git(instance_dir, "init", "--quiet", "--initial-branch", "main")
         git(instance_dir, "config", "user.name", "operator")
         git(instance_dir, "config", "user.email", "operator@example.invalid")
+        git(instance_dir, "config", "--local", "pack.threads", "1")
+        git(instance_dir, "config", "--local", "pack.windowMemory", "128m")
+        git(instance_dir, "config", "--local", "pack.deltaCacheSize", "64m")
         git(instance_dir, "add", "instance.yaml")
         git(instance_dir, "commit", "--quiet", "-m", "config")
         self.run_cli(["data", "init", "--instance", str(instance_dir)])
@@ -337,6 +343,17 @@ class CliTests(unittest.TestCase):
         self.assertIn("push: pushed", output)
         self.assertIn("lag: ", output)
         self.assertIn("status: ok", output)
+
+    def test_doctor_names_local_instance_packing_drift_and_exact_remediation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(Path(tmpdir), {"version": 1})
+            git(instance_dir, "config", "--local", "--unset-all", "pack.threads")
+            code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"instance Git packing controls drifted at {instance_dir}", output)
+        self.assertIn(f"git -C {instance_dir} config --local pack.threads 1", output)
+        self.assertIn("status: findings", output)
 
     def test_doctor_reports_remote_divergence_as_a_finding(self):
         with tempfile.TemporaryDirectory() as tmpdir:
