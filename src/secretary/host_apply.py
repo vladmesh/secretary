@@ -116,6 +116,18 @@ class UnitInstaller(ABC):
     @abstractmethod
     def is_active(self, name: str) -> bool: ...
 
+    @abstractmethod
+    def process_identity(self, name: str) -> UnitProcessIdentity | None: ...
+
+
+@dataclass(frozen=True)
+class UnitProcessIdentity:
+    """A systemd main process, including a kernel start identity against PID reuse."""
+
+    pid: int
+    start_ticks: int
+    invocation_id: str
+
 
 class HostCommandError(RuntimeError):
     """A host command failed. The message names the command, never its output."""
@@ -205,6 +217,75 @@ class SystemdUnitInstaller(UnitInstaller):
         except (OSError, subprocess.TimeoutExpired):
             return False
         return result.stdout.strip() == "active"
+
+    def process_identity(self, name: str) -> UnitProcessIdentity | None:
+        """Read systemd's current main PID and bind it to the kernel's start tick.
+
+        ``MainPID`` alone is not a process identity: Linux may recycle it. The unit invocation
+        identifies systemd's generation and ``/proc/<pid>/stat`` identifies the kernel process that
+        generation currently points at. Read systemd on both sides of ``/proc`` so a replacement
+        while observing is unknown rather than accidentally attested.
+        """
+        first = self._unit_process_properties(name)
+        if first is None:
+            return None
+        start_ticks = _process_start_ticks(first[0])
+        if start_ticks is None:
+            return None
+        second = self._unit_process_properties(name)
+        if second != first:
+            return None
+        return UnitProcessIdentity(first[0], start_ticks, first[1])
+
+    def _unit_process_properties(self, name: str) -> tuple[int, str] | None:
+        argv = [
+            "systemctl",
+            "show",
+            name,
+            "--property=MainPID",
+            "--property=InvocationID",
+        ]
+        try:
+            result = _proc.run(argv, timeout=self.timeout_seconds)
+        except FileNotFoundError:
+            raise HostCommandError(f"observe {name}: systemctl not found") from None
+        except subprocess.TimeoutExpired:
+            raise HostCommandError(f"observe {name}: systemctl timed out") from None
+        except OSError:
+            raise HostCommandError(f"observe {name}: systemctl could not run") from None
+        if result.returncode != 0:
+            raise HostCommandError(f"observe {name}: systemctl exited {result.returncode}")
+        values = {}
+        for line in (result.stdout or "").splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                values[key] = value
+        try:
+            pid = int(values.get("MainPID", "0"))
+        except ValueError:
+            return None
+        invocation_id = values.get("InvocationID", "")
+        if pid <= 0 or not invocation_id:
+            return None
+        return pid, invocation_id
+
+
+def _process_start_ticks(pid: int) -> int | None:
+    """Return Linux ``/proc`` field 22 without confusing a process name's parentheses."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    closing = text.rfind(")")
+    fields = text[closing + 1 :].split() if closing >= 0 else []
+    # Field 3 is the first item after ``)``; starttime is field 22.
+    if len(fields) <= 19:
+        return None
+    try:
+        start_ticks = int(fields[19])
+    except ValueError:
+        return None
+    return start_ticks if start_ticks > 0 else None
 
 
 class OrcaRegistrar(ABC):
@@ -602,6 +683,7 @@ __all__ = [
     "OrcaRegistrar",
     "SystemdUnitInstaller",
     "UnitInstaller",
+    "UnitProcessIdentity",
     "apply_host",
     "pinned_orca_executable",
     "resolve_packaged",

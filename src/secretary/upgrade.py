@@ -12,12 +12,14 @@ same decisions and performs no writes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pwd
 import re
 import stat
 import subprocess
+import tempfile
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -67,6 +69,7 @@ from secretary.host_apply import (
     OrcaRegistrar,
     SystemdUnitInstaller,
     UnitInstaller,
+    UnitProcessIdentity,
     apply_host,
     resolve_packaged,
     resolve_runtime_owner,
@@ -973,6 +976,260 @@ def step_memory(context: UpgradeContext) -> StepResult:
     return StepResult("memory", "changed", f"restarted and authenticated {unit}: {reason}")
 
 
+WEB_PROCESS_RECEIPT_RELATIVE = Path("web") / "process-receipt.json"
+WEB_PROCESS_RECEIPT_VERSION = 1
+WEB_PROCESS_INPUT_KEYS = (
+    "product_revision",
+    "product_sha256",
+    "dependency_sha256",
+    "schemas_sha256",
+    "web_units_sha256",
+    "head_registry_sha256",
+)
+
+
+class WebProcessReceiptError(RuntimeError):
+    """The small, private receipt that binds a successful web generation to its inputs."""
+
+
+def web_process_receipt_path(context: UpgradeContext) -> Path:
+    data_dir = getattr(context.report, "data_dir", None)
+    if not isinstance(data_dir, Path):
+        raise WebProcessReceiptError("web process receipt: instance has no resolved data directory")
+    return data_dir / WEB_PROCESS_RECEIPT_RELATIVE
+
+
+def _git_tracked_digest(product_root: Path, paths: tuple[str, ...]) -> str:
+    """Hash selected tracked product inputs, including their checkout-relative names.
+
+    A working process may create bytecode below ``src/``.  Git's tracked list intentionally leaves
+    that runtime by-product out while still including local edits to a tracked input.  The revision
+    is recorded separately, so a moved checkout and a dirty tracked file are both visible evidence.
+    """
+    try:
+        listed = _git(product_root, ["ls-files", "--", *paths])
+    except GitError as exc:
+        raise WebProcessReceiptError(f"cannot list product inputs: {exc}") from None
+    digest = hashlib.sha256()
+    digest.update(b"secretary-web-input-v1\0")
+    digest.update("\0".join(paths).encode("utf-8"))
+    for relative in filter(None, listed.splitlines()):
+        path = product_root / relative
+        try:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise OSError("not a regular file")
+            contents = path.read_bytes()
+        except OSError as exc:
+            raise WebProcessReceiptError(f"cannot read product input {relative}: {exc}") from None
+        digest.update(b"\0file\0")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(contents)
+    return digest.hexdigest()
+
+
+def _digest_web_units(context: UpgradeContext, name_prefix: str) -> str:
+    """Hash both shipped and installed web unit bytes without retaining their host-specific text."""
+    digest = hashlib.sha256()
+    digest.update(b"secretary-web-units-v1\0")
+    for name in (f"{name_prefix}.service", f"{name_prefix}-front.service"):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0installed\0")
+        installed = context.units.installed(name)
+        digest.update(installed if installed is not None else b"<absent>")
+        shipped = context.product_root / PACKAGED_UNIT_ROOT / name
+        digest.update(b"\0shipped\0")
+        try:
+            info = shipped.lstat()
+            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise OSError("not a regular file")
+            digest.update(shipped.read_bytes())
+        except FileNotFoundError:
+            digest.update(b"<absent>")
+        except OSError as exc:
+            raise WebProcessReceiptError(f"cannot read shipped web unit {shipped}: {exc}") from None
+    return digest.hexdigest()
+
+
+def web_process_inputs(context: UpgradeContext, name_prefix: str) -> dict[str, str]:
+    """The product and materialized state an active web process has to be bound to."""
+    try:
+        revision = _git(context.product_root, ["rev-parse", "HEAD"])
+    except GitError as exc:
+        raise WebProcessReceiptError(f"cannot read product revision: {exc}") from None
+    if not re.fullmatch(r"[0-9a-f]{40,64}", revision):
+        raise WebProcessReceiptError("cannot read an exact product revision")
+    snapshot = snapshot_path(context.instance_path)
+    try:
+        snapshot_bytes = snapshot.read_bytes()
+    except FileNotFoundError:
+        snapshot_bytes = b"<missing>"
+    except OSError as exc:
+        raise WebProcessReceiptError(f"cannot read head registry snapshot {snapshot}: {exc}") from None
+    return {
+        "product_revision": revision,
+        "product_sha256": _git_tracked_digest(context.product_root, PRODUCT_SOURCE_PATHS),
+        "dependency_sha256": _git_tracked_digest(context.product_root, DEPENDENCY_PATHS),
+        "schemas_sha256": _git_tracked_digest(context.product_root, SCHEMA_PATHS),
+        "web_units_sha256": _digest_web_units(context, name_prefix),
+        "head_registry_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
+    }
+
+
+def _receipt_process(identity: UnitProcessIdentity) -> dict[str, int | str]:
+    return {
+        "pid": identity.pid,
+        "start_ticks": identity.start_ticks,
+        "invocation_id": identity.invocation_id,
+    }
+
+
+def _receipt_identity(value: object) -> UnitProcessIdentity | None:
+    if not isinstance(value, dict) or set(value) != {"pid", "start_ticks", "invocation_id"}:
+        return None
+    pid = value.get("pid")
+    start_ticks = value.get("start_ticks")
+    invocation_id = value.get("invocation_id")
+    if (
+        type(pid) is not int
+        or pid <= 0
+        or type(start_ticks) is not int
+        or start_ticks <= 0
+        or not isinstance(invocation_id, str)
+        or not invocation_id
+    ):
+        return None
+    return UnitProcessIdentity(pid, start_ticks, invocation_id)
+
+
+def _valid_receipt_inputs(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict) or set(value) != set(WEB_PROCESS_INPUT_KEYS):
+        return None
+    result = {}
+    for key in WEB_PROCESS_INPUT_KEYS:
+        item = value.get(key)
+        if not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item):
+            if key == "product_revision" and isinstance(item, str) and re.fullmatch(r"[0-9a-f]{40,64}", item):
+                result[key] = item
+                continue
+            return None
+        result[key] = item
+    return result
+
+
+def _read_web_process_receipt(context: UpgradeContext, unit: str) -> tuple[dict[str, Any] | None, str]:
+    try:
+        path = web_process_receipt_path(context)
+        info = path.lstat()
+    except FileNotFoundError:
+        return None, "the web process receipt is missing"
+    except OSError as exc:
+        return None, f"the web process receipt cannot be read: {exc}"
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        return None, "the web process receipt is malformed"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, "the web process receipt is malformed"
+    if not isinstance(payload, dict) or set(payload) != {"version", "unit", "process", "inputs"}:
+        return None, "the web process receipt is malformed"
+    if payload.get("version") != WEB_PROCESS_RECEIPT_VERSION or payload.get("unit") != unit:
+        return None, "the web process receipt is malformed"
+    if (
+        _receipt_identity(payload.get("process")) is None
+        or _valid_receipt_inputs(payload.get("inputs")) is None
+    ):
+        return None, "the web process receipt is malformed"
+    return payload, ""
+
+
+def _receipt_evidence(
+    context: UpgradeContext,
+    unit: str,
+    identity: UnitProcessIdentity | None,
+    inputs: dict[str, str],
+) -> tuple[bool, str]:
+    if identity is None:
+        return False, "the active web process identity is unavailable"
+    receipt, reason = _read_web_process_receipt(context, unit)
+    if receipt is None:
+        return False, reason
+    if _receipt_identity(receipt["process"]) != identity:
+        return False, "the web process receipt belongs to a different process generation"
+    if _valid_receipt_inputs(receipt["inputs"]) != inputs:
+        return False, "the web process receipt inputs do not match the materialized state"
+    evidence = (
+        f"web process receipt verified: pid {identity.pid}, start ticks {identity.start_ticks}, "
+        f"invocation {identity.invocation_id}; product revision {inputs['product_revision']}; "
+        f"product {inputs['product_sha256']}; dependencies {inputs['dependency_sha256']}; "
+        f"schemas {inputs['schemas_sha256']}; web units {inputs['web_units_sha256']}; "
+        f"head registry {inputs['head_registry_sha256']}"
+    )
+    return True, evidence
+
+
+def _receipt_owner(path: Path, runtime_user: str | None) -> tuple[int, int] | None:
+    if not runtime_user or os.geteuid() != 0:
+        return None
+    try:
+        account = pwd.getpwnam(runtime_user)
+    except KeyError:
+        raise WebProcessReceiptError(f"runtime user {runtime_user!r} does not exist") from None
+    return account.pw_uid, account.pw_gid
+
+
+def _write_web_process_receipt(
+    context: UpgradeContext,
+    unit: str,
+    identity: UnitProcessIdentity,
+    inputs: dict[str, str],
+) -> None:
+    """Publish the receipt only after a proved generation, as one private atomic replacement."""
+    path = web_process_receipt_path(context)
+    payload = {
+        "version": WEB_PROCESS_RECEIPT_VERSION,
+        "unit": unit,
+        "process": _receipt_process(identity),
+        "inputs": inputs,
+    }
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        owner = _receipt_owner(path, context.runtime_user)
+        parent_info = path.parent.lstat()
+        if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
+            raise OSError("receipt directory is not a real directory")
+        if owner is not None:
+            os.chown(path.parent, *owner, follow_symlinks=False)
+            os.chmod(path.parent, 0o700, follow_symlinks=False)
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(name)
+        if owner is not None:
+            os.fchown(descriptor, *owner)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(payload, output, sort_keys=True, separators=(",", ":"))
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as exc:
+        raise WebProcessReceiptError(f"could not write web process receipt {path}: {exc}") from None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def step_web(context: UpgradeContext) -> StepResult:
     """Make the long-lived web process coherent with what this upgrade just materialized.
 
@@ -1029,6 +1286,10 @@ def step_web(context: UpgradeContext) -> StepResult:
         return StepResult(
             "web", "skipped", f"{unit} is installed but not active; an upgrade does not start it"
         )
+    try:
+        inputs = web_process_inputs(context, name_prefix)
+    except WebProcessReceiptError as exc:
+        return StepResult("web", "failed", str(exc))
     reasons = []
     if context.web_unit_changed or planned_unit_names(context.changed_paths, name_prefix):
         reasons.append("a web unit file changed")
@@ -1038,12 +1299,16 @@ def step_web(context: UpgradeContext) -> StepResult:
         reasons.append("product code or dependencies changed")
     if context.head_registry_changed:
         reasons.append("the head registry snapshot changed")
-    if not reasons:
-        return StepResult(
-            "web",
-            "unchanged",
-            f"{unit} already runs this checkout, these schemas, these dependencies and this head registry",
-        )
+    try:
+        identity = context.units.process_identity(unit)
+    except HostCommandError as exc:
+        identity = None
+        receipt_reason = f"the active web process identity could not be observed: {exc}"
+    else:
+        verified, receipt_reason = _receipt_evidence(context, unit, identity, inputs)
+        if verified and not reasons:
+            return StepResult("web", "unchanged", receipt_reason)
+    reasons.append(receipt_reason)
     try:
         target = target_from_unit(installed)
     except LoopbackOnly as refused:
@@ -1056,10 +1321,44 @@ def step_web(context: UpgradeContext) -> StepResult:
     except HostCommandError as exc:
         return StepResult("web", "failed", f"restarting {unit} failed: {exc}")
     try:
+        before_probe = context.units.process_identity(unit)
+    except HostCommandError as exc:
+        return StepResult("web", "failed", f"{unit} restarted but its process identity is unavailable: {exc}")
+    if before_probe is None:
+        return StepResult("web", "failed", f"{unit} restarted but its process identity is unavailable")
+    try:
         status = probe_web(target, timeout_seconds=WEB_PROBE_TIMEOUT_SECONDS)
     except WebProbeError as exc:
         return StepResult("web", "failed", f"{unit} restarted but the loopback probe failed: {exc}")
-    return StepResult("web", "changed", f"restarted {unit} and probed {target.url} -> {status}: {reason}")
+    try:
+        after_probe = context.units.process_identity(unit)
+    except HostCommandError as exc:
+        return StepResult(
+            "web", "failed", f"{unit} probe passed but its process identity is unavailable: {exc}"
+        )
+    if after_probe != before_probe:
+        return StepResult(
+            "web",
+            "failed",
+            f"{unit} changed process generation during the loopback probe; no receipt was written",
+        )
+    try:
+        final_inputs = web_process_inputs(context, name_prefix)
+    except WebProcessReceiptError as exc:
+        return StepResult("web", "failed", f"{unit} probe passed but receipt inputs could not be read: {exc}")
+    if final_inputs != inputs:
+        return StepResult(
+            "web", "failed", f"{unit} materialized inputs changed during restart; no receipt was written"
+        )
+    try:
+        _write_web_process_receipt(context, unit, after_probe, final_inputs)
+    except WebProcessReceiptError as exc:
+        return StepResult("web", "failed", str(exc))
+    return StepResult(
+        "web",
+        "changed",
+        f"restarted {unit} and probed {target.url} -> {status}; wrote web process receipt: {reason}",
+    )
 
 
 def step_verify(context: UpgradeContext) -> StepResult:
@@ -1072,6 +1371,20 @@ def step_verify(context: UpgradeContext) -> StepResult:
         return StepResult("verify", "failed", f"host is still not reconciled: {result.detail}")
     if result.status == "changed":
         return StepResult("verify", "failed", f"reconcile is not idempotent: {result.detail}")
+    name_prefix = _component_unit_prefix(context.report, WEB_COMPONENT)
+    web_unit = f"{name_prefix}.service"
+    web_evidence = ""
+    if context.units.installed(web_unit) is not None and context.units.is_active(web_unit):
+        try:
+            inputs = web_process_inputs(context, name_prefix)
+            identity = context.units.process_identity(web_unit)
+        except (HostCommandError, WebProcessReceiptError) as exc:
+            return StepResult("verify", "failed", f"active web process receipt cannot be verified: {exc}")
+        verified, web_evidence = _receipt_evidence(context, web_unit, identity, inputs)
+        if not verified:
+            return StepResult(
+                "verify", "failed", f"active web process receipt is not current: {web_evidence}"
+            )
     try:
         audit = role_skills.audit(
             instance_path=context.instance_path,
@@ -1095,7 +1408,10 @@ def step_verify(context: UpgradeContext) -> StepResult:
         return StepResult(
             "verify", "failed", f"head registry recovery pair remains dirty: {dirty.splitlines()[0]}"
         )
-    return StepResult("verify", "unchanged", "host reconciled and role skills in sync")
+    detail = "host reconciled and role skills in sync"
+    if web_evidence:
+        detail += f"; {web_evidence}"
+    return StepResult("verify", "unchanged", detail)
 
 
 def step_board_transport(context: UpgradeContext) -> StepResult:

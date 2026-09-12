@@ -2876,16 +2876,34 @@ What the step prints is what it did, and there are four answers:
 
 | line | what it means |
 | --- | --- |
-| `changed   web: restarted secretary-web.service and probed http://127.0.0.1:8787/api/system -> 200: ...` | the process was replaced and the new one answered; the reason it was restarted is named |
-| `unchanged web: secretary-web.service already runs this checkout, these schemas, these dependencies and this head registry` | nothing moved, so nothing was restarted — a repeated upgrade is a no-op here |
+| `changed   web: restarted secretary-web.service and probed http://127.0.0.1:8787/api/system -> 200; wrote web process receipt: ...` | the process was replaced, the new generation answered, and its applied-state receipt was atomically recorded; the reason is named |
+| `unchanged web: web process receipt verified: ...` | the observed active systemd generation matches private durable evidence for this exact checkout revision and the current product, dependency, schema, installed/shipped web-unit and head-registry inputs |
 | `skipped   web: secretary-web.service is not installed …` / `… is installed but not active; an upgrade does not start it` | the unit is optional and an upgrade never starts it for you |
-| `failed    web: …` | either the restart or the probe failed; see *When the restart or the probe fails* below |
+| `failed    web: …` | the restart, probe, process observation or receipt write failed; see *When the restart or the probe fails* below |
+
+An empty pull delta is not evidence about a long-lived process. In particular, the dispatcher can
+advance the editable checkout before the operator runs `secretary upgrade --no-pull`; the first
+receipt check then sees the checkout/input mismatch, restarts the transport and probes it. The
+same is true for an installation released before receipts existed: its first active-web upgrade
+restarts once to establish evidence, and an immediate identical repeat is the no-op.
+
+The private `DATA_DIR/web/process-receipt.json` is runtime evidence, not configuration or a
+rollback artifact. It records no credentials, requests, paths or unit text: only the systemd/main
+process generation (`PID`, kernel start ticks and systemd invocation), the product revision and
+hashes of the inputs above. It is mode 0600, atomically replaced under the installation runtime
+owner after the successful 200, and excluded from backups with other non-restorable runtime state.
+A missing, partial, malformed or mismatched receipt is `unknown/stale`, never `unchanged`; do not
+copy one from a backup or a different host. A deliberate service restart changes the generation and
+the next upgrade safely establishes a new receipt. The normal recovery and rollback boundary is
+unchanged: use the supported checkout/upgrade path and diagnose the unit, rather than editing this
+file or treating it as a deployment mechanism.
 
 `--dry-run` plans against the upstream target rather than the installed revision: it fetches,
 compares `HEAD` with `origin/<branch>`, and names the dependency, unit and web actions that revision
 would cause — `would restart secretary-web.service and probe http://127.0.0.1:8787/api/system: …` —
 while leaving the checkout exactly where it was. It is the honest way to ask what an upgrade is
-about to do; it writes nothing, and a unit change it names is one that is still only in the diff.
+about to do; it writes nothing, and names a missing or stale process receipt as another reason it
+would restart. A unit change it names is one that is still only in the diff.
 
 Run the upgrade as the installation owner and out of the installed checkout
 (`/home/dev/secretary/.venv/bin/secretary`), not out of a task workspace: without `--product-root`
@@ -3300,7 +3318,8 @@ live proof is scheduled with the sprint; it is not a worker-side service restart
 ## Upgrade
 
 `secretary upgrade --instance <dir>` pulls a new product version and re-materialises the installation onto it. It is
-idempotent: a repeat run on an up-to-date host does nothing.
+idempotent once its materialized state, including the active web-process receipt where that optional service runs,
+is current.
 
 ```bash
 secretary upgrade --instance INSTANCE --dry-run   # decide everything, write nothing
@@ -3325,6 +3344,7 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | `host` | `reconcile apply`: units from `packaging/systemd` plus session-manager registrations |
 | `automations` | create or repoint session-manager automations from `automation.toml` |
 | `memory` | restart the memory service if its code, dependencies, unit or shipped pack changed, then complete a bounded launch-authenticated MCP `memory_list` read |
+| `web` | for an active installed transport, verify its process-bound applied-state receipt or restart, complete one bounded loopback read, and write replacement evidence only after that 200 |
 | `verify` | a repeat dry run: the second rollout must be a no-op |
 
 Flags: `--no-pull` (re-materialise only), `--base-branch`, `--product-root`, `--runtime-user`,
