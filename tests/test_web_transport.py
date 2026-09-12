@@ -13,9 +13,11 @@ returns was decided one layer below and translated in exactly one table.
 from __future__ import annotations
 
 import ast
+import io
 import ipaddress
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -28,7 +30,9 @@ from unittest import mock
 from urllib.parse import urlencode
 
 import yaml
+from jsonschema import Draft202012Validator
 
+from secretary.config import ConfigError, load_schema
 from secretary.web import pages
 from secretary.web.app import ROUTES, WebApp
 from secretary.web.server import (
@@ -1003,6 +1007,232 @@ class LoopbackTests(TransportFixture):
         self.assertEqual(started.status, 200)
         self.assertEqual(len(self.runtime.starts), 1)
         self.assertTrue(document["run"]["run_id"])
+
+
+# -- criterion 5: an unexpected failure is contained, not dropped --------------------------------
+
+
+class ExplodingApp:
+    """The real application with one path made to raise, as the live process raised on every one.
+
+    A double rather than a broken layer, because what is being tested is the socket adapter: the
+    application has to be the real one for the *other* request in each test — the healthy one after
+    the failure — to prove the server is still serving.
+    """
+
+    def __init__(self, app: WebApp, path: str, exc: BaseException) -> None:
+        self.app = app
+        self.path = path
+        self.exc = exc
+        self.raised = 0
+
+    def handle(self, method: str, path: str, **kwargs: Any):
+        if path == self.path:
+            self.raised += 1
+            raise self.exc
+        return self.app.handle(method, path, **kwargs)
+
+
+#: An exception whose text is exactly what must not be published: a credential in a DSN. Nothing has
+#: audited the message of a failure nobody expected, so neither the body nor the log may quote it.
+SECRET_MESSAGE = "connecting to postgresql://secretary_app:hunter2@127.0.0.1:5432/board failed"
+
+
+class FailureContainmentTests(TransportFixture):
+    """`http.server` answers an escaped exception by closing the connection with no response.
+
+    That is what `secretary-web.service` did for nineteen hours on 2026-09-11 (secretary-1624):
+    `jsonschema.exceptions._WrappedReferencingError: Unresolvable: adapter.schema.json` escaped
+    `_Handler._answer`, and `GET /`, `GET /sprints/new` and `GET /api/system` all returned an empty
+    reply. The transport now answers a bounded 500 instead and stays able to answer the next
+    request. These tests drive a real socket, because the defect lived between `http.server` and the
+    application and cannot be seen through `WebApp.handle`.
+    """
+
+    def serve(self, app: Any) -> tuple[str, int]:
+        server = build_server(app, host="127.0.0.1", port=0)
+        self.addCleanup(server.server_close)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+        return server.server_address[0], server.server_address[1]
+
+    def exploding(self, exc: BaseException, *, path: str = "/api/system") -> ExplodingApp:
+        return ExplodingApp(self.app(), path, exc)
+
+    def test_an_escaped_exception_is_a_complete_bounded_500_and_the_server_answers_again(self) -> None:
+        app = self.exploding(RuntimeError(SECRET_MESSAGE))
+        host, port = self.serve(app)
+        log = io.StringIO()
+
+        connection = HTTPConnection(host, port, timeout=10)
+        self.addCleanup(connection.close)
+        with mock.patch("sys.stderr", log):
+            connection.request("GET", "/api/system")
+            response = connection.getresponse()
+            body = response.read()
+            # The same connection, after the failure: a complete response left the socket usable.
+            connection.request("GET", "/")
+            healthy = connection.getresponse()
+            markup = healthy.read().decode("utf-8")
+
+        self.assertEqual(response.status, 500)
+        self.assertEqual(int(response.getheader("Content-Length")), len(body))
+        self.assertTrue(body)
+        self.assertLess(len(body), 1024, "the containment body is a fixed sentence, not a dump")
+        self.assertEqual(healthy.status, 200)
+        self.assertIn("local only", markup)
+        self.assertEqual(app.raised, 1)
+
+    def test_the_contained_body_names_the_class_and_a_reference_and_quotes_no_message(self) -> None:
+        app = self.exploding(RuntimeError(SECRET_MESSAGE))
+        host, port = self.serve(app)
+        log = io.StringIO()
+
+        connection = HTTPConnection(host, port, timeout=10)
+        self.addCleanup(connection.close)
+        with mock.patch("sys.stderr", log):
+            connection.request("GET", "/api/system")
+            response = connection.getresponse()
+            text = response.read().decode("utf-8")
+
+        self.assertIn("RuntimeError", text)
+        self.assertNotIn("hunter2", text)
+        self.assertNotIn("postgresql", text)
+        reference = re.search(r"reference: ([0-9a-f]{12})", text)
+        self.assertIsNotNone(reference, text)
+        # The log is where the call site is, and it joins to the body by that one reference.
+        recorded = log.getvalue()
+        self.assertIn(f"ref={reference.group(1)}", recorded)
+        self.assertIn("RuntimeError", recorded)
+        self.assertIn("test_web_transport.py:", recorded)
+        self.assertNotIn("hunter2", recorded)
+        self.assertNotIn("postgresql", recorded)
+
+    def test_the_contained_response_carries_the_same_security_headers_as_every_other_answer(self) -> None:
+        host, port = self.serve(self.exploding(RuntimeError("boom")))
+        log = io.StringIO()
+
+        connection = HTTPConnection(host, port, timeout=10)
+        self.addCleanup(connection.close)
+        with mock.patch("sys.stderr", log):
+            connection.request("GET", "/api/system")
+            response = connection.getresponse()
+            response.read()
+
+        self.assertEqual(response.getheader("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(response.getheader("Cache-Control"), "no-store")
+        self.assertIn("frame-ancestors 'none'", response.getheader("Content-Security-Policy"))
+        self.assertEqual(response.getheader("Content-Type"), "text/plain; charset=utf-8")
+
+    def test_every_kind_of_escaped_failure_is_contained_the_same_way(self) -> None:
+        """Application, backend read, config and schema validation: one boundary, not four."""
+        failures = [
+            RuntimeError("an application invariant broke"),
+            OSError("the backend read failed"),
+            ConfigError("cannot parse config"),
+            _schema_drift_failure(),
+        ]
+        for exc in failures:
+            with self.subTest(failure=type(exc).__name__):
+                host, port = self.serve(self.exploding(exc))
+                connection = HTTPConnection(host, port, timeout=10)
+                self.addCleanup(connection.close)
+                with mock.patch("sys.stderr", io.StringIO()) as log:
+                    connection.request("GET", "/api/system")
+                    response = connection.getresponse()
+                    text = response.read().decode("utf-8")
+                self.assertEqual(response.status, 500)
+                self.assertIn(type(exc).__name__, text)
+                self.assertIn(type(exc).__name__, log.getvalue())
+
+    def test_a_deliberate_refusal_is_untouched_by_the_containment_boundary(self) -> None:
+        """The application's own 4xx and 5xx still come from the application's one status table."""
+        host, port = self.serve(self.app())
+
+        connection = HTTPConnection(host, port, timeout=10)
+        self.addCleanup(connection.close)
+        connection.request("GET", "/api/tasks/secretary-absent")
+        refused = connection.getresponse()
+        document = json.loads(refused.read().decode("utf-8"))
+
+        self.assertEqual(refused.status, 404)
+        self.assertEqual(document["error"]["code"], "not_found")
+        self.assertNotIn("reference", document["error"])
+
+    def test_a_refusal_the_layer_raises_never_reaches_the_containment_boundary(self) -> None:
+        refusal = InstallationUnavailable("the installation cannot be read")
+        app = WebApp(
+            RaisingLayer(refusal),
+            self.ops(),
+            self.sprint_reads(),
+            self.sprint_ops(),
+        )
+        host, port = self.serve(app)
+        log = io.StringIO()
+
+        connection = HTTPConnection(host, port, timeout=10)
+        self.addCleanup(connection.close)
+        with mock.patch("sys.stderr", log):
+            connection.request("GET", "/api/system")
+            response = connection.getresponse()
+            document = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(response.status, status_for(refusal.code))
+        self.assertEqual(document["error"]["code"], refusal.code)
+        self.assertNotIn("unhandled", log.getvalue())
+
+
+# -- criterion 6: the installed routes, over a socket, after a coherent start ---------------------
+
+
+def _schema_drift_failure() -> BaseException:
+    """The live failure itself: a registry-less validator against today's bundled schemas.
+
+    Reconstructed rather than described, so the containment boundary is shown to hold for the exact
+    exception that escaped it. `tests/test_web_process_coherence.py` owns why this raises.
+    """
+    document = json.loads(
+        (REPO_ROOT / "tests" / "fixtures" / "onboarding" / "happy-path.json").read_text(encoding="utf-8")
+    )
+    try:
+        list(Draft202012Validator(load_schema("onboarding-contract")).iter_errors(document))
+    except Exception as exc:  # noqa: BLE001 - the point is that it is not a declared protocol error
+        return exc
+    raise AssertionError("the bundled schemas no longer carry a cross-file $ref to resolve")
+
+
+class InstalledRouteTests(TransportFixture):
+    """The three GETs the live service answered with an empty reply, over a real socket."""
+
+    ROUTES_UNDER_TEST: ClassVar[tuple[str, ...]] = ("/", "/sprints/new", "/api/system")
+
+    def test_the_installed_get_routes_answer_200_after_a_coherent_start(self) -> None:
+        self._card()
+        server = build_server(self.app(), host="127.0.0.1", port=0)
+        self.addCleanup(server.server_close)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+        host, port = server.server_address[0], server.server_address[1]
+
+        connection = HTTPConnection(host, port, timeout=10)
+        self.addCleanup(connection.close)
+        for path in self.ROUTES_UNDER_TEST:
+            with self.subTest(path=path):
+                connection.request("GET", path)
+                response = connection.getresponse()
+                body = response.read()
+                self.assertEqual(response.status, 200)
+                self.assertTrue(body)
+                self.assertEqual(int(response.getheader("Content-Length")), len(body))
+
+    def test_the_routes_under_test_are_still_installed_routes(self) -> None:
+        """The list above is not a second route table: every path in it is one of the real ones."""
+        installed = {route.pattern for route in ROUTES if route.method == "GET"}
+        self.assertTrue(set(self.ROUTES_UNDER_TEST) <= installed)
 
 
 # -- the transport is a transport ----------------------------------------------------------------

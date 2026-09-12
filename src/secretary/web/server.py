@@ -19,8 +19,10 @@ from __future__ import annotations
 import ipaddress
 import socket
 import sys
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from uuid import uuid4
 
 from secretary.web.app import MAX_BODY_BYTES, WebApp
 
@@ -34,6 +36,34 @@ LOOPBACK_ONLY = (
     "guarded front instead (`secretary web-front`, DoD 5), which terminates TLS, checks a password "
     "and proxies here; this refusal is what makes that front the only way in"
 )
+
+
+#: How many of the innermost frames an unhandled failure is logged with. Enough to name the call
+#: site and the layer it was reached through; not a full traceback, which is unbounded.
+LOGGED_FRAMES = 5
+
+
+def _frames(exc: BaseException) -> str:
+    """The innermost call sites of a failure, and the classes it was wrapped in — no messages.
+
+    A class name alone did not locate the failure this was written for: `_WrappedReferencingError`
+    says jsonschema refused to resolve something, and the frame that matters is the validator call
+    in `secretary.config`. Frames are file, line and function, all of them product-side facts; the
+    exception messages are left out, because an unexpected failure is the one case where nothing has
+    audited whether its text quotes config, a request or a credential.
+    """
+    parts = [
+        f"{frame.filename}:{frame.lineno} in {frame.name}"
+        for frame in traceback.extract_tb(exc.__traceback__)[-LOGGED_FRAMES:]
+    ]
+    chain: list[str] = []
+    cause = exc.__cause__ or exc.__context__
+    while cause is not None and len(chain) < LOGGED_FRAMES:
+        chain.append(type(cause).__name__)
+        cause = cause.__cause__ or cause.__context__
+    if chain:
+        parts.append("caused by " + " <- ".join(chain))
+    return "; ".join(parts) or "no frames"
 
 
 class LoopbackOnly(Exception):
@@ -85,10 +115,14 @@ def check_bind(host: str) -> str:
 class _Handler(BaseHTTPRequestHandler):
     """The thinnest adapter there is: request line in, `WebApp.handle` out.
 
-    It decides nothing. Every status it writes was decided by the application, which took it from
-    the one code-to-status table, and every body it writes was produced there too. The request
+    It decides nothing the application could have decided. Every status it writes was decided there,
+    from the one code-to-status table, and every body it writes was produced there too. The request
     headers are handed over unread for the same reason: whether a POST may be answered at all is
     the application's single cross-origin check, not a rule this adapter gets its own copy of.
+
+    It decides exactly one thing, and only because the application did not: an exception nobody
+    expected has no status, and the default answer to that is a closed socket with no response at
+    all. :meth:`_contain` answers it as a bounded 500 instead.
     """
 
     protocol_version = "HTTP/1.1"
@@ -111,10 +145,46 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._write(413, str(exc).encode("utf-8"), "text/plain; charset=utf-8", head=False)
             return
-        response = self.server.app.handle(
-            method, path, query=query, body=body, headers=self.headers
-        )
+        try:
+            response = self.server.app.handle(method, path, query=query, body=body, headers=self.headers)
+        except Exception as exc:  # noqa: BLE001 - the containment boundary; see _contain
+            self._contain(exc, head=head)
+            return
         self._write(response.status, response.body, response.content_type, head=head, extra=response.headers)
+
+    def _contain(self, exc: BaseException, *, head: bool) -> None:
+        """Answer an escaped application exception as a complete 5xx instead of a closed socket.
+
+        Every status the application decides still comes from the application — this is not a second
+        code-to-status table and it never sees a deliberate refusal, which returns a `Response` and
+        leaves by the normal path. What it covers is the one case that has no status because nothing
+        decided it: an application, backend-read, config or schema-validation exception nobody
+        expected. `http.server` answers that by closing the connection with no response at all,
+        which is how a live `secretary-web.service` served empty replies on every route for a day
+        (secretary-1624) — a browser shows nothing, `curl` shows "empty reply from server", and the
+        journal is the only place the reason exists.
+
+        So the response is written here, through `_write`, which means it carries the same security
+        headers and the same `Content-Length` as every other answer and the connection stays usable
+        for the next request. The body is a fixed sentence plus the exception's class name and a
+        reference; the reference is what joins it to the server log, and the log is where the frames
+        are. Neither carries the exception's *message*, the request, the configuration or anything
+        read from the installation: an unexpected failure is exactly the case where nobody has
+        audited what the text contains, so a class name and a call site are what may be published.
+        """
+        reference = uuid4().hex[:12]
+        print(
+            f"{self.address_string()} unhandled {type(exc).__name__} ref={reference} at {_frames(exc)}",
+            file=sys.stderr,
+        )
+        body = (
+            f"secretary web: this request could not be answered.\n"
+            f"An unexpected {type(exc).__name__} escaped the application.\n"
+            f"reference: {reference}\n"
+            f"The service journal holds the failing call site under this reference "
+            f"(journalctl -u secretary-web.service).\n"
+        ).encode()
+        self._write(500, body, "text/plain; charset=utf-8", head=head)
 
     def _read_body(self) -> bytes:
         try:
