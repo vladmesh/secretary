@@ -16,7 +16,7 @@ from unittest import mock
 
 import psycopg
 
-from secretary import cutover
+from secretary import cutover, state_repo
 from secretary.backup import create_backups
 from secretary.backup_verify import verify_backup
 from secretary.board import migrate, provision, schema
@@ -569,6 +569,10 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         subprocess.run(
             ["git", "-C", str(instance), "commit", "-m", "fixture"], check=True, capture_output=True
         )
+        # This rehearsal constructs the instance checkout directly instead of
+        # entering through install/recover/upgrade. Establish the same local
+        # lifecycle control before its installed-protocol doctor invocation.
+        state_repo.configure_packing_controls(instance)
 
         plan = {
             "version": 1,
