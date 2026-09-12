@@ -66,8 +66,12 @@ A `VitalitySnapshot` is one channel's reading of one head run at one instant. It
 
 Mappings worth naming:
 
-- heartbeat `live-match` with `/proc` state `T` → `Process=Suspended`; dead or zombie → `Dead`;
-  live otherwise → `Running`; missing/unreadable/mismatched → `Unknown` + unavailable;
+- heartbeat `live-match` with `/proc` state `T` → `Process=Suspended`; dead, zombie, or a pid
+  reaped between the reader's signal and its `/proc` read → `Dead`; live otherwise → `Running`;
+  missing/unreadable/mismatched → `Unknown` + unavailable. A pid that answered `kill(pid, 0)` is
+  asked what it is, and a vanished `/proc/<pid>/status` is that process being gone rather than that
+  process not being a zombie: read the other way it published `live-match` for a head that had
+  already exited;
 - cursor moved since this run's previous snapshot → `Advancing`; unchanged → `Quiet`; unadmitted,
   foreign or unreadable → `Unknown` + unavailable; first observation of a source records its cursor
   without a progress opinion;

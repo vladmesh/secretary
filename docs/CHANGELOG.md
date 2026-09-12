@@ -4,6 +4,17 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-12 — a stopped head cannot read as `live-match` (secretary-1622, sprint:1438)
+
+**The launch-identity watchdog no longer calls a reaped head a running one.**
+`dispatcher_watchdog.head_process_status` signals the recorded pid, reads its start time, and then
+asks the process what it is. A head reaped between the second and third of those leaves no
+`/proc/<pid>/status`, and that absence was read as "not a zombie" — so the classification came back
+`live-match` for a launch that had already exited, which is what the control plane reads as "this
+head is still running". A vanished status is now the process being gone, and gone is `dead` beside
+zombie; a status that exists but cannot be read stays inconclusive (`unreadable`). Found as an
+intermittent CI failure a moment after a head was stopped, not on the live installation.
+
 ## 2026-09-12 — every live audit reader follows the configured card backend (secretary-1622, sprint:1438)
 
 **On `SECRETARY_CARD_BACKEND=postgres`, SQL is the audit canon for every reader, not only for the
