@@ -4,6 +4,37 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-12 — every live audit reader follows the configured card backend (secretary-1622, sprint:1438)
+
+**On `SECRETARY_CARD_BACKEND=postgres`, SQL is the audit canon for every reader, not only for the
+dispatcher.** `tasks.task_audit_for` already decided the audit owner from the card client; the
+readers that still built the file journal from a data directory now go through it too, so a migrated
+installation is never answered from `board/events.ndjson`, a file its writers do not touch
+(`docs/BOARD_STORE.md` §7.3).
+
+- **`secretary task verify-audit`** verifies the configured backend's audit and names it in a new
+  `backend` field. The exit contract is unchanged: 0 when nothing is staged, 1 when something is.
+  Asked of a migrated installation it used to report a clean audit it had never read.
+- **The checkpoint gate** blocks on staged `requests` rows with the pending count, blocks by name
+  when the card client cannot be established, and asks for the Kanboard-only staged Product/Issue
+  journal only on Kanboard — as `export_board` already did. A leftover `pending-audit/` file under a
+  migrated data plane no longer blocks a checkpoint forever, and a missing one no longer passes a
+  gate that read nothing. The blocked reason now names the backend it asked
+  (`the postgres task audit has 1 unresolved pending record(s)`).
+- **`web-read commands` / `web-read request`** page the `requests` table on PostgreSQL. An audit that
+  cannot be read stays `unavailable`/`unknown`; an empty `requests` table is an honestly empty
+  history, while a missing file journal on Kanboard still refuses the source as before.
+- **A product run's `product_run.started` / `.finished`** are published into the store the run's own
+  card client names. The run protocol, its request ids and its fields are unchanged.
+- **`BoardEventCanon`** takes the audit its caller's client named; constructed with neither an audit
+  nor a data directory it now refuses (`BoardEventCanonUnowned`) instead of guessing the file journal.
+- **The test suite clears an inherited `SECRETARY_CARD_BACKEND`.** A worker or operator shell on a
+  migrated installation exports `postgres`; inherited, it ran the suite against a store it has not
+  got. A case that means PostgreSQL opts in explicitly.
+
+`task_events`' byte-offset paging over `board/events.ndjson` is deliberately unchanged: its cursor is
+a released position in that file, so serving it from SQL is its own protocol change.
+
 ## 2026-09-11 — pre-import recover releases through a receipt; an old successor token refuses beside a new plan (secretary-1621, sprint:1437)
 
 **A pre-import `cutover recover` now ends with an immutable release receipt.** Its archive

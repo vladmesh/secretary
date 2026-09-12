@@ -638,22 +638,40 @@ class TaskReaderTests(BoardFixture, unittest.TestCase):
 
 class TaskCliTests(unittest.TestCase):
     def test_backend_error_never_echoes_credentials(self) -> None:
+        """A transport failure is `backend_unavailable` and carries none of the token.
+
+        The installation is named and is one this test built: unnamed, the command resolves
+        `DEFAULT_INSTANCE` — `~/secretary-instance`, which on the appliance host is the *live*
+        installation, whose transport and card backend this suite must never read (secretary-1622).
+        The ambient `KANBOARD_*` are still exported while it runs, because "not a source of transport
+        configuration" is part of what this case is about (secretary-1026); the credential that must
+        not be echoed is the one in the transport file the named instance owns.
+        """
         output, errors = io.StringIO(), io.StringIO()
-        with (
-            mock.patch.dict(
-                "os.environ",
-                {
-                    "KANBOARD_URL": "https://board.invalid/token",
-                    "KANBOARD_API_USER": "user",
-                    "KANBOARD_API_TOKEN": "super-secret",
-                },
-                clear=False,
-            ),
-            mock.patch("secretary.tasks.urllib.request.urlopen", side_effect=OSError("super-secret")),
-            contextlib.redirect_stdout(output),
-            contextlib.redirect_stderr(errors),
-        ):
-            code = main(["task", "list"])
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            transport = instance / "board-transport.env"
+            transport.write_text(
+                "KANBOARD_URL=https://board.invalid/token\n"
+                "KANBOARD_API_USER=user\nKANBOARD_API_TOKEN=super-secret\n",
+                encoding="utf-8",
+            )
+            transport.chmod(0o600)
+            with (
+                mock.patch.dict(
+                    "os.environ",
+                    {
+                        "KANBOARD_URL": "https://board.invalid/token",
+                        "KANBOARD_API_USER": "user",
+                        "KANBOARD_API_TOKEN": "super-secret",
+                    },
+                    clear=False,
+                ),
+                mock.patch("secretary.tasks.urllib.request.urlopen", side_effect=OSError("super-secret")),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                code = main(["task", "list", "--instance", str(instance)])
 
         self.assertEqual(code, 1)
         self.assertEqual(output.getvalue(), "")

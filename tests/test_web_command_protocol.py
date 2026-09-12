@@ -65,7 +65,13 @@ class CommandProtocolFixture(SprintProtocolFixture):
     """One installation, one data plane, and a committed audit with commands on several entities."""
 
     def layer(self, **kwargs: Any) -> CommandReadLayer:
-        options: dict[str, Any] = {"data_dir": self.data_dir, "clock": lambda: self.clock}
+        options: dict[str, Any] = {
+            "data_dir": self.data_dir,
+            # The audit follows the card client, so the fixture's own board is what decides it: this
+            # installation is served by Kanboard, and its canon is the file journal below.
+            "board_client": self.board,
+            "clock": lambda: self.clock,
+        }
         options.update(kwargs)
         return CommandReadLayer(self.instance, **options)
 
@@ -461,12 +467,12 @@ class HonestyTests(CommandProtocolFixture):
         (broken / "instance.yaml").write_text("version: 1\nname: broken\n", encoding="utf-8")
         self.commit("req-1", event_id="evt_1")
         document = CommandReadLayer(
-            broken, data_dir=self.data_dir, clock=lambda: self.clock
+            broken, data_dir=self.data_dir, board_client=self.board, clock=lambda: self.clock
         ).command_history()
         self.assert_unavailable(document, "sources", "installation")
         self.assert_available(document, "commands")
         with self.assertRaises(ValidationRefused):
-            CommandReadLayer(broken).command_history()
+            CommandReadLayer(broken, board_client=self.board).command_history()
 
 
 class SectionSeamTests(CommandProtocolFixture):

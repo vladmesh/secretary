@@ -2164,12 +2164,36 @@ The audit journal itself — `state/board/events.ndjson` — keeps being written
 
 No live reader may take that generated file for the audit. `tasks.task_audit_for(client, data_dir)`
 is the one place that decides which audit owner a process uses, and it decides from the client the
-switch built: `SqlTaskAudit(client)` on PostgreSQL, `TaskAudit(data_dir)` on Kanboard. `TaskWriter`,
+switch built: `SqlTaskAudit(client)` on PostgreSQL, `TaskAudit(data_dir)` on Kanboard. **SQL is the
+canon on PostgreSQL and the file journal is the canon on Kanboard**, and a reader states which one it
+is reading rather than inferring it from what happens to be on disk. `TaskWriter`,
 `SprintReader`/`SprintWriter`, `ProductIssueStore`, the dispatcher runtime and its command host all
 take it from there. The dispatcher built `TaskAudit(data)` beside a PostgreSQL client until
 2026-09-10: a worker's `report:done` committed in `requests` was then invisible to the report wait,
 the worker was declared stalled, and the observer got no wake for the Blocked move
 (sprint:1437, secretary-1614).
+
+Every other live reader follows the same rule since secretary-1622, and the list is enumerated in
+`tests/test_architecture.py::FileAuditOwnershipTests` rather than kept in prose:
+
+| Reader | What it reads on PostgreSQL |
+|---|---|
+| `CheckpointWriter` — the publication gate | staged `requests` rows; a card client that cannot be established blocks the checkpoint by name, and the Kanboard-only staged Product/Issue journal is asked for only on Kanboard, as `export_board` already does |
+| `secretary task verify-audit` | the same staged count, with the backend named in the answer; the exit contract (0 clean, 1 pending) is unchanged |
+| `CommandReadLayer.command_history` / `command_request` | committed and staged `requests`; an audit that cannot be read is `unavailable`/`unknown` and never an empty history or `not_found` |
+| `webproto.ops` product-run publication | the `requests` row of the generic `product_run.*` record, in the store its own card client names |
+| `BoardEventCanon` | the audit its caller's client named; a canon with neither an audit nor a data directory refuses instead of guessing one |
+| `SprintReader` / sprint status reads | `requests` through `task_audit_for`; the shared traversal `_AuditOnce` has no data-directory construction at all |
+
+Three file-audit constructions remain deliberate and each is named with its reason in that test: the
+selector's own Kanboard branch, the pre-v2 pending-layout gate and unmigrated-claim check in
+`product_issues.py` (statements about the file layout itself, run *because* the client is
+PostgreSQL), and the default of a command host built with no audit, which only tests do.
+
+One reader is deliberately *not* in that list: `webproto.journal.EventJournal`, which pages one
+card's slice of `board/events.ndjson` by byte offset for `task_events`. Its cursor is a position in
+that file — a released protocol value, not an implementation detail — so serving it from SQL is a
+paging contract of its own and belongs to its own card, not to the selection this section describes.
 
 ### 7.4 Schema versioning and migrations
 

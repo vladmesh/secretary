@@ -784,8 +784,11 @@ class CommandHostRuntime:
         self.data_dir = data_dir
         # TASK.md is a durable projection, so its feedback selector reads the same audit journal
         # as the dispatcher rather than depending on a live record or wall-clock ordering. The
-        # dispatcher hands its own audit in; built here from the data dir alone it would be the
-        # file journal, which on the PostgreSQL backend nobody writes.
+        # dispatcher hands its own backend-selected audit in (`dispatcher.runtime_from_args`), which
+        # is the only production construction of this host; built here from the data dir alone it
+        # would be the file journal, which on the PostgreSQL backend nobody writes, so the default is
+        # a host standing on its own — what a test builds — and is named as such in
+        # `tests/test_architecture.py::FileAuditOwnershipTests`.
         self.audit = audit if audit is not None else TaskAudit(data_dir)
         self.mode = mode
         # Fixed once for this dispatcher process. Every lifecycle fence asks this same value rather

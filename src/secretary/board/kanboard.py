@@ -52,6 +52,7 @@ from secretary.tasks import (
     _target_column_id,
     all_project_cards,
     project_card_by_reference,
+    task_audit_for,
 )
 
 
@@ -69,7 +70,16 @@ class KanboardBoardHost:
         self.client = client
         self.data_dir = data_dir
         self.instance = instance
-        self.canon = BoardEventCanon(data_dir, audit=audit) if data_dir is not None else None
+        # The typed canon follows this host's own client and never the data directory: with no audit
+        # handed in, `task_audit_for` reads the backend off the client, so a PostgreSQL client's
+        # events go to `requests`/`board_events` and a Kanboard client's to the file journal
+        # (`docs/BOARD_STORE.md` §7.3). Letting the canon default to the file journal here published
+        # typed events into a file the PostgreSQL backend never reads.
+        self.canon = (
+            BoardEventCanon(data_dir, audit=audit or task_audit_for(client, data_dir))
+            if data_dir is not None
+            else None
+        )
 
     def read(self, kind: EntityKind, ref: str) -> BoardEntity:
         if kind is EntityKind.CARD:

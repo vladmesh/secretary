@@ -138,7 +138,7 @@ from secretary.sprints import (
     require_active_sprint_projects,
     sprint_guard_index_initialized,
 )
-from secretary.tasks import TaskAudit
+from secretary.tasks import task_audit_for
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import InstallationUnavailable, TaskNotFound, ValidationRefused
@@ -1411,16 +1411,16 @@ class SprintReadLayer(ProtocolBoundary):
     def _journal(self, data_dir: Path, *, client: Any, now: float) -> Reading:
         """The committed audit, walked once for the whole document.
 
-        A source of its own: it is the file the resume-freshness verdict is judged against, it is
-        not the sprint board, and an installation can lose one without losing the other.
+        A source of its own: it is what the resume-freshness verdict is judged against, it is not
+        the sprint board, and an installation can lose one without losing the other.
+
+        Which store that is, is the card client's own answer (`task_audit_for`): `requests` on the
+        PostgreSQL backend and `board/events.ndjson` on Kanboard (`docs/BOARD_STORE.md` §7.3). The
+        evidence path stays the journal either way, because that is the file an operator is pointed
+        at when this source refuses on the backend that has one.
         """
         try:
-            if getattr(client, "backend_kind", "kanboard") == "postgres":
-                from secretary.board.sql_audit import SqlTaskAudit
-
-                events = SqlTaskAudit(client).events()
-            else:
-                events = TaskAudit(data_dir).events()
+            events = task_audit_for(client, data_dir).events()
         except _SOURCE_FAILURES as exc:
             return Reading(
                 SOURCE_JOURNAL,

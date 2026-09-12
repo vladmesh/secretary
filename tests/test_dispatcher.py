@@ -3447,7 +3447,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             )
 
         with mock.patch("secretary.checkpoint.export_board", side_effect=export_fixture_board):
-            checkpoint = CheckpointWriter(self.data_dir, instance, state_dir=state_dir).write()
+            # The gate reads the audit of the writer's own card client; this fixture's board is the
+            # Kanboard one whose canon is the file journal under `self.data_dir`.
+            checkpoint = CheckpointWriter(
+                self.data_dir, instance, state_dir=state_dir, client=self.board
+            ).write()
         self.assertEqual(checkpoint.status, "committed", checkpoint.reason)
         sealed = instance / "state" / "board"
         copied = self.data_dir / "offline-analytics-copy"

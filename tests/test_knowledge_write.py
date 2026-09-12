@@ -14,6 +14,7 @@ from secretary.knowledge_write import (
     write_knowledge_document,
 )
 from secretary.state_repo import StateRepoError
+from tests.fakes.tasks import FakeKanboard
 
 
 def git(repo: Path, *args: str) -> str:
@@ -86,7 +87,13 @@ class KnowledgeRepoCase(unittest.TestCase):
         )
 
     def checkpoint(self):
-        """Run the checkpoint writer with the export step stubbed by the seed."""
+        """Run the checkpoint writer with the export step stubbed by the seed.
+
+        The writer's gate is the audit of the card client it is given (`tasks.task_audit_for`), so
+        this installation is handed the Kanboard fake whose canon is the file journal the seed
+        writes. Without one the writer would ask the switch for a client this temporary instance has
+        no transport for, and block before the race these cases are about could even start.
+        """
 
         def board_export(data_dir, **_kwargs):
             lines = (Path(data_dir) / "board" / "cards.ndjson").read_text(encoding="utf-8")
@@ -98,7 +105,9 @@ class KnowledgeRepoCase(unittest.TestCase):
 
         with mock.patch("secretary.checkpoint.export_board", side_effect=board_export):
             with mock.patch("secretary.checkpoint.export_runs", side_effect=runs_export):
-                return CheckpointWriter(self.data_dir, self.instance_dir).write()
+                return CheckpointWriter(
+                    self.data_dir, self.instance_dir, client=FakeKanboard()
+                ).write()
 
     def write(self, *, document: str = DOCUMENT, text: str = BODY, actor: str = "po"):
         return write_knowledge_document(self.instance_dir, document=document, actor=actor, text=text)

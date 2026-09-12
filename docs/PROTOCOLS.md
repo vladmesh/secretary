@@ -3755,8 +3755,8 @@ installation, newest first. Each row is the four fields a history is made of, an
 is already on the committed audit: `actor` (who initiated it), `action` (what was done), `entity`
 (the reference it was done to, with the entity kind where the record carries one), and `result` (the
 `reason` a typed protocol event's writer gave, or the `outcome` of a released generic audit record --
-never one renamed into the other). It is `TaskAudit.events()`, the released cross-entity traversal,
-paged; there is no second store, index, cache or scheduler behind it.
+never one renamed into the other). It is the committed cross-entity traversal of this installation's
+own audit, paged; there is no second store, index, cache or scheduler behind it.
 
 **`command_request(request_id)`** -- what became of one request id, in four states and no fewer:
 
@@ -3767,7 +3767,7 @@ paged; there is no second store, index, cache or scheduler behind it.
 | `not_found` | the audit answered and holds neither a committed nor a staged record under this id |
 | `unknown` | the audit could not be read, so nothing is established. Never folded into `not_found`: "this installation never saw that request" and "nobody could say" are opposite answers |
 
-It reads `TaskAudit.committed_event` and `TaskAudit.pending_event` -- the pair `SprintWriter._write`
+It reads the audit's own `committed_event` and `pending_event` -- the pair `SprintWriter._write`
 itself consults to decide that a repeat is a no-op -- and re-decides nothing with them. **It never
 performs, retries, resumes or repairs the operation it reports on.** A read that repairs is not a
 read: a pending answer describes the continuation and leaves it to whoever owns the operation.
@@ -3788,9 +3788,19 @@ Newest first means the journal's append order reversed and deliberately not a so
 the writer stamps that field, two commands can share a second, and a clock can go backwards, so the
 append order is the only order that is a fact.
 
+**Which store the audit is, is the card client's answer.** Both reads go through
+`secretary.tasks.task_audit_for`, so on `SECRETARY_CARD_BACKEND=postgres` the canon is the
+`requests` table and on Kanboard it is `board/events.ndjson` (`docs/BOARD_STORE.md` §7.3). The
+documents are identical either way, and the file journal is not consulted beside a PostgreSQL client:
+it holds nothing that backend wrote, so answering from it published an empty history, and a
+`not_found` for request ids the installation was holding, for the whole of an installation's life
+after cutover.
+
 An audit nobody could read is an unavailable source and never an empty history: `items` is `null`,
 the section names the reason, and that includes the case the released traversal answers `[]` for -- a
-journal file that is not there at all, which this read refuses rather than publishes. A record's
+journal file that is not there at all, which this read refuses rather than publishes. On PostgreSQL
+that case is a store that will not answer rather than a missing file; an empty `requests` table is a
+read that happened and an honestly empty history. A record's
 entity kind is `null` when the record does not carry one, and is never inferred.
 
 ### Operation identity, in one place

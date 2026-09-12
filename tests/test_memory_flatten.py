@@ -18,6 +18,7 @@ from secretary.memory_errors import MemoryProtocolError
 from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import commit_memory_proposal, propose_memory_fact
 from secretary.tasks import TaskAudit
+from tests.fakes.tasks import FakeKanboard
 
 
 def git(repo: Path, *args: str) -> str:
@@ -238,7 +239,9 @@ class TwoWriterTests(unittest.TestCase):
         (runs / "claims.json").write_text('{"claims": {}}\n', encoding="utf-8")
 
     def writer(self) -> CheckpointWriter:
-        writer = CheckpointWriter(self.data_dir, self.instance_dir)
+        # The gate is the audit of the writer's own card client, so this installation is handed the
+        # Kanboard fake whose canon is the file journal under `self.data_dir`.
+        writer = CheckpointWriter(self.data_dir, self.instance_dir, client=FakeKanboard())
         writer._regenerate = lambda: (1, 0)
         return writer
 

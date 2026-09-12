@@ -92,19 +92,38 @@ class BoardEventPending(RuntimeError):
     """The backend effect succeeded, but its durable protocol event did not."""
 
 
+class BoardEventCanonUnowned(RuntimeError):
+    """A typed-event canon was asked for with no store that could hold the events."""
+
+
 class AnalyticsOutcomeConflict(ValueError):
     """One immutable attempt-outcome natural key was offered two payloads."""
 
 
 class BoardEventCanon:
-    """The one typed-event facade over ``board/events.ndjson``.
+    """The one typed-event facade over whichever store the caller's backend keeps the audit in.
 
     Generic TaskAudit records have no ``record_type`` discriminator and are deliberately ignored by
     :meth:`events`; TaskAudit itself remains the compatibility reader for released record versions.
+
+    ``audit`` is how a caller that has a card client says which store that is, and every caller that
+    has one passes it: :class:`~secretary.board.kanboard.KanboardBoardHost` resolves it through
+    :func:`secretary.tasks.task_audit_for`, so a PostgreSQL client's canon is
+    ``requests``/``board_events`` and a Kanboard client's is ``board/events.ndjson``
+    (``docs/BOARD_STORE.md`` §7.3). Constructed from a data directory alone this is the file journal,
+    which is the right answer for exactly one kind of caller -- one with no client at all, offline or
+    Kanboard-only, such as the fake board host and the storage-level fixtures. With neither an audit
+    nor a data directory there is no backend-safe choice left to make, so construction refuses by
+    name rather than guessing one.
     """
 
-    def __init__(self, data_dir: str | Path, *, audit: TaskAudit | None = None) -> None:
+    def __init__(self, data_dir: str | Path | None, *, audit: TaskAudit | None = None) -> None:
         if audit is None:
+            if data_dir is None:
+                raise BoardEventCanonUnowned(
+                    "a typed board event canon needs the audit owner of its card client, or a data "
+                    "directory whose file journal is the canon; it was given neither"
+                )
             # Kept local so secretary.tasks can import board transition values
             # without recursively loading its own TaskAudit definition.
             from secretary.tasks import TaskAudit

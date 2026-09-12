@@ -4,6 +4,7 @@
 component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
 unit tests/test_card_backend_switch.py
+integration-board tests/test_audit_backend_canon.py
 integration-board tests/test_attempt_usage.py
 integration-board tests/test_attempt_outcome.py
 integration-board tests/test_analytics_projection.py
@@ -61,6 +62,7 @@ unit tests/test_head_vitality_policy_execution.py
 unit tests/test_head_vitality_regression.py
 unit tests/test_head_vitality_wait_decisions.py
 unit tests/test_health_suite_command.py
+unit tests/test_hermetic_card_backend.py
 component tests/test_hermetic_codex.py
 component tests/test_hermetic_kanboard.py
 component tests/test_hermetic_orca.py
