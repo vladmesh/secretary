@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,7 @@ from secretary.data import (
     init_layout,
     raw_kanboard_dump,
 )
+from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from secretary.dispatcher_commands import (
     add_dispatcher_subcommands,
     add_head_status_command,
@@ -43,7 +45,7 @@ from secretary.head_health import (
     HeadReadiness,
     run_probe,
 )
-from secretary.head_registry import HeadRegistryConfigError, installed_heads
+from secretary.head_registry import HeadRegistryConfigError, installed_heads, read_source
 from secretary.host import (
     CollectResult,
     FixtureHostSource,
@@ -98,6 +100,7 @@ NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
 MEMORY_EXIT_VALIDATION = 2
 MEMORY_EXIT_PERMISSION = 3
 MEMORY_EXIT_LOCKED = 4
+_PROVENANCE_UNSET = object()
 
 
 @dataclass
@@ -706,7 +709,10 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
             {"code": "unit_runtime", "message": finding}
             for finding in _unit_runtime_findings(expected, collected)
         )
-    dispatcher = dispatcher_findings(report, collected, inspect_live=not args.offline)
+    provenance = production_runtime_provenance_finding(report, inspect_runtime=not args.offline)
+    dispatcher = dispatcher_findings(
+        report, collected, inspect_live=not args.offline, provenance=provenance
+    )
     checkpoint = checkpoint_findings(report)
     secret_store = secret_store_findings(report)
     board_transport = _board_transport_findings(report.instance_path.parent)
@@ -732,6 +738,8 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         for row in recovery["resources"]
     ]
     findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
+    if provenance is not None:
+        findings.append(provenance)
     findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint)
     findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
     findings.extend({"code": "board_transport", "message": finding} for finding in board_transport)
@@ -902,22 +910,90 @@ def print_dispatcher_status(
     return bool(findings)
 
 
-def dispatcher_findings(report, collected_host: CollectResult | None, *, inspect_live: bool) -> list[str]:
+def dispatcher_findings(
+    report,
+    collected_host: CollectResult | None,
+    *,
+    inspect_live: bool,
+    provenance: dict[str, object] | None | object = _PROVENANCE_UNSET,
+) -> list[str]:
     if report.data_dir is None:
         return []
     data_dir = report.data_dir
     production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
+    if provenance is _PROVENANCE_UNSET:
+        provenance = production_runtime_provenance_finding(report)
+    provenance_message = str(provenance["message"]) if isinstance(provenance, dict) else ""
     if not production:
-        return []
+        return [provenance_message] if provenance_message else []
     # Unresolved divergences are read from the state snapshot itself, not the live host, so they
     # surface under --offline too: an operator diagnosing a broken host still needs to see them.
     findings: list[str] = _divergence_findings(production)
+    if provenance_message:
+        findings.append(provenance_message)
     if not inspect_live:
         return findings
     if not str(production.get("owner") or ""):
         findings.append("production owner fence is missing")
     findings.extend(_production_host_findings(report, data_dir, collected_host))
     return findings
+
+
+def production_runtime_provenance_finding(
+    report, *, inspect_runtime: bool = True
+) -> dict[str, object] | None:
+    """Read the installed pre-import boundary without falling back to this checkout.
+
+    Fixtures and offline configuration documents often have no installed source pin.  Falling back
+    to the process's configured checkout in that case would make an offline Doctor accidentally
+    inspect a developer's live venv, so only an explicit installation pin authorizes this probe.
+    """
+    try:
+        source = read_source(report.instance_path.parent)
+    except HeadRegistryConfigError:
+        return None
+    product_root = source.get("product_root") if isinstance(source, dict) else None
+    if not isinstance(product_root, str) or not product_root.strip():
+        return None
+    # An offline Doctor reads the installation contract and recorded dispatcher state without
+    # starting any installation-owned executable.  A refusal persisted by the pre-import fence is
+    # already the exact inspector result, so it remains actionable offline.  In the absence of
+    # such a refusal, only live Doctor probes the production interpreter: a portable installation
+    # can validly be configured before its production venv has ever been materialized.
+    recorded = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    runtime_state = recorded.get("runtime_provenance")
+    observation = runtime_state.get("observation") if isinstance(runtime_state, dict) else None
+    has_recorded_refusal = isinstance(runtime_state, dict) and runtime_state.get("status") == "refused"
+    if has_recorded_refusal and isinstance(observation, dict):
+        provenance = RuntimeProvenance.from_dict(observation)
+    elif not inspect_runtime:
+        return None
+    else:
+        provenance = ProductionRuntime.installed(Path(product_root)).probe()
+    if provenance.valid:
+        return None
+    repair = shlex.join(
+        [
+            str(Path(provenance.product_root) / ".venv" / "bin" / "python3"),
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "-e",
+            provenance.product_root,
+        ]
+    )
+    return {
+        "code": "production_runtime_provenance",
+        "classification": provenance.classification,
+        "interpreter": provenance.interpreter,
+        "product_root": provenance.product_root,
+        "import_origin": provenance.import_origin,
+        "metadata_source": provenance.metadata_source,
+        "offending_target": provenance.offending_target,
+        "repair": repair,
+        "message": f"{provenance.refusal('doctor')}; repair: {repair}",
+    }
 
 
 def _divergence_findings(production: dict[str, object]) -> list[str]:

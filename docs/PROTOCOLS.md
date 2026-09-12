@@ -2389,6 +2389,35 @@ transitions, persists claim and review state, and checks the live board before r
 owner is recorded in dispatcher state; an owner mismatch, a dirty workspace, a missing report or an
 unresolved audit state stops a transition instead of falling back silently.
 
+Before that systemd unit invokes the `secretary` console entry point, its configured production
+interpreter runs `src/secretary/dispatch/runtime_preflight.py` with `-I`. The preflight is standard
+library code executed by pathname, not a package import. It binds the configured product root and
+production interpreter, then inspects that interpreter's plain editable `.pth` files, executable
+editable finders and `direct_url.json` records for `secretary`. Its one shared provenance result names
+the classification (`valid`, `wrong_root`, `workspace_targeted_editable`, `missing_import` or
+`interpreter_unavailable`), interpreter, product root, observable import origin, metadata source and
+offending target. Resolved paths, not lexical prefixes, decide containment, so a sibling such as
+`secretary-old` and a symlink escape do not pass.
+
+Only `valid` execs `secretary dispatcher production-tick`. A refusal exits `78` before candidate
+package code, reconciliation or a metadata change; it atomically writes the smallest
+`runtime_provenance` and unhealthy-tick diagnostic in the existing production-state file. The normal
+pipeline health line and steward incident reducer consume that same tick telemetry, so repeated
+minute refusals remain one incident and the first later healthy tick records one recovery. A valid
+preflight supersedes a prior refusal only; it does not falsely claim that the following dispatcher
+tick completed.
+
+`secretary doctor` reports a failed check as the structured
+`production_runtime_provenance` finding and includes the exact target and metadata source. It is
+read-only. Repair the editable installation explicitly, using the product root named by Doctor:
+
+```bash
+PRODUCT_ROOT/.venv/bin/python3 -m pip install --no-deps -e PRODUCT_ROOT
+```
+
+Do not use `uv sync`, delete a workspace, edit a `.pth` file, set `PYTHONPATH`, or automate this
+repair. A vanished task workspace is evidence of the failed installation, not a valid recovery path.
+
 ### Bring-up outcomes
 
 A bring-up is everything between a card being given to a head and that head existing. When one

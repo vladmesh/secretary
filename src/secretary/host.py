@@ -244,7 +244,7 @@ def _production_dispatcher_units(prefix: str, digests: dict[str, str]) -> list[P
     service_spec = {
         "component": "dispatcher-production",
         "managed_by": "secretary",
-        "runtime": "python3 -P -m secretary dispatcher production-tick --instance $SECRETARY_INSTANCE",
+        "runtime": "production pre-import fence -> secretary dispatcher production-tick --instance $SECRETARY_INSTANCE",
         "env": "SECRETARY_INSTANCE,SECRETARY_DISPATCHER_OWNER",
     }
     timer_spec = {

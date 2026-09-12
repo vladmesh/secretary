@@ -23,7 +23,11 @@ unit. Run `systemd-analyze verify` on anything you change.
 A unit already on the host is never overwritten until it is adopted; apply refuses to write over a
 name it cannot prove it owns.
 
-`secretary-dispatcher-production.timer` launches a one-shot `production-tick`.
+`secretary-dispatcher-production.timer` launches a one-shot `production-tick` through the configured
+venv's isolated `runtime_preflight.py`. The preflight runs by pathname before the `secretary` entry
+point can import an editable package, refuses foreign or task-workspace provenance with the existing
+production-state diagnostic, and execs the tick only after a valid observation. It is materialized
+with the unit through `reconcile apply` or `secretary upgrade`; do not copy or edit it on the host.
 `secretary-memory.service` serves MCP on the configured local endpoint and loads the instance
 embedding model. `secretary-web.service` runs the web transport on `127.0.0.1:8787` — that host is
 not a default the unit may relax — and `secretary-web-front.service` runs the archive Caddy that

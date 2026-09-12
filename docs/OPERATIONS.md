@@ -3239,6 +3239,35 @@ The current templates and what they are for are documented in
 The production dispatcher timer runs a one-shot tick. Memory, curator, steward and retro must each have exactly one
 scheduler owner.
 
+### Production interpreter provenance
+
+The dispatcher unit runs an isolated, pathname-addressed preflight before it can invoke the
+`secretary` console entry point. This catches an editable install that points at a worker or reviewer
+workspace even after that workspace has vanished. A refusal exits non-zero before importing candidate
+code or reconciling the board, and records its classification, exact metadata source and target in
+the production state's existing tick telemetry. `triggered-agents health` turns it red immediately;
+the steward emits one pipeline incident for the continuous refusal and one recovery after a healthy
+tick, not one notification per timer firing.
+
+Run `secretary doctor --instance INSTANCE` for the read-only text or JSON finding
+`production_runtime_provenance`. It gives the configured production interpreter, product root and
+offending target. The only supported repair is the exact command it prints:
+
+```bash
+PRODUCT_ROOT/.venv/bin/python3 -m pip install --no-deps -e PRODUCT_ROOT
+```
+
+Replace `PRODUCT_ROOT` with Doctor's configured product root. Do not run `uv sync`, delete a task
+workspace, rewrite editable metadata, add `PYTHONPATH`, or attempt an automatic repair. After an
+upgrade or reconcile has materialized the changed unit, a normal valid dispatcher tick closes the
+incident. `secretary upgrade` and `reconcile apply` remain the idempotent host/unit ownership paths;
+do not copy or patch the unit by hand.
+
+Passing the code and fixture checks proves the fence contract, not the coordinated production
+acceptance. After merge and supported version application, complete one whole dispatcher-worker-review-
+merge cycle and verify its workspace is removed before calling production isolation accepted. That
+live proof is scheduled with the sprint; it is not a worker-side service restart or fault injection.
+
 ## Upgrade
 
 `secretary upgrade --instance <dir>` pulls a new product version and re-materialises the installation onto it. It is
