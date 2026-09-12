@@ -446,6 +446,34 @@ class RuntimeWiringContractTests(unittest.TestCase):
         self.assertEqual(len(lines), 1, "the production unit must declare exactly one PATH")
         self.assertIn("/home/operator/.local/bin", lines[0].split("PATH=", 1)[1])
 
+    def test_production_unit_executes_the_stdlib_preflight_before_the_console_entry_point(self) -> None:
+        """A broken editable install must be diagnosed before ``secretary`` can be imported."""
+        product_root = Path("/srv/secretary")
+        rendered = render_systemd_unit(
+            (SHIPPED_PACKAGING_ROOT / "secretary-dispatcher-production.service").read_bytes(),
+            SystemdLayout(
+                product_root,
+                Path("/srv/secretary-instance"),
+                Path("/srv/secretary-data"),
+                "operator",
+                Path("/home/operator"),
+            ),
+        ).decode("utf-8")
+        exec_start = next(line for line in rendered.splitlines() if line.startswith("ExecStart="))
+        expected_prefix = (
+            "ExecStart=/srv/secretary/.venv/bin/python3 -I "
+            "/srv/secretary/src/secretary/dispatch/runtime_preflight.py "
+            "--product-root /srv/secretary --interpreter /srv/secretary/.venv/bin/python3 "
+            "--data-dir /srv/secretary-data -- "
+        )
+        self.assertTrue(exec_start.startswith(expected_prefix), exec_start)
+        self.assertEqual(
+            exec_start[len(expected_prefix) :],
+            "/srv/secretary/.venv/bin/secretary dispatcher production-tick "
+            "--instance /srv/secretary-instance",
+        )
+        self.assertNotIn("PYTHONPATH", exec_start)
+
 
 class HeadRegistrySourceContractTests(unittest.TestCase):
     """The live catalog reads the installation's registry, never the checkout it was imported from.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -9,9 +11,17 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from secretary.cli import main as secretary_main
 from secretary.dispatch.runtime_provenance import ProductionRuntime
+from secretary.dispatcher_production import record_tick_telemetry
+from triggered_agents.agents.steward import signals as steward_signals
+from triggered_agents.runtime import health, production_telemetry
 from triggered_agents.runtime.role_env import runtime_env
+from triggered_agents.runtime.state import AgentState
+
+PREFLIGHT = Path(__file__).parents[1] / "src" / "secretary" / "dispatch" / "runtime_preflight.py"
 
 
 def _fixture(root: Path, marker: str) -> None:
@@ -70,6 +80,53 @@ def _install(python: Path, checkout: Path) -> None:
         ],
         cwd=checkout,
         check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _instance(root: Path, product: Path, data_dir: Path) -> Path:
+    instance = root / "instance"
+    (instance / "heads").mkdir(parents=True)
+    (instance / "instance.yaml").write_text(
+        "version: 1\n"
+        "name: runtime-provenance-fixture\n"
+        f"data_dir: {data_dir}\n"
+        "offsite:\n"
+        "  instance_remote: https://example.invalid/instance.git\n",
+        encoding="utf-8",
+    )
+    # Doctor uses only this installed pin. That makes the fixture prove it never falls back to a
+    # developer's live checkout when it diagnoses an editable installation.
+    (instance / "heads" / "source.yaml").write_text(
+        f"product_root: {product}\n", encoding="utf-8"
+    )
+    return instance
+
+
+def _preflight(
+    python: Path,
+    product: Path,
+    data_dir: Path,
+    *command: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            str(python),
+            "-I",
+            str(PREFLIGHT),
+            "--product-root",
+            str(product),
+            "--interpreter",
+            str(python),
+            "--workspaces-root",
+            str(product.parent / "workspaces"),
+            "--state-path",
+            str(data_dir / "dispatcher" / "production-state.json"),
+            "--",
+            *command,
+        ],
+        check=False,
         capture_output=True,
         text=True,
     )
@@ -237,6 +294,111 @@ class ProductionRuntimeTests(unittest.TestCase):
                 str(python), str(similarly_named), workspaces_root=str(linked_workspaces)
             ).probe()
             self.assertEqual(wrong.classification, "wrong_root")
+
+    def test_preflight_refusal_diagnosis_deduplication_and_explicit_recovery_are_all_fixture_bound(self) -> None:
+        """The 2026-09 failure sequence, before any candidate package code can execute."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            production = root / "secretary"
+            workspace = root / "workspaces" / "secretary" / "task-77"
+            data_dir = root / "data"
+            _fixture(production, "production")
+            _fixture(workspace, "candidate")
+            # If the fence tried to verify provenance by importing the candidate, the test would
+            # fail before it could leave the diagnostic a broken service needs.
+            (workspace / "secretary" / "__init__.py").write_text(
+                "raise RuntimeError('candidate package was imported')\n", encoding="utf-8"
+            )
+            python = _venv(production / ".venv")
+            _install(python, workspace)
+            instance = _instance(root, production, data_dir)
+
+            first = _preflight(python, production, data_dir, "/bin/false")
+            self.assertEqual(first.returncode, 78, first.stderr)
+            state_path = data_dir / "dispatcher" / "production-state.json"
+            first_state = json.loads(state_path.read_text(encoding="utf-8"))
+            refusal = first_state["runtime_provenance"]
+            observed = refusal["observation"]
+            self.assertEqual(refusal["status"], "refused")
+            self.assertEqual(observed["classification"], "workspace_targeted_editable")
+            self.assertEqual(observed["offending_target"], str(workspace.resolve()))
+            self.assertTrue(observed["metadata_source"].endswith(".pth"))
+            self.assertEqual(first_state["tick_telemetry"]["incident_total"], 1)
+
+            doctor_text = io.StringIO()
+            with contextlib.redirect_stdout(doctor_text):
+                self.assertEqual(secretary_main(["doctor", "--offline", "--instance", str(instance)]), 1)
+            self.assertIn("production runtime provenance refused", doctor_text.getvalue())
+            self.assertIn(str(workspace.resolve()), doctor_text.getvalue())
+            self.assertIn("pip install --no-deps -e", doctor_text.getvalue())
+            doctor_json = io.StringIO()
+            with contextlib.redirect_stdout(doctor_json):
+                self.assertEqual(secretary_main(["doctor", "--offline", "--json", "--instance", str(instance)]), 1)
+            findings = json.loads(doctor_json.getvalue())["findings"]
+            finding = next(item for item in findings if item["code"] == "production_runtime_provenance")
+            self.assertEqual(finding["offending_target"], str(workspace.resolve()))
+            self.assertTrue(finding["metadata_source"].endswith(".pth"))
+
+            shutil.rmtree(workspace)
+            vanished = _preflight(python, production, data_dir, "/bin/false")
+            self.assertEqual(vanished.returncode, 78, vanished.stderr)
+            vanished_state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                vanished_state["runtime_provenance"]["observation"]["offending_target"], str(workspace.resolve())
+            )
+            self.assertEqual(vanished_state["tick_telemetry"]["incident_total"], 1)
+            self.assertEqual(vanished_state["tick_telemetry"]["incident"]["unhealthy_ticks"], 2)
+
+            with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(state_path)}):
+                problems, _detail = health._pipeline_status()
+                self.assertTrue(any("workspace_targeted_editable" in problem for problem in problems))
+                telemetry = production_telemetry.read()
+                mark = {
+                    **steward_signals._empty_watermark(),
+                    "pipeline_incident_total": 0,
+                    "pipeline_recovery_total": 0,
+                    "pipeline_telemetry_generation": telemetry.generation,
+                }
+                steward_state = AgentState("steward", state_dir=root / "steward")
+                with mock.patch.object(steward_signals, "STATE", steward_state):
+                    hits, pending = steward_signals._pipeline_tick_signals(mark)
+                    self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
+                    self.assertIn("workspace_targeted_editable", hits[0]["cause"])
+
+            # This is the one supported repair. It changes only the disposable fixture venv, never
+            # a real installation or metadata file by hand.
+            subprocess.run(
+                [str(python), "-m", "pip", "install", "--no-index", "--no-deps", "-e", str(production)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            tick_record = root / "representative-tick.json"
+            recovered = _preflight(
+                python,
+                production,
+                data_dir,
+                str(python),
+                "-I",
+                "-m",
+                "secretary.dispatcher_tick",
+                str(tick_record),
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertEqual(
+                json.loads(tick_record.read_text(encoding="utf-8")),
+                {"action": "normal", "marker": "production"},
+            )
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["runtime_provenance"]["status"], "valid")
+            record_tick_telemetry(payload, {"status": "ok", "step": "production-tick"})
+            state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(state_path)}):
+                self.assertEqual(health._pipeline_status()[0], [])
+                with mock.patch.object(steward_signals, "STATE", steward_state):
+                    hits, _pending = steward_signals._pipeline_tick_signals(dict(mark, **pending))
+            self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-recovered"])
 
 
 if __name__ == "__main__":
