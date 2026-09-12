@@ -30,7 +30,7 @@ from secretary.data import (
     init_layout,
     raw_kanboard_dump,
 )
-from secretary.dispatch.runtime_provenance import ProductionRuntime
+from secretary.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from secretary.dispatcher_commands import (
     add_dispatcher_subcommands,
     add_head_status_command,
@@ -709,7 +709,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
             {"code": "unit_runtime", "message": finding}
             for finding in _unit_runtime_findings(expected, collected)
         )
-    provenance = production_runtime_provenance_finding(report)
+    provenance = production_runtime_provenance_finding(report, inspect_runtime=not args.offline)
     dispatcher = dispatcher_findings(
         report, collected, inspect_live=not args.offline, provenance=provenance
     )
@@ -939,7 +939,9 @@ def dispatcher_findings(
     return findings
 
 
-def production_runtime_provenance_finding(report) -> dict[str, object] | None:
+def production_runtime_provenance_finding(
+    report, *, inspect_runtime: bool = True
+) -> dict[str, object] | None:
     """Read the installed pre-import boundary without falling back to this checkout.
 
     Fixtures and offline configuration documents often have no installed source pin.  Falling back
@@ -953,7 +955,21 @@ def production_runtime_provenance_finding(report) -> dict[str, object] | None:
     product_root = source.get("product_root") if isinstance(source, dict) else None
     if not isinstance(product_root, str) or not product_root.strip():
         return None
-    provenance = ProductionRuntime.installed(Path(product_root)).probe()
+    # An offline Doctor reads the installation contract and recorded dispatcher state without
+    # starting any installation-owned executable.  A refusal persisted by the pre-import fence is
+    # already the exact inspector result, so it remains actionable offline.  In the absence of
+    # such a refusal, only live Doctor probes the production interpreter: a portable installation
+    # can validly be configured before its production venv has ever been materialized.
+    recorded = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    runtime_state = recorded.get("runtime_provenance")
+    observation = runtime_state.get("observation") if isinstance(runtime_state, dict) else None
+    has_recorded_refusal = isinstance(runtime_state, dict) and runtime_state.get("status") == "refused"
+    if has_recorded_refusal and isinstance(observation, dict):
+        provenance = RuntimeProvenance.from_dict(observation)
+    elif not inspect_runtime:
+        return None
+    else:
+        provenance = ProductionRuntime.installed(Path(product_root)).probe()
     if provenance.valid:
         return None
     repair = shlex.join(

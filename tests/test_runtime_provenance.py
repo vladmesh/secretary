@@ -133,6 +133,37 @@ def _preflight(
 
 
 class ProductionRuntimeTests(unittest.TestCase):
+    def test_offline_doctor_does_not_probe_an_unstarted_production_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            product = root / "secretary"
+            data_dir = root / "data"
+            _fixture(product, "production")
+            instance = _instance(root, product, data_dir)
+            output = io.StringIO()
+            with (
+                mock.patch.object(ProductionRuntime, "probe", side_effect=AssertionError("offline probe")),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(secretary_main(["doctor", "--offline", "--instance", str(instance)]), 0)
+
+    def test_live_doctor_reports_an_unstarted_production_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            product = root / "secretary"
+            data_dir = root / "data"
+            _fixture(product, "production")
+            instance = _instance(root, product, data_dir)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    secretary_main(["doctor", "--dry-run", "--json", "--instance", str(instance)]), 1
+                )
+            findings = json.loads(output.getvalue())["findings"]
+            finding = next(item for item in findings if item["code"] == "production_runtime_provenance")
+            self.assertEqual(finding["classification"], "interpreter_unavailable")
+            self.assertIn("pip install --no-deps -e", finding["repair"])
+
     def test_missing_interpreter_has_its_own_classification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -326,7 +357,10 @@ class ProductionRuntimeTests(unittest.TestCase):
             self.assertEqual(first_state["tick_telemetry"]["incident_total"], 1)
 
             doctor_text = io.StringIO()
-            with contextlib.redirect_stdout(doctor_text):
+            with (
+                mock.patch.object(ProductionRuntime, "probe", side_effect=AssertionError("offline probe")),
+                contextlib.redirect_stdout(doctor_text),
+            ):
                 self.assertEqual(secretary_main(["doctor", "--offline", "--instance", str(instance)]), 1)
             self.assertIn("production runtime provenance refused", doctor_text.getvalue())
             self.assertIn(str(workspace.resolve()), doctor_text.getvalue())
