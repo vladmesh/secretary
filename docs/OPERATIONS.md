@@ -1495,9 +1495,16 @@ An event is staged before the host call and committed after it. Failures are vis
   production state, but the event stayed pending. Repair appends it:
 
 ```bash
-secretary task verify-audit --instance INSTANCE     # .pending
+secretary task verify-audit --instance INSTANCE     # .pending, .backend
 secretary task reconcile-audit --instance INSTANCE  # repaired/unresolved
 ```
+
+Both commands ask the audit of the backend the installation serves cards from, and
+`verify-audit` names it in `.backend`: the `requests` table on `SECRETARY_CARD_BACKEND=postgres`, and
+`board/pending-audit/` plus `board/events.ndjson` on Kanboard (`docs/BOARD_STORE.md` §7.3). On
+PostgreSQL there is nothing for `reconcile-audit` to repair — the effect and its record are one
+transaction — so it answers `0/0`; a staged row there is an unsettled shape-B obligation and is
+resolved by repeating its own request id.
 
 The observer record is persisted in the same order and for the same reason. The launch intent (sprint,
 generation, head profile, attempt number, workspace and the future head's pid file) is written to production

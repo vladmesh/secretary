@@ -2164,12 +2164,45 @@ The audit journal itself — `state/board/events.ndjson` — keeps being written
 
 No live reader may take that generated file for the audit. `tasks.task_audit_for(client, data_dir)`
 is the one place that decides which audit owner a process uses, and it decides from the client the
-switch built: `SqlTaskAudit(client)` on PostgreSQL, `TaskAudit(data_dir)` on Kanboard. `TaskWriter`,
+switch built: `SqlTaskAudit(client)` on PostgreSQL, `TaskAudit(data_dir)` on Kanboard. **SQL is the
+canon on PostgreSQL and the file journal is the canon on Kanboard**, and a reader states which one it
+is reading rather than inferring it from what happens to be on disk. `TaskWriter`,
 `SprintReader`/`SprintWriter`, `ProductIssueStore`, the dispatcher runtime and its command host all
 take it from there. The dispatcher built `TaskAudit(data)` beside a PostgreSQL client until
 2026-09-10: a worker's `report:done` committed in `requests` was then invisible to the report wait,
 the worker was declared stalled, and the observer got no wake for the Blocked move
 (sprint:1437, secretary-1614).
+
+Every other live reader follows the same rule since secretary-1622, and the list is enumerated in
+`tests/test_architecture.py::FileAuditOwnershipTests` rather than kept in prose:
+
+| Reader | What it reads on PostgreSQL |
+|---|---|
+| `CheckpointWriter` — the publication gate | staged `requests` rows; a card client that cannot be established blocks the checkpoint by name, and the Kanboard-only staged Product/Issue journal is asked for only on Kanboard, as `export_board` already does |
+| `secretary task verify-audit` | the same staged count, with the backend named in the answer; the exit contract (0 clean, 1 pending) is unchanged |
+| `CommandReadLayer.command_history` / `command_request` | committed and staged `requests`; an audit that cannot be read is `unavailable`/`unknown` and never an empty history or `not_found` |
+| `webproto.ops` product-run publication | the `requests` row of the generic `product_run.*` record, in the store its own card client names |
+| `BoardEventCanon` | the audit its caller's client named; a canon with neither an audit nor a data directory refuses instead of guessing one |
+| `SprintReader` / sprint status reads | `requests` through `task_audit_for`; the shared traversal `_AuditOnce` has no data-directory construction at all |
+| `ReadLayer.task_snapshot` / `task_events` | the committed `requests` traversal for that card, paged by ordinal; the file projection under `<data>/board` is not opened, so an absent one is not an outage and a stale one is not a history |
+
+Three file-audit constructions remain deliberate and each is named with its reason in that test: the
+selector's own Kanboard branch, the pre-v2 pending-layout gate and unmigrated-claim check in
+`product_issues.py` (statements about the file layout itself, run *because* the client is
+PostgreSQL), and the default of a command host built with no audit, which only tests do.
+
+The read layer's card-event readers are selected the same way, and the selection is the only place
+they are chosen: `ReadLayer._events` resolves the card client, asks `task_audit_for` for its audit
+owner, and returns either `webproto.journal.EventJournal` — the released byte-offset reader of
+`board/events.ndjson`, unchanged down to its cursor — or `webproto.journal.CommittedAudit`, which
+pages that owner's ordered committed traversal and opens no file at all. `task_snapshot` and
+`task_events` both read through it, so a migrated installation's card page and API cannot publish
+the file projection's emptiness. The cursor carries which kind of position it is, `offset` or
+`ordinal`, because a byte offset in a journal is not an ordinal in `requests`: a cursor of the other
+kind is refused rather than reinterpreted, and a fresh task snapshot hands the client the
+continuation its own store can honour. `tests/test_architecture.py` holds that as a list too —
+`EventJournal` may be constructed in that one selection function and nowhere else, so an indirect
+file reader cannot come back as a bypass the `TaskAudit(...)` scan would not see.
 
 ### 7.4 Schema versioning and migrations
 

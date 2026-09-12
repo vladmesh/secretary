@@ -41,6 +41,7 @@ from secretary._fsutil import (
 from secretary._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
+from secretary.board.backend import CARD, board_client
 from secretary.board.models import Event
 from secretary.data import (
     PIPELINE_STATE_DIR,
@@ -57,7 +58,7 @@ from secretary.product_issues import (
     registered_projects,
 )
 from secretary.state_repo import BOARD_RUNS_PATHSPEC
-from secretary.tasks import TaskAudit, TaskError
+from secretary.tasks import TaskError, task_audit_for
 from triggered_agents.runtime.redact import redact
 
 # Canonical checkpoint entries per component. New board cuts always include an
@@ -364,10 +365,36 @@ class CheckpointWriter:
         instance_dir: Path,
         *,
         state_dir: Path = PIPELINE_STATE_DIR,
+        client: Any | None = None,
     ) -> None:
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.instance_dir = Path(instance_dir).expanduser().resolve()
         self.state_dir = Path(state_dir)
+        # `client` is the seam a test -- or a caller that already holds the installation's card
+        # client -- supplies its own board through. It is not a mode: with none given the writer
+        # asks the switch for this installation's own client, exactly as `export_board` does.
+        self._client = client
+
+    def _audit_owner(self) -> tuple[Any, Any]:
+        """The card client of this installation and the audit owner that client names.
+
+        The gate below decides whether a snapshot may be published, so it may not be answered by a
+        store nobody writes. `task_audit_for` reads the answer off the client the switch built, so
+        a PostgreSQL installation is gated on staged `requests` rows and a Kanboard one on its
+        pending files (`docs/BOARD_STORE.md` §7.3). A client that cannot be established blocks the
+        checkpoint by name instead of falling back to the file journal, whose absence or staleness
+        would otherwise report a clean board that was never read.
+        """
+        try:
+            client = self._client if self._client is not None else board_client(
+                self.instance_dir, serves=(CARD,)
+            )
+            return client, task_audit_for(client, self.data_dir)
+        except TaskError as exc:
+            raise CheckpointBlocked(
+                f"the card backend of {self.instance_dir} is unavailable, so the task audit "
+                f"could not be read: {exc.message}"
+            ) from None
 
     def write(self) -> CheckpointResult:
         try:
@@ -377,14 +404,27 @@ class CheckpointWriter:
             return CheckpointResult(status="blocked", reason=str(exc))
 
     def _write(self) -> CheckpointResult:
-        audit = TaskAudit(self.data_dir).status()
-        if not audit["ok"]:
-            raise CheckpointBlocked(f"task audit has {audit['pending']} unresolved pending record(s)")
-        product_issue = ProductIssueTransaction(self.data_dir, TaskAudit(self.data_dir)).status()
-        if not product_issue["ok"]:
+        client, audit_owner = self._audit_owner()
+        backend = getattr(client, "backend_kind", "kanboard")
+        try:
+            audit = audit_owner.status()
+        except TaskError as exc:
             raise CheckpointBlocked(
-                f"Product/Issue transactions have {product_issue['pending']} unresolved pending record(s)"
+                f"the {backend} task audit could not be read: {exc.message}"
+            ) from None
+        if not audit["ok"]:
+            raise CheckpointBlocked(
+                f"the {backend} task audit has {audit['pending']} unresolved pending record(s)"
             )
+        if backend != "postgres":
+            # The private staged Product/Issue journal is the Kanboard implementation's; on the
+            # PostgreSQL backend the record and the effect are one transaction (§7.1), which is
+            # the same reason `export_board` states for asking only there.
+            product_issue = ProductIssueTransaction(self.data_dir, audit_owner).status()
+            if not product_issue["ok"]:
+                raise CheckpointBlocked(
+                    f"Product/Issue transactions have {product_issue['pending']} unresolved pending record(s)"
+                )
 
         board, runs = self._regenerate()
         self._prevent_run_history_loss()

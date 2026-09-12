@@ -225,7 +225,12 @@ Before each commit the snapshot passes a fail-closed check. If any item fails, t
 checkpoint, records the reason in status and retries on the next tick. A torn snapshot never reaches
 history.
 
-- task audit is settled, with no pending board mutation;
+- task audit is settled, with no pending board mutation. The audit asked is the one this
+  installation's card client names (`tasks.task_audit_for`): staged `requests` rows on
+  `SECRETARY_CARD_BACKEND=postgres`, and `board/pending-audit/` plus the staged Product/Issue
+  transaction journal on Kanboard (`docs/BOARD_STORE.md` §7.3). A card client that cannot be
+  established blocks the checkpoint by name rather than falling back to the file journal, whose
+  absence under a migrated data plane would otherwise report a clean board nobody had read;
 - the writer regenerates `cards.ndjson` and `sprints.ndjson` from the live boards, and both counters
   in `export.json` match the line counts. The generated `cards.json`/`cards.ndjson` pair must be
   identical and card references must be unique before either the local export or canonical checkpoint

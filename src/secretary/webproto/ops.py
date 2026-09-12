@@ -64,7 +64,7 @@ from typing import Any
 
 from secretary.board.backend import CARD, board_client
 from secretary.config import InstanceReport, validate_instance
-from secretary.tasks import TaskAudit
+from secretary.tasks import task_audit_for
 from secretary.webproto import run_events, sources
 from secretary.webproto import run_state as run_state_reads
 from secretary.webproto.admission import Admission, admit
@@ -272,8 +272,18 @@ class OperationLayer(ProtocolBoundary):
             head_process_status=head_process_status,
         )
 
-    def _audit(self, data_dir: Path) -> TaskAudit:
-        return TaskAudit(data_dir)
+    def _audit(self, data_dir: Path) -> Any:
+        """The audit owner of this installation's card backend, for the run events published below.
+
+        `run_events.publish_*` appends a generic audit record, so it has to be appended where the
+        installation's readers look for one: the `requests` rows of the PostgreSQL backend, whose
+        generic records live in that one table, and `board/events.ndjson` under Kanboard
+        (`docs/BOARD_STORE.md` §7.3). Built from the data dir alone this published a product run
+        into a file that backend never reads, which is the same invisible-record defect
+        `task_audit_for` exists to close. The run protocol itself is unchanged: the same events, in
+        the same order, in the store the client names.
+        """
+        return task_audit_for(self._client(), data_dir)
 
     # -- operations ------------------------------------------------------------------------
 
@@ -595,7 +605,7 @@ class OperationLayer(ProtocolBoundary):
 
         Criterion 6 says the launch and the outcome are visible through the existing `task_events`
         and `task_snapshot`. Publishing them once, on the path that created them, only holds that
-        while the journal never fails: a `TaskAudit` that is briefly unavailable *after* the head
+        while the audit never fails: an audit owner that is briefly unavailable *after* the head
         is up loses `product_run.started` forever, because the retry the idempotency contract
         invites finds the record and returns it without ever trying again. The same hole sits under
         `run_state`, whose settle is durable before its publication is.
@@ -603,7 +613,7 @@ class OperationLayer(ProtocolBoundary):
         So publication is not a step of the creating path but a property every path restores: a
         recovered run republishes what it owes before it is returned. It costs nothing when the
         events are already there, because both are derived entirely from the run -- `occurred_at`
-        included -- so a replay builds the byte-identical record `TaskAudit` already holds and
+        included -- so a replay builds the byte-identical record the audit already holds and
         recognises, and neither a second event nor a second history can come of it.
         """
         if not run.raised and not run.ended:

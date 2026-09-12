@@ -471,6 +471,11 @@ class ProductIssueStore:
         self.client = client
         self.data_dir = Path(data_dir)
         self.audit = task_audit_for(client, data_dir)
+        # Not a second audit owner: `legacy_audit` is the *file layout* itself, kept because two
+        # guards are statements about that layout rather than reads of the canon — the released
+        # pre-v2 pending-upgrade gate, and `_require_sql_legacy_namespace_free`, which refuses a SQL
+        # mutation whose request id an unmigrated file claim already owns. Both are run because the
+        # client is PostgreSQL, never instead of asking it (`docs/BOARD_STORE.md` §7.3).
         self.legacy_audit = TaskAudit(data_dir)
         if getattr(client, "backend_kind", "kanboard") == "postgres":
             self.audit.legacy_audit = self.legacy_audit

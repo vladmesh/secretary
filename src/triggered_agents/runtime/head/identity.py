@@ -59,17 +59,39 @@ def _boot_id() -> str:
     return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
 
 
-def _is_zombie(pid: int) -> bool:
-    """A process the kernel has not reaped yet still answers `kill(pid, 0)`, so a check right at
-    exit can read one tick stale as still alive. Reading its own `/proc` status closes that gap."""
+#: What `/proc/<pid>/status` says about a pid that answered `kill(pid, 0)`: a process that is there
+#: to run, one the kernel has not reaped yet, one that has gone since the signal, and one whose
+#: status could not be read at all. The last is inconclusive; the two middle ones are ended.
+_PROCESS_RUNNING = "running"
+_PROCESS_ZOMBIE = "zombie"
+_PROCESS_GONE = "gone"
+_PROCESS_UNREADABLE = "unreadable"
+
+
+def _process_state(pid: int) -> str:
+    """What the process itself says it is, read from its own `/proc` status.
+
+    `kill(pid, 0)` answers for a zombie exactly as it does for a running process, so a check made
+    right at exit reads one tick stale as still alive; this read is what closes that gap. It closes
+    a second one too: a pid reaped between that signal and this read has no `/proc` entry left, and
+    that absence is `gone` and never "not a zombie". Classified as running it made a head that had
+    already exited read as `live-match` -- the one answer a watchdog may not give about a dead head,
+    since it is what the control plane treats as "this launch is still running". CI caught it as an
+    intermittent `'live-match' != 'dead'` a moment after a head was stopped (2026-09-12).
+
+    A status that exists but cannot be read is neither: that is `unreadable`, and the caller keeps
+    it inconclusive rather than deciding anything on it.
+    """
     try:
         status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _PROCESS_GONE
     except OSError:
-        return False
+        return _PROCESS_UNREADABLE
     for line in status.splitlines():
         if line.startswith("State:"):
-            return "Z" in line
-    return False
+            return _PROCESS_ZOMBIE if "Z" in line else _PROCESS_RUNNING
+    return _PROCESS_RUNNING
 
 
 def _is_stopped(pid: int) -> bool:
@@ -176,6 +198,9 @@ def head_process_status(pid_file: str, *, expected: Mapping[str, Any] | None = N
 
     A readable record has one of ``live-match``, ``dead`` or ``identity-mismatch``. Missing,
     partially written, malformed and legacy PID-only files retain their distinct inconclusive states.
+
+    A pid that answered ``kill(pid, 0)`` is then asked what it is (:func:`_process_state`): a zombie
+    and a pid reaped between the two are both ``dead``, because neither is a launch that is running.
     """
     record, failure = _read_record(pid_file)
     if failure is not None:
@@ -204,8 +229,10 @@ def head_process_status(pid_file: str, *, expected: Mapping[str, Any] | None = N
         start_matches = str(record["proc_starttime_ticks"]) == _proc_starttime_ticks(pid)
     except (OSError, ValueError) as exc:
         return _unreadable(type(exc).__name__)
-    alive = not _is_zombie(pid)
-    if not alive:
+    state = _process_state(pid)
+    if state == _PROCESS_UNREADABLE:
+        return _unreadable("process-status-unreadable")
+    if state in (_PROCESS_ZOMBIE, _PROCESS_GONE):
         return {
             "known": True,
             "alive": False,

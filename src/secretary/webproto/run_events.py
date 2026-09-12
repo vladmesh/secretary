@@ -3,11 +3,15 @@
 Criterion 6 of secretary-1562 is a prohibition before it is a requirement: the run's launch and its
 outcome must be visible through the `task_events` and `task_snapshot` that already exist, *without*
 a second history. So there is no run journal, no run event store and no per-run ndjson file
-anywhere in this package. What a run publishes it publishes into `<data>/board/events.ndjson`
-through `secretary.tasks.TaskAudit` — the same append-only journal, under the same lock, in the
-same generic record shape the control plane's own records (`sprint_guard_denied`,
-`sprint_guard_override`) already use — and :class:`secretary.webproto.journal.EventJournal` reads it
-back with no change at all, cursor included.
+anywhere in this package. What a run publishes it publishes through the audit owner of this
+installation's card client (:func:`secretary.tasks.task_audit_for`) — the committed board audit,
+under the same lock, in the same generic record shape the control plane's own records
+(`sprint_guard_denied`, `sprint_guard_override`) already use — and
+:class:`secretary.webproto.journal.EventJournal` reads it back with no change at all, cursor
+included. On Kanboard that store is `<data>/board/events.ndjson`; on
+`SECRETARY_CARD_BACKEND=postgres` it is `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3), and
+the events are the same either way. Published into the file journal beside a PostgreSQL client they
+went to a file the installation's own readers never open.
 
 Two events per run, and there are two because a run has exactly two things worth a place in a
 card's history:
@@ -17,8 +21,8 @@ card's history:
 ``product_run.finished``  that run reached a terminal state: which state, the exit status, whether
                           a result was published and the verdict on it when there is one
 
-Both are idempotent, and by the journal's own mechanism rather than by a check here: the request id
-is derived from the run id, and `TaskAudit` refuses to append a second record under a request id it
+Both are idempotent, and by the audit's own mechanism rather than by a check here: the request id
+is derived from the run id, and the audit refuses to append a second record under a request id it
 already owns. Every field of the record is derived from the run — including `occurred_at`, which is
 the run's own start or settle time and not the clock at the moment of the call — so a replay builds
 a byte-identical event and the journal recognises it as the one it already holds instead of
@@ -44,7 +48,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from secretary.tasks import TaskAudit, TaskError
+from secretary.tasks import TaskError
 from secretary.webproto.errors import RuntimeUnavailable
 from secretary.webproto.runs import ProductRun
 
@@ -56,7 +60,7 @@ FINISHED = "product_run.finished"
 ACTOR = {"role": "product-runtime", "id": "secretary.webproto"}
 
 
-def publish_started(audit: TaskAudit, run: ProductRun) -> dict[str, Any]:
+def publish_started(audit: Any, run: ProductRun) -> dict[str, Any]:
     """Record that this run's head was raised, on the card's own history."""
     return _publish(
         audit,
@@ -84,7 +88,7 @@ def publish_started(audit: TaskAudit, run: ProductRun) -> dict[str, Any]:
     )
 
 
-def publish_finished(audit: TaskAudit, run: ProductRun, state: dict[str, Any]) -> dict[str, Any]:
+def publish_finished(audit: Any, run: ProductRun, state: dict[str, Any]) -> dict[str, Any]:
     """Record how this run ended, once, on the same history its start is on.
 
     `outcome` is the journal's own two-valued field and is not a third name for the run's state: it
@@ -126,7 +130,7 @@ def request_id_for(run_id: str, kind: str) -> str:
 
 
 def _publish(
-    audit: TaskAudit,
+    audit: Any,
     run: ProductRun,
     *,
     kind: str,

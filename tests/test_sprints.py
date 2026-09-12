@@ -3055,6 +3055,8 @@ class SprintTests(SprintFixture):
                     "observer",
                     "--task",
                     task["ref"],
+                    "--instance",
+                    str(self.instance),
                     "--data-dir",
                     self.tmp.name,
                 ]

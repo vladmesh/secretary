@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from secretary.dispatch.head_vitality import (
     CURSOR_LIMIT,
@@ -32,7 +33,7 @@ from secretary.dispatcher_watchdog import (
     HEARTBEAT_LIVE_MATCH,
     head_process_status,
 )
-from triggered_agents.runtime.head import with_pid_heartbeat
+from triggered_agents.runtime.head import identity, with_pid_heartbeat
 
 RUN_ID = "run-1"
 
@@ -142,6 +143,33 @@ class PidHeartbeatTests(unittest.TestCase):
 
         self.assertEqual(snapshot.process, ProcessState.DEAD)
         self.assertEqual(snapshot.availability, SourceAvailability.AVAILABLE)
+
+    def test_a_process_reaped_between_the_two_proc_reads_is_dead_and_never_live(self) -> None:
+        """The window CI found: `kill(pid, 0)` answers, and the process is gone a syscall later.
+
+        `head_process_status` signals the pid, reads its start time, then asks what the process is.
+        A head reaped between the second and the third of those leaves no `/proc/<pid>/status` at
+        all, and reading that absence as "not a zombie" published `live-match` for a launch that had
+        already exited -- which is what the control plane reads as "this head is still running". The
+        window is a few microseconds wide, so it is staged here rather than waited for: the process
+        really is reaped, and the two reads that happened before it are the ones being simulated.
+        """
+        pid_file, proc = _write_live_heartbeat(self.directory, "reaped.pid")
+        with open(pid_file, encoding="utf-8") as handle:
+            ticks = json.load(handle)["proc_starttime_ticks"]
+        proc.kill()
+        proc.wait()
+        self.assertEqual(identity._process_state(proc.pid), "gone")
+
+        with (
+            mock.patch.object(identity.os, "kill", return_value=None),
+            mock.patch.object(identity, "_proc_starttime_ticks", return_value=ticks),
+        ):
+            status = head_process_status(pid_file, expected=_heartbeat_identity())
+
+        self.assertEqual(status["state"], HEARTBEAT_DEAD, status)
+        snapshot = VitalitySnapshot.from_pid_heartbeat(status, run_id=RUN_ID, observed_at=1000.0)
+        self.assertEqual(snapshot.process, ProcessState.DEAD)
 
     def test_a_missing_pid_file_is_unavailable_never_dead(self) -> None:
         status = head_process_status(os.path.join(self.directory, "never-written.pid"))

@@ -18,6 +18,14 @@ a question. So this answers the same thing from the audit's own two lookups, and
 anything: not found, pending with what is already done and how to continue safely, or committed
 with its result and the entity it produced.
 
+**Which store holds the audit is the card client's answer, not this layer's.** The two reads go
+through :func:`secretary.tasks.task_audit_for`, so on `SECRETARY_CARD_BACKEND=postgres` the canon is
+`requests`/`board_events` and on Kanboard it is `board/events.ndjson` (`docs/BOARD_STORE.md` §7.3).
+The surface below is the same either way -- that is what makes one set of rules serve both -- but the
+file journal is *not* consulted beside a PostgreSQL client: it holds nothing that backend wrote, and
+answering from it published an empty history and a `not_found` for records the installation was
+holding all along.
+
 **Neither opens a second store, index, scheduler or registry of operations.** Everything below is
 already durable and already read by the writers themselves:
 
@@ -75,7 +83,7 @@ from typing import Any
 
 from secretary.board.models import Event
 from secretary.config import InstanceReport, validate_instance
-from secretary.tasks import TaskAudit, _event_action
+from secretary.tasks import _event_action, task_audit_for
 from secretary.webproto import sources
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.cursor import Cursor, decode
@@ -500,10 +508,16 @@ class CommandReadLayer(ProtocolBoundary):
         instance: str | Path,
         *,
         data_dir: str | Path | None = None,
+        board_client: Any | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.instance = Path(instance)
         self._data_dir = Path(data_dir) if data_dir is not None else None
+        # `board_client` is the seam a test -- or a transport with its own connection policy --
+        # supplies its own board through, exactly as `SprintReadLayer` takes one. It is not a mode:
+        # the same code path runs with the live client, and the audit both reads consult is the one
+        # that client names.
+        self._board_client = board_client
         self._clock = clock
 
     # -- operations ---------------------------------------------------------------------------
@@ -633,7 +647,7 @@ class CommandReadLayer(ProtocolBoundary):
     def _history(self, data_dir: Path, *, now: float) -> Reading:
         """The committed audit, read once for the document through the released traversal.
 
-        `TaskAudit.events()` answers `[]` for a journal that is not there, which is the one answer
+        The released traversal answers `[]` for a journal that is not there, which is the one answer
         this read may not publish: an installation whose journal is missing has not commanded
         nothing, it has no evidence either way. So the file's absence refuses the source, and
         everything else the read can raise -- a journal the filesystem will not open, a record shape
@@ -651,7 +665,7 @@ class CommandReadLayer(ProtocolBoundary):
         over one append-only file.
         """
 
-        def produce(audit: TaskAudit) -> _History:
+        def produce(audit: Any) -> _History:
             return _History(tuple(audit.events()))
 
         return self._audit(data_dir, produce, now=now)
@@ -668,32 +682,57 @@ class CommandReadLayer(ProtocolBoundary):
         of a difference a caller has to go and find.
         """
 
-        def produce(audit: TaskAudit) -> _Lookup:
+        def produce(audit: Any) -> _Lookup:
             return _Lookup(request_id, audit.committed_event(request_id), audit.pending_event(request_id))
 
         return self._audit(data_dir, produce, now=now)
 
-    def _audit(self, data_dir: Path, produce: Callable[[TaskAudit], Any], *, now: float) -> Reading:
+    def _audit(self, data_dir: Path, produce: Callable[[Any], Any], *, now: float) -> Reading:
         """One read of the one durable source of both documents, and the whole of the broad span.
 
-        The journal's absence is checked before anything reads it, because both released lookups
-        answer a missing journal with the same value as an empty one -- `[]` and `None` -- and those
-        are the two answers this layer may not publish as an empty history and as `not_found`.
+        *Which* source that is, is the card client's own answer and never this layer's: the audit of
+        a PostgreSQL installation is `requests`/`board_events` and the audit of a Kanboard one is
+        `board/events.ndjson` (`docs/BOARD_STORE.md` §7.3). Read off the file journal beside a
+        PostgreSQL client, both lookups answered from a file that backend never writes -- an empty
+        history for an installation that has commanded plenty, and `not_found` for a request id it
+        holds -- which are exactly the two answers this layer may not publish.
+
+        The journal's absence is checked before anything reads it, for that same reason and only on
+        the backend that has one: both released lookups answer a missing file with the same value as
+        an empty one (`[]` and `None`). A migrated store needs no such check -- an empty `requests`
+        table is a read that happened -- and a store that cannot be reached raises inside the span
+        and refuses the source, as does a client the switch cannot build at all.
         """
-        audit = TaskAudit(data_dir)
-        journal = Path(audit.events_path)
+        journal: Path | None = None
 
         def read() -> Any:
-            if not journal.exists():
-                raise _Unreadable("the journal is not there, so nothing about it is established")
+            nonlocal journal
+            client = self._client()
+            audit = task_audit_for(client, data_dir)
+            if getattr(client, "backend_kind", "kanboard") != "postgres":
+                journal = Path(audit.events_path)
+                if not journal.exists():
+                    raise _Unreadable("the journal is not there, so nothing about it is established")
             return produce(audit)
 
         return _source(
             SOURCE_AUDIT,
             read,
-            refusal=lambda exc: f"the committed board audit could not be read: {journal} ({_reason(exc)})",
+            refusal=lambda exc: (
+                f"the committed board audit could not be read: {journal} ({_reason(exc)})"
+                if journal is not None
+                else f"the committed board audit could not be read: {_reason(exc)}"
+            ),
             now=now,
             evidence=journal,
+        )
+
+    def _client(self) -> Any:
+        """The card client of this installation: an injected one, or the switch's (§2.2)."""
+        from secretary.board.backend import CARD, board_client
+
+        return self._board_client or board_client(
+            self.instance.parent if self.instance.is_file() else self.instance, serves=(CARD,)
         )
 
     @staticmethod

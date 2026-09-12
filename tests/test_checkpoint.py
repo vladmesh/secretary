@@ -42,6 +42,7 @@ from secretary.routing_journal import attempts
 from secretary.secret_store import import_env_file, initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.tasks import TaskAudit
+from tests.fakes.tasks import FakeKanboard
 
 
 def git(repo: Path, *args: str) -> str:
@@ -158,10 +159,18 @@ class CheckpointWriterTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def writer(self) -> CheckpointWriter:
-        return CheckpointWriter(self.data_dir, self.instance_dir)
+    def writer(self, client: object | None = None) -> CheckpointWriter:
+        """The writer, over this installation's card client.
 
-    def write(self):
+        The gate the writer opens with is the audit of the backend that client names, so the client
+        is what a case picks when it wants the other backend's canon. Given none, this installation
+        is a Kanboard one and its canon is the file journal these cases seed.
+        """
+        return CheckpointWriter(
+            self.data_dir, self.instance_dir, client=client if client is not None else FakeKanboard()
+        )
+
+    def write(self, client: object | None = None):
         """Run the writer with the export step stubbed by the seeded snapshot."""
 
         def board_export(data_dir, **_kwargs):
@@ -176,7 +185,7 @@ class CheckpointWriterTests(unittest.TestCase):
             mock.patch("secretary.checkpoint.export_board", side_effect=board_export),
             mock.patch("secretary.checkpoint.export_runs", side_effect=runs_export),
         ):
-            return self.writer().write()
+            return self.writer(client).write()
 
     def head_files(self) -> list[str]:
         return git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split()

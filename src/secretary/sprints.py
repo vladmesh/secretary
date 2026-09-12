@@ -36,7 +36,6 @@ from secretary.sprint_observer import (
 )
 from secretary.tasks import (
     KanboardClient,
-    TaskAudit,
     TaskError,
     TaskReader,
     TaskWriter,
@@ -470,20 +469,24 @@ def _sprint_board(client: KanboardClient, *, create: bool) -> int | None:
 class _AuditOnce:
     """One committed-audit traversal shared by the sprint summaries of a single operation.
 
-    `events` may be given instead of a directory, for a caller that has already walked the journal
-    and has to keep that walk's failure apart from the board's. The journal is a source of its own:
-    a caller that reads it itself can mark it unavailable without the board pass appearing to have
-    failed, which is what `secretary.webproto.sprint_reads` does.
+    It never opens a store of its own. Either the caller has already walked the committed audit and
+    hands the records in (`events`), or it hands in the audit owner its own card client named
+    (`audit`), which is what `SprintReader` does. A traversal built from a data directory would be
+    the file journal whatever backend the reader is on, and beside a PostgreSQL client that journal
+    holds none of the events a resume-freshness verdict is judged against (`docs/BOARD_STORE.md`
+    §7.3) -- so there is no such construction to be made here.
+
+    With neither given there is nothing to read, and `events()` says so with an empty traversal: a
+    `SprintReader` built with no data directory on the Kanboard backend has no audit at all, and
+    that reader's summaries have always been the ones that state no freshness.
     """
 
     def __init__(
         self,
-        data_dir: Path | None,
         *,
         events: list[dict[str, Any]] | None = None,
         audit: Any | None = None,
     ) -> None:
-        self._data_dir = data_dir
         self._events: list[dict[str, Any]] | None = events
         self._audit = audit
 
@@ -493,10 +496,7 @@ class _AuditOnce:
         if self._audit is not None:
             self._events = self._audit.events()
             return self._events
-        if self._data_dir is None:
-            return []
-        self._events = TaskAudit(self._data_dir).events()
-        return self._events
+        return []
 
 
 def audit_traversal(events: list[dict[str, Any]]) -> _AuditOnce:
@@ -506,7 +506,7 @@ def audit_traversal(events: list[dict[str, Any]]) -> _AuditOnce:
     refused -- rather than the board it is read beside -- walks it itself and passes the result to
     `status_views`, which then opens nothing. `secretary.webproto.sprint_reads` is that caller.
     """
-    return _AuditOnce(None, events=events)
+    return _AuditOnce(events=events)
 
 
 def _task_id(raw: dict[str, Any]) -> int:
@@ -723,7 +723,7 @@ class SprintReader:
         board -- passes its own traversal in, and this call opens nothing. With none given the
         journal is walked here, lazily, exactly as `statuses` has always walked it.
         """
-        audit = audit if audit is not None else _AuditOnce(self.data_dir, audit=self.audit)
+        audit = audit if audit is not None else _AuditOnce(audit=self.audit)
         result = []
         for listed in sprints:
             sprint = {**listed, "cards": linked.get(listed["ref"], [])}
