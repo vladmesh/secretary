@@ -199,7 +199,11 @@ def _project_git_consumers(report, instance_dir: Path) -> list[dict[str, Any]]:
         repo = binding.get("repo")
         transport = "unknown"
         checkout = Path(repo).expanduser() if isinstance(repo, str) and repo else None
-        if checkout is not None and (checkout / ".git").exists():
+        if checkout is None or not checkout.exists():
+            # An unprovisioned project has no Git consumer on this host yet; the dispatcher answers
+            # `not-applicable` for it and project availability names the missing checkout.
+            continue
+        if (checkout / ".git").exists():
             try:
                 transport = project_remote_execution(checkout, instance_dir=instance_dir).transport
             except CredentialError:

@@ -603,6 +603,43 @@ def project_access_failure_code(detail: str) -> str:
     return ""
 
 
+def _unconfigured_remote(
+    checkout: Path, remote_name: str, child: GitChildIdentity, timeout: float
+) -> tuple[str, ...] | None:
+    """What Git would contact when `remote_name` is not a configured remote; None when it is.
+
+    A directory that is not a Git checkout cannot start a remote operation at all, so it is
+    classified as local. Git reads an unconfigured remote name as a URL or path after URL
+    rewriting, so `ls-remote --get-url` (which contacts nothing) names what it would reach.
+    """
+    probe = state_repo.run_git(
+        checkout, ["rev-parse", "--git-dir"], label="resolve project checkout", timeout=timeout, child=child
+    )
+    if probe.returncode:
+        return (str(checkout),)
+    configured = state_repo.run_git(
+        checkout,
+        ["config", "--get-regexp", rf"^remote\.{re.escape(remote_name)}\.(url|pushurl)$"],
+        label="resolve project remote configuration",
+        timeout=timeout,
+        child=child,
+    )
+    if configured.returncode == 0 and (configured.stdout or "").strip():
+        return None
+    named = state_repo.run_git(
+        checkout,
+        ["ls-remote", "--get-url", remote_name],
+        label="resolve project remote name",
+        timeout=timeout,
+        child=child,
+    )
+    if named.returncode:
+        raise CredentialError(
+            f"project checkout remote {remote_name!r} could not be resolved", code="remote-unresolved"
+        )
+    return ((named.stdout or "").strip() or remote_name,)
+
+
 def project_remote_execution(
     checkout: Path, *, instance_dir: Path | None, remote_name: str = "origin", timeout: float = 30
 ) -> RemoteExecution:
@@ -616,6 +653,11 @@ def project_remote_execution(
     urls: list[str] = []
     try:
         child = state_repo.git_child_identity(checkout)
+        unconfigured = _unconfigured_remote(checkout, remote_name, child, timeout)
+        if unconfigured is not None:
+            return RemoteExecution(
+                unconfigured[0], PROJECT_GIT_PHASE, instance_dir=instance_dir, effective_urls=unconfigured
+            )
         for extra in ([], ["--push"]):
             completed = state_repo.run_git(
                 checkout,

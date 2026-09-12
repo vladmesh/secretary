@@ -168,17 +168,25 @@ class EffectiveRemoteClassificationTests(HermeticGitTestCase):
             execution.run_project(other, ["fetch", "origin"], label="fixture")
         self.assertEqual(refused.exception.code, "unsupported-https")
 
-    def test_a_credential_bearing_or_missing_origin_is_refused_before_git(self) -> None:
+    def test_a_credential_bearing_origin_is_refused_before_git(self) -> None:
         bearing = self.repository("bearing", "https://user:inline-secret@github.com/example/sample.git")
         access = project_remote_execution(bearing, instance_dir=None).preflight_project(bearing)
         self.assertEqual((access.state, access.code), ("refused", "unsafe-remote"))
+        self.assertIn(access.code, PROJECT_ACCESS_REFUSALS)
         self.assertNotIn("inline-secret", json.dumps(access.to_json()))
 
+    def test_no_configured_origin_is_classified_by_what_git_would_contact(self) -> None:
+        """Git reads an unconfigured remote name as a URL or path, after URL rewriting."""
         missing = self.repository("missing")
-        with self.assertRaises(CredentialError) as refused:
-            project_remote_execution(missing, instance_dir=None)
-        self.assertEqual(refused.exception.code, "remote-unresolved")
-        self.assertIn(refused.exception.code, PROJECT_ACCESS_REFUSALS)
+        self.assertEqual(project_remote_execution(missing, instance_dir=None).transport, "local")
+
+        rewritten = self.repository("rewritten")
+        git(rewritten, "config", f"url.{REMOTE}.insteadOf", "origin")
+        self.assertEqual(project_remote_execution(rewritten, instance_dir=None).transport, "github-https")
+
+        not_a_checkout = self.root / "plain-directory"
+        not_a_checkout.mkdir()
+        self.assertEqual(project_remote_execution(not_a_checkout, instance_dir=None).transport, "local")
 
 
 class _Catalog:
@@ -238,7 +246,7 @@ class FakeGithub:
         return [operation["label"] for operation in self.operations]
 
     def __call__(self, checkout, args, *, label, timeout=120, extra_env=None, input=None, child=None):
-        if args[:2] == ["remote", "get-url"]:
+        if str(label).startswith("resolve project"):
             return self._run_git(
                 checkout, args, label=label, timeout=timeout, extra_env=extra_env, input=input, child=child
             )

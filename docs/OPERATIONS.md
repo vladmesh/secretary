@@ -401,7 +401,8 @@ rewrites, ambient helpers/files, SSH or manual transport, and retired Kanboard c
 unsupported row carries `supported_next_action`. A bypass finding does not make a managed credential
 missing, and legacy Kanboard entries never override `board-transport.env`.
 
-`credential_consumers` also carries one `project-git:<project>` row per registered project: the
+`credential_consumers` also carries one `project-git:<project>` row per registered project whose checkout
+exists on the host (an unprovisioned project has no Git consumer yet): the
 effective `transport` of its checkout's `origin`, `managed_readiness` of the encrypted store (reported
 whatever the transport), `state`, `source` and `supported_next_action`. GitHub HTTPS rows take the managed
 state; local rows are `not-applicable`, SSH and other non-HTTPS rows `ambient/manual-bypass`, other
