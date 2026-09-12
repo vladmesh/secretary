@@ -76,12 +76,22 @@ from secretary.memory.health import MemoryProbeError, probe_memory
 from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
 from secretary.projects.availability import ProjectAvailability
 from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
+from secretary.web.health import WebProbeError, probe_web, target_from_unit
+from secretary.web.server import LoopbackOnly
 from triggered_agents.runtime.paths import configured_product_root
 
 MEMORY_COMPONENT = "memory"
+WEB_COMPONENT = "web"
 # Changes here require restarting the memory service even if its unit is unchanged.
 MEMORY_CODE_PATHS = ("secretary/", "pyproject.toml", "uv.lock", "requirements.txt")
 DEPENDENCY_PATHS = ("pyproject.toml", "uv.lock", "requirements.txt")
+# The bundled JSON Schemas are product data a long-lived process reads from the checkout through
+# `importlib.resources` *after* it started, while its validation callables were loaded at start. So
+# a schema move is its own named restart reason, not a detail of "code changed": it is the half of
+# the split that makes an unrestarted process fail on files its own build shipped (secretary-1624).
+SCHEMA_PATHS = ("secretary/schemas/",)
+# How long a restarted web transport is given to answer one bounded loopback read.
+WEB_PROBE_TIMEOUT_SECONDS = 20.0
 RUFF_VERSION_RE = re.compile(r"^ruff==([^;\s]+)$")
 
 
@@ -112,7 +122,9 @@ class UpgradeContext:
     report: Any = None
     changed_paths: tuple[str, ...] = ()
     code_changed: bool = False
+    schemas_changed: bool = False
     unit_changed: bool = False
+    web_unit_changed: bool = False
     # Product-pack changes require incremental memory reconciliation.
     memory_pack_changed: bool = False
     memory_pack: Any = None
@@ -226,6 +238,7 @@ def step_pull(context: UpgradeContext) -> StepResult:
         return StepResult("pull", "unchanged", after[:12])
     context.changed_paths = _changed_paths(context.product_root, before, after)
     context.code_changed = _touches(context.changed_paths, MEMORY_CODE_PATHS)
+    context.schemas_changed = _touches(context.changed_paths, SCHEMA_PATHS)
     context.pulled_before = before
     context.pulled_after = after
     return StepResult("pull", "changed", f"{before[:12]} -> {after[:12]}")
@@ -825,7 +838,14 @@ def step_host(context: UpgradeContext) -> StepResult:
     if result.errors:
         return StepResult("host", "failed", "; ".join(result.errors))
     context.unit_changed = any(
-        change.kind == "unit" and change.name.startswith(_memory_unit_prefix(report)) for change in pending
+        change.kind == "unit" and change.name.startswith(_component_unit_prefix(report, MEMORY_COMPONENT))
+        for change in pending
+    )
+    # Both web units count: the front is `PartOf=` the transport, so a change to either is a change
+    # the pair has to be restarted for, and restarting the transport is what restarts the pair.
+    context.web_unit_changed = any(
+        change.kind == "unit" and change.name.startswith(_component_unit_prefix(report, WEB_COMPONENT))
+        for change in pending
     )
     if not pending:
         detail = f"{len(result.changes)} resources reconciled"
@@ -836,9 +856,18 @@ def step_host(context: UpgradeContext) -> StepResult:
     return StepResult("host", "changed", detail)
 
 
-def _memory_unit_prefix(report: Any) -> str:
+def _component_unit_prefix(report: Any, component: str) -> str:
+    """The installation's unit-name prefix for one component's units.
+
+    Deliberately not closed with a `.`: the web component ships `secretary-web.service` *and*
+    `secretary-web-front.service`, and both belong to it.
+    """
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
-    return f"{prefix}{MEMORY_COMPONENT}." if isinstance(prefix, str) else f"{MEMORY_COMPONENT}."
+    return f"{prefix}{component}" if isinstance(prefix, str) else component
+
+
+def _memory_unit_prefix(report: Any) -> str:
+    return f"{_component_unit_prefix(report, MEMORY_COMPONENT)}."
 
 
 def step_automations(context: UpgradeContext) -> StepResult:
@@ -890,6 +919,84 @@ def step_memory(context: UpgradeContext) -> StepResult:
     except (MemoryProbeError, GitError) as exc:
         return StepResult("memory", "failed", f"authenticated probe failed: {exc}")
     return StepResult("memory", "changed", f"restarted and authenticated {unit}: {reason}")
+
+
+def step_web(context: UpgradeContext) -> StepResult:
+    """Make the long-lived web process coherent with what this upgrade just materialized.
+
+    The web transport was the one supported long-lived process an upgrade did not own. That is not
+    a gap you can see from a step list: `secretary upgrade` reported `ok`, the checkout was current,
+    the unit was current, and `secretary-web.service` went on running the callables it had imported
+    a day earlier. On 2026-09-11 that process answered every route with an empty reply for nineteen
+    hours, because `importlib.resources` reads the bundled schemas from the checkout *now* while the
+    validator that reads them was loaded *then*: a new relative `$ref` against an old registry-less
+    validator (secretary-1624). Timestamps could not fix that and were never the defect; the process
+    was. So the reconciliation is a restart, and it is here, after everything the new process needs.
+
+    Three properties are load-bearing:
+
+    **It is last of the materializing steps.** A restart is the moment the old code stops being the
+    code that answers, so everything the new process reads has to be in place first: the checkout
+    (`step_pull`), the installed dependencies and the bundled schemas that came with them
+    (`step_dependencies`), and the unit itself (`step_host`). `run_steps` stops at the first failed
+    step, so a failed prerequisite means this step does not run at all and the run is failed — it
+    can never be the case that something reported the web as serving current code over a failed
+    prerequisite.
+
+    **A restart without a read is not evidence.** systemd accepting `restart` says nothing about
+    whether the new process bound its socket or whether it can answer. So a restart is followed by
+    one bounded loopback GET against the address the *installed unit* names, and a probe that does
+    not come back 200 fails the step: an upgrade that cannot read the transport it just restarted
+    does not get to say the transport is current.
+
+    **The unit is optional and this step never starts it.** The web is not on every installation,
+    and a stopped transport is a state an operator chose — an upgrade that quietly published a
+    dashboard because it found a unit file would be making that choice for them. So an uninstalled
+    or inactive unit is reported as skipped, with which of the two it was, and nothing is started.
+    That is the one place this step deliberately differs from `step_memory`, which starts a stopped
+    memory service because the pipeline cannot run without it.
+
+    Only `secretary-web.service` is restarted. `secretary-web-front.service` is `PartOf=` it and
+    comes along, which is also why a change to either unit file is a reason to restart this one.
+    """
+    report = context.report
+    unit = f"{_component_unit_prefix(report, WEB_COMPONENT)}.service"
+    installed = context.units.installed(unit)
+    if installed is None:
+        return StepResult("web", "skipped", f"{unit} is not installed; this host serves no web transport")
+    if not context.units.is_active(unit):
+        return StepResult(
+            "web", "skipped", f"{unit} is installed but not active; an upgrade does not start it"
+        )
+    reasons = []
+    if context.web_unit_changed:
+        reasons.append("a web unit file changed")
+    if context.schemas_changed:
+        reasons.append("bundled schemas changed")
+    if context.code_changed:
+        reasons.append("product code or dependencies changed")
+    if not reasons:
+        return StepResult(
+            "web",
+            "unchanged",
+            f"{unit} already runs this checkout, these schemas and these dependencies",
+        )
+    try:
+        target = target_from_unit(installed)
+    except LoopbackOnly as refused:
+        return StepResult("web", "failed", f"{unit} does not serve a loopback address: {refused}")
+    reason = "; ".join(reasons)
+    if context.dry_run:
+        return StepResult("web", "changed", f"would restart {unit} and probe {target.url}: {reason}")
+    try:
+        context.units.restart(unit)
+    except HostCommandError as exc:
+        return StepResult("web", "failed", f"restarting {unit} failed: {exc}")
+    try:
+        status = probe_web(target, timeout_seconds=WEB_PROBE_TIMEOUT_SECONDS)
+    except WebProbeError as exc:
+        return StepResult("web", "failed", f"{unit} restarted but the loopback probe failed: {exc}")
+    return StepResult("web", "changed", f"restarted {unit} and probed {target.url} -> {status}: {reason}")
 
 
 def step_verify(context: UpgradeContext) -> StepResult:
@@ -1059,6 +1166,9 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_host,
     step_automations,
     step_memory,
+    # Last of the materializing steps: a restart is the moment the new code becomes the code that
+    # answers, so it follows the checkout, the dependencies, the schemas and the unit.
+    step_web,
     step_verify,
 )
 

@@ -416,7 +416,9 @@ later re-run does not re-add them: `dispatcher_helpers.py`, `dispatcher_observer
 `webproto/reads.py`, `webproto/sprint_reads.py`, `webproto/pause_reads.py`, `cli.py` — counting the
 three `webproto` modules that share one printed row as three. Filtered: `knowledge_write.py`
 (module docstring, explaining that the tick writer commits `state/board`/`state/runs` in the same
-repo every minute) and `memory_write.py` (an inline comment saying a concurrent
+repo on its five-minute periodic cadence — which is what that docstring says and what
+`checkpoint.py` does; this inventory sentence read "every minute" after the implementation moved to
+the five-minute window) and `memory_write.py` (an inline comment saying a concurrent
 `state/board`/`state/runs` commit neither blocks nor is blocked by a memory write). Neither reads a
 board file; both mention the pathspec while explaining lock behaviour.
 

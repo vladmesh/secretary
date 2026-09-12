@@ -2670,13 +2670,13 @@ below.
 ### Updating the service
 
 ```bash
-# the code: after the product checkout moves, restart the transport (the front follows it)
-sudo systemctl restart secretary-web.service
+# the code: `secretary upgrade` moves the checkout and reconciles the transport with it — one
+# command, and *Updating the published application to `main`* below is the whole of the sequence
+secretary upgrade --instance ~/secretary-instance
 
 # the head profiles: edit the canonical registry, then regenerate the pair the standard way
 $EDITOR ~/secretary-instance/heads/heads.toml
 cd ~/secretary && python3 -P -m secretary upgrade --instance ~/secretary-instance --no-pull
-sudo systemctl restart secretary-web.service
 ```
 
 Two things about that second one are worth knowing before it surprises somebody.
@@ -2687,7 +2687,11 @@ pair. `secretary upgrade` regenerates both from `heads.toml` and commits them to
 
 **The registry is read once per process.** `secretary-web.service` is long-lived, so a profile added
 while it is running is invisible to it until it is restarted. A `validation` refusal saying a
-profile "is not launchable" right after a registry change is almost always this.
+profile "is not launchable" right after a registry change is almost always this. That is one
+instance of the general property: everything this process resolved at import — the registry, the
+validation callables, the config module — is fixed for the life of the process, while every file it
+reads lazily comes from the checkout as it is *now*. The `web` step of `secretary upgrade` exists
+because those two can disagree; see *Updating the published application to `main`*.
 
 > **Known: `secretary upgrade` stops at its `host` step on this installation** with `unowned names
 > in our namespace: codegen-product-kit, secretary-web-front.service, secretary-web.service`. The
@@ -2787,24 +2791,92 @@ instead of taking the front down while it is running.
 Restarting the front republishes the same application: Caddy holds the password and the TLS, and
 every page comes out of `secretary-web.service`, which runs the product out of the configured
 checkout (`~/secretary`, installed into its own virtualenv in editable mode). The code a card page
-renders is therefore whatever that checkout held **when the transport process started**, and neither
-half notices a checkout that moved underneath it.
+renders is therefore whatever that checkout held **when the transport process started** — and that
+is not only about pages. The process holds the callables it imported at start, while
+`importlib.resources` reads the bundled JSON Schemas from the checkout as the checkout is *now*: on
+2026-09-11 a process started at 06:33 UTC met the schemas of a commit that landed at 09:42 UTC and
+answered `GET /`, `GET /sprints/new` and `GET /api/system` with an empty reply for nineteen hours
+(`Unresolvable: adapter.schema.json`, secretary-1624). A checkout that moved under a running
+process is not a cosmetic lag; it is a process that can stop answering at all.
 
-`secretary upgrade` moves the checkout and re-materialises the installation onto it, but the only
-service it restarts is memory. Nothing in it restarts the transport, so an upgrade on its own leaves
-the front publishing the code of the previous process — a merged page change stays invisible, and
-the JSON routes below it can already answer with fields the page does not draw. Updating the
-published application is the upgrade and then one restart:
+**There is one supported sequence, and it is one command.**
 
 ```bash
 secretary upgrade --instance ~/secretary-instance      # `pull` fast-forwards ~/secretary onto main
-sudo systemctl restart secretary-web.service           # the front is PartOf= and comes with it
 ```
+
+`upgrade` moves the checkout, re-materialises the installation onto it, and then — in its `web`
+step, after `pull`, `dependencies` and `host` have all succeeded — restarts
+`secretary-web.service` and reads it back. The ordering is the contract: a restart is the moment
+the new code becomes the code that answers, so the checkout, the installed dependencies, the
+bundled schemas and the unit files are all in place before it happens, and a failure in any of
+them stops the run *before* the restart rather than after it. `secretary-web-front.service` is
+`PartOf=` the transport and comes along; there is no separate front restart to remember.
+
+What the step prints is what it did, and there are four answers:
+
+| line | what it means |
+| --- | --- |
+| `changed   web: restarted secretary-web.service and probed http://127.0.0.1:8787/api/system -> 200: ...` | the process was replaced and the new one answered; the reason it was restarted is named |
+| `unchanged web: secretary-web.service already runs this checkout, these schemas and these dependencies` | nothing moved, so nothing was restarted — a repeated upgrade is a no-op here |
+| `skipped   web: secretary-web.service is not installed …` / `… is installed but not active; an upgrade does not start it` | the unit is optional and an upgrade never starts it for you |
+| `failed    web: …` | either the restart or the probe failed; see *When the restart or the probe fails* below |
+
+`--dry-run` names the restart and the address it would read (`would restart … and probe …`) and
+touches nothing.
 
 Run the upgrade as the installation owner and out of the installed checkout
 (`/home/dev/secretary/.venv/bin/secretary`), not out of a task workspace: without `--product-root`
 an upgrade materialises the *configured* checkout, and running the module from a candidate worktree
 is how unmerged work reaches the homes the running heads read.
+
+**What this does not fix.** The `web` step reconciles the *process* with what the upgrade
+materialised. It is not a dependency-state redesign: the manifest and extras drift tracked in
+`issue:e648c2725530d871b3a2` and `issue:f5290a9c1e47d913f105` is untouched by it, and so is the
+production editable-install boundary in `issue:77d31654f7701eabab76`. An upgrade that installs the
+wrong dependency set will now restart the transport onto that wrong set and say so honestly; it
+will not make the set right.
+
+#### When the restart or the probe fails
+
+A `failed web` line is one of two things, and the detail says which.
+
+*The restart failed* (`restarting secretary-web.service failed: …`). systemd refused the command;
+nothing was probed. The old process may still be running or may be down. Ask systemd, then the
+journal:
+
+```bash
+systemctl is-active secretary-web.service
+sudo journalctl -u secretary-web.service -n 50 --no-pager
+```
+
+*The restart succeeded and the probe did not* (`secretary-web.service restarted but the loopback
+probe failed: http://127.0.0.1:8787/api/system did not answer 200 within 20s …`). The old process
+is gone and the new one cannot serve: this is the failure mode that matters, and it is the one the
+probe exists to catch rather than hide. The last answer is in the message — `HTTP 500`, or a socket
+error class such as `ConnectionRefusedError`. Read the journal first; with the containment
+boundary in place an unexpected failure is a `500` carrying a reference, and the journal line under
+that reference names the exception class and the failing call site:
+
+```bash
+sudo journalctl -u secretary-web.service -n 50 --no-pager     # the reference, the class, the frames
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/system
+```
+
+**The rollback boundary is the checkout, and it is one command plus one restart.** `upgrade` is
+`--ff-only` and writes no other history, so going back means selecting the previous revision and
+replacing the process again:
+
+```bash
+git -C ~/secretary log --oneline -3                  # the revision to go back to
+git -C ~/secretary switch --detach <previous-sha>
+sudo systemctl restart secretary-web.service         # the front is PartOf= and comes with it
+```
+
+A `git switch` alone is *not* a rollback of the installation: it moves the checkout and leaves the
+head-registry pin, the materialised units and the installed dependencies where the upgrade put
+them. Re-running `secretary upgrade --no-pull` against the selected checkout is what makes those
+agree again.
 
 What is installed afterwards is three facts, and all three are worth printing:
 
@@ -2814,20 +2886,30 @@ git -C ~/secretary reflog show --date=iso -1 HEAD                # when that che
 systemctl show -p ExecMainStartTimestamp secretary-web.service   # when the process started
 ```
 
-The transport must have started *after* the checkout moved, and those are the two values that say
-so: the start timestamp against the reflog timestamp, time against time, mind the offsets (the
-reflog prints local time, `systemctl` UTC). The revision is context, not the other half of that
+These are three different clocks answering three different questions, and only two of them are
+comparable to each other:
+
+- **the checkout clock** — `git reflog`, when `~/secretary` last moved. Local time with its offset.
+- **the process clock** — `ExecMainStartTimestamp`, when the running transport started. UTC.
+- **the head-registry pin** — the revision in `~/secretary-instance/heads/source.yaml`, which
+  `secretary status` prints. A *revision*, not a time, and it answers a third question entirely.
+
+The transport must have started *after* the checkout moved, and the first two are the pair that
+says so: time against time, mind the offsets. The revision is context, not the other half of that
 comparison — a timestamp cannot be ordered against a SHA. If the process is the older of the two,
 the restart did not happen and the page is still the old one; and if the reflog has no entry to
 compare against — a `pull` that fetched nothing writes none — ask the running process instead:
 `curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/sprints/new` answers `200` on code that has
-the sprint form and `404` on code that does not. `secretary status` prints a third revision — the head
-registry pin in `~/secretary-instance/heads/source.yaml` — and it answers a different question. It
-is written by the `head-registry` and `head-registry-checkpoint` steps, which run well before `host`
-and before anything else can fail, so a pin naming this revision says the registry was regenerated
-and published, and never that the upgrade finished. The pin also does not move for a rollback made
-by `git switch` alone (below), so a pin ahead of the checkout is exactly what a rollback that did
-not re-run `upgrade` looks like.
+the sprint form and `404` on code that does not. The pin is written by the `head-registry` and
+`head-registry-checkpoint` steps, which run well before `host` and before anything else can fail, so
+a pin naming this revision says the registry was regenerated and published, and never that the
+upgrade finished — and never that the *process* was replaced, which is the `web` step's line and
+nothing else. The pin also does not move for a rollback made by `git switch` alone (above), so a pin
+ahead of the checkout is exactly what a rollback that did not re-run `upgrade` looks like.
+
+On a successful `secretary upgrade` the `web` step has already made this comparison for you, by
+reading the restarted process rather than reasoning about timestamps at all. Print the three values
+when the upgrade *did not* run to completion, or when somebody restarted a service by hand.
 
 `PartOf=` means the front goes down and comes back with the transport, so a request in flight at
 that moment fails rather than waiting; `Restart=always` brings both halves back without further
@@ -2837,11 +2919,19 @@ help, and a reload a second later is served by the new code.
 > namespace: codegen-product-kit, secretary-web-front.service, secretary-web.service`. The two web
 > units were installed ahead of the host manifest that would own them, so reconcile finds resources
 > in its own namespace it has no record of and refuses to write rather than adopt them. This does
-> not affect the update above: `pull` runs first and has already moved the checkout, so the restart
-> still publishes the new revision. What does not run is everything after `host` — the host
-> resources themselves, `automations`, `memory` and `verify` — so on a version that changes a unit,
-> an automation spec or the memory service, that part of the installation stays where it was. Every
-> step before `host` did run, the head-registry pin among them: after this failure
+> not affect the checkout: `pull` runs first and has already moved it, so a restart still publishes
+> the new revision — but the restart is yours to make. What does not run is everything after
+> `host` — the host resources themselves, `automations`, `memory`, **`web`** and `verify` — so on a version that
+> changes a unit, an automation spec or the memory service, that part of the installation stays
+> where it was, and the transport is **not** restarted or probed for you. Until the conflict is
+> cleared, that one step is the manual line it used to be for everybody:
+>
+> ```bash
+> sudo systemctl restart secretary-web.service            # the front is PartOf= and comes with it
+> curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/system   # 200, the probe by hand
+> ```
+>
+> Every step before `host` did run, the head-registry pin among them: after this failure
 > `heads/source.yaml` already names the new revision, so the pin is never evidence that the upgrade
 > completed. Clearing the conflict is a deliberate act, taken once, by the operator:
 >
@@ -2880,9 +2970,11 @@ sudo systemctl restart secretary-web.service            # the front is PartOf= a
 ```
 
 Run `upgrade` as the installation owner out of `/home/dev/secretary/.venv/bin/secretary`, never out
-of a task workspace. It stops at its `host` step on this installation — `unowned names in our
-namespace: codegen-product-kit, secretary-web-front.service, secretary-web.service` — and that is
-expected and does not block the restart: `pull` runs first and has already moved the checkout.
+of a task workspace. The restart is written out separately here because on this installation
+`upgrade` stops at its `host` step — `unowned names in our namespace: codegen-product-kit,
+secretary-web-front.service, secretary-web.service` — and therefore never reaches its `web` step.
+That is expected and does not block the restart: `pull` runs first and has already moved the
+checkout. On an installation without that conflict the `upgrade` line is the whole of it.
 Clearing that conflict is a separate, deliberate decision and is the two `secretary reconcile adopt`
 commands in *Updating the published application to `main`* above; the acceptance below does not need
 it.
@@ -3099,6 +3191,8 @@ Work outwards from the host, because most of the answers are local:
 | 401 with the right password | the running configuration is older than the store | re-render and restart; `web-front check` prints the file the unit reads |
 | 502 after the password | the loopback transport is down | `sudo systemctl status secretary-web.service`, then `curl -s localhost:8787/api/system` |
 | a page loads but a section is marked unavailable | a source below the transport refused | that is the transport's own diagnosis; see *Diagnosing it* above |
+| every route answers `500` with `reference: <id>` | something the application did not expect escaped it — a stale process against a moved checkout is the known cause | `journalctl -u secretary-web.service` and grep that reference: the line names the exception class and the failing call site. Then *Updating the published application to `main`* |
+| every route answers an empty reply and the journal shows a traceback | a build from before secretary-1624, where an escaped exception closed the connection with no response | update the checkout and restart the transport; the current build answers the `500` above instead |
 
 SSH is the fallback and is untouched by any of this: nothing in this slice changes `sshd`, and no
 firewall rule was added or removed. If the front is wedged, `ssh dev@109.235.67.14` and stop it.
