@@ -265,6 +265,20 @@ class InstancePackingControlTests(unittest.TestCase):
             project_config = (project / ".git" / "config").read_text(encoding="utf-8")
             self.assertNotIn("[pack]", project_config)
 
+    def test_controls_replace_duplicate_local_values_with_one_expected_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp) / "instance"
+            _init_repo(instance)
+            state_repo.configure_packing_controls(instance)
+            _git(instance, "config", "--local", "--add", "pack.threads", "1")
+            _git(instance, "config", "--local", "--add", "pack.threads", "1")
+
+            changed = state_repo.configure_packing_controls(instance)
+
+            self.assertEqual(changed, ("pack.threads",))
+            self.assertEqual(state_repo.packing_controls(instance), dict(state_repo.PACKING_CONTROLS))
+            self.assertEqual(_git(instance, "config", "--local", "--get-all", "pack.threads"), "1\n")
+
 
 if __name__ == "__main__":
     unittest.main()

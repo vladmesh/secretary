@@ -28,7 +28,9 @@ from secretary.checkpoint import (
     PUSH_INTERVAL_SECONDS,
     AnalyticsManifestError,
     CheckpointPusher,
+    CheckpointResult,
     CheckpointWriter,
+    PushOutcome,
     _analytics_checkpoint_id,
     _validate_board,
     _validate_board_events,
@@ -38,6 +40,7 @@ from secretary.checkpoint import (
     verify_analytics_checkpoint,
 )
 from secretary.data import DataExport
+from secretary.dispatcher_production import _coordinate_checkpoint
 from secretary.routing_journal import attempts
 from secretary.secret_store import import_env_file, initialize_store, set_secret
 from secretary.secret_words import RECOVERY_WORDS
@@ -1232,6 +1235,80 @@ class CheckpointPusherTests(unittest.TestCase):
         self.assertEqual(state["status"], "pushed")
         self.assertFalse(state["remote_diverged"])
         self.assertEqual(self.remote_head(), resolved)
+
+    def test_coordinator_bounds_sticky_divergence_preparation_to_the_checkpoint_cadence(self):
+        writer = mock.Mock()
+        writer.write.return_value = CheckpointResult(status="unchanged")
+        pusher = self.pusher()
+        runtime = SimpleNamespace(checkpoint=writer, checkpoint_push=pusher)
+        payload: dict[str, object] = {}
+
+        with mock.patch.object(
+            pusher, "_attempt", return_value=PushOutcome("diverged", "remote has unrelated history")
+        ) as attempt:
+            checkpoint, push = _coordinate_checkpoint(runtime, payload)
+            self.assertEqual(checkpoint["status"], "unchanged")
+            self.assertEqual(push["status"], "diverged")
+            self.assertTrue(payload["checkpoint_push"]["remote_diverged"])
+
+            for _ in range(4):
+                self.clock.advance(60)
+                checkpoint, push = _coordinate_checkpoint(runtime, payload)
+                self.assertEqual(checkpoint["status"], "skipped")
+                self.assertEqual(push["status"], "diverged")
+
+            self.assertEqual(writer.write.call_count, 1)
+            self.assertEqual(attempt.call_count, 5, "the real pusher still performs its sticky recheck")
+            self.clock.advance(60)
+            checkpoint, push = _coordinate_checkpoint(runtime, payload)
+
+        self.assertEqual(checkpoint["status"], "unchanged")
+        self.assertEqual(push["status"], "diverged")
+        self.assertEqual(writer.write.call_count, 2)
+        self.assertEqual(attempt.call_count, 6)
+
+    def test_coordinator_consumes_withheld_preparation_retry_after_failed_delivery(self):
+        writer = mock.Mock()
+        writer.write.side_effect = (
+            CheckpointResult(status="unchanged"),
+            CheckpointResult(status="blocked", reason="audit pending"),
+            CheckpointResult(status="unchanged"),
+        )
+        pusher = self.pusher()
+        runtime = SimpleNamespace(checkpoint=writer, checkpoint_push=pusher)
+        payload: dict[str, object] = {}
+
+        with mock.patch.object(
+            pusher,
+            "_attempt",
+            return_value=PushOutcome("failed", "could not resolve host github.com"),
+        ) as attempt:
+            _coordinate_checkpoint(runtime, payload)
+            self.assertEqual(attempt.call_count, 1)
+            self.assertNotIn("retry_pending", payload["checkpoint_push"])
+
+            self.clock.advance(PUSH_INTERVAL_SECONDS)
+            checkpoint, push = _coordinate_checkpoint(runtime, payload)
+            self.assertEqual(checkpoint["status"], "blocked")
+            self.assertEqual(push["status"], "skipped")
+            self.assertTrue(push["retry_pending"])
+            self.assertEqual(attempt.call_count, 1, "blocked preparation withholds remote delivery")
+
+            self.clock.advance(60)
+            checkpoint, push = _coordinate_checkpoint(runtime, payload)
+            self.assertEqual(checkpoint["status"], "unchanged")
+            self.assertEqual(push["status"], "failed")
+            self.assertNotIn("retry_pending", push)
+            self.assertEqual(attempt.call_count, 2)
+
+            for _ in range(4):
+                self.clock.advance(60)
+                checkpoint, push = _coordinate_checkpoint(runtime, payload)
+                self.assertEqual(checkpoint["status"], "skipped")
+                self.assertIsNone(push)
+
+        self.assertEqual(writer.write.call_count, 3)
+        self.assertEqual(attempt.call_count, 2)
 
     def test_a_remote_that_moves_under_the_push_reads_as_divergence(self):
         state = self.pusher().push()

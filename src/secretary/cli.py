@@ -1166,7 +1166,7 @@ def checkpoint_findings(report) -> list[str]:
             ]
             if drifted:
                 commands = "; ".join(
-                    f"git -C {instance} config --local {key} {expected}"
+                    f"git -C {instance} config --local --replace-all {key} {expected}"
                     for key, expected in state_repo.PACKING_CONTROLS
                 )
                 findings.append(

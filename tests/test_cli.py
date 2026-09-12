@@ -352,7 +352,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(code, 1, output)
         self.assertIn(f"instance Git packing controls drifted at {instance_dir}", output)
-        self.assertIn(f"git -C {instance_dir} config --local pack.threads 1", output)
+        self.assertIn(f"git -C {instance_dir} config --local --replace-all pack.threads 1", output)
         self.assertIn("status: findings", output)
 
     def test_doctor_reports_remote_divergence_as_a_finding(self):

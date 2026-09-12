@@ -342,7 +342,7 @@ def packing_controls(instance_dir: Path) -> dict[str, str | None]:
     instance = require_repo(instance_dir)
     values: dict[str, str | None] = {}
     for key, _ in PACKING_CONTROLS:
-        result = run_git(instance, ["config", "--local", "--get", key], label=f"inspect {key}")
+        result = run_git(instance, ["config", "--local", "--get-all", key], label=f"inspect {key}")
         if result.returncode not in {0, 1}:
             detail = (result.stderr or result.stdout or "").strip().splitlines()
             raise StateRepoError(f"inspect {key} failed: {detail[-1] if detail else 'git error'}")
@@ -364,7 +364,7 @@ def configure_packing_controls(instance_dir: Path, *, dry_run: bool = False) -> 
         drifted = tuple(key for key, expected in PACKING_CONTROLS if current.get(key) != expected)
         for key, expected in PACKING_CONTROLS:
             if key in drifted:
-                git(instance, ["config", "--local", key, expected], label=f"set {key}")
+                git(instance, ["config", "--local", "--replace-all", key, expected], label=f"set {key}")
     return drifted
 
 

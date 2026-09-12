@@ -253,8 +253,9 @@ pack.windowMemory=128m
 pack.deltaCacheSize=64m
 ```
 
-They use `git -C INSTANCE config --local`, never a global configuration or a registered project
-repository. `doctor` names missing or drifted values with the instance path and the exact remediation.
+They use `git -C INSTANCE config --local --replace-all`, never a global configuration or a registered
+project repository. `doctor` names missing, drifted or duplicate values with the instance path and the
+exact remediation.
 To roll them back locally, run:
 
 ```

@@ -1400,6 +1400,16 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         # another snapshot nor contacts the remote.
         self.assertEqual(len(pusher.calls), 1)
 
+    def test_runtime_without_checkpoint_keeps_a_due_push_benign(self) -> None:
+        """The constrained runtime seam still permits its pre-cadence push-only path."""
+        self.runtime.checkpoint_push = FakePusher({"status": "pushed", "last_push_commit": "abc123"})
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertNotIn("checkpoint", result)
+        self.assertEqual(result["checkpoint_push"]["status"], "pushed")
+
     def test_failed_push_leaves_the_tick_working(self) -> None:
         self.runtime.checkpoint = FakeCheckpoint(CheckpointResult(status="unchanged", board_cards=2))
         self.runtime.checkpoint_push = FakePusher(

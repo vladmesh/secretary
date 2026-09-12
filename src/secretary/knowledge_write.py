@@ -7,7 +7,8 @@ with the rest of the checkpoint and survives a move to another machine.
 
 The writer exists so the role keeping a document does not have to reach for raw
 `git`. A bare `git commit` in the instance repo races the tick writer, which
-commits `state/board` and `state/runs` in the same repo every minute. This
+commits `state/board` and `state/runs` in the same repo on its five-minute
+periodic cadence. This
 writer owns `state/knowledge` alone, takes the same `state_repo_lock` the other
 writers take, and never runs `git add -A`.
 """

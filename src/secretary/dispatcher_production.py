@@ -16,7 +16,7 @@ from secretary.board.terminal_taxonomy import (
     budget_event_type,
     read_terminal_taxonomy,
 )
-from secretary.checkpoint import PUSH_INTERVAL_SECONDS, checkpoint_snapshot
+from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatcher_launch import (
     FAILURE_CLASS_INFRASTRUCTURE,
     REVIEW_ROLE,
@@ -544,12 +544,33 @@ def _coordinate_checkpoint(runtime: Any, payload: dict[str, Any]) -> tuple[dict[
     push_due = _checkpoint_push_due(pusher, push_state, now)
     checkpoint_due = _checkpoint_due(write_state, now)
 
-    if writer is None and pusher is None:
-        return None, None
-    if not checkpoint_due and not push_due:
+    # A few constrained runtime tests deliberately have no checkpoint writer.
+    # Preserve their former benign push-only behavior rather than fabricating a
+    # blocked periodic checkpoint. Production constructs both dependencies.
+    if writer is None:
+        if pusher is None or not push_due:
+            return None, None
+        push = _push_checkpoint(runtime, push_state, now)
+        payload["checkpoint_push"] = push
+        return None, push
+    if pusher is None and not checkpoint_due:
         checkpoint = _checkpoint_skipped(write_state, now)
         payload["checkpoint"] = checkpoint
         return checkpoint, None
+
+    # A regular remote deadline needs a current preparation before delivery.
+    # A remote already known to have diverged is deliberately rechecked by its
+    # pusher on every tick, but cannot make the expensive board/run projection
+    # run more often than its own five-minute deadline.
+    preparation_due = checkpoint_due or _push_forces_preparation(push_due, push_state)
+    if not preparation_due:
+        checkpoint = _checkpoint_skipped(write_state, now)
+        payload["checkpoint"] = checkpoint
+        if not push_due or pusher is None:
+            return checkpoint, None
+        push = _push_checkpoint(runtime, push_state, now)
+        payload["checkpoint_push"] = push
+        return checkpoint, push
 
     checkpoint = _write_checkpoint(runtime, write_state, now)
     payload["checkpoint"] = checkpoint
@@ -563,6 +584,12 @@ def _coordinate_checkpoint(runtime: Any, payload: dict[str, Any]) -> tuple[dict[
     if pusher is None:
         return checkpoint, None
     push = _push_checkpoint(runtime, push_state, now)
+    # This one-shot pusher retry means only "the next delivery needs a fresh
+    # preparation". The preparation above satisfied that condition even when
+    # the remote still fails or remains diverged, so it cannot pin the pusher
+    # and this coordinator into a per-minute retry loop.
+    if push_state.get("retry_pending"):
+        push.pop("retry_pending", None)
     payload["checkpoint_push"] = push
     return checkpoint, push
 
@@ -596,18 +623,20 @@ def _checkpoint_push_due(pusher: Any, state: dict[str, Any], now: float) -> bool
     if pusher is None:
         return False
     due = getattr(pusher, "due", None)
-    if callable(due):
-        try:
-            return bool(due(state, now=now))
-        except Exception:
-            # A pusher that cannot answer its own due semantics gets a fresh
-            # preparation and then records its own failure. It must not turn a
-            # failed preflight into permission to send an old snapshot.
-            return True
-    if state.get("retry_pending") or state.get("remote_diverged") or state.get("status") == "diverged":
+    if not callable(due):
+        return False
+    try:
+        return bool(due(state, now=now))
+    except Exception:
+        # A pusher that cannot answer its own public window contract gets a
+        # fresh preparation and then records its own delivery failure. It must
+        # not turn a failed preflight into permission to send an old snapshot.
         return True
-    attempted = _number(state.get("attempted_epoch"))
-    return attempted <= 0 or now < attempted or now - attempted >= PUSH_INTERVAL_SECONDS
+
+
+def _push_forces_preparation(push_due: bool, state: dict[str, Any]) -> bool:
+    """Whether this due push is an ordinary deadline, not a sticky recheck."""
+    return push_due and not bool(state.get("remote_diverged"))
 
 
 def _checkpoint_skipped(state: dict[str, Any], now: float) -> dict[str, Any]:
@@ -692,7 +721,6 @@ def _push_withheld_for_checkpoint(
             "attempted_epoch": now,
             "attempted_at": _checkpoint_rfc3339(now),
             "retry_pending": True,
-            "preparation_failed": True,
         }
     )
     return result

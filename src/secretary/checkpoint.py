@@ -701,19 +701,7 @@ class CheckpointPusher:
         return self._record(current, self._attempt(), stamp)
 
     def _due(self, state: dict[str, Any], now: float) -> bool:
-        # A due remote window that was withheld because fresh preparation failed
-        # must retry with that preparation on the next bounded dispatcher tick.
-        # Treating its recorded attempt as a completed 30-minute window would
-        # silently extend the RPO after a local checkpoint failure.
-        if state.get("retry_pending"):
-            return True
-        if state.get("remote_diverged") or state.get("status") == "diverged":
-            return True
-        attempted = _float_field(state, "attempted_epoch")
-        if attempted <= 0:
-            return True
-        # A clock that jumped backwards must not park the push forever.
-        return now < attempted or now - attempted >= self.interval_seconds
+        return is_push_due(state, now, interval_seconds=self.interval_seconds)
 
     def _attempt(self) -> PushOutcome:
         try:
@@ -786,11 +774,9 @@ class CheckpointPusher:
                 }
             )
             state.pop("retry_pending", None)
-            state.pop("preparation_failed", None)
         elif outcome.status == "skipped":
             state["remote_diverged"] = False
             state.pop("retry_pending", None)
-            state.pop("preparation_failed", None)
         else:
             state["failures"] = int(_float_field(state, "failures")) + 1
             state["remote_diverged"] = outcome.status == "diverged"
@@ -911,6 +897,29 @@ class CheckpointPusher:
     @staticmethod
     def _git_output(result: subprocess.CompletedProcess[str]) -> str:
         return (result.stderr or result.stdout or "").strip()
+
+
+def is_push_due(state: dict[str, Any], now: float, *, interval_seconds: float) -> bool:
+    """The public remote-window predicate shared by production and its fakes.
+
+    A diverged remote is intentionally rechecked promptly, while a regular
+    failed delivery retains the normal publication interval. Keeping this
+    state-only rule separate lets the dispatcher coordinate preparation
+    cadence without growing a second interpretation of the pusher window.
+    """
+    # A due remote window that was withheld because fresh preparation failed
+    # must retry with that preparation on the next bounded dispatcher tick.
+    # Treating its recorded attempt as a completed 30-minute window would
+    # silently extend the RPO after a local checkpoint failure.
+    if state.get("retry_pending"):
+        return True
+    if state.get("remote_diverged") or state.get("status") == "diverged":
+        return True
+    attempted = _float_field(state, "attempted_epoch")
+    if attempted <= 0:
+        return True
+    # A clock that jumped backwards must not park the push forever.
+    return now < attempted or now - attempted >= interval_seconds
 
 
 def checkpoint_snapshot(

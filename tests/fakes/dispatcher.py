@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
-from secretary.checkpoint import CheckpointResult
+from secretary.checkpoint import PUSH_INTERVAL_SECONDS, CheckpointResult, is_push_due
 from secretary.dispatcher import (
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_REVIEW_FREEZE,
@@ -1775,6 +1775,14 @@ class FakePusher:
     def __init__(self, outcome: dict | Exception) -> None:
         self.outcome = outcome
         self.calls: list[dict] = []
+
+    def due(self, state: dict | None = None, *, now: float | None = None) -> bool:
+        """The same public window predicate the production pusher exposes."""
+        return is_push_due(
+            dict(state or {}),
+            float(now or 0),
+            interval_seconds=PUSH_INTERVAL_SECONDS,
+        )
 
     def push(self, state: dict | None = None, *, now: float | None = None) -> dict:
         self.calls.append(dict(state or {}))
