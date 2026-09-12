@@ -13,10 +13,10 @@ from secretary import _proc, head_registry, state_repo
 from secretary.checkpoint import DEFAULT_REMOTE
 from secretary.head_health import PROBE_TTL_SECONDS, HeadHealth, HeadReadiness, run_probe
 from secretary.infra.github_credential import (
-    PROJECT_GIT_PHASE,
     CredentialError,
     CredentialReadiness,
     RemoteExecution,
+    checkpoint_credential_readiness_for_child,
     project_remote_execution,
 )
 from secretary.secret_store import (
@@ -193,7 +193,9 @@ def _project_git_consumers(report, instance_dir: Path) -> list[dict[str, Any]]:
     )
     if not bindings:
         return []
-    managed = RemoteExecution("", PROJECT_GIT_PHASE, instance_dir=instance_dir).managed_credential_state
+    # Readiness is per Git child: a project checkout may belong to a different user than the
+    # instance checkout, and the dispatcher's preflight reads the store as that project's child.
+    readiness_by_child: dict[tuple[int, int], CredentialReadiness] = {}
     rows: list[dict[str, Any]] = []
     for binding in bindings:
         repo = binding.get("repo")
@@ -208,6 +210,15 @@ def _project_git_consumers(report, instance_dir: Path) -> list[dict[str, Any]]:
                 transport = project_remote_execution(checkout, instance_dir=instance_dir).transport
             except CredentialError:
                 transport = "unknown"
+        try:
+            child = state_repo.git_child_identity(checkout)
+        except state_repo.StateRepoError as exc:
+            managed = CredentialReadiness("missing/unavailable", " ".join(str(exc).split())[:240])
+        else:
+            key = (child.uid, child.gid)
+            if key not in readiness_by_child:
+                readiness_by_child[key] = checkpoint_credential_readiness_for_child(instance_dir, child)
+            managed = readiness_by_child[key]
         rows.append(_project_git_row(str(binding["id"]), binding.get("enabled") is True, transport, managed))
     return rows
 

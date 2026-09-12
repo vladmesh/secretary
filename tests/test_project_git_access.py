@@ -37,6 +37,7 @@ from secretary.infra.github_credential import (
     PROJECT_ACCESS_REFUSALS,
     PROJECT_GIT_PHASE,
     CredentialError,
+    CredentialReadiness,
     ProjectGitAccess,
     project_remote_execution,
 )
@@ -756,6 +757,57 @@ class ProjectGitInventoryTests(HermeticGitTestCase):
         self.assertIn("checkpoint-github set", rows["project-git:rewritten"]["supported_next_action"])
         self.assertEqual(rows["project-git:hermetic"]["state"], "not-applicable")
         self.assertEqual(rows["project-git:hermetic"]["managed_readiness"], "missing/unavailable")
+
+    def test_each_project_row_verifies_readiness_as_its_own_git_child(self) -> None:
+        """A project checkout owned by another Git user is verified as that user.
+
+        Root doctor with the instance checkout and a project checkout owned by different
+        unprivileged users: the dispatcher's preflight reads the store as the project's child,
+        so the inventory row must not borrow the instance owner's verdict.
+        """
+        _, report = self.fixture({"shared": "gh:example/shared.git", "other": "gh:example/other.git"})
+        baseline = self.consumers(report)
+        instance_owner = GitChildIdentity(os.geteuid(), os.getegid())
+        project_owner = GitChildIdentity(os.geteuid() + 4242, os.getegid() + 4242, "project-user")
+        other_checkout = (self.root / "other").resolve()
+        real_identity = state_repo.git_child_identity
+        asked: list[tuple[Path, GitChildIdentity]] = []
+
+        def identity(path):
+            if Path(path).expanduser().resolve() == other_checkout:
+                return project_owner
+            return real_identity(path)
+
+        def readiness(instance_dir, child):
+            asked.append((Path(instance_dir), child))
+            if child == project_owner:
+                return CredentialReadiness("locked/unverifiable", "installation key is unavailable")
+            return CredentialReadiness("managed-ready")
+
+        with (
+            mock.patch.object(state_repo, "git_child_identity", side_effect=identity),
+            mock.patch(
+                "secretary.infra.recovery_inventory.checkpoint_credential_readiness_for_child",
+                side_effect=readiness,
+            ),
+        ):
+            rows = self.consumers(report)
+
+        shared, other = rows["project-git:shared"], rows["project-git:other"]
+        self.assertEqual((shared["state"], shared["managed_readiness"]), ("managed-ready", "managed-ready"))
+        self.assertEqual(shared["supported_next_action"], "none")
+        self.assertEqual((other["transport"], other["source"]), ("github-https", "managed-store"))
+        self.assertEqual(
+            (other["state"], other["managed_readiness"]), ("locked/unverifiable", "locked/unverifiable")
+        )
+        self.assertIn("checkpoint-github set", other["supported_next_action"])
+        self.assertEqual(
+            sorted((child.uid for _, child in asked)),
+            sorted([instance_owner.uid, project_owner.uid]),
+            "readiness is asked once per distinct Git child, as that child",
+        )
+        self.assertTrue(all(directory == self.root / "instance" for directory, _ in asked))
+        self.assertEqual(rows["checkpoint-github"], baseline["checkpoint-github"], "checkpoint row unchanged")
 
     def test_ambient_credential_advice_depends_on_the_inventoried_consumers(self) -> None:
         (self.home / ".git-credentials").write_text(
