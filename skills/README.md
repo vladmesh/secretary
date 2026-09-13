@@ -5,6 +5,7 @@ The canon of skills is stored by role, not by shell:
 - `skills/roles/secretary/*`
 - `skills/roles/curator/*`
 - `skills/roles/observer/*`
+- `skills/roles/po/*`
 - `skills/roles/retro/*`
 - `skills/roles/steward/*`
 
@@ -31,6 +32,16 @@ discovery mixes the namespaces and produces wrong locators.
 Target roots are written home-relative (`~/...`) and expand against the home of whoever runs the
 sync, because the product does not know which account installs it. Sources do not move with the
 home: a skill is always read from the `roles/` tree beside the manifest that declared it.
+
+A root written `@po/...` is inside the product owner's workspace, `<data_dir>/po`, of the installation
+(`--data-dir`, else `data_dir` of the instance); see the PO workspace in `docs/OPERATIONS.md`. A role
+may deliver a skill another role declares by naming it `<role>/<skill>`: the copy is read from that
+role's tree, so a shared skill keeps one source.
+
+Sync writes a `.secretary-role-skill` marker into every copy and removes a marked copy once no
+manifest declares that skill for its root. A copy delivered before markers existed is removed only
+when its `SKILL.md` is byte for byte a version the manifest's repository shipped under that name.
+Nothing else in a shell root is touched.
 
 `--product-root <checkout>` reads the manifest of another checkout instead of the one this command
 was installed from. `secretary upgrade --product-root` passes it for you, so an upgrade delivers the

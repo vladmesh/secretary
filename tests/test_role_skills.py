@@ -173,13 +173,17 @@ class CanonicalRegistryTests(unittest.TestCase):
         self.assertEqual(missing, [])
 
     def test_every_shipped_target_root_belongs_to_whoever_installs_it(self) -> None:
-        """The product does not know which user runs it, so no root may name one."""
+        """The product does not know which user runs it, so no root may name one.
+
+        A root is relative to the installing user's home or to the installation's PO workspace in
+        its data directory; neither names a host path.
+        """
         roots = [target["root"] for target, _ in self.registry.targets.values()]
 
         self.assertTrue(roots)
         for root in roots:
             with self.subTest(root):
-                self.assertTrue(root.startswith("~/"), root)
+                self.assertTrue(root.startswith(("~/", "@po/")), root)
 
     def test_a_shipped_target_root_expands_into_the_installing_users_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):

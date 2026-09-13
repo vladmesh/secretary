@@ -11,7 +11,8 @@ checkpoint, so they survive a move to a new machine.
 
 ## What goes where
 
-- Executable work (cards, specs, states) goes on the Pipeline board, through the `spec-card` skill.
+- Executable work goes on the board, not here: sprints as entities (`open-sprint`), product issues
+  through `secretary issue`, and cards, which the sprint observer cuts.
 - The short current conclusion that must reach a head's context goes into curated memory
   (`state/memory/facts`), written by the curator.
 - The long reasoning and the context the conclusion came from goes here.

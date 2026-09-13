@@ -77,6 +77,7 @@ from secretary.host_apply import (
 from secretary.memory.client_config import ClientConfigError, reconcile_clients
 from secretary.memory.health import MemoryProbeError, probe_memory
 from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
+from secretary.po import workspace as po_workspace
 from secretary.projects.availability import ProjectAvailability
 from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from secretary.web.health import WebProbeError, probe_web, target_from_unit
@@ -471,6 +472,53 @@ def step_memory_clients(context: UpgradeContext) -> StepResult:
     return StepResult("memory-clients", "changed", f"{action} {result.changed} client config(s)")
 
 
+def step_po_workspace(context: UpgradeContext) -> StepResult:
+    """Materialize the PO head's working directory; its notes file is never rewritten.
+
+    Ownership is handed over by `step_po_workspace_owner`, after the skills are delivered into it.
+    """
+    if not (context.product_root / ".venv").is_dir():
+        return StepResult("po-workspace", "skipped", "no .venv in the product checkout")
+    data_dir = _data_dir(context)
+    if data_dir is None:
+        return StepResult("po-workspace", "failed", "instance data directory is unresolved")
+    try:
+        result = po_workspace.materialize(context.product_root, data_dir, dry_run=context.dry_run)
+    except po_workspace.WorkspaceError as exc:
+        return StepResult("po-workspace", "failed", str(exc))
+    if not result.changed:
+        return StepResult("po-workspace", "unchanged", f"{result.path} current")
+    action = "would write" if context.dry_run else "wrote"
+    return StepResult("po-workspace", "changed", f"{action} {', '.join(result.changed)} in {result.path}")
+
+
+def step_po_workspace_owner(context: UpgradeContext) -> StepResult:
+    """Hand the whole PO workspace to the runtime user once role-skills has delivered into it.
+
+    Runs on every upgrade rather than on change: a root invoker creates the skill roots and their
+    copies after `po-workspace`, and a tree left root-owned by an earlier run is repaired here.
+    """
+    data_dir = _data_dir(context)
+    if data_dir is None:
+        return StepResult("po-workspace-owner", "skipped", "instance data directory is unresolved")
+    workspace = po_workspace.workspace_dir(data_dir)
+    if context.dry_run or not workspace.is_dir():
+        return StepResult("po-workspace-owner", "skipped", f"no {workspace} to hand over")
+    if not context.runtime_user or os.geteuid() != 0:
+        return StepResult(
+            "po-workspace-owner", "skipped", "not a root invoker; files already belong to the caller"
+        )
+    try:
+        _set_runtime_owner(workspace, context.runtime_user)
+    except GitError as exc:
+        return StepResult("po-workspace-owner", "failed", str(exc))
+    return StepResult("po-workspace-owner", "unchanged", f"{workspace} owned by {context.runtime_user}")
+
+
+def _data_dir(context: UpgradeContext) -> Path | None:
+    return getattr(context.report, "data_dir", None)
+
+
 def _role_skills_manifest(context: UpgradeContext) -> Path:
     """The skill registry of the checkout being installed, which is not always the running one."""
     return role_skills.product_manifest_path(context.product_root)
@@ -489,7 +537,8 @@ def step_registries(context: UpgradeContext) -> StepResult:
     manifest = _role_skills_manifest(context)
     try:
         registry = role_skills.load_registry(context.instance_path, product_manifest=manifest)
-        problems = role_skills.unmaterializable(registry, context.runtime_home)
+        data_dir = role_skills.resolve_data_dir(registry, context.instance_path, _data_dir(context))
+        problems = role_skills.unmaterializable(registry, context.runtime_home, data_dir=data_dir)
     except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
         return StepResult("registries", "failed", f"skill registry: {exc}")
     if problems:
@@ -551,12 +600,14 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
             instance_path=context.instance_path,
             product_manifest=manifest,
             home=context.runtime_home,
+            data_dir=_data_dir(context),
         )
     except (OSError, ValueError) as exc:
         return StepResult("role-skills", "failed", str(exc))
     if before["ok"]:
         return StepResult("role-skills", "unchanged", f"{len(before['targets'])} targets in sync")
     pending = len(before["missing"]) + len(before["drift"]) + len(before["entry_points"])
+    pending += len(before.get("retired", []))
     if before["config_errors"] or before["source_missing"]:
         return StepResult(
             "role-skills", "failed", "manifest is not usable: overlapping roots or a missing source skill"
@@ -568,6 +619,7 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
             instance_path=context.instance_path,
             product_manifest=manifest,
             home=context.runtime_home,
+            data_dir=_data_dir(context),
         )
     except (OSError, ValueError) as exc:
         return StepResult("role-skills", "failed", str(exc))
@@ -1390,6 +1442,7 @@ def step_verify(context: UpgradeContext) -> StepResult:
             instance_path=context.instance_path,
             product_manifest=_role_skills_manifest(context),
             home=context.runtime_home,
+            data_dir=_data_dir(context),
         )
     except (OSError, ValueError) as exc:
         return StepResult("verify", "failed", str(exc))
@@ -1537,11 +1590,13 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_board_store,
     step_board_store_roles,
     step_memory_clients,
+    step_po_workspace,
     step_head_registry,
     step_instance_packing,
     step_publish_head_registry,
     step_worktrees,
     step_role_skills,
+    step_po_workspace_owner,
     step_host,
     step_automations,
     step_memory,

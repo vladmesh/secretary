@@ -21,13 +21,16 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from secretary.config import DataDirError, instance_data_dir
 from secretary.onboarding import DEFAULT_INSTANCE
+from secretary.po.workspace import workspace_dir
 from triggered_agents.runtime.paths import configured_product_root
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -48,6 +51,16 @@ INSTANCE_ORIGIN = "instance"
 
 # Role and skill names are one path component to contain every root join.
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# A target root inside the installation's PO workspace, which lives in the data directory.
+PO_WORKSPACE_ROOT = "@po"
+# Written into every copy sync delivers, so a later sync can tell its own copies from anyone else's.
+OWNERSHIP_MARKER = ".secretary-role-skill"
+OWNERSHIP_MARKER_TEXT = (
+    "Delivered by `secretary role-skills sync`, which removes this directory once no manifest\n"
+    "declares the skill for this root.\n"
+)
+# A SKILL.md a manifest's repository has shipped, as `git log --raw` names it.
+SHIPPED_SKILL = re.compile(r"(?:^|/)roles/[^/]+/([^/]+)/SKILL\.md$")
 
 
 class RegistryError(ValueError):
@@ -113,6 +126,56 @@ def _expand_home(value: Path | str, home: Path | str | None) -> Path:
     return Path(os.path.expanduser(text))
 
 
+def _is_po_workspace_root(value: str) -> bool:
+    return value == PO_WORKSPACE_ROOT or value.startswith(f"{PO_WORKSPACE_ROOT}/")
+
+
+def resolve_data_dir(
+    registry: SkillRegistry,
+    instance_path: Path | str | None,
+    data_dir: Path | str | None = None,
+    *,
+    role: str | None = None,
+) -> Path | None:
+    """The data directory `@po/` roots are read against, or None when there is no installation.
+
+    A named data directory wins. Otherwise ``instance.yaml`` is read only when a target this
+    question concerns (every target, or the ones carrying ``role``) has a `@po/` root, so a
+    question about any other skill never depends on the instance file. An instance directory with
+    no ``instance.yaml`` is a checkout with nothing installed, and its `@po/` targets are left out
+    rather than guessed. An ``instance.yaml`` that cannot be read refuses.
+    """
+    if data_dir is not None:
+        return _absolute(data_dir)
+    if not any(
+        _is_po_workspace_root(target["root"]) and (role is None or role in target["roles"])
+        for target, _ in registry.targets.values()
+    ):
+        return None
+    base = instance_path if instance_path is not None else configured_instance_path()
+    path = _absolute(base)
+    instance_file = path if path.suffix in (".yaml", ".yml") else path / "instance.yaml"
+    if not instance_file.is_file():
+        return None
+    try:
+        return instance_data_dir(instance_file)
+    except DataDirError as exc:
+        raise RegistryError(f"{instance_file}: data directory cannot be resolved: {exc}") from None
+
+
+def _expand_root(value: str, home: Path | str | None, data_dir: Path | None) -> Path | None:
+    """A target root as a path, or None for a PO workspace root with no data directory to name."""
+    if not _is_po_workspace_root(value):
+        return _expand_home(value, home)
+    if data_dir is None:
+        return None
+    workspace = workspace_dir(data_dir)
+    root = _absolute(workspace / value[len(PO_WORKSPACE_ROOT) :].lstrip("/"))
+    if not _within(workspace, root):
+        raise RegistryError(f"target root {value!r} resolves to {root}, outside {workspace}")
+    return root
+
+
 def bin_dir(home: Path | str | None = None) -> Path:
     """The directory on ``PATH`` that a skill's command is linked into."""
     raw = os.environ.get(BIN_DIR_ENV)
@@ -173,6 +236,11 @@ class SkillRegistry:
     roles: dict[str, list[tuple[str, ManifestSource]]] = field(default_factory=dict)
     # target name -> (target table, declaring source)
     targets: dict[str, tuple[dict[str, Any], ManifestSource]] = field(default_factory=dict)
+    # (role, skill) -> the role whose tree the skill is read from, for `<role>/<skill>` entries
+    references: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    def source_role(self, role: str, skill: str) -> str:
+        return self.references.get((role, skill), role)
 
     def describe_sources(self) -> list[dict[str, str]]:
         return [{"origin": source.origin, "path": str(source.path)} for source in self.sources]
@@ -268,11 +336,13 @@ def load_registry(
     """Read every manifest and layer them in order.
 
     Roles accumulate: an instance adds skills to a product role rather than replacing the role. A
-    target is replaced whole by a later manifest, because a target is one shell root.
+    target is replaced whole by a later manifest, because a target is one shell root. A
+    `<role>/<skill>` entry is read from wherever that role declares the skill, so it has to.
     """
     sources = manifest_sources(instance_path, product_manifest=product_manifest)
     roles: dict[str, list[tuple[str, ManifestSource]]] = {}
     targets: dict[str, tuple[dict[str, Any], ManifestSource]] = {}
+    references: dict[tuple[str, str], tuple[str, ManifestSource]] = {}
     for source in sources:
         data = load_manifest(source.path)
         if not isinstance(data, dict):
@@ -283,11 +353,16 @@ def load_registry(
             _identifier(role_name, f"[roles.{role_name}] role name", source)
             declared = roles.setdefault(role_name, [])
             seen = {skill for skill, _ in declared}
-            for skill in _string_list(role, "skills", f"roles.{role_name}", source):
+            for entry in _string_list(role, "skills", f"roles.{role_name}", source):
+                owner, _, skill = entry.rpartition("/")
+                if owner:
+                    _identifier(owner, f"roles.{role_name}.skills entry {entry!r} role", source)
                 _identifier(skill, f"roles.{role_name}.skills entry", source)
                 if skill not in seen:
                     declared.append((skill, source))
                     seen.add(skill)
+                    if owner and owner != role_name:
+                        references[(role_name, skill)] = (owner, source)
         for target_name, target in _table(data, "targets", source).items():
             if not isinstance(target, dict):
                 raise RegistryError(f"{source.path}: [targets.{target_name}] must be a table")
@@ -303,17 +378,43 @@ def load_registry(
                 raise RegistryError(
                     f"{source.path}: targets.{target_name}.roles names the unknown role {role_name!r}"
                 )
-    return SkillRegistry(sources=tuple(sources), roles=roles, targets=targets)
+    owners: dict[tuple[str, str], str] = {}
+    for (role_name, skill), (owner, source) in references.items():
+        declared = dict(roles.get(owner, []))
+        if skill not in declared or (owner, skill) in references:
+            raise RegistryError(
+                f"{source.path}: roles.{role_name}.skills names {owner}/{skill}, which the {owner} "
+                "role does not declare itself"
+            )
+        # Read from the manifest whose tree holds the owner's copy.
+        roles[role_name] = [
+            (name, declared[skill] if name == skill else origin) for name, origin in roles[role_name]
+        ]
+        owners[(role_name, skill)] = owner
+    return SkillRegistry(sources=tuple(sources), roles=roles, targets=targets, references=owners)
+
+
+def target_roots(
+    registry: SkillRegistry, home: Path | str | None = None, data_dir: Path | str | None = None
+) -> dict[str, Path | None]:
+    """Every target's root; None for a PO workspace root when no data directory is known."""
+    resolved = _absolute(data_dir) if data_dir is not None else None
+    return {
+        name: _expand_root(target["root"], home, resolved)
+        for name, (target, _) in sorted(registry.targets.items())
+    }
 
 
 def find_overlapping_target_roots(
-    registry: SkillRegistry, home: Path | str | None = None
+    registry: SkillRegistry, home: Path | str | None = None, data_dir: Path | str | None = None
 ) -> list[dict[str, str]]:
     """Reject nested roots for one shell: recursive discovery mixes their namespaces."""
     errors: list[dict[str, str]] = []
+    roots = target_roots(registry, home, data_dir)
     items = [
-        (name, target["shell"], _expand_home(target["root"], home).resolve())
+        (name, target["shell"], root.resolve())
         for name, (target, _) in sorted(registry.targets.items())
+        if (root := roots[name]) is not None
     ]
     for index, (left_name, left_shell, left_root) in enumerate(items):
         for right_name, right_shell, right_root in items[index + 1 :]:
@@ -332,11 +433,19 @@ def find_overlapping_target_roots(
     return errors
 
 
-def iter_expected(registry: SkillRegistry, home: Path | str | None = None) -> list[ExpectedSkill]:
-    """Every skill the registry expects in a shell, with both ends of the copy checked."""
+def iter_expected(
+    registry: SkillRegistry, home: Path | str | None = None, data_dir: Path | str | None = None
+) -> list[ExpectedSkill]:
+    """Every skill the registry expects in a shell, with both ends of the copy checked.
+
+    A target whose root is in the PO workspace is left out when no data directory is known.
+    """
     expected: list[ExpectedSkill] = []
+    roots = target_roots(registry, home, data_dir)
     for target_name, (target, source_of_target) in sorted(registry.targets.items()):
-        root = _expand_home(target["root"], home)
+        root = roots[target_name]
+        if root is None:
+            continue
         for role_name in target["roles"]:
             for skill, source in registry.roles.get(role_name, []):
                 item = ExpectedSkill(
@@ -344,7 +453,7 @@ def iter_expected(registry: SkillRegistry, home: Path | str | None = None) -> li
                     shell=target["shell"],
                     role=role_name,
                     skill=skill,
-                    source=source.roles_root / role_name / skill,
+                    source=source.roles_root / registry.source_role(role_name, skill) / skill,
                     dest=root / skill,
                     origin=source.origin,
                     manifest=source.path,
@@ -392,6 +501,101 @@ def find_conflicting_destinations(expected: list[ExpectedSkill]) -> list[dict[st
     return conflicts
 
 
+def _git_blob_id(path: Path) -> str:
+    data = path.read_bytes()
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _shipped_skill_blobs(roles_root: Path) -> set[tuple[str, str]]:
+    """(skill name, blob id) of every SKILL.md the repository holding a roles tree ever had.
+
+    No repository, or git failing, is an empty answer: it only means fewer copies can be proven ours.
+    """
+    if not roles_root.is_dir():
+        return set()
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(roles_root),
+                "log",
+                "--all",
+                "--no-renames",
+                "--raw",
+                "--no-abbrev",
+                "--format=",
+                "--",
+                ".",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if completed.returncode != 0:
+        return set()
+    shipped: set[tuple[str, str]] = set()
+    for line in completed.stdout.splitlines():
+        meta, separator, path = line.partition("\t")
+        fields = meta.split()
+        match = SHIPPED_SKILL.search(path)
+        if not separator or not meta.startswith(":") or len(fields) < 4 or match is None:
+            continue
+        shipped.update((match.group(1), blob) for blob in fields[2:4] if blob.strip("0"))
+    return shipped
+
+
+def find_retired(
+    registry: SkillRegistry,
+    home: Path | str | None = None,
+    data_dir: Path | str | None = None,
+    target_filter: set[str] | None = None,
+) -> list[dict[str, str]]:
+    """Skill copies sync delivered into a target root that no manifest declares for that root anymore.
+
+    Only copies that are provably sync's are named: one carrying the marker sync writes into every
+    copy, or one delivered before the marker existed whose SKILL.md is byte for byte a version the
+    repository of one of the manifests shipped under that name. Anything else in a shell root is
+    somebody else's and is never named. A root shared by several targets keeps what any of them
+    declares.
+    """
+    roots = target_roots(registry, home, data_dir)
+    declared: dict[Path, set[str]] = {}
+    for item in iter_expected(registry, home, data_dir):
+        declared.setdefault(_absolute(item.dest.parent), set()).add(item.skill)
+    scanned = sorted(
+        {
+            _absolute(root)
+            for name, root in roots.items()
+            if root is not None and (not target_filter or name in target_filter)
+        }
+    )
+    shipped: set[tuple[str, str]] | None = None
+    retired: list[dict[str, str]] = []
+    for root in scanned:
+        if not root.is_dir():
+            continue
+        for child in sorted(root.iterdir()):
+            if child.is_symlink() or not child.is_dir() or child.name in declared.get(root, set()):
+                continue
+            if (child / OWNERSHIP_MARKER).is_file():
+                evidence = f"carries {OWNERSHIP_MARKER}"
+            else:
+                skill_file = child / "SKILL.md"
+                if skill_file.is_symlink() or not skill_file.is_file():
+                    continue
+                if shipped is None:
+                    shipped = set().union(*(_shipped_skill_blobs(s.roles_root) for s in registry.sources))
+                if (child.name, _git_blob_id(skill_file)) not in shipped:
+                    continue
+                evidence = "SKILL.md is a version a manifest repository shipped"
+            retired.append({"root": str(root), "skill": child.name, "dest": str(child), "evidence": evidence})
+    return retired
+
+
 def command_script(role: str, skill: str, source: ManifestSource) -> Path | None:
     """The one command a skill may ship: ``<skill>.sh`` beside its ``SKILL.md``.
 
@@ -413,6 +617,9 @@ def iter_expected_commands(registry: SkillRegistry, home: Path | str | None = No
     by_name: dict[str, ExpectedCommand] = {}
     for role in sorted(registry.roles):
         for skill, source in registry.roles[role]:
+            if (role, skill) in registry.references:
+                # The owning role links it.
+                continue
             script = command_script(role, skill, source)
             if script is None:
                 continue
@@ -539,7 +746,7 @@ def skill_delivery(
         result["manifests"] = registry.describe_sources()
         expected = [
             item
-            for item in iter_expected(registry)
+            for item in iter_expected(registry, data_dir=resolve_data_dir(registry, instance_path, role=role))
             if item.role == role and item.skill == skill and item.shell == shell
         ]
     except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
@@ -566,13 +773,21 @@ def audit(
     instance_path: Path | str | None = None,
     product_manifest: Path | str | None = None,
     home: Path | str | None = None,
+    data_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     registry = load_registry(instance_path, product_manifest=product_manifest)
-    config_errors = find_overlapping_target_roots(registry, home)
-    expected = iter_expected(registry, home)
+    data_dir = resolve_data_dir(registry, instance_path, data_dir)
+    config_errors = find_overlapping_target_roots(registry, home, data_dir)
+    expected = iter_expected(registry, home, data_dir)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
     destination_conflicts = find_conflicting_destinations(expected)
+    retired = find_retired(registry, home, data_dir, target_filter)
+    unresolved = [
+        name
+        for name, root in target_roots(registry, home, data_dir).items()
+        if root is None and (not target_filter or name in target_filter)
+    ]
 
     missing: list[dict[str, str]] = []
     drift: list[dict[str, str]] = []
@@ -625,7 +840,7 @@ def audit(
     entry_point_problems = [item for item in entry_points if item["status"] != "ok"]
 
     ok = not missing and not drift and not source_missing and not config_errors
-    ok = ok and not entry_point_problems and not destination_conflicts
+    ok = ok and not entry_point_problems and not destination_conflicts and not retired
     return {
         "ok": ok,
         "manifest": str(manifest_path(product_manifest)),
@@ -637,6 +852,9 @@ def audit(
         "entry_points": entry_point_problems,
         "config_errors": config_errors,
         "destination_conflicts": destination_conflicts,
+        "retired": retired,
+        # Targets in the PO workspace of an installation this audit could not name.
+        "unresolved_targets": unresolved,
     }
 
 
@@ -644,6 +862,7 @@ def unmaterializable(
     registry: SkillRegistry,
     home: Path | str | None = None,
     target_filter: set[str] | None = None,
+    data_dir: Path | str | None = None,
 ) -> list[str]:
     """Every reason this registry cannot be delivered as written, decided without writing.
 
@@ -651,9 +870,10 @@ def unmaterializable(
     `sync` asks the same question, so the two cannot come to different conclusions.
     """
     problems = [
-        f"overlapping skill target roots: {error}" for error in find_overlapping_target_roots(registry, home)
+        f"overlapping skill target roots: {error}"
+        for error in find_overlapping_target_roots(registry, home, data_dir)
     ]
-    expected = iter_expected(registry, home)
+    expected = iter_expected(registry, home, data_dir)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
     problems += [
@@ -683,26 +903,33 @@ def sync(
     instance_path: Path | str | None = None,
     product_manifest: Path | str | None = None,
     home: Path | str | None = None,
+    data_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """Deliver every expected skill and entry point, or refuse before writing anything.
 
     A registry that is half applied is worse than one that was not applied at all, because the next
-    audit cannot tell the two apart.
+    audit cannot tell the two apart. Copies of skills no manifest declares for their root anymore
+    are removed, but only the ones `find_retired` proves this sync delivered.
     """
     registry = load_registry(instance_path, product_manifest=product_manifest)
-    problems = unmaterializable(registry, home, target_filter)
+    data_dir = resolve_data_dir(registry, instance_path, data_dir)
+    problems = unmaterializable(registry, home, target_filter, data_dir)
     if problems:
         raise RegistryError(problems[0])
-    expected = iter_expected(registry, home)
+    expected = iter_expected(registry, home, data_dir)
     if target_filter:
         expected = [item for item in expected if item.target in target_filter]
     commands = [] if target_filter else iter_expected_commands(registry, home)
     states = [_entry_point_state(command, registry.owned_roots) for command in commands]
+    retired = find_retired(registry, home, data_dir, target_filter)
 
     copied: list[dict[str, str]] = []
     for item in expected:
         item.dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(item.source, item.dest, dirs_exist_ok=True)
+        marker = item.dest / OWNERSHIP_MARKER
+        if not marker.is_file() or marker.read_text(encoding="utf-8") != OWNERSHIP_MARKER_TEXT:
+            marker.write_text(OWNERSHIP_MARKER_TEXT, encoding="utf-8")
         copied.append(
             {
                 "target": item.target,
@@ -729,15 +956,20 @@ def sync(
                 "was": state["status"],
             }
         )
+
+    for item in retired:
+        shutil.rmtree(item["dest"])
     return {
         "ok": True,
         "copied": copied,
         "linked": linked,
+        "removed": retired,
         "after": audit(
             target_filter,
             instance_path=instance_path,
             product_manifest=product_manifest,
             home=home,
+            data_dir=data_dir,
         ),
     }
 
@@ -770,6 +1002,14 @@ def render_markdown(result: dict[str, Any]) -> str:
                 f"- {item['command']} [{item['origin']} {item['manifest']}] "
                 f"{item['status']}: {item['reason']}"
             )
+    if result.get("retired"):
+        lines.extend(["", "Retired copies (removed by sync):"])
+        for item in result["retired"]:
+            lines.append(f"- {item['dest']}: {item['evidence']}")
+    if result.get("unresolved_targets"):
+        lines.extend(
+            ["", "Not checked, no installation data directory: " + ", ".join(result["unresolved_targets"])]
+        )
     if result.get("destination_conflicts"):
         lines.extend(["", "Destination conflicts:"])
         for item in result["destination_conflicts"]:
@@ -798,16 +1038,17 @@ def run_role_skills(args) -> int:
     instance = getattr(args, "instance", None)
     product_root = getattr(args, "product_root", None)
     product = product_manifest_path(product_root) if product_root else None
+    data_dir = getattr(args, "data_dir", None)
     if args.role_skills_command == "audit":
         try:
-            result = audit(targets, instance_path=instance, product_manifest=product)
+            result = audit(targets, instance_path=instance, product_manifest=product, data_dir=data_dir)
         except (OSError, ValueError) as exc:
             print(f"secretary role-skills audit: {exc}")
             return 2
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else render_markdown(result))
         return 1 if args.check and not result["ok"] else 0
     try:
-        result = sync(targets, instance_path=instance, product_manifest=product)
+        result = sync(targets, instance_path=instance, product_manifest=product, data_dir=data_dir)
     except (OSError, ValueError) as exc:
         print(f"secretary role-skills sync: {exc}")
         return 2
@@ -828,6 +1069,11 @@ def _add_common_arguments(parser, name: str) -> None:
         "--product-root",
         help="product checkout whose skills/manifest.toml is the product layer "
         f"(default: {MANIFEST_ENV}, else the configured product checkout)",
+    )
+    parser.add_argument(
+        "--data-dir",
+        help=f"data directory whose PO workspace the {PO_WORKSPACE_ROOT}/ roots name "
+        "(default: data_dir of the instance)",
     )
     if name == "audit":
         parser.add_argument("--check", action="store_true", help="exit 1 when missing or drift exists")

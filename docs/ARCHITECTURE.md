@@ -15,7 +15,7 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
 
 - `src/secretary` is the product package. Its flat root is closed: `tests/test_architecture.py`
   holds the list of existing flat modules, and a new module must go into a feature package. Current
-  packages: `board`, `cutover`, `dispatch`, `infra`, `memory`, `projects`, `schemas`, `web`,
+  packages: `board`, `cutover`, `dispatch`, `infra`, `memory`, `po`, `projects`, `schemas`, `web`,
   `webfront`, `webproto`.
 - `src/triggered_agents` is a legacy namespace. It holds runtime primitives Secretary uses directly
   (head runtimes, session-manager and delivery helpers, the mechanical-role driver, the curator,
