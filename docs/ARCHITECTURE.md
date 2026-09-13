@@ -1,26 +1,30 @@
 # Architecture
 
 `secretary` is a substrate for several interchangeable agent heads. It owns the task and memory
-protocols, the dispatcher lifecycle, installation contracts and recovery. The providers' native CLIs
-do the actual work on top of that.
+protocols, the dispatcher lifecycle, installation contracts and recovery. The actual work is done by
+the providers' native CLIs.
+
+Command and web contracts are in [Protocols](PROTOCOLS.md), runbooks in [Operations](OPERATIONS.md),
+the PostgreSQL schema in [Board store](BOARD_STORE.md), checkpoint and restore in
+[Recovery](RECOVERY.md), and the product goal in [Vision](VISION.md).
 
 ## Source layout and module boundaries
 
-Product source uses a `src/` layout. The repository root is the product and deployment boundary;
-`src/secretary` is the primary Python package. Keeping importable code below `src/` prevents a test or
-operator command from accidentally importing an uninstalled checkout merely because its current
-directory is the repository root. Packaging, scripts, documentation, examples and tests remain at the
-repository root because they are product assets rather than importable runtime code.
+Product source uses a `src/` layout, so a test or command run from the repository root cannot import
+an uninstalled checkout by accident. Packaging, scripts, docs, examples and tests stay at the root.
 
-`src/triggered_agents` is a temporary historical namespace, not a second product boundary. It was
-absorbed from a separate repository and now provides runtime primitives used directly by Secretary.
-The dependency evidence makes the intended ownership unambiguous: the Secretary package is already a
-large consumer of that runtime, while only production telemetry crosses back into Secretary. New
-shared runtime code therefore belongs to `secretary`, and no new dependency from `secretary` to
-`triggered_agents` should be introduced. A later migration will move those primitives under the main
-namespace while preserving the installed `triggered-agents` command as a compatibility surface.
+- `src/secretary` is the product package. Its flat root is closed: `tests/test_architecture.py`
+  holds the list of existing flat modules, and a new module must go into a feature package. Current
+  packages: `board`, `cutover`, `dispatch`, `infra`, `memory`, `projects`, `schemas`, `web`,
+  `webfront`, `webproto`.
+- `src/triggered_agents` is a legacy namespace. It holds runtime primitives Secretary uses directly
+  (head runtimes, session-manager and delivery helpers, the mechanical-role driver, the curator,
+  steward and retro agents). New shared runtime code goes into `secretary`. The only allowed imports
+  from `triggered_agents` into `secretary` are the ones listed in the test: production telemetry and
+  curator discovery reading `secretary.config`, and `secretary.sprints`.
 
-The target package layout is feature-first:
+The target package layout is feature-first. Modules move there one feature at a time, keeping
+compatibility imports where an installed command depends on an old path:
 
 ```text
 src/secretary/
@@ -40,17 +44,16 @@ src/secretary/
   schemas/             packaged data contracts
 ```
 
-This tree is a migration destination, not a claim that the current flat package already conforms to
-it. Moves happen one feature at a time with compatibility imports where an installed command or
-integration depends on an old module path. In particular, the large dispatcher and task modules must
-be decomposed by lifecycle responsibility rather than split by file size alone.
+Dependency rules:
 
-Dependencies point inward from entry points to feature APIs: CLI and automation modules may call
-feature services; orchestration may call task, sprint and runtime APIs; adapters implement protocols
-owned by the feature that consumes them. Feature code must not import CLI modules, and shared runtime
-must not import an application module merely to discover configuration. Configuration or paths needed
-by runtime are passed in or exposed through a small shared interface. These rules remove the current
-telemetry cycle and keep `infra` from becoming a second application layer.
+- Dependencies point inward, from entry points to feature APIs. CLI and automation modules call
+  feature services. Orchestration calls task, sprint and runtime APIs. An adapter implements a
+  protocol owned by the feature that consumes it.
+- Feature code does not import CLI modules. Shared runtime does not import an application module to
+  find configuration; configuration and paths are passed in.
+- A board client is built only through `secretary.board.backend.board_client`, and a card audit only
+  through `secretary.tasks.task_audit_for`. The few modules allowed to build `KanboardClient`,
+  `TaskAudit` or `EventJournal` directly are listed, with reasons, in `tests/test_architecture.py`.
 
 ## Storage boundary
 
@@ -58,67 +61,50 @@ telemetry cycle and keep `infra` from becoming a second application layer.
 product repository     CLI, runtime, schemas, tests, generic skills
 instance repository    one private repository per installation: config + portable checkpoint
 data directory         local mutable and derived runtime data plane
+board store            live cards, sprints, products, issues and their audit
 ```
 
-Backup policy is selected from that same board-backend boundary. Portable normalized board and
-process state is common to `core` and `full`; engine material is an additional mutually exclusive
-component. Kanboard names `raw_board`. PostgreSQL names `postgres_dump` and records its custom
-format, pinned engine/client major, source Alembic head and data-only local-restore purpose. Backup
-code does not inspect ORM rows or parse a second database configuration. It asks the public board
-client for normalized state and the established `board-store.env` resolver for the owner connection.
-PostgreSQL dump/restore execution lives in `postgres_recovery.py`; archive policy and verification
-remain engine-neutral except for validating that declared component contract.
+The product repository holds no real project bindings, credentials, cards or host-local state. No
+product path names a user or a checkout.
 
-The product repository holds no real project bindings, credentials, cards or host-local state. The
-instance repository holds persona, project bindings, adapters, policies and head profiles. Its
-`secrets/` directory keeps a metadata catalog and sealed values in Git next to board and memory; the
-only things it never contains are the raw installation key and the recovery phrase, see
-[Recovery](RECOVERY.md#secrets). The host `runtime.env` is a separate `0600` file, gitignored and
-outside any checkpoint or archive payload; its values may be registered in the store, in which case
-the file becomes a materialised copy.
+The instance repository holds persona, project bindings, adapters, policies and head profiles.
+`state/` in it holds the recovery canon: board, runs, memory facts and knowledge documents.
+`secrets/` holds a metadata catalog and sealed values. The raw installation key and the recovery
+phrase are never stored there ([Recovery](RECOVERY.md#secrets)). The host `runtime.env` is a separate
+`0600` file, gitignored and outside every checkpoint and archive; a value registered in the store
+makes the file a materialised copy.
 
-Product configuration reaches an installation one way: `secretary upgrade` generates
-`heads/heads.yaml` from the installation's head canon — its own `heads/heads.toml` when it has one,
-else the product's small portable default — and writes `heads/source.yaml` next to it, recording
-that canon, which side owns it, the checkout and revision it was taken from, and a digest of the
-snapshot. Upgrade commits and pushes the two generated files as one recovery-canon update. A live
-tick reads and validates that installed pair without consulting a product checkout, so editing the
-canon in a product working tree neither changes installation behaviour nor stops it. The cost is
-that a change reaches the installation only through `upgrade`, and the gap is visible in
-`secretary status` under `installation.head_registry`.
+The data directory holds task audit files, dispatcher state, derived exports and indexes, search
+logs, raw dumps, transcripts and artifacts. The SQLite and vector index, worktrees, terminals and
+generated host resources are derived and are not checkpointed.
 
-No path in the product names a user or a checkout. An installation is named by `--instance` or
-`SECRETARY_INSTANCE`, the checkout to install by `--product-root`, and anything neither of them
-covers hangs off a home: the shipped skill target roots, the shell entry points, the role
-worktrees, the runtime env file. Which home is the one question a materializer has to answer before
-it writes, and the answer is the account that owns the installation — the owner of the instance
-directory, or `--runtime-user`. That is the same account the units are rendered for, so a repair
-run as root materializes the paths those units name rather than filling `/root`. The full order is
-in [Operations](OPERATIONS.md#path-precedence). So a checkout is installable by any account, and one
-that has been pointed at a particular checkout or installation stays pointed there.
+The live board has two implementations of `TaskReader`/`TaskWriter`: Kanboard over JSON-RPC and the
+PostgreSQL board store. A process picks one from `SECRETARY_CARD_BACKEND` (`kanboard` when unset,
+unknown values refused), once per process. The PostgreSQL schema, transactions and migrations are in
+[Board store](BOARD_STORE.md). Backup components follow the same backend: normalised board and
+process state is common, plus `raw_board` for Kanboard or `postgres_dump` for PostgreSQL. Backup code
+does not read ORM rows. It asks the board client for normalised state and the `board-store.env`
+resolver for the owner connection; dump/restore runs in `board/postgres_recovery.py`.
 
-`state/` in the instance repository holds the normalised recovery canon: board, runs, memory facts
-and knowledge documents. The data directory holds task audit, dispatcher state, derived
-exports and indexes, search logs, raw dumps, transcripts and artifacts. The SQLite and vector index,
-worktrees, terminals and generated host resources are derived and stay out of the checkpoint.
+Product configuration reaches an installation one way. `secretary upgrade` generates
+`heads/heads.yaml` from the installation's head canon (its own `heads/heads.toml`, else the product
+default), writes `heads/source.yaml` recording the canon, its owner, checkout, revision and snapshot
+digest, and commits and pushes both. A live tick reads only that installed pair, so editing a product
+working tree changes nothing until the next `upgrade`. The gap shows in `secretary status` under
+`installation.head_registry`.
 
-Clean-host recovery needs that current canon tree, not the commits that preceded it. A fresh instance
-checkout is therefore a depth-1, single-branch, no-tags snapshot of the remote default-branch tip. It is
-validated in a private sibling stage and atomically adopted only when origin, branch, upstream, revision
-and shallow identity agree. Its Git child and helpers share an isolated process group so cancellation
-cannot leave a pack process or partial adopted repository behind. Subsequent recovery fetches only the
-tracked branch's new history and first attempts the ordinary fast-forward, retaining the shallow boundary.
-One recovery-only exception preserves a product-owned head-registry checkpoint retained by an earlier degraded
-recovery: after complete ancestry preflight, Git merges the fetched upstream tip into that local first-parent
-lineage. Every ordinary local-only commit must have the product checkpoint identity and exact
-`checkpoint(heads): publish installed head registry` message, have one parent, and change only
-`heads/heads.yaml` or `heads/source.yaml`. The only other accepted node is the product's exact two-parent
-reconciliation merge, whose first parent continues that lineage and whose second parent belongs to fetched
-upstream ancestry. Arbitrary clean local history is not recoverable. The merge runs as the installation user
-under the instance-repository lock and does not push; checkpoint publication remains a later boundary.
+An installation is named by `--instance` or `SECRETARY_INSTANCE`, the checkout by `--product-root`.
+Every other path (skill targets, shell entry points, role worktrees, runtime env file) hangs off the
+home of the account that owns the installation: the owner of the instance directory, or
+`--runtime-user`. A run as root therefore writes the paths the units name, not `/root`. Full order:
+[Operations](OPERATIONS.md#path-precedence).
 
-The Git-backed checkpoint is described in [Recovery](RECOVERY.md). A manual cold archive remains an
-optional tool for raw material and compatibility, and takes no part in recovery readiness.
+A fresh instance checkout is a depth-1, single-branch, no-tags snapshot of the remote default-branch
+tip, validated in a private stage and adopted atomically. Recovery then fetches only new history and
+fast-forwards. The one accepted local divergence is a head-registry checkpoint commit kept by an
+earlier degraded recovery, which is merged with upstream without pushing. Details:
+[Operations](OPERATIONS.md#recovery) and [Recovery](RECOVERY.md#fresh-install-and-recovery). A manual
+cold archive is optional and plays no part in recovery readiness.
 
 ## Runtime flow
 
@@ -136,774 +122,350 @@ operator / automation
 agent heads ── Bearer grant + HeadRun heartbeat ──> memory MCP/index <── facts journal <── curator
 ```
 
-Kanboard is the current live store for cards and sprints. Cards live on the `Pipeline` board; each
-sprint is a separate task on a `Secretary sprints` board. Both sets go into and come back from the
-checkpoint as separate sets (see [Recovery](RECOVERY.md#what-the-checkpoint-contains)), so the live
-store stays operational rather than being the only place a sprint contract exists. Every supported
-write goes through `secretary task` or `secretary sprint`, which apply role guards, transitions and
-append-only audit. The dispatcher resolves routing, drives the worker and reviewer lifecycle, and
-checks board, workspace, report and review state before each transition.
+Every supported board write goes through `secretary task` or `secretary sprint`, which apply role
+guards, transitions and append-only audit ([Protocols](PROTOCOLS.md#tasks)). Cards and sprints are
+exported to the checkpoint and restored from it as separate sets
+([Recovery](RECOVERY.md#what-the-checkpoint-contains)). Card references are recovery identities, not
+backend row ids. Export and restore share one board validator, so the checkpoint never holds canon
+that restore would refuse.
 
-Card references are unique recovery identities, not backend row identities. Export and restore share one
-restorable-board validator, including JSON/NDJSON parity and uniqueness, so a producer cannot publish canon a
-consumer refuses. The exceptional historical collision repair addresses a row by exact backend ID under the
-normal allocation and audit locks; its plan hash fences the inspected complete board from the applied board,
-while append-only repair provenance preserves the old reference and history boundary.
+The dispatcher resolves routing, drives the worker and reviewer lifecycle, and checks board,
+workspace, report and review state before each transition. A substantive reviewer verdict parks the
+card in Assessment with the reviewer stopped and the worker held; the merge or next round runs only on
+a tick that carries out a recorded observer decision. Mechanical outcomes resolve in Validate.
 
-The standing-agent gate keeps curator on its generic triggered-agent entrypoint. Steward and retro
-enter `secretary.dispatch.standing_agent`, the composition root that supplies canonical task-backed
-ports for steward signals/report cards and retro Done retention. The generic runtime owns only the
-structural ports and never imports Secretary, so board policy stays at the product boundary without
-pulling task lifecycle into terminal/session management.
+Sprint budget comes from the durable audit of linked cards, not from the observer. The dispatcher
+writes one budget event per source event. At the hard limit the sprint becomes `stopped` and a
+`budget_hard_stopped` event is written. Observer reconciliation reads only open sprints, so that stop
+removes the live head without touching claimed cards. The sprint's resume entry is structured
+metadata; its freshness is computed against card audit.
+
+Standing agents: curator runs on its generic triggered-agent entrypoint. Steward and retro enter
+`secretary.dispatch.standing_agent`, which supplies task-backed ports for steward reports and retro
+Done retention. The generic runtime owns only the port interfaces and does not import Secretary.
 
 ### Head runtime ownership
 
-`HeadRuntime` is the lifecycle boundary used by the dispatcher and the mechanical-role driver. Its
-six verbs — start, deliver, observe, request drain, stop and conditional stop — return typed
-receipts; callers do not infer success from a pane, a socket write or process existence. Runtime
-selection is part of a head profile. An absent value means `orca-legacy`; the closed supported set
-is `orca-legacy | local-pty`, and changing one profile is the rollback boundary.
+`HeadRuntime` is the lifecycle boundary for the dispatcher and the mechanical-role driver. Its verbs
+(start, deliver, observe, request drain, stop, conditional stop) return typed receipts; callers do not
+infer success from a pane, a socket write or process existence. The backend is chosen per head
+profile from the closed set `orca-legacy | local-pty` (absent means `orca-legacy`), and
+`triggered_agents.runtime.head_runtime_backends` is the only place a name becomes a backend.
 
-`OrcaLegacyHeadRuntime` preserves the existing session-manager behaviour. Its readiness probe and
-conditional stop narrow races but cannot make pane observation and a later stop atomic, and its
-activity epoch is process-local by definition.
+- `OrcaLegacyHeadRuntime` runs heads in Orca panes. Its readiness probe and conditional stop narrow
+  races but cannot make observe-then-stop atomic.
+- `LocalPtyHeadRuntime` runs a per-run supervisor that owns the process group, PTY, Unix socket and
+  a versioned append-only journal. Delivery, drain and stop share one lock. The supervisor's status
+  frame is the live source for turn, admission and journal sequence; a bounded 64 KiB journal tail is
+  the fallback after it exits. Uncertainty closes admission; confirmed process death never creates a
+  permanent lease.
 
-`LocalPtyHeadRuntime` owns the head's session/process group, PTY master, Unix socket and versioned
-append-only journal through a per-run supervisor. Delivery, drain and stop share one runtime lock.
-The supervisor's status frame is the present-tense source for turn, admission and journal sequence;
-a bounded 64 KiB journal tail is the fallback after the supervisor is gone. A fresh tick rehydrates
-the turn lease, closed admission and monotonic epoch from those sources. Typed transient refusals
-such as the connection limit do not become durable drain, while genuine uncertainty fails closed
-for new input and positive process death never invents a permanent lease.
+Mechanical scheduler units are `Type=oneshot` ticks with `KillMode=process`, so a supervised head
+outlives the tick. The next tick controls it through the runtime's identity-fenced drain/stop. The
+role's `AgentState` keeps the `HeadRun`; starting over a matching live run is refused, while a run
+confirmed dead can be replaced. Every supervised process has a run directory, identity record and
+socket.
 
-The mechanical scheduler units are short `Type=oneshot` ticks, but a supervised head is not their
-child lifecycle. They use `KillMode=process`: when the tick's main process exits, systemd leaves the
-daemonized supervisor alone, reparented to init, and subsequent control goes through the runtime's
-identity-fenced drain/stop protocol. The role's `AgentState` persists the `HeadRun` needed by the
-next tick; starting over a matching live run is refused before spawn, while a positively dead run
-is replaceable. This arrangement is the current deployment boundary, not a general licence for
-untracked daemons: every supervised process must have a run directory, identity record and socket.
+Head liveness and recovery rules are in [Head vitality](HEAD_VITALITY.md).
 
-A substantive reviewer verdict is not itself an effect. It parks the card in Assessment with the
-reviewer stopped and the worker of the round held, and the merge or the next round runs only on the
-tick that performs a decision the observer recorded (see [Tasks](PROTOCOLS.md#tasks)). Mechanical
-outcomes keep resolving in Validate, so the decision point sits where direction is decided and
-nowhere else.
+### Card workspaces
 
-Sprint budget is not the observer's self-report. The dispatcher reads the durable audit of the cards
-linked to a sprint and writes one budget event per source-event identity. Thresholds come from
-instance configuration, with defaults substituted before validation; the hard limit moves the entity
-to `stopped` and emits a separate durable `budget_hard_stopped` event carrying the reason. Observer
-reconciliation reads only open sprints, so such a stop takes down the live head and prevents a new
-one without touching cards that are already claimed. The resume entry lives in sprint metadata as a
-structured record, and its freshness is derived by comparing it against card audit, not against
-terminal history. `secretary status --json` reads the same entities and the live board.
+On the Orca backend one card occupies one Orca worktree. The worker has its own terminal. The
+reviewer opens as a split pane in the same worktree; the standalone-terminal fallback and its
+fail-closed rules are in [Operations](OPERATIONS.md#worker-and-reviewer-launch-intent). When review
+starts, the worker's head is stopped and its commit recorded, and the merge gate refuses a green
+verdict if the checkout has moved since. Orca decides where the worktree lives (from the binding's
+`orca_binding`). A returned worktree is accepted only if Orca's record ties it to this project's
+repository and this card's workspace name; otherwise it is removed before bring-up fails. Head
+rendering and delivery are adapter-specific, but not a stable plugin API.
 
-Orca remains the session manager and live terminal UI for the legacy backend. One card occupies one worktree: the worker
-gets its own terminal, the reviewer starts as a separate split pane in the same worktree, and both
-handles are kept apart in dispatcher state. A split rather than a second terminal, because on a
-headless server a freshly created terminal arrives as a background surface and does not materialise
-in a worktree the client already has open. Orca's `terminal_split_source_not_found` can arrive before
-or after its child attempt, so the dispatcher snapshots the pane inventory before the split and reads
-it again after that refusal. Only an unchanged inventory permits a standalone reviewer terminal in
-the same worktree; a newly visible pane leaves the launch fail-closed, avoiding a duplicate reviewer.
-The tick records the successful standalone route with `reviewer_fallback_reason`. Any other split
-failure remains fail-closed, because it may have already started a child and opening another pane
-would duplicate it. When review starts, the worker's head is stopped and its
-commit is recorded: the merge gate will not accept a green verdict if the checkout moved since.
-Where that worktree lives is Orca's answer, not the dispatcher's: workspaces are namespaced by the
-session manager's repo registration, which is the binding's `orca_binding`, and the Secretary project
-id has no say in the path. A returned worktree is accepted only when the session manager's own record
-says it belongs to this project's registered repository and carries this card's workspace name; one
-that does not is removed again before the bring-up fails, so a rejection leaves nothing registered.
-Launch and cleanup still depend on Orca's specific API; a target session protocol is a roadmap
-milestone. Head-specific rendering and delivery are confined to adapters, but that contract is not
-yet a stable plugin API.
+The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` belongs to the
+project adapter. It claims the environment with an owner record, adds its workspace paths to Git's
+`info/exclude`, and never writes production package paths into either environment. One immutable
+`ProductionRuntime` value binds the production interpreter, product root and `secretary` import at
+workspace creation, launch, gate, release and teardown; a mismatch keeps the worktree and blocks the
+card. Head-visible Secretary commands name the absolute production interpreter with `-P`. Details:
+[Operations](OPERATIONS.md#dispatcher-task-python-isolation).
 
-The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` is always the
-project adapter's namespace. It claims its reserved environment with an owner record before creating
-or populating it, and first adds the paths the pipeline writes (`.secretary-task-env/`, `/TASK.md`,
-`/state/checks/`, declared once as `WORKSPACE_EXCLUDES`) to Git's repository-local `info/exclude` so
-a blanket `git add -A` cannot capture runtime files and a broad-check receipt is never refused on a
-project with a clean `.gitignore`. Linked worktrees share that file; the idempotent entries
-intentionally outlive card cleanup and are redundant but harmless where tracked ignore already
-covers them. Existing project reservation and dispatcher serialization admit one card per
-project, so this hotfix adds no second concurrency subsystem around that shared append. It never
-enables system site packages or writes production package paths into either environment. Projects
-whose adapter declares `broad_check` but omits its interpreter are installed there from their
-`.[dev]` declaration, while adapter setup runs outside both environments and may create its own
-`.venv`. Worker and reviewer login shells put the dispatcher environment ahead of their ordinary `PATH`; an adapter's
-declared broad-check interpreter may still select its own `.venv`. Rework and retained review prepare
-a missing dispatcher environment before launch, which upgrades old retained workspaces in place.
-Non-mutating gate, release and cleanup boundaries accept an absent pre-upgrade namespace, but if the
-reserved namespace exists they require the same dispatcher owner record before proceeding.
-An adapter that declares no `broad_check` gets an intentionally bare reserved environment because it
-declared no candidate-install contract. The production virtualenv is never a general tool source for
-those roles. One renderer makes every head-visible Secretary task, report, verdict, broad and show
-command name the absolute production interpreter, `-P`, and registered production source. For a fit
-adapter that omits its interpreter, the wrapper
-passes the reserved candidate interpreter to the inner broad suite, whose receipt attests it. The
-same immutable `ProductionRuntime` value binds the dispatcher interpreter, registered product root
-and observed `secretary` import at workspace creation, launch, gate, release and teardown. A mismatch
-preserves the worktree and blocks the card.
-
-Before launching a head its CLI's first-run questions are answered on its behalf. Otherwise an
-interactive head sits in a dialog instead of working: it never goes idle, the prompt is never
-delivered, and bring-up ends up deferred. Only the missing entries are appended, foreign ones are
-left alone, and a path held at a different trust level stops bring-up with a visible reason rather
-than being silently overwritten.
-
-This is one preflight, not one per launcher. Every interactive Codex head follows the same order —
-ensure the workspace is trusted, create the pane, wait for readiness, deliver the prompt, confirm
-the turn — whether the dispatcher launches it for a worker, reviewer or observer, or a background
-tick launches it for a service agent. A launch command's own directory-trust flags state the intent
-but do not answer the question on their own, so the preflight runs before the pane exists; a
-workspace that cannot be prepared fails there, with nothing started and nothing recorded as having
-run. An operator-launched `secretary shell` session is excluded on purpose: a human is sitting in
-front of that terminal and can answer the dialog themselves.
+Before any interactive Codex head launches (worker, reviewer, observer or service agent), one
+preflight answers the CLI's first-run questions: it marks the workspace trusted, appends only missing
+entries, and stops bring-up with a reason if a path is held at a different trust level. Then the pane
+is created, readiness awaited, the prompt delivered and the turn confirmed. A workspace that cannot be
+prepared fails before anything starts. Operator `secretary shell` sessions skip the preflight.
 
 ## The read layer
 
-`secretary.webproto` is the one place the three operator questions are answered — what is the
-system doing, what is this card doing, what happened to it next — and it is deliberately separate
-from whatever serves those answers. Sprint 1425 puts a web dashboard on top of it and a Telegram
-head after that, and both read this, not their own collectors.
+`secretary.webproto` answers the operator's questions (what the system is doing, what a card is
+doing, what happened to it) for every transport: the `web-read` CLI and the web dashboard. A
+transport only maps typed errors to its own codes and renders snapshots.
 
-The separation buys one thing: a single set of beliefs about production. Two transports that each
-assembled "is the worker alive" would eventually disagree, and the operator would then have to
-work out which of their two dashboards was lying before they could act on either. So the layer
-owns the answers, and a transport owns only its protocol: it maps a typed error onto a status
-code or a message, renders a snapshot, and adds nothing to it. Nothing under `webproto` imports
-HTTP, sockets, a framework or a template engine, and a test asserts it.
+The layer collects no facts of its own. Health is `collect_status` (what `secretary status --json`
+prints); projects are the validated bindings; cards come from `TaskReader`; history is the board's
+append-only audit, so a cursor is a position in that audit; agents are dispatcher production state
+plus launch heartbeats.
 
-It also owns no facts. Health is `collect_status`, the collector `secretary status --json` already
-prints; projects are the instance's validated bindings; cards are `TaskReader`; history is the
-board's append-only audit journal, which is why a resumable cursor is a position in that journal
-rather than a new store; agents are the dispatcher's durable production state plus the launch
-heartbeats the head runtime already writes. Building a second collector for any of them would put
-a second answer next to a working one, which is the failure this layer exists to prevent.
+Constraints, enforced by tests:
 
-Two invariants are enforced rather than documented. The three reads never write: none of them
-mutates the board, the dispatcher state, the journal or the installation, and none takes an actor.
-And liveness is process state: a pane, terminal or window is not evidence about a head, for the
-reason `secretary head-status` exists — panes outlive, alias and stop drawing the processes behind
-them.
+- nothing under `webproto` imports HTTP, sockets, a framework or a template engine;
+- read operations never write the board, dispatcher state, audit or installation, and take no actor;
+- liveness is process state, never pane, terminal or window state.
 
-The protocol, its schema, its states and its cursor semantics are in
-[Protocols](PROTOCOLS.md#reading-the-pipeline).
+Protocol, schema, states and cursors: [Protocols](PROTOCOLS.md#reading-the-pipeline).
 
 ## The product runtime
 
-The other half of `secretary.webproto` is what produces what those reads show: the product raises a
-real worker head for a card and a real reviewer head by its result, and it owns the workspace, the
-process, the pid, the logs and the outcome of both.
+The other half of `secretary.webproto` raises a real worker head for a card and a reviewer head from
+its result, and owns their workspace, process, pid, logs and outcome.
 
-**Why it does not depend on Orca.** The pipeline's heads are Orca panes: `orca worktree create`
-makes the workspace, Orca's session store holds the pty, Orca's repository inventory knows what
-exists, and Orca's teardown removes it. That is a second lifecycle authority for something the
-product is supposed to own, and it costs three things this layer cannot pay. A pane is not
-evidence of a process — it is aliased, detached and redrawn empty over a working head — so a
-dashboard built on it reports a liveness that is not true. A pane's exit status is lost, so "it
-finished", "it exited 17" and "it was killed" collapse into one "the pane is gone". And a workspace
-Orca owns cannot be handed to a web transport without handing that transport Orca too. So on the
-start path and the result-reading path there is no Orca CLI, no Orca RPC, no terminal and no Orca
-repository inventory, and a test fails if any of them appears.
+It does not use Orca. The start and result-reading paths use no Orca CLI, RPC, terminal or repository
+inventory, and a test enforces this. It reuses existing parts: `LocalPtyHeadRuntime` through
+`head_runtime_backends.build_head_runtime`, the watchdog's launch-identity heartbeat for liveness,
+the supervisor journal for exit status, the head registry and `head.command.render_head_command` for
+the command, `codex_preflight` and `claude_env` for first-run preparation, and the board's audit
+for run events. New parts: a `git worktree` workspace, a durable run record and one admission gate.
 
-**What it reuses, rather than rebuilds.** Almost everything. The head's process is held by
-`LocalPtyHeadRuntime`, the supervised backend that already exists, reached through the product's one
-name-to-backend mapping (`head_runtime_backends.build_head_runtime`) with a session factory that
-raises — there is no second supervisor here. Liveness is the same launch-identity heartbeat and the
-same reader the watchdog uses. The exit status is the supervisor's own journal. Which head runs is
-the head registry, and the command is `head.command.render_head_command`; a Codex head goes through
-the same `codex_preflight` the pipeline uses, and a Claude head through the same `claude_env`
-first-run preparation. The card and the project are the identities the pipeline already has. The
-run's two events go onto the board's own audit journal, so the read layer shows them with no second
-history. What is genuinely new is small: a workspace cut with `git worktree` instead of by Orca, a
-durable run record, and one admission gate.
+Invariants:
 
-**One place owns the order between a process and the record of it.** A run's phases —
-`claimed → raising → raised → settled` — move in one function, and every path that can spawn or
-close goes through it. The reason is a history rather than a preference: three separate defects of
-this runtime were all the same defect, in which "a process may now exist" and "the durable record
-says so" were ordered by three different pieces of code that were each free to order them
-differently. The invariant that function holds is that the record which can *find and stop* a head
-is durable before a spawn can produce one, that the record alone is enough to stop it (the
-supervised backend addresses a head from the run id and pid path, never from what the spawning
-process remembers), and that a cleanup which could not be confirmed is written as unresolved rather
-than as an ending. An unresolved run is not over and not settled, which is exactly what the
-admission gate already refuses a second run over — the fence is an existing rule, not a new one.
+- Run phases `claimed → raising → raised → settled` move in one function, and every spawn and close
+  goes through it. The record that can find and stop a head is durable before the spawn. The record
+  alone is enough to stop the head. An unconfirmed cleanup is recorded as unresolved, and admission
+  refuses a second run beside an unresolved one.
+- "The run is over" is a boolean set by the lifecycle: the process is confirmed gone, or none was
+  spawned. It is the only thing admission checks. The run's outcome is derived separately and may be
+  `source_unavailable`.
+- Raising a head and publishing its start, and settling a run and publishing its end, are separate
+  durable writes. Every repeat and every read of a settled run republishes what it owes. Events are
+  pure functions of the run record. A request id owns an operation and its inputs.
+- `webproto.admission.admit` is the one ownership check: a product run is never a second owner of a
+  dispatcher attempt or a card in a sprint's reserved projects.
 
-**"This run is over" and "this is how it ended" are two facts.** They must be, and the reason is
-what the conflation cost. A run's outcome is one of the read layer's five words, and for a while
-"the run is over" was computed *from* that word: a run counted as over when its value was
-`finished` or `process_failed`. Two of the five therefore carried a second meaning nobody had
-chosen for them, and the consequences ran both ways. A card was freed only by a run whose ending
-had a name, so a head that was confirmed gone while its journal could not be read had to be given
-one before its card could be released — and the only name available was `process_failed`, an
-accusation against a process nobody watched fail, written into the card's own history where no
-later read can withdraw it. Withheld instead, the same run would have fenced its card forever. The
-product had a choice between lying and deadlocking because one value was answering two questions.
-
-So the fact is now a boolean on the record: this run is over when the process it may have held is
-provably gone — a stop this product confirmed, or a launch identity that says there is nothing
-there — or when no process was ever spawned under it. It is established by the lifecycle, which is
-the only place that can establish it, and it is the only property the admission gate consults. What
-a run ended *as* is derived separately from whatever evidence exists, keeps the same five words, and
-is free to say `source_unavailable`: the run is over and what it did could not be established. That
-sentence is true, publishable and terminal, and before the split there was no way to say it.
-
-**Two durable writes are never assumed to be one.** Raising a head and putting its start on the
-card's history are separate durable facts, and so are settling a run's ending and publishing it. So
-publication is a property every path restores rather than a step of the path that created the run:
-an idempotent repeat, and every read of a settled run, republish what that run owes before
-answering. The events are pure functions of the run record — which is why the ending records the
-exit status and the result it was read off, rather than re-deriving them from a run directory a
-sweep may have removed — so a replay rebuilds the record the journal already holds instead of a
-second, differing one. For the same reason a request id owns an *operation and its inputs* and not
-just a run: an idempotency key that could be reused across two different commands would hand a
-caller a document about a run that answers a different question.
-
-**And one owner of a card.** The production dispatcher takes cards from its own lane and an open
-sprint reserves its projects; a product run must be neither a second owner of an attempt nor an
-intruder in a sprint. One function decides that — `webproto.admission.admit` — out of rules that
-already exist, and every path that raises a head goes through it.
-
-Its operations, their idempotency, the ownership rule and the outcome vocabulary are in
-[Protocols](PROTOCOLS.md#running-the-pipeline).
+Operations, idempotency, ownership and outcomes: [Protocols](PROTOCOLS.md#running-the-pipeline).
 
 ## The web transport
 
-`secretary.web` serves a dashboard and a card page over HTTP, and it is the *second* transport over
-the layer above rather than a second source of truth. The first is `secretary web-read` /
-`secretary web-run`: argparse in, JSON out, a typed protocol code turned into an exit status in one
-table. This one is the same shape with a different vocabulary — a request line in, JSON or HTML
-out, a protocol code turned into an HTTP status in one table (`secretary.web.statuses`). One route
-is one operation of `secretary.webproto`, listed in `secretary.web.app.ROUTES`, and the transport
-holds no snapshot, no state derivation, no liveness rule and no mutation of its own.
+`secretary.web` serves the dashboard, card, sprint, project and history pages and a JSON API over
+HTTP, using the standard-library `http.server`. It is a transport like `web-read`/`web-run`: each
+entry of `secretary.web.app.ROUTES` is one `secretary.webproto` operation, and one table
+(`secretary.web.statuses`) maps protocol codes to HTTP status. It holds no snapshot, state derivation,
+liveness rule or mutation of its own. A missing fact is added to the layer, not to a page.
 
-That is the whole reason it is a package beside the layer instead of code inside it. If a page
-needed a fact this installation does not already answer, the repair is a change to the layer, where
-every transport gets it at once — not a query written into a page, which is how two dashboards come
-to disagree about whether a worker is alive. The dependency is one-way and checked: nothing under
-`secretary.web` imports anything of the product except `secretary.webproto`, and nothing under
-`secretary.webproto` imports HTTP, sockets, a framework or a template engine.
+Constraints:
 
-**No web dependency was added.** `http.server` from the standard library is enough for a service
-that reads three documents and posts two, and the project's dependency set stays PyYAML, jsonschema
-and cryptography.
+- `secretary.web` imports nothing from the product except `secretary.webproto`.
+- No session state. Cursors belong to the client, and repeated POSTs carry the client's request id,
+  so a retry never raises a second head.
+- Every public `webproto` operation is wrapped by `webproto.boundary.ProtocolBoundary`, which turns an
+  implementation failure into `backend_unavailable`. One unreadable source marks its page section
+  unavailable instead of failing the page.
+- Loopback only. The service has no authentication and its POST routes start heads and change
+  state. A non-loopback bind is refused before a socket exists, after resolving the name and
+  checking every resulting address.
+- A run is shown as two facts: what its process did (outcome and whether it is over) and what it
+  produced (result document, verdict, exit status).
 
-**No session state.** The cursor a client watches a card with is the client's, so a reload or a
-reconnection resumes from where that client was, two viewers of one card cannot disturb each other,
-and a restart of the service loses nothing. Idempotency is the layer's: a repeated POST carries the
-client's own request id and is answered with the run that already exists, so the transport cannot
-raise a second head even when a browser sends the same command twice.
+`secretary-web.service` runs it on `127.0.0.1:8787`. A product run started through it must name a
+head-registry profile that declares `local-pty`.
 
-**One error contract, kept in one place.** The web transport holds one table from protocol code to
-HTTP status and catches `ReadError` once, and that is only affordable because the layer guarantees
-nothing else leaves it. The guarantee is structural rather than remembered: both layers inherit
-`secretary.webproto.boundary.ProtocolBoundary`, which wraps every public operation and turns an
-implementation failure into `backend_unavailable`. So an unreadable product-run record marks the
-product-runs section of a card page unavailable, beside a card state, history and result that are
-read from other sources and still shown -- rather than taking the page down.
-
-**Loopback only, and it stayed that way when the pipeline was published.** It has no password, no
-TLS and no authorisation, and its POST routes start real heads, so reaching the port is owning the
-pipeline. A non-loopback bind is refused in code before a socket exists -- by resolving the
-requested name and refusing unless every address it resolves to is loopback, since a spelling check
-would let a host's own mappings publish it. DoD 5 did not touch that refusal, and the reason is
-below.
-
-**What a page shows about a run, and why it is two columns.** A run carries two answers that are
-not one: what its *process* did — one of the read layer's five values, with whether the run is over
-beside it — and what the run *produced*, which is the head's own result document, the verdict on it
-when there is one, and the exit status its supervisor recorded. Drawn as one column they collapse:
-a review that called the work `red` and a review that called it `green` both ended normally, so the
-state word is identical and the only thing a card page is opened to find out is missing. Drawn
-apart, a failed run reads as a failure carrying its exit status, and never as a run with nothing to
-show — which is what an open run has, and a different thing.
-
-**It is installed, and the profiles it runs on are installation configuration.** `secretary-web.service`
-runs this transport on `127.0.0.1:8787` and the guarded front publishes it; a product run started
-through the front names a profile from this installation's own head registry, and only one that
-declares the supervised backend. So which head does the work is a registry entry rather than a code
-path, and the scenario reproduces from the installation instead of from a file in somebody's
-checkout.
-
-Its routes, its code-to-status table and its cursor semantics are in
-[Protocols](PROTOCOLS.md#serving-the-pipeline-locally); running and stopping it is in
+Routes, status table, cursors: [Protocols](PROTOCOLS.md#serving-the-pipeline-locally). Running it:
 [Operations](OPERATIONS.md#the-local-web-transport).
 
 ## The guarded front
 
-Outside access to the pipeline is a password over TLS, and none of it is this product's code.
-`secretary.webfront` renders a configuration for Caddy -- from the Ubuntu archive, not a GitHub
-release -- which terminates TLS, checks the owner's password with `basicauth` against a bcrypt hash,
-and proxies to `127.0.0.1`.
+External access is TLS plus one password, and the product contains no authentication code.
+`secretary.webfront` renders a Caddy configuration (Caddy from the Ubuntu archive) that terminates
+TLS, checks the owner's password with `basicauth *` against a bcrypt hash, and proxies to loopback.
 
-**Why the protection is taken ready-made.** Password authentication is a thing to get exactly right
-and nothing to invent: constant-time comparison, a work-factored hash, a challenge that leaks
-nothing about which half was wrong, TLS termination, HTTP/2 and HTTP/3, and years of other people's
-bugs already found. Writing that here would put a security-critical implementation into a product
-whose subject is a task pipeline, and would have to be maintained by whoever is holding this
-repository next. So there is no authentication code in this product at all: there is a
-configuration, and a reader that audits it.
+- The front is the only public listener; the application cannot bind anywhere else, and pages call
+  the read layer in-process, so there is no internal HTTP surface.
+- `secretary.webfront.guard` parses the rendered file and reports every entry of
+  `secretary.web.app.ROUTES` that would be answered before the password check.
+- The password and its hash live in the installation secret store. The rendered file is `0600` state
+  under the data directory; rotation is `set-password`, `render`, restart, with no commit.
 
-**Why the application stayed loopback.** The alternative was to teach the transport a password and
-let it bind a public address. That trades one boundary for many: every route, every future route
-and every page would then have to remember the check, and the property "no unauthenticated request
-can reach this process" would become an assertion repeated in code rather than a fact about the
-network. Keeping the refusal makes it a fact. There is exactly one listener on a public interface,
-it is the front, and the thing behind it cannot be bound anywhere a second listener could be. The
-pages call the read layer in-process rather than over HTTP, so there is no internal HTTP surface
-for a request to appear on either.
-
-**Why one guard for the whole site.** `basicauth *` guards every path, so protection is not a
-property somebody has to add to each new route. `secretary.webfront.guard` checks the converse:
-it parses the rendered configuration and reports every entry of `secretary.web.app.ROUTES` -- the
-same table `docs/PROTOCOLS.md` publishes -- that something would answer before a password was
-checked. That is what makes "forgetting a route" impossible rather than merely unlikely, and it is
-the same shape as the operation registry in the error contract: the surface asks the table, the
-table is not copied into the test.
-
-**Where the credential lives.** In the installation's secret store, both halves of it: the
-password and its bcrypt hash. The repository holds a renderer, not a hash; the rendered file is
-mode-0600 machine state under the data directory and is produced from the store on demand, so
-rotating the password is `set-password`, `render`, restart -- and no commit.
+Commands: [Protocols](PROTOCOLS.md#publishing-the-pipeline-the-guarded-front). Runbook:
+[Operations](OPERATIONS.md#the-published-web-front).
 
 ## The sprint observer head
 
-An open sprint gets its own observer head. It is neither an interactive session nor a worker: an
-observer never claims cards, never appears in card records and never occupies the per-project claim
-gate. The sprint's cards are claimed and executed by the dispatcher independently of it.
+Each open sprint gets its own observer head. It never claims cards, never appears in card records
+and never takes the per-project claim gate; the dispatcher runs the sprint's cards independently.
+Operator view and states: [Operations](OPERATIONS.md#sprint-observer-heads). Sprint contract, the
+declared observer and the observer fence: [Protocols](PROTOCOLS.md#sprints).
 
-The same production tick that drives cards runs a separate reconciliation pass against the sprints
-board:
+The production tick runs an observer reconciliation pass against the sprints board:
 
-- open sprint with no live head: launch one;
-- open sprint with a live head: do nothing, exactly one head per sprint;
-- open sprint whose head's own launch identity says the process is dead: launch a replacement,
-  whether or not a card event is waiting for it. A quiet queue is a reason not to wake a head that
-  is there, never a reason to leave the sprint without one — the fence over that sprint's cards
-  reads the same heartbeat and holds until a head is adopted, so leaving a dead one alone stopped
-  the sprint until an operator commented on one of its cards. Only positive death counts: a launch
-  identity that is missing, half-written or unreadable answers nothing, and a bring-up on it would
-  open a second head beside a live one. A replacement that is itself found dead is bounded by the
-  same persisted backoff a failed launch uses, so a head that dies at every bring-up costs one
-  attempt per backoff window rather than one per tick, and a bring-up the host refused is retried
-  on that same backoff: the quiet-queue answer never overwrites a record that still owes a launch;
+- open sprint, no live head: launch one;
+- open sprint, live head: nothing (one head per sprint);
+- open sprint whose head's launch identity positively shows a dead process: launch a replacement, on
+  the persisted launch backoff. A missing or unreadable identity is not death;
 - closed or vanished sprint: stop the head and drop the record;
-- unreachable sprints board: touch nothing, an unanswered board is not a closed sprint.
+- unreadable sprints board: change nothing.
 
-A stop the host rejected does not count as a stop. The record keeps its handle in a `stop-pending`
-state, no stop event is written, and the tick retries until the terminal is really closed. Dropping
-the record earlier would leave a live head that nothing points at. For the same reason a relaunch
-after a dead pid is deferred if the old terminal could not be closed: two heads on one sprint is
-worse than none.
+A stop the host rejected is not a stop: the record stays `stop-pending` with its handle, and a
+relaunch waits until the old terminal is closed.
 
-The head profile is the sprint's own: `sprint_observer` holds one concrete profile or `none`, and the
-launch resolves that profile against the installation's `heads/heads.yaml` snapshot without any fallback.
-A sprint declaring a profile the snapshot does not have is corrupt and fences its own projects rather than
-launching on a default. `role_defaults.observer` never decides what a sprint runs; it only labels an
-observer record that is filled in with no sprint to read.
-The profile is interactive, because an observer is one continuous session for the whole
-sprint: a one-shot launch would exit after the first turn and the tick would read that as a dead
-head. The same resource-readiness gate that runs before claiming a card runs before launch; an
-unavailable resource means a deferred launch, and the next tick tries again.
+The head profile is the sprint's declared `sprint_observer`, resolved against the installed
+`heads/heads.yaml` without fallback; an unknown profile fences the sprint's projects.
+`role_defaults.observer` never chooses it. The profile is interactive (one session per sprint). Launch
+passes the same resource-readiness gate as a card claim, uses the ordinary head-command renderer and
+role environment wrapper, and gets only role-scoped environment, not the whole `runtime.env`.
 
-The head is launched through the ordinary head-command renderer and the role environment wrapper, so
-an observer gets exactly the environment a dispatcher-launched role is entitled to (board credentials
-and the instance and product-root pointers), not the whole `runtime.env`. It has its own workspace
-and its own terminal handle.
+The observer workspace is cut from a dispatcher-owned empty repository without a remote
+(`<data>/dispatcher/observer-root/observers`, created on first use and registered with Orca). It never
+gets a project checkout. Reconciliation neither creates nor deletes this repository, and `doctor`
+accepts its registration only at that path. Stopping closes all terminals of the workspace, then
+removes the worktree registration.
 
-That workspace is registered with the session manager like a worker's: a terminal is only handed out
-for a registered workspace selector, and a directory the session manager does not know about is not a
-selector. The observer gets no project checkout: its workspace is cut from a separate empty
-repository without a remote, which the dispatcher creates on first use. That repository is a managed
-resource of the installation, derived from the data directory when the production dispatcher
-component is enabled. Reconciliation neither creates nor deletes this lazy resource, and `doctor`
-accepts its registration only at that path; before the first observer, its absence is normal.
+The launch prompt is rendered from the live sprint entity and points to the `observe-sprint` role
+skill by path without repeating it. The skill lives in `skills/` of this repository, is registered as
+the `observer` role in `skills/manifest.toml` and is delivered by `secretary role-skills sync` to the
+shell of every profile a sprint may declare. If the skill is missing from the target shell, launch is
+deferred with a reason naming the file.
 
-Stopping goes through the workspace: stopping terminals by worktree kills all of the observer's panes
-at once, after which the worktree registration is removed. A closed sprint leaves neither terminal nor
-workspace behind. The launch prompt is rendered from the live sprint entity at launch time: reference,
-goal, Definition of Done text, repositories, status, current card, budget state and the path to the
-role skill.
+### Wakes and delivery
 
-### The observer role and its skill
+Liveness uses the same pid heartbeat as workers and reviewers. Readiness is Orca's `tui-idle`,
+classified as ready, busy, blocked (dialog) or unanswerable. A head that cannot be addressed or
+probed goes into the bounded failure path, not a wait.
 
-What an observer does while running a sprint is defined by the `observer` role in the role-skill
-registry (`skills/manifest.toml`) and its `observe-sprint` skill. The canon lives in this repository
-and is delivered to shells by the same `secretary role-skills sync` as every other role skill. The skill
-must be delivered to the shell of whichever profile a sprint declares, so a sprint opened on a profile from
-another shell also needs a delivery target for that shell. `role_defaults` decides delivery for the other
-roles, not the observer's profile.
+A committed, significant event on a linked card opens a durable delivery batch with an immutable
+high-water mark, written before a nudge or replacement. Only an observer resume carrying that
+delivery's audit marker acknowledges the batch. An active card alone does not create a turn. A batch
+is redelivered when the head is seen ready without acknowledging it, or when its acknowledgement
+deadline passes; a head never ready for input is bounded by a turn ceiling. Failed wakes retry a
+bounded number of times on the live head, after which the head is replaced and the same delivery
+marker is carried into the new launch. Cumulative wake and launch-delivery counts and the last
+failure's bounded evidence (never prompt text) stay on the observer record while the sprint is open.
 
-The skill is self-sufficient for a fresh head with no transcript: recovering state from the sprint
-entity and the live board, checking the Definition of Done against current `main` before each new
-card, how to pick the next step, doing its own research instead of filing a research card, exactly
-one fresh card at a time, a reviewer from a different family than the worker, watching a card to a
-terminal state, reading reports and verdicts, the classes of Blocked, the narrow conditions for a
-hotfix, behaviour at budget thresholds, the limits of the role, and a closing checklist. Writing a
-resume entry after every significant transition is a requirement of the skill.
+All interactive heads share one delivery path, whichever provider or role:
 
-The launch prompt references that file by path and does not repeat its instructions: two texts about
-one job drift apart, and the head follows the stale one.
+- The pane receives one short line with the absolute path of a task document (the worker's `TASK.md`,
+  the reviewer's private review document under run artifacts). Nothing from a card description
+  reaches a terminal write.
+- Delivery has observed stages: payload written, Enter taken, turn observed, caller acknowledgement.
+  The pane is fingerprinted before and after the send (composer content and Orca's opaque output
+  cursor). A composer still holding the payload is re-entered, an empty one is rewritten, and an
+  advanced cursor counts as a taken turn. Retries are bounded; host refusals surface as delivery
+  failures with evidence.
+- A turn is confirmed from the provider's own local session record (Claude or Codex). The status line
+  may confirm a turn but never refute one.
+- An unconfirmed delivery does not close the pane. Bring-up returns an abort with evidence and keeps
+  the launch intent; the next tick adopts the head or stops it through its retained identity.
+- Reviewer bring-up failures go through one recorder in `start_review`, which stores
+  `review_delivery_failures` and `review_delivery_evidence` on the card without changing routing.
 
-A head is never launched blind. Before preparing an observer, the tick checks that the role skill is
-present in the shell of the head being launched. If it is missing, the registry is unreadable, or that
-shell has no `observer` target at all, the launch is deferred with a reason naming the missing file.
-The reason lands in the observer record and is visible in the external summary. A head without
-instructions would improvise a sprint from a single entity, which is worse than a sprint waiting for
-the next tick.
+### Durability
 
-Liveness uses the same pid heartbeat as worker and reviewer. A live head can still have finished its
-turn, so the dispatcher also asks Orca whether the pane is ready for input and reads its terminal
-output time. Readiness is `tui-idle`, the same signal the delivery path waits on before it sends to
-any head, so the answer does not depend on which provider the observer profile names. It has three
-answers, not two: ready, busy (a pane that is working, or the condition unmet before the probe's
-deadline), blocked (a pane held in a dialog, which is not ready and is not working on a prompt
-either) and unanswerable. Orca leaves the command with a non-zero status for a busy pane as well as
-for a failure, so the answer is read from the body it printed rather than from the outcome. A pane
-nothing can be sent to at all, because the record has no handle, because Orca no longer lists that
-terminal or because it is disconnected, is not a busy head either: it enters the same bounded
-failure path. A probe that cannot be answered is not a busy head; it enters the
-same bounded failure path as a refused delivery, because a head nobody can ask about is not one the
-sprint can wait on. A ready pane exposes `idle-grace` in the observer record, but does not relaunch
-it by itself. A committed,
-successful non-routing, non-guard-denied event on a linked card opens one durable delivery batch. Its immutable high-water mark is
-written before a nudge or replacement launch, and only an observer resume carrying that delivery's exact audit
-marker can acknowledge the specific batch, including one whose delivery was refused: that marker
-only exists in a prompt that reached the head, so its resume ends the batch rather than earning a
-second turn. Events
-that arrive before the intent coalesce; later events wait for the next batch. A dead head is replaced only for
-pending work. An unacknowledged batch is sent again as soon as its head is seen ready for input, and
-otherwise once its acknowledgement deadline (30 minutes by default) expires; a head that is never ready for
-input at all is bounded instead by a turn ceiling, after which the delivery fails — the long compatibility
-ceiling for a head with no attested provider-progress source, and a much shorter one for a head whose
-source never became admitted, which nothing else can end the wait for. Failed
-wakes carry their reason and bounded retry time in the observer record, and a batch that has spent
-those retries is delivered by replacing the head rather than by retrying it again.
+Lifecycle events go to the durable audit keyed by sprint reference and are deduplicated by request id,
+which includes the record generation. As with card writes, the event is staged, the host is called,
+then the event is committed. A staging failure cancels the action. A commit failure keeps the effect,
+leaves the event pending for `secretary task reconcile-audit`, and reports a pending audit.
 
-An active card does not itself create another observer turn. Once the pane is ready for input again,
-the head is `idle-grace` even if its linked card remains active; the next significant durable card
-event wakes it. If that event arrived while the head was still working, the dispatcher keeps the
-pending event and checks again on later ticks, delivering the nudge as soon as the pane is ready.
+The launch intent (sprint, generation, profile, attempt, workspace, pid file) is flushed to production
+state before the host call; unwritable state means no launch. A tick that dies after the host call
+leaves the intent, and the next tick adopts a live pid, waits out the startup window, or closes the
+workspace terminals and relaunches.
 
-The wake itself goes through the one delivery path every interactive head has, whatever provider it
-runs and whichever role owns it: a Codex launch, a worker or reviewer continuation and an observer
-wake are the same primitive. Delivery there is four observed stages, not one: the payload written
-into the pane, the Enter taken, a turn observed, and the caller's own acknowledgement. `terminal
-send` answering `accepted: true` with a byte count is only the first, and Orca calls a pane holding
-an unsent composer `tui-idle` because it really is idle — which is how a prompt that was pasted and
-never entered reported as delivered (`issue:13dd4d88df6b33cfb98f`). So the pane is fingerprinted on
-both sides of the send: what the composer holds, and where its output has got to. That position is
-Orca's own `nextCursor`, kept opaque and only compared: the retained tail is a bounded window, so a
-quick turn can append output the tail no longer shows and a repainting TUI can print without the
-returned lines differing at all. Only a runtime that answers a read without a cursor falls back to
-a digest of the tail, and the evidence says which of the two it was. A composer that is holding what
-the send put there is re-entered; one that is empty with nothing printed is written again; a pane
-that went to work, or whose cursor advanced, has taken a turn — including one that began and ended
-between two readiness probes, which readiness alone reports as a pane that stayed ready. Retries
-stay bounded and a delivery that runs out of them refuses upwards with the stage it reached. So
-does the transport itself: a `terminal wait` or `terminal send` the host refuses is a delivery that
-did not happen, and it leaves the boundary as an evidence-carrying delivery failure rather than as
-a bare host error a caller could only persist as prose. A worker or reviewer continuation is delivered once
-its own head's turn has visibly started, which is that role's long-standing criterion, and an
-observer wake stops one stage earlier for the same reasons rather than under a weaker rule.
-Observer delivery
-acceptance is deliberately separate from its causal acknowledgement: the terminal path proves that
-the prompt was taken, then returns without polling the audit log; the next normal reconciliation
-reads one audit snapshot and closes the batch only if it contains a resume naming that delivery.
-A wake the pane never took reaches the tick outcome and the
-delivery record as an explicit failure with its reason. That failure is retried on the live head a
-bounded number of times (`SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS`, 3 by default) on the existing
-backoff; once they are spent, the batch goes to the ordinary replacement path, which stops that head
-before it opens the next one and carries the same delivery marker into the new launch, so the resume
-that finally arrives still acknowledges the batch that was owed.
-
-What was delivered, and what was not, is sprint evidence rather than delivery state. The batch's own
-retry counter is reset by an acknowledgement, by a replacement head and by the next batch, and has
-to be. Beside it the observer record keeps cumulative counts that nothing resets while the sprint is
-open: wake attempts and failures, launch-delivery attempts and failures, the last failure's reason
-and subject, and the last attempt's bounded evidence — terminal identity, payload size and hash,
-the stage reached, the composer and output fingerprints, and why it stopped. Never the prompt text.
-The counts are wake-scoped and launch-scoped on purpose: a reviewer that failed to come up on a card
-is a different subject with its own counters on that card's record, and "the reviewer launched
-normally" was the answer that hid three refused observer wakes from a sprint's closing resume
-(`issue:83ac17afc53248340f4c`). Every prompt a bring-up puts in front of a head counts as a launch
-delivery, including the first launch of a sprint, which carries no batch at all — a launch with
-nothing owed writes no retry state, because there is nothing to redeliver, but it is still counted
-and its evidence still kept. They reach the head that has to report them through the wake message
-and through a replacement head's launch document, and they are readable from outside in
-`sprint status` (`observer.delivery`) and in `secretary status` (`delivery_failures`).
-
-What the input channel carries is bounded: a task is a document on disk and the pane receives one
-short line naming its absolute path. Both roles are nudged that way and both bring-ups are told the
-document they nudged at: the worker at the `TASK.md` in its checkout, the reviewer at a review kept
-out of the checkout. The reviewer was the first for which the rule was enforced rather than merely
-followed; the worker followed it in the prompt it sent and not in the record it kept, which is how a
-bring-up came to answer an unconfirmed pointer by closing the pane behind it. Its review — description, dispatcher-owned exact-SHA gate receipt, verdict
-commands, some 12 KiB of it — is written under the run artifacts, private, because a workspace's
-identity is the tracked diff and untracked files a receipt hashes to say which code it is evidence
-for. The nudge is derived from that path alone, so nothing a card description carries (an ESC, a
-bracketed-paste terminator, the CRLF the board's web form submits) can reach a terminal write, and
-there is no payload left for a composer to swallow: the 24 consecutive `payload-left-in-composer`
-failures that stopped two products on `codegen-orchestrator-1165` were all large pastes, and short
-lines have never failed. A retry re-renders the same document and sends the same pointer, so the
-head always opens the round's current task. The delivery record says which mode it was and which
-document it named, and never what the document says.
-
-The pane's fate is not decided by that delivery's classification, whichever role's head is in it. A
-nudge the boundary could not confirm is ambiguous by construction — the head may well have taken it
-— so the bring-up hands the pane back as an abort with its evidence rather than closing it, the
-launch intent stays on disk, and the next tick either adopts that head or stops it through its own
-retained identity with the cleanup recorded as the initiator. Closing a pane on a classification is
-what killed reviewers that had their task in hand, and then six consecutive Claude workers on
-`codegen-orchestrator-1166` that had taken their prompt and started work.
-
-What the classification is made of is the head's own provider record, not its screen. Claude and
-Codex both persist a user turn locally, and a turn recorded after the send boundary is the proof;
-the pane's status line is a secondary hint that may confirm and may never condemn. That asymmetry is
-not a preference. Both readings are claims about another product's format, and both had gone stale
-at once by 2026-08-11: `~/.claude/projects` names a project directory after the workspace path with
-every non-alphanumeric character replaced, so a `codegen_orchestrator` workspace was being looked
-for under a directory Claude Code has never written, while the status-line pattern still expected a
-spinner glyph and a `(4s · ↑ 13.2k tokens)` suffix that the current version does not paint. Neither
-could fire, so every delivery was unproven — and the bring-up that trusted that verdict killed the
-heads. The rules are held against the real catalogue and the real pane text in
-`tests/test_dispatcher_tui.py`, because a unit test that builds its fixture with the same rule it is
-asserting cannot detect the drift that matters.
-
-The reviewer keeps the same evidence on its own record. A reviewer prompt that the shared boundary
-saw fail leaves `review_delivery_failures` and `review_delivery_evidence` on the card, because the
-pane cannot be asked afterwards for what it did with the prompt. Every reviewer
-bring-up failure goes through one recorder in `start_review`, before any branch takes a transition,
-writes a launch intent, decides a retry or returns an outcome — including the ambiguous abort, where
-the pane is still open and the intent has to be kept: the evidence is written first, and refusing to
-open a second reviewer still outranks the ordinary infrastructure retry. One point means no branch
-can forget and none can count twice. A failure carrying no evidence records none: a split that would
-not open is an infrastructure failure, and it must not be tallied as a prompt that was refused.
-It changes no routing:
-the card still takes the infrastructure-retry transition it took before, with its green gate
-receipt, candidate SHA, report round and held worker untouched, and unlike the infrastructure
-counter beside it the delivery evidence is not cleared by a reviewer that later takes the checkout.
-
-All lifecycle events go to the same durable audit log keyed by the sprint reference and are deduplicated
-by request id. The record's generation is part of that id, so a sprint reappearing on the board starts a
-fresh cycle of events instead of being deduplicated against the previous one.
-
-Ordering matches card writes: the event is staged first, then the host is called, and only then is
-the event committed. Storage that fails at staging cancels the action itself, because an unrecordable
-action is worse than a deferred one. Storage that fails at commit is not surfaced: the effect already
-happened, the record is saved anyway, the event stays pending and is repaired by
-`secretary task reconcile-audit`, and the tick outcome reports a pending audit. Otherwise a live
-terminal would have no record and the next tick would launch a second head onto the same sprint.
-
-The record itself is persisted the same way and for the same reason. The launch intent — sprint,
-record generation, head profile, attempt number, workspace and the future head's pid file — is
-written to production state and flushed to disk before the host call, not at the end of the tick.
-Unwritable state means the head is not launched at all: a data-plane failure costs the sprint a tick,
-not a second head. A tick that dies between the host call and its own end leaves the intent on disk,
-and the next tick resolves it from the pid file: a live pid is adopted as this sprint's head, a pid
-file that has not appeared yet within the usual startup window is not treated as death, and anything
-else closes the workspace's terminals and launches again.
-
-Pause behaviour: a freeze stops observer heads along with everything else and records the reason;
-resume clears the mark and the head returns on the next tick through the same reconciliation. A
-drain leaves a live head alone and launches no new ones, but a sprint opened during a drain still
-gets a deferred record with its head profile and reason, because an open sprint must be visible from
-outside.
+A freeze stops observer heads and records the reason; resume brings them back through reconciliation.
+A drain leaves live heads alone and launches none, but a sprint opened during a drain still gets a
+deferred record.
 
 ## Memory plane
 
-Facts are markdown records under `state/memory/facts` in the instance repository. The curator is the
-writer role and writes through `secretary memory propose/commit/supersede`; the protocol commits only
-`state/memory` under the shared instance-repository writer lock. The butler is a proposer, not a writer:
-it may stage a fact for the curator inbox with `secretary memory propose`, and canonical `commit` and
-`supersede` stay with the curator, secretary and operator roles
-([Protocols](PROTOCOLS.md#memory)). Other heads read through MCP. The
-NDJSON export and the SQLite/vector index in the data directory are rebuilt from the canon. Only one
-index writer may publish derived state at a time.
+Facts are markdown records under `state/memory/facts` in the instance repository. The curator writes
+through `secretary memory propose/commit/supersede`, which commits only `state/memory` under the
+shared instance-repository writer lock. The butler may only `propose`; `commit` and `supersede` belong
+to the curator, secretary and operator roles ([Protocols](PROTOCOLS.md#memory)). Other heads read
+through MCP. The NDJSON export and the SQLite/vector index in the data directory are rebuilt from the
+canon, and one index writer publishes at a time.
 
-Unresolved cross-project conclusions are quarantined under `state/memory/facts/po-review`, exposed as
-the distinct `review:po` scope. They remain visible to the interactive PO and installation-wide curator
-and retro duties for manual triage, but are not included in worker, reviewer, observer, or steward scope
-grants. A reviewed item is superseded into its final global or project scope; until then it is explicitly
-pending review rather than project canon.
+Unresolved cross-project conclusions sit under `state/memory/facts/po-review` as scope `review:po`.
+The interactive PO, curator and retro see them; worker, reviewer, observer and steward grants do not.
+A reviewed item is superseded into its final scope.
 
-The shipped `packaging/memory/product-secretary` pack is a second input to that same canon, not a second
-database. Its facts live at `state/memory/facts/product-secretary` and resolve as `product:secretary`.
-Before materialization the selected product checkout's complete manifest, safe paths, regular files and
-SHA-256 digests are verified. `state/memory/packs/product-secretary.json` records the installed digest and
-the facts the pack owns: local facts may share its scope under different ids, but a local collision with a
-shipped id is refused. Added and changed facts publish through the normal export; the warm service's
-incremental reconciliation reuses embeddings whose id and content digest are unchanged and removes absent
-shipped facts without touching local or project facts.
+The shipped `packaging/memory/product-secretary` pack feeds the same canon at
+`state/memory/facts/product-secretary` (scope `product:secretary`). Its manifest, paths and SHA-256
+digests are verified before it is materialised. `state/memory/packs/product-secretary.json` records
+the installed digest and owned fact ids; a local fact with a shipped id is refused. Incremental index
+reconciliation reuses embeddings with unchanged id and digest. The ledger is `pending` until the
+export is handed to the memory daemon's runtime user, then `ready`, so a failed handoff is retried by
+the next upgrade.
 
-The ledger is `pending` while a changed canon awaits export publication and becomes `ready` only after the
-export files have been handed to the memory daemon's runtime user. That makes a failed root-run handoff
-visible and makes the next `--no-pull` upgrade retry it rather than treating a stale index as current.
-
-The embedding model is loaded locally and is the appliance's main memory consumer; see
-[Operations](OPERATIONS.md#system-requirements) for what has and has not been established about the
-supported minimum.
+The embedding model runs locally and is the appliance's main memory consumer
+([Operations](OPERATIONS.md#system-requirements)).
 
 ## Knowledge planes
 
-Knowledge is split across three planes, and "where does this go" is decided by the length and purpose
-of the record. The Pipeline board holds executable work: cards, specs, states. Curated memory
-(`state/memory/facts`) holds the short current conclusion a head should receive in context through
-`memory_search`. Knowledge (`state/knowledge`) holds the long reasoning and context the conclusion
-came from: brainstorms, decision logs, incident write-ups.
+Where a record goes depends on its length and purpose:
 
-A document is scoped by who it belongs to. Sections directly under `state/knowledge` hold the
-installation's own reasoning: its decisions, its incidents, its runbooks. A connected project keeps
-its documents under `state/knowledge/projects/<project id>/<section>/`, where the project id is the
-one in `projects/`. The split matters because a connected repository is not the place for the
-reasoning behind its own development: a product repository carries contracts and code, while the
-history of why the work was scoped that way is recoverable state of the installation that drove it.
+- the Pipeline board holds executable work: cards, specs, states;
+- curated memory (`state/memory/facts`) holds the short current conclusion a head receives through
+  `memory_search`;
+- knowledge (`state/knowledge`) holds the long reasoning behind it: brainstorms, decision logs,
+  incident write-ups.
 
-Knowledge is not indexed, does not appear in `memory_search` and is never loaded into a head's context
-wholesale. A document is read on purpose when the history of a question is needed. The format is free:
-ordinary tracked markdown, no frontmatter or metadata required. Writes go through
-`secretary knowledge write`; that writer owns only `state/knowledge`, takes the shared
-instance-repository writer lock and scans the document for secrets, so no manual `git commit` is
-needed and it does not race the tick writer.
+Sections directly under `state/knowledge` belong to the installation. A connected project's documents
+live under `state/knowledge/projects/<project id>/<section>/`, with the id from `projects/`. A product
+repository carries contracts and code; the reasoning behind its development is installation state.
+
+Knowledge is not indexed, not returned by `memory_search` and never loaded wholesale into a head's
+context. Format is free markdown. Writes go through `secretary knowledge write`, which owns only
+`state/knowledge`, takes the shared instance-repository writer lock and refuses documents containing
+secrets ([Protocols](PROTOCOLS.md#knowledge)).
 
 ## Ownership and security
 
-- The current security profile assumes one trusted owner of the host. Agents are not isolated as
-  untrusted tenants.
-- `doctor` reads config, data and host inventory, but never changes the host.
-- `status` and `doctor` share one recovery projection. It joins the installed head registry to the
-  dispatcher's TTL verdicts and read-only probes, then inventories credential consumers, declared
-  materialization targets, canonical path selections and Git bypass metadata. It does not decrypt
-  values to compare them, update the probe cache, or launch a head. Current capability readiness and
-  persisted operation outcomes remain separate facts.
+- The security profile assumes one trusted host owner. Agents are not isolated as untrusted tenants.
+- `doctor` reads config, data and host inventory and never changes the host. `status` and `doctor`
+  share one recovery projection; it does not decrypt values, update the probe cache or launch heads.
 - `reconcile plan` computes desired state. A matching name or prefix confers no ownership without a
-  managed manifest or a product-written marker.
-- The lazy session-manager registration of the observer root belongs to installation config but not to
-  reconciliation: the dispatcher creates it on the first observer. A matching display name at a
-  different path does not become ownership and stays an unmanaged-on-host finding.
-- Secrets registered in the store reach instance Git as encrypted envelopes and travel with the
-  checkpoint; the raw installation key and the recovery phrase do not (see
-  [Recovery](RECOVERY.md#secrets)). The host `runtime.env` is outside the store, and facts, exports and
-  diagnostics carry no secrets.
-- Private instance-remote and recovery project Git use one product-owned remote-execution boundary. It classifies transport,
-  resolves the eventual Git-child identity, selects the phase source, creates and cleans an operation-scoped
-  capability, then launches Git. Initial `https://github.com` clone requires explicit bootstrap input;
-  existing-checkout recovery and project provisioning use supplied bootstrap input or the unlocked managed
-  envelope; checkpoint probes and pushes use only the managed envelope. Fresh instance clones request a
-  bounded current snapshot, run in an isolated process group, and are validated in a private sibling stage
-  before atomic adoption. Project clones are staged, run as
-  the installation Git child, assigned final ownership before atomic adoption, and produce sanitized
-  per-binding outcomes. Those HTTPS children clear ambient helpers, so a
-  per-user credential file remains available to its other consumers but cannot silently authenticate
-  recovery, project provisioning or checkpoint. Local/file remotes are ordinary Git, SSH is explicit manual-bypass, and other
-  HTTPS hosts are refused.
-- Root-orchestrated recovery has one named ownership barrier after secret recovery and before the
-  installation account's first secret-consuming Git or remote child. It recursively hands the instance and
-  declared data roots to that account, then verifies that a restored installation key is a regular,
-  non-symlink, mode-`0600` file owned by the account. An existing partial recovery crosses the same barrier
-  before checkout reuse so its already-restored managed credential is readable by the selected Git child.
-  Recovery reaches that same named barrier again on successful and partial exits, including any restored
-  dispatcher run-state root, without replacing the original error when cleanup also fails.
-- Head-registry materialization always commits the generated snapshot and source pin locally before it tries
-  managed, fast-forward-only publication. Ordinary upgrade and checkpoint callers require that publication
-  and stop on failure. Supported recovery alone classifies a disabled, unavailable or divergent destination
-  as degraded, retains the exact local commit, and continues safe local host finalization. No reset, rebase,
-  force-push or ambient credential fallback exists; a later recovery retries the same local history.
-- Recovery's project boundary catches only one binding's provisioning failure. Core/configuration failures
-  and operator interruption remain outside it. A non-secret input digest and phase ledger let a retry skip
-  completed board and memory work; the digest includes deterministic memory-fact canon. One
-  `ProjectAvailability` value carries unavailable checkout ids for every configured binding, enabled or
-  disabled, from recovery into host desired-state planning and
-  is recomputed from the same filesystem rule at a project-consuming dispatch boundary. A task project id is
-  first resolved to its enabled binding; only then is that binding's checkout allowed to gate its worker
-  worktree, worker process or reviewer process. Unknown ids, registered inventory-only projects and unavailable
-  enabled bindings remain distinct refusals. Observer heads consume the dedicated observer repository, not a
-  sprint's canonical repository roots or project-id reservations, so project availability never gates observer
-  creation. Desired unavailable bindings stay in the host plan, preserving matching registrations and reporting
-  absent or drifted registrations as deferred. Core usability, unavailable projects and remote checkpoint
-  durability are separate results. The aggregate installation state remains degraded until every configured
-  binding is available and the recovery-created checkpoint has been published.
-- Task audit and pending writes are fail-closed: an unfinished board mutation blocks a consistent
-  export and the recovery checkpoint.
-- Normalized recovery owns restore-only bulk boundaries for card initialization and Card/Sprint comments. Card
-  planning validates Task, Product and Issue rows together under the restore lock, then reuses one board schema,
-  swimlane map and reference inventory for that phase. Each card has one `restored_bulk` obligation staged in
-  the ordinary `TaskAudit` journal before any create. Native creates carry final title, description, reference,
-  column and swimlane; metadata and exported placement use bounded follow-up batches. A fresh whole-board
-  inventory plus batched metadata proves each row independently, so a mixed rejection, malformed response or
-  lost aggregate reply never makes the batch atomic. Every possible single create, metadata/state and closure
-  call is serialized and checked against the 1 MiB wire limit before obligations are staged. A structurally valid
-  per-call backend error is a definite rejection and is reported with its card and phase; only transport loss or
-  malformed/incomplete aggregate evidence enters uncertainty reconciliation. Exact swimlane names take priority
-  when legacy normalized aliases collide. Duplicate references and conflicting existing content fail closed. A
-  retry keeps the local restore namespace, accepts released `create`/`restored` evidence, creates only
-  absent rows, initializes only incomplete obligations, and publishes each new occurrence only after its exact
-  row and initialized state are proved. A complete replay performs no card mutation.
+  managed manifest or a product-written marker. The observer root's session-manager registration is
+  created lazily by the dispatcher, not by reconciliation.
+- Store-registered secrets reach instance Git only as encrypted envelopes. The raw installation key,
+  the recovery phrase and `runtime.env` stay out of Git. Facts, exports and diagnostics carry no
+  secrets.
+- Private instance-remote and project Git go through one product-owned remote-execution boundary. HTTPS
+  children clear ambient credential helpers and use explicit bootstrap input or the managed envelope;
+  checkpoint probes and pushes use only the managed envelope. Local/file remotes are plain Git, SSH is
+  manual bypass, and HTTPS hosts other than `github.com` are refused.
+- Root-run recovery hands the instance and data roots to the installation account at one named
+  ownership barrier, before that account's first secret-consuming Git child, and verifies the restored
+  key is a regular `0600` file owned by it.
+- Head-registry materialisation commits locally before a fast-forward-only publish. Upgrade and
+  checkpoint stop when publication fails; only recovery continues as degraded and keeps the commit.
+  There is no reset, rebase, force-push or ambient credential fallback.
+- Recovery isolates one binding's provisioning failure; core failures and interruption are not
+  isolated. `ProjectAvailability` carries unavailable checkouts into host planning and dispatch; an
+  unavailable binding gates its own worker and reviewer, never observers. The installation stays
+  degraded until every binding is available and the recovery checkpoint is published.
+- Task audit and pending writes fail closed: an unfinished board mutation blocks export and the
+  checkpoint.
+- Restoring a normalised board into Kanboard uses bounded JSON-RPC batches (at most 200 calls and
+  1 MiB per document, 50 calls for comment reads and writes). Each card or comment has a durable
+  `restored_bulk` obligation in `TaskAudit` before any write. Aggregate replies are never treated as
+  atomic: rows are proved from fresh inventory, and replay mutates nothing that is already proved.
+  Comment waves hold at most one occurrence per entity, and comment order relies on pinned Kanboard
+  v1.2.46 returning comments in `(date_creation, id) ASC` order. Test coverage:
+  [Testing](TESTING.md#normalized-board-bulk-recovery).
 
-  Comment restore reuses the same audit and stable restore request identities, but does not enter either
-  interactive writer's per-comment full-entity read cycle. Intended occurrences are durable before bounded
-  JSON-RPC writes. One ordered wave contains no more than one occurrence for an entity because Kanboard batches
-  are not database transactions and do not promise member execution order. Missing, duplicate, malformed or
-  mismatched answers invalidate the aggregate result; fresh batched histories then reconcile each occurrence.
-  The transport caps a document at 200 general calls and 1 MiB, with separate 50-call caps for comment reads
-  and writes, splits before any bound, and never relies on response order. Pinned Kanboard v1.2.46 returns
-  comments by `(date_creation, id) ASC`, making the id the stable creation-order tie-break within one second;
-  the source and disposable-backend evidence are recorded in
-  [the comment contract canary](evidence/kanboard-comment-contract-v1.2.46.md). Final parity is a new
-  authoritative bounded snapshot, not the cache used to plan writes. A comment-read response contains at most
-  50 histories, but one history and the aggregate response bytes have no smaller product limit. A single long
-  history is transferred again for every ordered wave, so its row transfer is quadratic in that entity's
-  comment count; the 30-second transport timeout fails such a read closed rather than weakening reconciliation.
-  Archived-card closure is also bounded and follows comment proof. The existing post-close active-order repair
-  then reconciles only mismatched `(column, swimlane)` groups before final content and order parity.
+## Cutover controller
 
-Command contracts are in [Protocols](PROTOCOLS.md), runbooks in [Operations](OPERATIONS.md), and the
-product goal in [Vision](VISION.md).
-# Cutover controller
+`secretary.cutover` orchestrates the Kanboard-to-PostgreSQL cutover out of existing product
+operations. It does not implement its own migration, import, parity, backup, checkpoint, pause or
+backend selection. Every completed phase is fsynced to the data plane before the next one starts, and
+a failure is durable and leaves the global freeze in place.
 
-`secretary.cutover` is an orchestration boundary over existing product operations. It does not own a
-second migration, import, parity, backup, checkpoint, pause, or backend-selection implementation.
+- One installation-wide `CutoverLock` serialises mutation. State identity is a digest of installed
+  revision, provenance, paths, source fingerprint, counts, parity and phase vocabulary, and the
+  confirmation token derives from it. Retries accept only the original actor, reason, revision and
+  identity.
+- While a cutover is in flight, public writers are fenced; only controller children carrying the
+  state identity pass. Terminal states release the fence.
+- `prepare-successor` is a separate OID-driven state machine under the same lock. It writes durable
+  intent before every PostgreSQL effect and completed evidence after verification, and refuses any
+  database-name-to-OID mapping it did not record. Its terminal authority is immutable recovered history
+  plus a release receipt bound to the predecessor plan and archive.
 
-Its durable ordered phases are: preflight; Kanboard backup/checkpoint; PostgreSQL provision and
-migration verification; global freeze; writer-quiescence proof; final fenced import; full parity;
-PostgreSQL recovery backup; selector activation; service reconciliation; installed-protocol
-acceptance; post-switch checkpoint; and resume-ready.
-
-The `prepare-successor` subcommand is a separate OID-driven state machine under the same
-installation-wide `CutoverLock`. It composes the store resolver, Alembic migration, PostgreSQL 16
-custom dump/verifier, role verifier, atomic controller writer and immutable recovered-history
-publisher. PostgreSQL database rename/create is the only new effect boundary. The process-wide board
-selector is deliberately bypassed for database proof and remains Kanboard throughout.
-
-The preserved target must already be externally upgraded to `0007_card_transport_key`; this state
-machine only migrates the newly created empty canonical database. Its terminal authority is one
-resolver over immutable recovered history plus a release receipt bound to the predecessor plan,
-archive identity and checksums. Canonical-file presence is not evidence about predecessor completion.
-
-Durable intent precedes every PostgreSQL effect. Completed evidence follows verification. This makes
-name transitions recoverable: before rename the configured name has the old OID, after rename the
-archive name has that OID, and after create the configured name has a new recorded OID. Any other
-mapping is an architectural refusal, not a reconciliation opportunity. Its twelve phases are listed
-in the successor protocol and are distinct from the cutover phases above.
-
-The state identity is the digest of the exact installed revision, runtime/source provenance,
-instance/data paths, source fingerprint, counts, parity and phase vocabulary. The confirmation token
-is derived from that digest. An exclusive lock serializes mutation. Atomic, non-secret state is
-owner-writable and runtime-readable so service uids can enforce the same barrier. Retries accept only
-the original actor, reason, revision and identity. Controller subprocesses carry the state identity;
-other matching writer processes remain fenced. The barrier applies only to in-flight controller
-states and terminal states release it unconditionally. The irreversible-policy marker is derived
-from committed SQL audit growth after the activation baseline. A safe pre-import recovery archives its
-exact terminal document before releasing the canonical state slot. Successor plans bind the archive
-digests, so they are distinct while the recovered identities remain immutable and inspectable. A
-completed final import makes the target occupied and therefore keeps the canonical identity terminal,
-even when the first-application-write marker is absent.
-
-The SQL board-client transport identity is not the public Card suffix. `tasks.task_ref` is the stable
-public identity, `(project_id, task_number)` is project-local vocabulary, and an immutable unique
-`tasks.board_key` below the Sprint range is the integer used by every SQL Card operation. This keeps
-same-number Cards in different projects independently addressable without changing either public ref.
+Commands, phases and tokens: [Protocols](PROTOCOLS.md#secretary-cutover). Runbook:
+[Operations](OPERATIONS.md#postgresql-board-store-cutover). Recovery boundary:
+[Recovery](RECOVERY.md#cutover-controller-state).

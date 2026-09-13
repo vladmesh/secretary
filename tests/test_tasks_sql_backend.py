@@ -802,7 +802,7 @@ KANBOARD_ONLY = {
     "test_auto_reference_serializes_concurrent_creates": (
         "it creates from two threads at once.  `SqlCardClient` holds one connection, and one "
         "libpq connection cannot carry two transactions, so the concurrency this asserts needs a "
-        "pool (§5.6) that this card does not ship.  A finding for the cutover card"
+        "connection pool, which the store client does not have (§5.6).  A finding for the cutover card"
     ),
     "test_pending_blocks_export_from_the_same_data_root": (
         "the export's gate reads `pending-audit/` on disk.  §6.3 says it becomes a query over "

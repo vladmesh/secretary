@@ -198,8 +198,8 @@ def _task_number_of(ref: str) -> int:
 class SqlCardClient:
     """The board vocabulary of §2.2, answered from PostgreSQL instead of JSON-RPC.
 
-    One connection, opened lazily and kept: §5.6 sizes the store for ten of them, and a client
-    that reconnected per call would spend the whole budget on handshakes.  Autocommit is off, so
+    One connection, opened lazily and kept (§5.6); a client that reconnected per call would spend
+    its time on handshakes.  Autocommit is off, so
     a mutation issued inside `transaction()` is one transaction (§7.1) and one issued outside it
     still commits on its own — which is what keeps the reads of a read-only consumer cheap.
     """

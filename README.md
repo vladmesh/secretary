@@ -6,8 +6,8 @@ logic, schemas and generic skills.
 
 The product repository holds no installation data. Private installation configuration and the
 portable Git-backed recovery checkpoint live in a separate private instance repository; local mutable
-and derived runtime state lives in a local data directory. The current Git-backed install and recovery
-path is documented in [Recovery](docs/RECOVERY.md).
+and derived runtime state lives in a local data directory. Install and recovery are documented in
+[Recovery](docs/RECOVERY.md).
 
 ## Documentation
 
@@ -15,6 +15,8 @@ path is documented in [Recovery](docs/RECOVERY.md).
 - [Roadmap](docs/ROADMAP.md) — product states, milestones and open questions
 - [Architecture](docs/ARCHITECTURE.md) — storage boundary, runtime flow, security model
 - [Head vitality](docs/HEAD_VITALITY.md) — observation axes, snapshots and their invariants
+- [Outcome lineage](docs/OUTCOME_LINEAGE.md) — durable round handoffs between worker and reviewer launches
+- [Board store](docs/BOARD_STORE.md) — board read/write inventory and the PostgreSQL schema
 - [Protocols](docs/PROTOCOLS.md) — command contracts for tasks, sprints, memory and secrets
 - [Operations](docs/OPERATIONS.md) — runbooks for a running installation
 - [Recovery](docs/RECOVERY.md) — the checkpoint contract, fresh install and restore
@@ -22,7 +24,7 @@ path is documented in [Recovery](docs/RECOVERY.md).
 
 ## Install
 
-The host bootstrap currently supports Ubuntu 24.04. Install the CLI and memory runtime from a checkout:
+The host bootstrap supports Ubuntu 24.04. Install the CLI and memory runtime from a checkout:
 
 ```bash
 python3 -m pip install -e '.[memory]'
@@ -53,12 +55,12 @@ sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE \
 
 Bootstrap pins the board and session-manager transports, generates their local mode-0600 ignored
 configuration, creates the Pipeline board, and provisions the separate loopback-only `postgres:16`
-board-store container and persistent volume through the current Alembic head. This does not switch
-the card backend or perform a live import/cutover.
+board-store container and persistent volume through the current Alembic head. It does not switch
+the card backend; see [Board store](docs/BOARD_STORE.md).
 
 ## Status
 
-The project is pre-1.0 and moving quickly. It is developed against one opinionated deployment
+The project is pre-1.0. It is developed against one opinionated deployment
 profile: a single trusted owner running one appliance on one host. See
 [SECURITY.md](SECURITY.md) for the boundaries of that model.
 

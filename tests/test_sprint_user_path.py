@@ -1,9 +1,7 @@
 """The walkthrough of `tests/sprint_user_path.py`, run as a test so it cannot rot quietly.
 
-The transcript that acceptance quotes (`docs/evidence/sprint-user-path-2026-09-06.md`) was produced
-by the same function this runs. A script that is only ever run by hand records the day it was run
-and nothing after it; running it here means a change that breaks the owner's path breaks the suite
-on the branch that made it, and the recorded transcript stays a description of something true.
+A script that is only ever run by hand describes the day it was run and nothing after it; running
+it here means a change that breaks the owner's path breaks the suite on the branch that made it.
 """
 
 from __future__ import annotations

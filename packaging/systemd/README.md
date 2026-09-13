@@ -1,9 +1,9 @@
 # systemd assets
 
-Templates for the current secretary runtime. The live installation uses units for production
-dispatcher ticks, memory service, curator, steward and retro. Archive backup is no longer a
-scheduled unit: git-checkpoint is the recovery contract (docs/RECOVERY.md), and `backup create`
-remains only a manual, optional cold-archive tool.
+Templates for the secretary runtime units: production dispatcher ticks, the memory service, the web
+transport and its front, curator, steward (including the deep sweep) and retro. There is no
+scheduled backup unit: the git checkpoint is the recovery contract ([Recovery](../../docs/RECOVERY.md)),
+and `backup create` is a manual, optional cold archive.
 
 These files are templates, not host-ready files or a starting point to copy by hand. `secretary
 reconcile apply` compiles them with the installation user, home, product checkout, instance and
@@ -30,7 +30,7 @@ production-state diagnostic, and execs the tick only after a valid observation. 
 with the unit through `reconcile apply` or `secretary upgrade`; do not copy or edit it on the host.
 `secretary-memory.service` serves MCP on the configured local endpoint and loads the instance
 embedding model. `secretary-web.service` runs the web transport on `127.0.0.1:8787` — that host is
-not a default the unit may relax — and `secretary-web-front.service` runs the archive Caddy that
+not a default the unit may relax — and `secretary-web-front.service` runs the distribution's Caddy that
 terminates TLS, checks the owner's password and proxies to it. The front is `PartOf` the transport,
 so the pair starts, stops and restarts together, and its configuration is not a template here: it
 carries a bcrypt hash and is rendered from the secret store by `secretary web-front render` into

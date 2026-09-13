@@ -512,7 +512,7 @@ class SprintMappingTests(unittest.TestCase):
         self.assertIn("sprint_ref_is_a_sprint_reference", refusal["reason"])
 
     def test_an_archived_duplicate_reference_keeps_its_record_under_a_distinguishing_one(self) -> None:
-        """§9 option 1, which is what this card runs while the owner's answer is outstanding."""
+        """The archived duplicate reference rule of docs/BOARD_STORE.md §8.8."""
         result = import_board.plan(
             source(
                 sprints=(
@@ -1123,7 +1123,7 @@ class ParityTests(unittest.TestCase):
         )
 
     def test_the_disambiguated_archived_sprint_is_parity_clean_and_named(self) -> None:
-        """§9 option 1: both records land, so parity is green *and* the report says what happened."""
+        """§8.8: both records land, so parity is green *and* the report says what happened."""
         board = source(
             sprints=(
                 sprint_row(748, 1037, comments=(comment("[po]\nlive"),)),

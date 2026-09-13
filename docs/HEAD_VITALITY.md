@@ -1,29 +1,28 @@
-# Head vitality observations
+# Head vitality
 
-The dispatcher's destructive history (secretary-1063, cards codegen-orchestrator-1194..1197) came
-from collapsing one question — "is the head working?" — into a single boolean and then acting on it.
-The head-vitality model splits that question into three independent axes, observed as pure data and
-fused later with hysteresis. This page describes the observation vocabulary introduced in
-`src/secretary/dispatch/head_vitality.py`, the episode reducer
-(`head_vitality_episode.py`), and — since S1-5 — the recovery policy (`head_vitality_policy.py`)
-that turns a persisted verdict into an intent the dispatcher executes under the guard. `HeadRuntime`
-now supplies the lifecycle boundary: the local-pty backend owns delivery, turn lease, drain and
-stop atomically, while the Orca legacy backend retains the explicitly weaker conditional-stop
-contract during migration.
+Head vitality answers "is the head working?" as three independent observation axes, fused over time
+with hysteresis, then turned into a recovery intent. Modules:
 
-## The central invariant
+- `src/secretary/dispatch/head_vitality.py`: observation vocabulary and snapshots;
+- `src/secretary/dispatch/head_vitality_episode.py`: the episode reducer;
+- `src/secretary/dispatch/head_vitality_guard.py`: the destructive-step guard;
+- `src/secretary/dispatch/head_vitality_policy.py`: the recovery policy.
 
-Every external observation has a TOCTOU window: between the last reading and any action the head
-may start a new turn. Two agreeing channels narrow the noise but never close the window.
-Consequently:
+`HeadRuntime` owns the lifecycle boundary. The local-pty backend owns delivery, turn lease, drain and
+stop atomically. The Orca legacy backend has a weaker conditional stop.
+
+## Central invariant
+
+Every external observation has a TOCTOU window: the head may start a new turn between the last reading
+and any action. Agreeing channels reduce noise but never close the window.
 
 > An observation reports facts. Fusion forms suspicion. Policy chooses intent. A runtime that
 > atomically owns delivery decides whether an intervention is safe.
 
-Local-pty performs that final admission/lease/epoch check inside its own lock and against durable
-supervisor evidence. Orca readiness, terminal output and filesystem fingerprints still can never by
-themselves grant a kill capability; `OrcaLegacyHeadRuntime.stop_if_quiescent` remains a best-effort
-legacy fence around the unavoidable external observation window.
+Local-pty performs the final admission/lease/epoch check inside its own lock against durable supervisor
+evidence. Orca readiness, terminal output and filesystem fingerprints never grant a kill capability by
+themselves; `OrcaLegacyHeadRuntime.stop_if_quiescent` is a best-effort fence around the external
+observation window.
 
 ## Three independent axes
 
@@ -33,30 +32,25 @@ Turn     = Active  | Idle    | Unknown               is a turn in flight?
 Progress = Advancing| Quiet  | Stagnant | Unknown    is the work moving?
 ```
 
-The axes are independent on purpose: a pid heartbeat answers the first and nothing else, a provider
-cursor speaks only to the third, a pane answer only to the second. A snapshot that cannot answer an
-axis leaves it `Unknown`, and that absence survives serialisation — `Process=Running` with
-`Turn=Unknown` is a meaningful, representable state, not missing data.
+A pid heartbeat answers only Process, a provider cursor only Progress, a pane only Turn. An axis a
+snapshot cannot answer stays `Unknown`, and that survives serialisation: `Process=Running` with
+`Turn=Unknown` is a valid state.
 
-`Stagnant` exists in the vocabulary for the reducer's conclusions over time. No single observation
-may ever produce it: one unchanged cursor is `Quiet`.
+`Stagnant` is reserved for conclusions over time. No single observation produces it: one unchanged
+cursor is `Quiet`.
 
 ## Snapshots
 
-A `VitalitySnapshot` is one channel's reading of one head run at one instant. Its rules:
+A `VitalitySnapshot` is one channel's reading of one head run at one instant.
 
-- **Identity-bound.** Every snapshot carries the `HeadRun.run_id` it was proven against. A source
-  whose attestation names another live run degrades to `Unknown`/`Unavailable`, never to `Dead`:
-  "not mine" says nothing about death. A snapshot never combines a new run's pid with an old run's
-  provider cursor.
-- **Unavailable ≠ no progress.** A missing pid file, a refused pane probe or an unreadable journal
-  yields `Unknown` axes plus `availability=unavailable` and a bounded reason. A broken channel
-  freezes knowledge; it never spends stall evidence.
-- **Pane readings are advisory.** They fill the `Turn` axis alone and are stamped
-  `source=pane_advisory`. Readiness answers whether a pane will accept input, not whether the head
-  behind it may be stopped.
-
-## Sources today
+- **Identity-bound.** Every snapshot carries the `HeadRun.run_id` it was proven against. A source whose
+  attestation names another run degrades to `Unknown`/unavailable, never `Dead`. A snapshot never
+  combines a new run's pid with an old run's cursor.
+- **Unavailable is not no progress.** A missing pid file, refused pane probe or unreadable journal
+  yields `Unknown` axes, `availability=unavailable` and a bounded reason. A broken channel freezes
+  knowledge; it never counts as stall evidence.
+- **Pane readings are advisory.** They fill only `Turn` and are stamped `source=pane_advisory`.
+  Readiness says whether a pane accepts input, not whether the head may be stopped.
 
 | Source | Producer wrapped | Axes answered |
 |---|---|---|
@@ -64,412 +58,264 @@ A `VitalitySnapshot` is one channel's reading of one head run at one instant. It
 | `provider_cursor` | `dispatcher_tui.provider_progress_for_run` | Progress |
 | `pane_advisory` | pane readiness (`{"idle": bool}`, from `pane_host.Pane`) | Turn |
 
-Mappings worth naming:
+Mappings:
 
-- heartbeat `live-match` with `/proc` state `T` → `Process=Suspended`; dead, zombie, or a pid
-  reaped between the reader's signal and its `/proc` read → `Dead`; live otherwise → `Running`;
-  missing/unreadable/mismatched → `Unknown` + unavailable. A pid that answered `kill(pid, 0)` is
-  asked what it is, and a vanished `/proc/<pid>/status` is that process being gone rather than that
-  process not being a zombie: read the other way it published `live-match` for a head that had
-  already exited;
+- heartbeat `live-match` with `/proc` state `T` → `Suspended`; dead, zombie, or a pid reaped between the
+  signal check and the `/proc` read → `Dead`; otherwise live → `Running`; missing, unreadable or
+  mismatched → `Unknown` + unavailable;
 - cursor moved since this run's previous snapshot → `Advancing`; unchanged → `Quiet`; unadmitted,
-  foreign or unreadable → `Unknown` + unavailable; first observation of a source records its cursor
+  foreign or unreadable → `Unknown` + unavailable; the first observation of a source records its cursor
   without a progress opinion;
-- pane ready (`idle`) → `Turn=Idle`; busy → `Active`; unanswerable → `Unknown`.
+- pane ready → `Turn=Idle`; busy → `Active`; unanswerable → `Unknown`.
 
-Snapshots are frozen dataclasses with `to_json`/`from_json`; a payload whose version or axis names
-fall outside the vocabulary raises instead of being silently normalised, because damaged evidence
-must stay visible rather than be read back as words nobody wrote.
+Snapshots are frozen dataclasses with `to_json`/`from_json`. A payload with an unknown version or axis
+value raises instead of being normalised.
 
-## Episodes: the verdict ladder
+## Episodes
 
-The persisted `VitalityEpisode` (`src/secretary/dispatch/head_vitality_episode.py`) is the
-hysteresis layer from the plan's "Vitality reducer": `reduce_vitality(previous, snapshots, now,
-thresholds, retained=...)` folds one tick's snapshots for a run into a durable conclusion.
-`retained` is the caller's declaration that the dispatcher itself is holding this process on a
-stop signal; it is an input, not an observation (see "Retention" below).
+`VitalityEpisode` is the persisted hysteresis layer. `reduce_vitality(previous, snapshots, now,
+thresholds, retained=..., answer_owed_since=...)` folds one tick's snapshots for a run into a durable
+verdict. It is pure and deterministic: no I/O, no clock; the caller owns `now`.
 
 ```text
 HealthyActive   a non-advisory source showed advancement now
 HealthyQuiet    alive, no advancement yet, below every threshold
-Suspended       /proc has the process parked on a stop signal (NOT a stall)
-Retained        the same parked process, held there by the dispatcher's OWN retention
+Suspended       /proc shows the process parked on a stop signal (not a stall)
+Retained        the same parked process, held by the dispatcher's own retention
 SuspectedStall  strong quiet outlived suspect_after
 ConfirmedStall  strong quiet additionally outlived confirm_after
 Dead            the heartbeat names a gone or unreaped process
 Unverifiable    no strong channel answered; nothing may be concluded
 ```
 
-Rules the reducer enforces (each pinned by a named test in `tests/test_head_vitality_episode.py`):
+Reducer rules (pinned in `tests/test_head_vitality_episode.py`):
 
-- Snapshots naming another run are dropped and noted in `basis`; when every snapshot agrees on a
-  new run id, that identity change starts a fresh episode instead of splicing new facts into an
-  old head's history.
-- `Dead` outranks everything. `Suspended` is its own verdict and freezes the stall clocks:
-  suspended time feeds no threshold, and quiet references shift past the frozen span on resume.
-- A parked process whose caller passed `retained=True` reduces to `Retained` instead of
-  `Suspended`. The freeze is identical; only the recorded `reason` and the recovery ladder differ.
-  `Dead` still outranks it, and a retention whose process is running again is not `Retained`
-  either — the suppression is of the wake, not of the truth (secretary-1539).
-- Advancement from any non-advisory source ends a suspected or confirmed episode immediately,
-  resets the phase timestamps, stamps `last_progress_at`/`last_progress_source`, and bumps
-  `activity_epoch`.
-- An unavailable source freezes its evidence: it never counts as no progress, never advances a
-  stall timer, and is tracked in `unavailable_since` until it answers again. When every strong
-  source (pid + provider) is dark the verdict is `Unverifiable` — except that an already-confirmed
-  episode is not laundered back to health by its observers going blind.
-- **That freeze is bounded** (secretary-1543). A progress source known to this episode and not
-  answering holds the stall clock for at most `dark_ceiling`, measured from the instant *that*
-  outage began. Past it the episode ages on the pid's own sustained "running, and nothing else",
-  exactly as a run whose progress source never answered at all — see "A dark source freezes for a
-  bounded window" below. A live pid is never indefinite evidence of liveness.
-- A **rejected report the head has not answered**, followed by an advisory turn seen to end,
-  raises `HealthyQuiet` to `SuspectedStall` at once. The rejection is a caller-declared input
-  (`answer_owed_since`, like `retained`), not something the reducer can observe; the advisory
-  reading only narrows it, and with no owed answer it stays exactly as weightless as ever.
-- Advisory pane readings corroborate in `basis` only; they can never drive a stall verdict.
-- Quiet accumulates from `last_progress_at` (or episode start), not from the observing tick: ticks
-  are irregular, the quiet they sample is not. The ladder climbs HealthyQuiet → SuspectedStall →
-  ConfirmedStall as the reference age crosses `suspect_after` and then `confirm_after`.
-- Confirmation is sticky: one more quiet tick does not bounce it back. Only real progress,
-  suspension, death, or an identity change ends a confirmed episode.
-- The reducer is pure and deterministic: same inputs, same episode, no I/O, no clock. The caller
-  owns `now`.
+- Snapshots naming another run are dropped and noted in `basis`. When all snapshots agree on a new run
+  id, a fresh episode starts.
+- `Dead` outranks everything. `Suspended` freezes the stall clocks: suspended time feeds no threshold,
+  and quiet references shift past the frozen span on resume.
+- With `retained=True` a parked process reduces to `Retained` instead of `Suspended`; the freeze is the
+  same. `Dead` still outranks it, and a retained process that is running again is not `Retained`.
+- Advancement from any non-advisory source ends a suspected or confirmed episode, resets phase
+  timestamps, stamps `last_progress_at`/`last_progress_source` and bumps `activity_epoch`.
+- An unavailable source freezes its evidence and is tracked in `unavailable_since` until it answers.
+  When every strong source (pid and provider) is dark the verdict is `Unverifiable`, except that an
+  already confirmed episode stays confirmed.
+- A caller-declared rejected report the head has not answered (`answer_owed_since`), followed by an
+  advisory turn seen to end, raises `HealthyQuiet` to `SuspectedStall` at once. Without an owed answer
+  advisory readings carry no weight.
+- Advisory pane readings only corroborate in `basis`; they never drive a stall verdict.
+- Quiet is measured from `max(last_progress_at, quiet_since)`, or `started_at` if neither is set, not
+  from the observing tick. The ladder climbs `HealthyQuiet` → `SuspectedStall` → `ConfirmedStall` as
+  that age crosses `suspect_after` and then `suspect_after + confirm_after`.
+- Confirmation is sticky. Only progress, suspension, death or identity change ends it.
 
-### Pid-only evidence ages (the issue 656 decision)
+### Pid-only evidence
 
-S1-2 left one branch open: what an episode concludes when its *only* strong witness is the pid
-heartbeat — Running, with no progress source ever heard from. S1-3 settled it (pinned by
-`test_pid_only_running_with_no_progress_for_hours_confirms_the_stall`), separating two cases:
+- **No progress source has ever answered.** The pid is the only witness, and process existence is not
+  liveness. Sustained "running, nothing else" ages to `SuspectedStall` at `suspect_after` and
+  `ConfirmedStall` at `suspect_after + confirm_after`, measured from `started_at`. The absent provider
+  is neither progress nor quiet.
+- **A progress source this episode has witnessed** (it left a cursor) and is now dark keeps the freeze,
+  bounded by `dark_ceiling`.
 
-- **A progress source this episode has witnessed** — it left a cursor, or sits dark in
-  `unavailable_since` — keeps the freeze semantics unchanged. Its silence is unavailability:
-  `Unavailable != no progress`, so a broken channel must never age a live head toward its death.
-- **No progress source has ever answered**: the pid is the only witness, and bare process
-  existence is not proof of liveness (`issue:06dcf6cb`). The pid's sustained answer of "running,
-  and nothing else" ages HealthyQuiet → SuspectedStall at `suspect_after` → ConfirmedStall at
-  `suspect_after + confirm_after`, measured from `started_at` (no advancement was ever seen). The
-  absent provider contributes no vote of its own: it is neither progress (the reference never
-  moves) nor quiet (no `quiet:<n>s` basis token names it).
+### Dark sources
 
-Since S1-4 this is no longer shadow-only: the reduction is the wait tick's decision input, and
-since S1-5 the recovery policy consumes the persisted episode (including a dark source's reason,
-which rides on `episode.reason`) on the wait path and in the gate phase.
+A witnessed progress source is dark when it answers unavailable **or** produces no snapshot on a tick
+(`basis` says `absent@<source>`). The wait tick's status can carry a live `pid_status` with no provider
+channel, for example `reason: "pid"` (exact live heartbeat whose pane the worktree inventory no longer
+lists) or `reason: "disconnected"`. A source that never answered is not treated as dark; that is the
+pid-only case above.
 
-### A dark source freezes for a bounded window (secretary-1543)
+Darkness freezes the stall clock for at most `dark_ceiling`, measured from the start of the current
+outage (a source that answers again leaves `unavailable_since`; its next outage starts a new window):
 
-The split above left one half unbounded, and that half is what `issue:7bff833fef6d9d9b404d`
-(2026-08-30) froze on. `progress_witnessed` was true for a source that was merely *known and not
-answering*, so a Codex head with no bound provider baseline — provider cursor unavailable, PID
-alive, pane idle, no file or event progress — reduced to `HealthyQuiet` with the reason "progress
-source known to this episode but not answering; frozen" on every tick for as long as the PID
-lived. The card sat `in_progress`/claimed for 65+ minutes with no wake, no replacement and no
-terminal outcome. The aging arm was not missing; the freeze in front of it had no end.
+- **inside the window** an earned `SuspectedStall`/`ConfirmedStall` stands, and a healthy episode stays
+  `HealthyQuiet` with the dark channel's diagnostic as reason; `basis` says `dark:<n>s@<source>`;
+- **past the window** the episode ages on the pid alone, as in the pid-only case, with a reason naming
+  the dark source and its duration. An earned confirmation is preserved.
 
-So the freeze is now a window, `thresholds.dark_ceiling`, measured from the start of the current
-outage (a source that answers again leaves `unavailable_since`, and its next outage starts a fresh
-window):
+For the guard, "not dark" means "answered on the most recent reduction".
 
-- **Inside the window** everything is as before: `Unavailable != no progress`, an earned
-  `SuspectedStall` or `ConfirmedStall` stands, and a healthy episode stays `HealthyQuiet` with the
-  dark channel's own diagnostic as its reason. The basis says `dark:<n>s@<source>` every tick.
-- **Past the window** the episode ages on the pid alone, exactly as the never-witnessed shape does:
-  `HealthyQuiet` → `SuspectedStall` at `suspect_after` of quiet → `ConfirmedStall` at
-  `suspect_after + confirm_after`, with a reason that names which source is dark and for how long.
-  An earned confirmation is still sticky and is preserved first, whatever the ceiling has done.
+### Quiet restart after a nudge
 
-The rungs behind it are the existing ones, unchanged: suspicion earns the one idempotent report
-nudge (the wake the incident never got — at `max(dark_ceiling, suspect_after)`, ten minutes rather
-than never), confirmation earns the S1-4 recovery path, and the guard below still fences every
-destructive step. What is NOT killed by this: a genuinely running long command. The pane's quiet is
-advisory and drives nothing; the ladder's first rung is conversational; and a confirmation earned
-with no answering progress source waits out the role's whole outer ceiling before anything
-destructive happens (see the guard section).
+The report nudge (`_prompt_worker_report`) stamps `quiet_since = now`. The head is charged only with
+silence after it was asked; `last_progress_at` is kept. Records without the field have no restart.
 
-### Darkness is read from the absence of an answer, not only an answer of absence
+### Retention
 
-An earlier form of this section claimed that the wait tick always attaches a provider snapshot to
-the status it reduces. It does not, and the difference was a defect. `snapshots_from_status`
-builds a `provider_cursor` snapshot only when the status carries a `provider_progress` key, and
-`command_terminal_status` probes the provider only on the branch where a connected pane matched
-this head. Two of its answers carry a live `pid_status` and no provider channel at all:
+`/proc` state `T` has two possible owners. The dispatcher parks a finished worker itself:
+`host.retain_worker` sends SIGSTOP on `report:done` and `WorkerContinuation.begin_retention` records it,
+so the worker stops editing while CI and the reviewer own the checkout and a red verdict can resume the
+same conversation.
 
-- `reason: "pid"` — an exact live heartbeat whose pane the worktree inventory no longer lists
-  ("Missing inventory does not beat an exact live heartbeat; never respawn beside it");
-- `reason: "disconnected"` — the pane matched but is not connected.
-
-A head that has outlived its pane binding is precisely the head this ladder must not kill. Yet
-with darkness recorded only for a snapshot that *says* UNAVAILABLE, such a tick left
-`unavailable_since` empty while the cursor from the tick that did answer stayed in
-`evidence_cursors`: the episode read as witnessed-and-not-dark, skipped the window above, and the
-guard counted one channel as two — a live worker respawnable fifteen minutes after its last
-provider advance, where the guard's own contract promises the role's six-hour ceiling.
-
-So the reducer stamps `unavailable_since` for a witnessed progress source that produced **no
-snapshot on this tick** as well as for one that answered UNAVAILABLE (`basis` says
-`absent@<source>`). An absent channel is therefore an outage like any other: it takes the same
-`dark_ceiling` window, the same reason text naming the source and its darkness, and the same
-outer-ceiling hold at the guard. A source that never answered at all is *not* invented as dark —
-that stays the never-witnessed pid-only arm above, with its own words.
-
-The consequence for the guard is the point: `not dark` now means "answered on the most recent
-reduction", so its two-channel test states the proposition its contract always claimed.
-
-### A conversational rung really restarts the quiet clock
-
-The dispatcher's one report nudge (`_prompt_worker_report`) says the episode restarts its quiet
-reference at now. It used to rewrite only `started_at`, while the reducer measures quiet from
-`max(last_progress_at, quiet_since) or started_at`, so an episode that had ever seen the provider
-advance got no grace at all and the next tick re-confirmed immediately. The restart is now its own
-stamp, `quiet_since`: the head is charged with the silence *after* it was actually asked, and its
-progress history stays on file for the operator to read. Records written before the field exists
-carry no restart, which is exactly what their absence means.
-
-## Regression table
-
-Each historical incident is replayed tick by tick through the S1-1 snapshot builders fed with
-producer payload dicts (the shapes `head_process_status`, `provider_progress_for_run` and pane
-readiness put on the wire) and folded by the reducer in
-`tests/test_head_vitality_regression.py`, asserting exactly when the ladder crosses each rung
-under `DEFAULT_VITALITY_THRESHOLDS`. The asymmetry-of-cost principle behind every row: a false
-"working" costs an idle hour; a false kill loses a live round.
-
-| Incident | Test | Required verdict / behaviour |
-|---|---|---|
-| `issue:b5195041` (board 951, secretary-1420): idle ~380s ×3 against a live Codex transcript; nudge → respawn → Blocked on a working head | `IssueB5195041CodexTranscriptBlindnessTests` | provider Advancing ⇒ `HealthyActive`; advisory pane-idle alone never leaves `Unverifiable`; no destructive verdict while the transcript moved |
-| `issue:3e7abdf9` (board 997, secretary-1423): wait-for-readiness timeout on a working head read as transport refusal; retained worker replaced | `Issue3e7abdf9BusyReadAsUnavailableTests` | busy pane + Running + Advancing ⇒ `HealthyActive`; readiness Unavailable is Turn-axis only and never stall evidence; provider unknown ⇒ `HealthyQuiet`, never Dead/ConfirmedStall |
-| `issue:8f86ed63` (board 1010, secretary-1428): 11 busy-retry cycles in an hour, rollout frozen since 06:50, composer stale ("busy is readiness, not liveness") | `Issue8f86ed63BusyMasksStallTests` | Running + admitted Quiet over the hour ⇒ `SuspectedStall` at +300s, `ConfirmedStall` at +900s from last progress; the busy pane corroborates in `basis` only |
-| `issue:fe04011b` (board 1156, codegen-orchestrator-1197): worker+child in `T (stopped)` 27 min, revived by SIGCONT; ticks wrote `gate-pending ok`, six-hour ceiling applied | `IssueFe04011bStoppedWorkerSixHourCeilingTests`; gate-phase twin: `IssueFe04011bLegacyGatePendingTests` | `/proc` state `T` ⇒ `Suspended` within one tick; stall clocks frozen for the whole stop; never ConfirmedStall, never Dead. Since S1-5 the gate-pending tick runs the same reduction + policy, so a suspended head gets its SIGCONT within one tick instead of waiting out `GATE_PENDING_STALL_SECONDS` |
-| codegen-orchestrator-1194 (board card, sprint 1148): reviewer spawn failed 49 min, 45× identical deterministic `terminal_split_source_not_found` with a live terminal | `CodegenOrchestrator1194DeterministicSplitFailureTests`; `ReviewPaneTests.test_reviewer_falls_back_when_connected_anchor_is_not_split_capable` | the token can occur before or after Orca attempts a child. Reviewer bring-up opens one standalone pane only when before/after worktree inventories show that no pane appeared; otherwise it fails closed. It is not a vitality question: if that launch path cannot recover, snapshot Unavailable with the deterministic reason keeps `Unverifiable` forever; the policy escalates identical authoritative sightings at 3, while a heuristic reason repeated just as often earns only observation |
-| `issue:02fe04d7` (codegen-orchestrator-1248, 2026-09-02; same wording on -1235 the day before): a worker retained on `report:done` at 15:14:53 was SIGCONT'd by the watchdog at 15:17:32; red CI at 15:18:37 then read "retained worker session is no longer confirmably suspended" and took `continuation: replacement` | `Issue02fe04d7RetainedWorkerTests` (gate ticks, red reuse, and death still detected) | a confirmed retention ⇒ `Retained`, never `Suspended`: no SIGCONT and no other rung from any tick that runs the worker vitality policy, so the red gate still finds a confirmable suspension and reuses the session. `Dead` still outranks the retention |
-| `issue:7bff833fef6d9d9b404d` (secretary-1517, 2026-08-30): a Codex head with no bound provider baseline — cursor unavailable, PID alive, pane idle — sat `healthy_quiet` and `in_progress`/claimed for 65+ minutes with no wake, no replacement, no terminal outcome | `Secretary1517Tests` (reducer, tick by tick) and `Secretary1517WaitTickTests` (the real wait tick end to end) | the freeze is bounded by `dark_ceiling`: `HealthyQuiet` while the source has been dark under ten minutes, then `SuspectedStall` (which spends the round's one report nudge — the wake) and `ConfirmedStall` at `suspect_after + confirm_after` of quiet. The reason names the dark source and its darkness; the pane's idle answer stays corroboration; nothing is stopped or replaced, because the confirmation rests on the pid alone and the guard holds it behind the outer ceiling |
-| A live worker head whose pane the worktree inventory no longer lists (`reason: "pid"`) or that is not connected (`reason: "disconnected"`), after the provider had answered once: the status carries no provider channel at all | `ProviderLessStatusShapesTests` (the shapes pinned from `command_terminal_status`, then the reduction and the guard end to end) | the absent channel is stamped dark (`absent@provider_cursor`), so the episode takes the `dark_ceiling` window, spends the conversational nudge, and — confirmed — is held behind the role's outer ceiling instead of being respawned fifteen minutes after the last provider advance |
-| `issue:06dcf6cb` (board 656): umbrella contract — child-process existence ≠ liveness | `Issue06dcf6cbUmbrellaLivenessContractTests` | pid-only Running with no progress evidence ages ⇒ SuspectedStall ⇒ ConfirmedStall (see "Pid-only evidence ages" above) |
-
-The legacy decision path itself is characterised in `tests/test_head_vitality_legacy_path.py`:
-what the wait tick and gate do for b5195041, 3e7abdf9 and fe04011b. Since S1-4 the b5195041
-characterisation is a REAL assertion (a transcript that advances every tick is never prompted,
-never respawned); since S1-5 fe04011b's gate-phase characterisation is a REAL assertion too
-(the pending-gate tick SIGCONTs a suspended worker within one tick). No `expectedFailure`
-markers remain in the vitality suites. Since secretary-1539 the fe04011b gate characterisation is
-explicitly scoped to a head this dispatcher is NOT holding (the fixture clears the card's retention
-first); the retained twin is `Issue02fe04d7RetainedWorkerTests` in the same file.
-
-### Retention: whose stop signal is it
-
-`/proc` state `T` is one fact with two possible owners. The dispatcher parks a finished worker
-itself — `host.retain_worker` sends SIGSTOP on `report:done` and `WorkerContinuation.begin_retention`
-records the confirmed retention — so that the worker stops editing the checkout while CI and the
-reviewer own it, and so that a red verdict can resume the same provider conversation. The watchdog
-reads the same `T` as a head to revive.
-
-Until secretary-1539 both were true at once. On codegen-orchestrator-1248 (2026-09-02) the card
-retained its worker at 15:14:53, the vitality watchdog SIGCONT'd it at 15:17:32, CI came back red at
-15:18:37, and the red continuation found the session "no longer confirmably suspended" and took
-`replacement` instead of `reuse`, losing the conversation that wrote the code. Retention lasts two
-to three minutes and CI takes three to four, so the SIGCONT always won that race.
-
-The fix is typed, not a special case at one call site: `reduce_vitality` takes the intent as an
-input, `_reduce_and_store_vitality_episode` passes `record.worker_continuation.retained` for the
-worker head (the review head has no retention of its own and always passes `False`), and the
-resulting `Retained` verdict earns **no rung at all** — not SIGCONT, not the nudge, not the operator
-escalation, and the guard refuses every destructive step over it (`retained` refusal class). A head
-stopped WITHOUT an active retention keeps the whole fe04011b `Suspended` ladder unchanged.
+`_reduce_and_store_vitality_episode` passes `record.worker_continuation.retained` for the worker head
+(the review head always passes `False`). `Retained` earns no rung: no SIGCONT, no nudge, no operator
+escalation, and the guard refuses every destructive step (`retained`). A head stopped without an
+active retention follows the `Suspended` ladder.
 
 ### Thresholds
 
-`dark_ceiling` is the one number here that is load-bearing for a real recovery, and it is argued
-rather than borrowed. Lower bound: it must outlast a genuine provider-startup window — secretary-1542
-measured one against real Codex v0.152.1 on this host, and across it Orca answered `tui-idle`
-satisfied on sixteen consecutive probes while the output cursor never advanced, so neither of those
-signals distinguishes a starting head from a settled one and only time does. Upper bound: it must
-stay far below the six-hour worker-report ceiling and still make the wake worth having. The default
-is `2 × IDLE_STALL_DEFAULT` (ten minutes): a dark-and-quiet head is nudged at ten minutes instead of
-never, while nothing destructive happens before both quiet thresholds AND the guard's outer ceiling.
+| Threshold | Default |
+|---|---|
+| `suspect_after` | `IDLE_STALL_DEFAULT` (5 min) |
+| `confirm_after` | `2 × IDLE_STALL_DEFAULT` (10 min) |
+| `dark_ceiling` | `2 × IDLE_STALL_DEFAULT` (10 min) |
+| suspension response window | 5 min (`SECRETARY_HEAD_SUSPENSION_RESPONSE_SECONDS`, `SUSPENSION_RESPONSE_WINDOW_DEFAULT`) |
+| deterministic refusal limit | 3 |
+| worker report outer ceiling | `WORKER_REPORT_STALL_DEFAULT` (6 h) |
+| gate pending outer ceiling | `GATE_PENDING_STALL_SECONDS` (6 h) |
 
-The other two are comparability choices, not authority: `suspect_after = IDLE_STALL_DEFAULT`
-(secretary-1063's five-minute readiness-idle window, where today's machinery first treats idle as
-actionable) and `confirm_after = 2×IDLE_STALL_DEFAULT`, echoing the watchdog's principle that a
-destructive-looking conclusion wants evidence separated in time. Both are far below the six-hour
-worker-report ceiling whose uncritical application produced the incidents this sprint exists to
-remove. A later policy card owns whatever the production numbers become.
+`dark_ceiling` must outlast a provider startup window, during which pane readiness and output cursor
+cannot tell a starting head from a settled one, and stay far below the six-hour ceilings. A dark and
+quiet head is nudged at `max(dark_ceiling, suspect_after)`.
 
-### Shadow mode
+### Verdict persistence
 
-S1-4 promoted the shadow reduction into the decision input (see "Decision path and destructive
-guard" below); the historical contract it grew from is kept here because the promotion preserved
-it. The worker/review wait tick computes and persists each role's episode (`worker_vitality_episode`,
-`review_vitality_episode` on the dispatcher record) from values it already holds, and logs one
-durable comment per verdict change (keyed on the transition itself, so a flapping verdict cannot
-flood the card). A tick whose status carries none of the observed sources (the noop host, a runtime-unavailable
-probe) runs no reduction and writes nothing — an episode is only ever the record of something
-actually observed. A reduction failure degrades to "no episode" with a comment — the reduction must
-never break the tick hosting it; the caller then decides as it would with no episode at all.
+The worker/review wait tick persists each role's episode (`worker_vitality_episode`,
+`review_vitality_episode` on the dispatcher record) and writes one durable comment per verdict change,
+keyed on the transition. A tick whose status carries none of the observed sources runs no reduction and
+writes nothing. A reduction failure degrades to "no episode" with a comment and never breaks the tick.
 
-## Decision path and destructive guard
+## Decision path
 
-Since card S1-4 the wait tick's decision is the persisted episode's verdict — the pane-idle fence,
-the `pid_confirmed and idle` branch and the pure clock ceilings on this path are gone. The
-reduction runs on every wait tick (including not-live shapes: a heartbeat that names a gone
-process reduces to `Dead`; a vanished pane over a live process is an observation failure that
-waits). Verdict → action:
+The wait tick decides from the persisted episode's verdict. The reduction runs on every wait tick,
+including not-live shapes: a heartbeat naming a gone process reduces to `Dead`; a vanished pane over a
+live process is an observation failure that waits.
 
 | Verdict | Wait-tick action |
 |---|---|
-| `HealthyActive`, `HealthyQuiet`, `Unverifiable` | `wait`. Fresh evidence of life renews the outer `worker_waiting_since` window; nothing is nudged or signalled. A recovered suspension also lands here, with the recovery ladder cleared. |
-| `Retained` | `wait`, and nothing else: this dispatcher is holding the process on a stop signal itself, so not even the SIGCONT rung applies. The role's wait clock is renewed — a retained head is not late, it is not being waited on. |
-| `Suspended` | **The recovery policy owns this arm (S1-5)** — see the section below: one identity-fenced SIGCONT per suspension span, a response window, then operator escalation. Never a stop. |
-| `SuspectedStall` | At most one idempotent report nudge per round generation (the existing `_prompt_worker_report` machinery), then visible degradation (`{kind}-stall-suspected`). A suspicion never destroys. |
-| `ConfirmedStall` | The existing recovery path: one report prompt if the round has not spent it, else `_trigger_wait_watchdog` → respawn once → escalate to Blocked. Only from this verdict. |
-| `Dead` | The existing not-live handling: reclaim via `_trigger_wait_watchdog`. |
-| No episode / `Unverifiable`, ceiling elapsed | **Operator escalation, head untouched** (`_escalate_unobservable_wait`): one idempotent durable comment naming the evidence gap plus a degraded `{kind}-unobserved-wait-escalated` outcome. An unobservable wait is bounded by escalation, NOT by replacement — the guard refuses every destructive step for such a run, so the pre-S1-4 behaviour (reclaim on the clock alone) is gone on purpose. Before the ceilings speak, the recovery policy is consulted once more: an authoritative deterministic refusal on file escalates after N identical sightings instead of waiting out any ceiling (the 1194 class). |
+| `HealthyActive`, `HealthyQuiet`, `Unverifiable` | `wait`. Fresh evidence renews the outer `worker_waiting_since` window. A recovered suspension lands here with the ladder cleared. |
+| `Retained` | `wait` only; the role's wait clock is renewed. |
+| `Suspended` | Recovery policy: one identity-fenced SIGCONT per suspension span, a response window, then operator escalation. Never a stop. |
+| `SuspectedStall` | At most one idempotent report nudge per round generation, then visible degradation (`{kind}-stall-suspected`). Never destructive. |
+| `ConfirmedStall` | One report prompt if the round has not spent it, else `_trigger_wait_watchdog` → respawn once → escalate to Blocked. |
+| `Dead` | Reclaim via `_trigger_wait_watchdog`. |
+| No episode / `Unverifiable`, ceiling elapsed | Operator escalation, head untouched (`_escalate_unobservable_wait`): one idempotent durable comment naming the evidence gap and a degraded `{kind}-unobserved-wait-escalated` outcome. Before that, an authoritative deterministic refusal seen `deterministic_refusal_limit` times escalates without waiting for the ceiling. |
 
 ### The guard
 
-Every watchdog-driven destructive step passes through
-`secretary.dispatch.head_vitality_guard.assert_destructive_allowed` before anything is stopped,
-killed, respawned or replaced. Refusal classes: `missing-episode` (nothing was observed — a step
-nobody observed acts on nobody's evidence), `foreign-run` (the episode names another HeadRun than
-the one being acted on), `healthy-active`, `healthy-quiet`, `unverifiable`, `suspended`,
-`retained`, `suspected-stall`, and `pid-only-ceiling-unelapsed` (below). Allowed only for `ConfirmedStall`
-and `Dead`.
+Every watchdog-driven destructive step passes
+`secretary.dispatch.head_vitality_guard.assert_destructive_allowed` before anything is stopped, killed,
+respawned or replaced. It allows only `ConfirmedStall` and `Dead`. Refusal classes: `missing-episode`,
+`foreign-run` (episode names another HeadRun), `healthy-active`, `healthy-quiet`, `unverifiable`,
+`suspended`, `retained`, `suspected-stall`, `pid-only-ceiling-unelapsed`.
 
-**Belt-and-braces for the first production release:** a confirmation earned with no progress source
-*answering* — the pid-only aging arm (issue 656, the provider never answered at all) and, since
-secretary-1543, a source that answered and has since gone dark, whether it answered UNAVAILABLE or
-stopped producing a snapshot at all — additionally requires the role's
-ordinary outer ceiling (`WORKER_REPORT_STALL_DEFAULT` class) to have elapsed since the episode began
-accumulating. Such a stall is therefore acted on strictly later than the old clock-only machinery
-would have, never earlier. Only a confirmation earned on quiet a progress source is still answering
-for is unheld: that is the two-channel evidence the sprint exists to listen for. A raising reducer
-fails safe to `wait` + one comment.
+A confirmation earned with no progress source answering (pid-only, or a witnessed source now dark)
+also requires the role's outer ceiling (`WORKER_REPORT_STALL_DEFAULT` class) to have elapsed since the
+episode began; otherwise `pid-only-ceiling-unelapsed`. Only a confirmation on quiet that a progress
+source is still answering for is acted on without that hold. A raising reducer fails safe to `wait`
+plus one comment.
 
-The refusal comment is keyed on the wait cycle **and the refusal class**, and its body says only
-what that key names; the live measurement (the quiet, the dark sources, the next deadline) stays on
-the durable episode and is read with `secretary head-status`. A body carrying the elapsed seconds
-under a key that does not name them is not an idempotent replay — it is the secretary-1477
-`request id belongs to another operation or payload` failure, raised out of the tick before it can
-decide.
+A refusal produces a degraded `{kind}-guard-refused` outcome and one idempotent durable comment keyed
+on the wait cycle and refusal class. The body says only what that key names; live measurements (quiet,
+dark sources, next deadline) stay on the episode and are read with `secretary head-status`.
 
-A refusal produces a degraded `{kind}-guard-refused` outcome plus one idempotent durable comment
-keyed on the wait-cycle token — never a silent no-op loop without telemetry.
+Guarded entry point: `DispatcherRuntime._trigger_wait_watchdog`, which fences both arms
+(`_respawn_wait`, `_escalate_wait`) through `_guard_or_wait`. The no-episode fallback's evidence
+branches (`no output since launch`, `no terminal progress`) keep their triggers but act only under
+`_trigger_wait_watchdog`; its pure clock branch escalates without destroying. `_stop_worker_confirmed`
+and `_end_review_pane_confirmed` run only beneath a guarded entry.
 
-- **Guarded entry points (watchdog-driven):**
-  `dispatcher.DispatcherRuntime._trigger_wait_watchdog` — the verdict-driven recovery entry point;
-  fences both its arms (`_respawn_wait`, `_escalate_wait`) through `_guard_or_wait`.
-  The evidence-shaped branches of the no-episode fallback (`no output since launch`; `no terminal
-  progress`) keep their pre-vitality triggers because they act on what a source actually said;
-  their destructive steps run under `_trigger_wait_watchdog` and are fenced like every other.
-  The pure clock branch of that same fallback no longer destroys at all: it escalates to the
-  operator (see the verdict table).
-  The confirmed-stop paths reached from these two (`_stop_worker_confirmed`,
-  `_end_review_pane_confirmed`) run only underneath a guarded entry.
+Not guarded, because they do not act on vitality:
 
-**Intentionally NOT guarded (legitimate without any episode):**
+- operator-initiated stops (`CommandHostRuntime.stop_head` from an explicit operator command);
+- card-lifecycle stops: Done/Blocked transitions, drain, the review bring-up's confirmed worker freeze
+  (`_adopt_launch_intent`);
+- launch-recovery stops in `dispatcher_launch.resolve_launch_intent`, which act on durable launch
+  intents and heartbeat identity.
 
-- Operator-initiated stops (`CommandHostRuntime.stop_head` invoked by an explicit operator
-  command) — a human decided.
-- Card-lifecycle stops: card Done/Blocked transitions, drain, the review bring-up's freeze of the
-  worker (`_adopt_launch_intent`'s confirmed stop) — the lifecycle owns the head.
-- Launch-recovery stops in `dispatcher_launch.resolve_launch_intent` (settling a launch whose tick
-  died) — they act on durable launch intents and heartbeat identity, not vitality verdicts.
-
-Call-site coverage lives in `tests/test_head_vitality_guard_sites.py`: each guarded path is driven
-with the guard patched to refuse (no destructive host call may happen) and once through the real
-guard (the step must happen); each unguarded stop asserts the guard symbol is never consulted.
-Unit tests for every refusal class live in `tests/test_head_vitality_guard.py`.
+Tests: refusal classes in `tests/test_head_vitality_guard.py`; call-site coverage in
+`tests/test_head_vitality_guard_sites.py` (guarded paths with the guard forced to refuse and through the
+real guard; unguarded stops never consult it).
 
 ## Recovery policy
 
-Since card S1-5 the plan's third layer exists: `src/secretary/dispatch/head_vitality_policy.py`.
-It consumes **only** a persisted `VitalityEpisode` — never raw signals, never a pane API — and
-returns a `RecoveryDecision`: an intent from `RecoveryIntent`, the ladder rung it leaves the head
-on, and structured detail for telemetry. It executes nothing; the dispatcher executes intents, and
-the destructive guard of the previous section remains the last fence. The policy can never kill:
-no input shape produces anything beyond `escalate_operator`, and a suspended process is alive by
-the kernel's own word.
+`head_vitality_policy.py` consumes only a persisted `VitalityEpisode` and returns a `RecoveryDecision`:
+an intent, the rung it leaves the head on, and telemetry detail. It executes nothing; the dispatcher
+executes intents under the guard. No input produces anything beyond `escalate_operator`.
 
-### The rung table (as implemented)
+### Rungs
 
-Rung state persists on the episode itself (`recovery_rung`, reserved since S1-2, plus the sibling
-fields `recovery_span_started_at` and `deterministic_refusals`) through the record's existing
-serialisation, so a dispatcher restart resumes the same rung instead of restarting the ladder:
+Rung state persists on the episode (`recovery_rung`, `recovery_span_started_at`,
+`deterministic_refusals`), so a dispatcher restart resumes the same rung.
 
 | Rung | Verdict | Intent | Meaning |
 |---|---|---|---|
-| 0 | Healthy\*, Unverifiable, Dead | `observe` | Nothing earned. A suspension that recovered lands here too: the ladder clears with it, so a future span starts fresh. |
-| 1 | `SuspectedStall` | `nudge` | The suspicion was seen; its single idempotent nudge is spent by the S1-4 wait-tick arm (`_prompt_worker_report`), unchanged. |
-| — | `Retained` | `observe` | Checked before everything else, including the deterministic-refusal fast path: a process the dispatcher parked itself earns no rung, and the ladder is reset to zero so the retention's end starts a fresh span. |
-| 2→3 | `Suspended`, fresh span | `sigcont` | One identity-fenced SIGCONT per span (see below), then the response window opens. |
-| 3 | `Suspended`, window running | `observe` | Inside the response window; the reduction flips the verdict to Healthy\*/Suspected the moment the head actually resumes. |
-| 4 | `Suspended`, window expired | `escalate_operator` | One durable comment asking a human to look. Holds for the rest of the span (no re-firing). **Never kill** — the guard refuses destruction on this verdict regardless. |
-| — | deterministic refusal ×N | `escalate_operator` | Skips the retry ladder entirely after `deterministic_refusal_limit` (3) identical authoritative sightings. |
+| — | `Retained` | `observe` | Checked first, before the deterministic-refusal path. Resets the ladder to 0. |
+| 0 | Healthy\*, `Unverifiable`, `Dead` | `observe` | Nothing earned. A recovered suspension clears the ladder here. |
+| 1 | `SuspectedStall` | `nudge` | The wait tick spends the single nudge (`_prompt_worker_report`). |
+| 2→3 | `Suspended`, new span | `sigcont` | One identity-fenced SIGCONT per span; the response window opens. |
+| 3 | `Suspended`, window running | `observe` | The reduction flips the verdict as soon as the head resumes. |
+| 4 | `Suspended`, window expired | `escalate_operator` | One durable comment; holds for the rest of the span. Never kill. |
+| — | deterministic refusal ×N | `escalate_operator` | After `deterministic_refusal_limit` (3) identical authoritative sightings. |
 
-A suspension **span** is identified by the reducer's own freeze stamp (`stall_frozen_since`): it
-starts when the kernel first shows the process parked and clears when it runs again. Every
-SIGCONT-rung decision keys on that stamp — within one span nothing re-fires, across spans the
-ladder restarts, on recovery it resets to 0. This is what makes repeated identical observations
-free and the policy safe to call from every tick, wait path and gate phase alike.
+A suspension span is keyed on the reducer's freeze stamp (`stall_frozen_since`): it starts when the
+process is first seen parked and clears when it runs. Within a span nothing re-fires; a new span
+restarts the ladder; recovery resets it to 0. Repeated identical observations are therefore free.
 
-### The SIGCONT execution
+The policy does not yet route rungs through `request_drain`, safe replacement at a quiescent boundary,
+same-profile respawn, runtime failover or evidence-backed `block`. `ConfirmedStall` recovery is respawn
+once, then escalate.
 
-`DispatcherRuntime._sigcont_head` is the only signal this path can send. Before signalling it
-re-verifies identity at send time through `guard_head_run_identity` (pid + boot id + proc start
-time + expected HeadRun, the same fence `_confirm_head_process_gone` uses): a mismatched,
-unreadable or vanished heartbeat sends nothing — resuming somebody else's process group is worse
-than leaving our own parked one parked one more tick. Delivery follows `_signal_head`'s group
-rule (signal the head's own process group when it has one, else the pid). SIGCONT only, ever:
-SIGTERM/SIGKILL stay behind their own guarded entries. The send is one durable comment naming the
-span and the response window (`{kind}-vitality-sigcont`), idempotent via the span stamp in the
-request id.
+### SIGCONT execution
 
-### The response window
+`DispatcherRuntime._sigcont_head` is the only signal this path sends. At send time it re-verifies
+identity through `guard_head_run_identity` (pid, boot id, proc start time, expected HeadRun); a
+mismatched, unreadable or vanished heartbeat sends nothing. Delivery follows `_signal_head`: the head's
+own process group when it has one, else the pid. SIGTERM/SIGKILL stay behind their guarded entries.
+Each send writes one durable comment (`{kind}-vitality-sigcont`) naming the span and response window,
+idempotent via the span stamp in the request id.
 
-Default five minutes (`SECRETARY_HEAD_SUSPENSION_RESPONSE_SECONDS`,
-`SUSPENSION_RESPONSE_WINDOW_DEFAULT`). The scale is deliberate: it must outlast several tick
-cadences so a resumed head gets multiple ticks to show life before the second rung fires; it must
-stay far below the six-hour ceilings whose uncritical application produced fe04011b; and the
-incident itself — 27 minutes unnoticed in `T` — bounds well under a window of this size while a
-resuming head loses nothing. Expiry escalates to the operator and touches nothing.
+The response window must outlast several ticks so a resumed head can show life. Expiry escalates to the
+operator and touches nothing.
 
-### Gate-phase coverage
+### Gate phase
 
-`_gate_pending` no longer watches only its clock (issue fe04011b). While CI sits non-terminal,
-each pending tick runs the same vitality reduction + recovery policy for the worker head that the
-report wait runs: `T` is seen within one tick and SIGCONT'd; an expired response window reaches
-the operator in minutes. Any probe failure degrades to the ordinary gate behaviour — the gate
-keeps working over an unobservable head exactly as before. `GATE_PENDING_STALL_SECONDS` stays as
-the OUTER escalation ceiling for the CI rollup itself (Blocked for a human, non-destructive per
-S1-4 semantics); it is simply no longer the first thing to notice a stopped process.
-`WORKER_REPORT_STALL_DEFAULT` keeps the same role on the report-wait path: an outer ceiling for
-unobservable heads, while observable ones are decided by evidence.
+While CI is non-terminal, each `_gate_pending` tick runs the same reduction and policy for the worker
+head: a stopped process is seen and SIGCONT'd within one tick, and an expired window reaches the operator.
+A probe failure falls back to ordinary gate behaviour. `GATE_PENDING_STALL_SECONDS` is the outer
+ceiling for the CI rollup (Blocked for a human, non-destructive); `WORKER_REPORT_STALL_DEFAULT` plays the
+same role on the report-wait path.
 
-### Deterministic refusal reasons (the allowlist)
+### Deterministic refusal reasons
 
-The plan: identical heuristic reasons N times are not evidence; only authoritative deterministic
-classes may skip ranks. `DETERMINISTIC_TERMINAL_REASONS` is the explicit allowlist — what
-qualifies is a refusal naming a property of THIS launch, which retrying cannot change: invalid
-configuration, missing executable, authentication rejected, resource exhausted, and the incident's
-own `terminal_split_source_not_found`. Reviewer bring-up handles that last token before it reaches
-the policy: Orca has refused before creating a child because the split anchor's renderer node is
-gone, so it opens one standalone pane in the same worktree. Matching is token-in-bounded-string
-against the diagnostic the producer put on the snapshot (the reducer now carries a dark source's
-reason onto the episode).
-After three identical sightings (`deterministic_refusal_limit`) the policy returns
-`escalate_operator` and the dispatcher writes one comment and stops re-sending — minutes into what
-was a 49-minute silent loop. Timing/availability/transport refusals deliberately do NOT qualify:
-they repeat whenever their cause persists, and counting them would let one dark channel fast-track
-a live head to escalation — the exact inversion of "Unavailable ≠ no progress". A changed attempt
-(a tick where no deterministic reason appears) resets the count, as real progress ends a stall.
+Only authoritative deterministic reasons may skip rungs. `DETERMINISTIC_TERMINAL_REASONS` is the
+allowlist of refusals naming a property of this launch that retrying cannot change: invalid
+configuration, missing executable, authentication rejected, resource exhausted, and
+`terminal_split_source_not_found`. Matching is token-in-bounded-string against the diagnostic on the
+snapshot (a dark source's reason is carried onto the episode). Timing, availability and transport
+refusals do not qualify: counting them would let one dark channel fast-track a live head to
+escalation. A tick with no deterministic reason resets the count.
 
-Tests: policy rungs and idempotency in `tests/test_head_vitality_policy.py`; real-process
-execution (a genuinely SIGSTOPed child resumed once via SIGCONT alone, a foreign-identity
-heartbeat signalled by nobody) in `tests/test_head_vitality_policy_execution.py`; wait-tick and
-gate-phase ticks in `tests/test_head_vitality_wait_decisions.py` and
-`tests/test_head_vitality_legacy_path.py`.
+Reviewer bring-up handles `terminal_split_source_not_found` before the policy sees it: the token can
+occur before or after Orca attempts a child. It opens one standalone pane in the same worktree only when
+before/after worktree inventories show no pane appeared; otherwise it fails closed.
 
-**What remains after the runtime boundary:** the recovery policy does not yet route its rungs
-through `request_drain`, safe replacement on a quiescent boundary, same-profile respawn, runtime
-failover and `block` with evidence. The local-pty backend can express those operations safely, but
-the policy wiring and migration of observer/reviewer/worker are later work. The current
-`ConfirmedStall` recovery path remains respawn once, then escalate.
+Tests: rungs and idempotency in `tests/test_head_vitality_policy.py`; real-process SIGCONT and
+foreign-identity refusal in `tests/test_head_vitality_policy_execution.py`; wait-tick and gate-phase
+decisions in `tests/test_head_vitality_wait_decisions.py` and `tests/test_head_vitality_legacy_path.py`.
+
+## Regression invariants
+
+Each invariant is replayed tick by tick through the snapshot builders, fed the producer payload shapes
+(`head_process_status`, `provider_progress_for_run`, pane readiness) and folded by the reducer under
+`DEFAULT_VITALITY_THRESHOLDS`. A false "working" costs idle time; a false kill loses a live round, so a
+verdict that can stop a head needs strong admitted evidence.
+
+| Invariant | Tests |
+|---|---|
+| Provider `Advancing` ⇒ `HealthyActive`; advisory pane-idle alone never leaves `Unverifiable`; no destructive verdict while the transcript moves; such a head is never prompted or respawned. | `IssueB5195041CodexTranscriptBlindnessTests`, `IssueB5195041LegacyIdlePathTests` |
+| Busy pane + `Running` + `Advancing` ⇒ `HealthyActive`; readiness unavailable is Turn-only and never stall evidence; unknown provider ⇒ `HealthyQuiet`, never `Dead`/`ConfirmedStall`. | `Issue3e7abdf9BusyReadAsUnavailableTests`, `Issue3e7abdf9LegacyBusyReadinessTests` |
+| `Running` + admitted `Quiet` ⇒ `SuspectedStall` at +300 s and `ConfirmedStall` at +900 s from last progress; a busy pane only corroborates. | `Issue8f86ed63BusyMasksStallTests` |
+| `/proc` state `T` ⇒ `Suspended` within one tick; stall clocks frozen; never `ConfirmedStall` or `Dead`; the gate-pending tick SIGCONTs a non-retained suspended worker within one tick. | `IssueFe04011bStoppedWorkerSixHourCeilingTests`, `IssueFe04011bLegacyGatePendingTests` |
+| A repeated deterministic reason with a live terminal keeps `Unverifiable` and escalates after 3 identical sightings; a repeated heuristic reason earns only observation. | `CodegenOrchestrator1194DeterministicSplitFailureTests`; `ReviewPaneTests.test_reviewer_falls_back_when_connected_anchor_is_not_split_capable` |
+| A confirmed retention ⇒ `Retained`: no SIGCONT or other rung, so a red gate reuses the suspended session; `Dead` still outranks it. | `Issue02fe04d7RetainedWorkerTests` |
+| A dark progress source freezes only for `dark_ceiling`, then `SuspectedStall` (spending the nudge) and `ConfirmedStall`; the reason names the dark source; nothing is stopped before the outer ceiling. | `Secretary1517Tests`, `Secretary1517WaitTickTests` |
+| A status with no provider channel (`reason: "pid"`, `"disconnected"`) after the provider answered once is stamped `absent@provider_cursor`, takes the `dark_ceiling` window, and a confirmation is held behind the outer ceiling. | `ProviderLessStatusShapesTests` |
+| Pid-only `Running` with no progress evidence ages to `SuspectedStall` then `ConfirmedStall`. | `Issue06dcf6cbUmbrellaLivenessContractTests` |
+
+Reducer timelines live in `tests/test_head_vitality_regression.py` and
+`tests/test_head_vitality_episode.py`; wait-tick and gate behaviour in
+`tests/test_head_vitality_legacy_path.py` and `tests/test_head_vitality_wait_decisions.py`. The
+vitality suites carry no `expectedFailure` markers.

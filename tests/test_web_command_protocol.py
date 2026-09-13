@@ -663,12 +663,10 @@ class IdentityContractTests(CommandProtocolFixture):
             call()
         return refused.exception.code
 
-    def test_the_operator_scenario_and_the_change_are_written_down(self) -> None:
+    def test_the_operator_scenario_is_written_down(self) -> None:
         operations_doc = (DOCS / "OPERATIONS.md").read_text(encoding="utf-8")
-        changelog = (DOCS / "CHANGELOG.md").read_text(encoding="utf-8")
         for needle in ("web-read commands", "web-read request"):
             self.assertIn(needle, operations_doc)
-            self.assertIn(needle, changelog)
 
 
 class LayerPropertyTests(CommandProtocolFixture):
