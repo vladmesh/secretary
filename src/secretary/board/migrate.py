@@ -38,8 +38,8 @@ SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 
 #: The revision this build of the product expects a store to be at.  It is Alembic's head, and
 #: `head_revision()` reads it from the script directory rather than trusting this literal.
-#: `0007_card_transport_key` is the head serving collision-free Card dispatch.
-EXPECTED_SCHEMA_REVISION = "0007_card_transport_key"
+#: `0008_po_sessions` is the head serving the PO head's sessions, turns and feed.
+EXPECTED_SCHEMA_REVISION = "0008_po_sessions"
 
 #: A fixed 64-bit key, so every runner of every checkout contends on the same lock.  Any constant
 #: would do; this one is the first 63 bits of sha256("secretary.board.migrations"), recorded here

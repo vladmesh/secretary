@@ -698,15 +698,18 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0004_product_issue_sql` | `product_comments`; Product/Issue `board_key`; `products.extensions`; `tasks.date_moved` |
 | `0005_sprint_sql` | Sprint runtime: relation ordinals, `sprint_resumes.recorded_at_source`, deferrable card→sprint reference |
 | `0006_sprint_transport_key` | `sprints.board_key` |
-| `0007_card_transport_key` | `tasks.board_key` from `card_board_key_seq` (head) |
+| `0007_card_transport_key` | `tasks.board_key` from `card_board_key_seq` |
+| `0008_po_sessions` | PO head `po_sessions`, `po_turns` (one running turn per session), `po_feed` (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
 non-null, unique and range-checked. Refs, numbers, relations, comments and audit rows are untouched.
 
+`0008` only adds tables; their use is in [Operations](OPERATIONS.md#po-head-sessions-and-turns).
+
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 24 tables, 39 `CHECK`, 40 foreign keys, 24 primary keys, 17 `UNIQUE`,
-4 partial unique indexes.
+(including `alembic_version`): 27 tables, 45 `CHECK`, 42 foreign keys, 27 primary keys, 17 `UNIQUE`,
+5 partial unique indexes.
 
 ---
 
@@ -991,7 +994,7 @@ The cursor names its kind, `offset` or `ordinal`; a cursor of the other kind is 
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0007_card_transport_key`). `migrate.assert_schema_revision` is used by the importer; cutover,
+  (`0008_po_sessions`). `migrate.assert_schema_revision` is used by the importer; cutover,
   successor preparation and PostgreSQL restore compare against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
@@ -1011,7 +1014,7 @@ The only supported replacement for an occupied, completed import target is rotat
 cluster and volume. The imported database is fenced, renamed to a bounded name derived from its
 plan and database OID, and kept as evidence that ordinary roles cannot use. A new empty database is
 created under the configured name and owner, migrated and role-verified. There is no row-level
-merge importer. The preserved database must already be at `0007_card_transport_key`. Command
+merge importer. The preserved database must already be at the head revision. Command
 contract and phases: [PROTOCOLS.md](PROTOCOLS.md#secretary-cutover); runbook:
 [OPERATIONS.md](OPERATIONS.md#preparing-a-successor-after-a-completed-import).
 

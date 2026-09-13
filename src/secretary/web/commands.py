@@ -20,6 +20,7 @@ from secretary.webproto.command_reads import CommandReadLayer
 from secretary.webproto.ops import OperationLayer
 from secretary.webproto.pause_ops import PauseOperationLayer
 from secretary.webproto.pause_reads import PauseReadLayer
+from secretary.webproto.po_recovery import recover_po_turns
 from secretary.webproto.reads import ReadLayer
 from secretary.webproto.sprint_ops import SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
@@ -74,6 +75,8 @@ def run_web_serve(args: argparse.Namespace) -> int:
         CardOperationLayer(args.instance, data_dir=args.data_dir),
         ProviderUsageLayer(),
     )
+    for line in recover_po_turns(args.instance, args.data_dir):
+        print(line, file=sys.stderr)
     try:
         return serve(app, host=args.host, port=args.port)
     except LoopbackOnly as refused:

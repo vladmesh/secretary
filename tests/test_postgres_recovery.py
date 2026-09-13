@@ -931,7 +931,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
 
         applied_upgrade = migrate.migrate_instance(instance, reuse_existing_roles=True)
         provision.verify_roles(instance)
-        self.assertEqual(applied_upgrade, ("0007_card_transport_key",))
+        self.assertEqual(applied_upgrade, ("0007_card_transport_key", "0008_po_sessions"))
         before_content = content_snapshot(original)
         injected = {name: True for name in (
             "database_rename", "database_create", "migration", "empty_verification",
@@ -1012,7 +1012,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertTrue(all(count == 0 for count in fresh["table_counts"].values()))
         self.assertEqual(fresh["source_schema"], migrate.head_revision())
         occupied = result["successor_preparation"]["phases"]["occupied_verification"]["evidence"]
-        self.assertEqual(occupied["schema_before"], "0007_card_transport_key")
+        self.assertEqual(occupied["schema_before"], migrate.head_revision())
         self.assertEqual(occupied["forward_migrations"], [])
 
         copy_name = "successor_archive_readback"
