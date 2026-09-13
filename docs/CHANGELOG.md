@@ -4,6 +4,18 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-13 — the card page shows its transitions; long text folds
+
+**The card page leads with a transition timeline**: every state change of the card, oldest first,
+with its time, `from → to` chips and the reason; each one opens on the records that made it — the
+worker's report before a submit, the reviewer's verdict before a park in Assessment, the
+observer's decision before a rework. The page reads 200 events by default (`?events=` still
+overrides) so the timeline of a card that went round several times is whole; the flat event list
+is kept, folded, below it. **Long text folds to its first line everywhere** — reports, verdicts,
+decisions, resumes, the sprint goal and Definition of Done — and opens on a click, so a page fits
+one screen. The breadcrumb trail no longer repeats the navigation: a nested page shows only the
+identifier it is on.
+
 ## 2026-09-13 — the web pages are one interface: navigation, panels, a sprints page
 
 **Every page shares one shell**: a top bar with the product, the primary navigation (Dashboard,

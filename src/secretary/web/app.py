@@ -129,6 +129,9 @@ TASK_MOVE_FIELDS = frozenset(
 
 #: How many commands the dashboard's feed and the commands page show per read.
 FEED_LIMIT = 25
+#: How many of a card's events the card page reads by default: enough for the whole transition
+#: timeline of a card that went round several times, where the API's default is a short tail.
+TASK_PAGE_EVENTS = 200
 REVIEW_FIELDS = frozenset({"ref", "request_id", "profile", "worker_run_id"})
 SPRINT_FIELDS = frozenset(
     {
@@ -413,7 +416,9 @@ class WebApp:
 
     def _task_page(self, params, query, _body) -> Response:
         ref = params["ref"]
-        snapshot = self.reads.task_snapshot(ref, events=_events_count(query))
+        snapshot = self.reads.task_snapshot(
+            ref, events=_int(query, "events", TASK_PAGE_EVENTS, ceiling=MAX_LIMIT)
+        )
         return _html(200, pages.task(snapshot, runs=self._runs_or_reason(ref)))
 
     def _sprints_page(self, _params, query, _body) -> Response:

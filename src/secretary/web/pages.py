@@ -202,6 +202,27 @@ form.act .hint { color: var(--faint); font-size: .78rem; margin: .4rem 0 0; }
 .filters a[aria-current="true"] { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 .filters a:hover { text-decoration: none; color: var(--ink); }
 
+/* long text folds; the first line is the summary */
+details.text > summary { list-style: none; cursor: pointer; color: var(--ink); }
+details.text > summary::-webkit-details-marker { display: none; }
+details.text > summary::after { content: " more"; color: var(--accent); font-size: .8rem; }
+details.text[open] > summary::after { content: " less"; }
+details.text > pre { margin-top: .4rem; }
+
+/* the transition timeline */
+ol.timeline { list-style: none; margin: 0; padding: 0; }
+ol.timeline > li { border-top: 1px solid var(--line); }
+ol.timeline > li:first-child { border-top: 0; }
+ol.timeline details > summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 5.2rem 1fr; gap: .6rem; padding: .35rem 0; align-items: baseline; }
+ol.timeline details > summary::-webkit-details-marker { display: none; }
+ol.timeline details > summary:hover { background: var(--raised); }
+ol.timeline .arrow { color: var(--faint); margin: 0 .2rem; }
+ol.timeline .why { color: var(--muted); font-size: .85rem; display: block; }
+ol.timeline .detail { padding: .3rem 0 .6rem 5.8rem; display: grid; gap: .4rem; }
+ol.timeline .record { border-left: 2px solid var(--line-strong); padding-left: .6rem; }
+ol.timeline .record .who { font-size: .8rem; color: var(--muted); }
+@media (max-width: 600px) { ol.timeline .detail { padding-left: 0; } }
+
 /* events */
 ol.events { list-style: none; padding: 0; margin: 0; }
 ol.events li { display: grid; grid-template-columns: 11.5rem 1fr; gap: .6rem; padding: .35rem 0; border-top: 1px solid var(--line); }
@@ -249,8 +270,9 @@ def _page(
 ) -> str:
     """The shell every page shares: the top bar with the product, the navigation and the crumbs.
 
-    `nav` names the primary entry this page belongs to; `crumbs` is the path down from it, each a
-    (label, href) pair with the last one being where the person is (href ignored).
+    `nav` names the primary entry this page belongs to, and the navigation marks it; `crumbs` is
+    what is open under it -- normally one identifier, the card or the sprint -- shown beside the
+    navigation and never repeating it.
     """
     current = ' aria-current="page"'
     links = "".join(
@@ -340,7 +362,7 @@ def error(status: int, code: str, message: str) -> str:
             '<p><a href="/">back to the dashboard</a></p>',
         ]
     )
-    return _page(f"{status} {code}", body, crumbs=(("Dashboard", "/"), (f"{status} {code}", "")))
+    return _page(f"{status} {code}", body)
 
 
 # -- source rendering ---------------------------------------------------------------------------
@@ -728,11 +750,11 @@ def _sprint_work(item: dict[str, Any]) -> str:
         rows.append(["observer", f'{_or_dash((observer.get("declared") or {}).get("profile"))} — <span class="state state-{escape(state)}">{escape(words)}</span>'])
     waiting = item.get("waiting") if isinstance(item.get("waiting"), dict) else {}
     if waiting:
-        rows.append(["observer is", f'<b>{escape(str(waiting.get("state") or "unknown"))}</b> <span class="reason">{escape(str(waiting.get("reason") or ""))}</span>'])
+        rows.append(["observer is", f'<b>{escape(str(waiting.get("state") or "unknown"))}</b> <span class="reason">{escape(_short(waiting.get("reason"), 140))}</span>'])
     checks = item.get("checks") if isinstance(item.get("checks"), dict) else {}
     if checks:
         gate = checks.get("gate") if isinstance(checks.get("gate"), dict) else {}
-        rows.append(["checks", f'<b>{escape(str(gate.get("state") or "—"))}</b> <span class="reason">{escape(str(checks.get("reason") or ""))}</span>'])
+        rows.append(["checks", f'<b>{escape(str(gate.get("state") or "—"))}</b> <span class="reason">{escape(_short(checks.get("reason"), 140))}</span>'])
     budget = item.get("budget") if isinstance(item.get("budget"), dict) else {}
     if budget:
         rows.append(["budget", _budget(budget)])
@@ -754,12 +776,17 @@ def _sprint_work(item: dict[str, Any]) -> str:
     if entry:
         freshness = (decision.get("freshness") or {}).get("value") or {}
         stale = "" if freshness.get("fresh", True) else f' <span class="muted">(stale: {escape(str(freshness.get("error") or ""))})</span>'
-        rows.append(["last decision", f'{escape(str(entry.get("selected_step") or ""))}{stale}<div class="reason">{escape(str(entry.get("selected_why") or ""))}</div>'])
+        rows.append(["last decision", f'{_long(entry.get("selected_step"), chars=140)}{stale}<div class="reason">{_long(entry.get("selected_why"), chars=140)}</div>'])
         if entry.get("next_safe_step"):
-            rows.append(["next step", escape(str(entry.get("next_safe_step")))])
+            rows.append(["next step", _long(entry.get("next_safe_step"), chars=140)])
     if not rows:
         return '<p class="empty">nothing about this sprint\'s work could be read.</p>'
     return _rows(["", ""], rows)
+
+
+def _short(text: Any, chars: int) -> str:
+    value = str(text or "")
+    return value if len(value) <= chars else value[: chars - 1].rstrip() + "…"
 
 
 def _budget(budget: dict[str, Any]) -> str:
@@ -848,7 +875,7 @@ def commands(document: dict[str, Any]) -> str:
             _panel("Commands, newest first", _feed_table(document), more=older),
         ]
     )
-    return _page("History", body, nav="history", crumbs=(("Dashboard", "/"), ("History", "")))
+    return _page("History", body, nav="history")
 
 
 def sprints_page(document: dict[str, Any], *, statuses: list[str]) -> str:
@@ -901,7 +928,7 @@ def sprints_page(document: dict[str, Any], *, statuses: list[str]) -> str:
                    more='<a class="more" href="/sprints/new">open a new sprint</a>'),
         ]
     )
-    return _page("Sprints", body, nav="sprints", crumbs=(("Dashboard", "/"), ("Sprints", "")))
+    return _page("Sprints", body, nav="sprints")
 
 
 # -- the owner's actions --------------------------------------------------------------------------
@@ -1068,27 +1095,28 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
         chips.append(_chip(str(project.get("id") or value.get("project"))))
     if value.get("claimed_by"):
         chips.append(_chip(f"claimed by {value.get('claimed_by')}", "accent"))
+    event_items = list(events.get("items") or [])
     body = "\n".join(
         [
             '<div class="hero">',
             f"<h1>{escape(ref)}</h1>",
             f'<div class="chips">{"".join(chips)}</div>',
             f'<span class="age" style="margin-left:auto">read at {escape(str(snapshot.get("observed_at") or "an unknown time"))}</span>',
-            (f'<p class="title">{escape(str(value.get("title")))}</p>' if value.get("title") else ""),
+            (f'<p class="title">{escape(_short(value.get("title"), 160))}</p>' if value.get("title") else ""),
             "</div>",
             '<div class="grid">',
             '<div class="col">',
+            _panel("Transitions", _source_block(events.get("source"), what="this card's history") + _timeline(event_items)),
             _panel("Work", _work(snapshot.get("work") or {})),
             _panel(
-                "Events",
-                _source_block(events.get("source"), what="this card's history")
-                + _events(list(events.get("items") or []))
-                + '<p id="events-notice"></p>',
+                "Every event",
+                _events(event_items) + '<p id="events-notice"></p>',
+                count=len(event_items) or None,
+                open_=False,
             ),
             "</div>",
             '<div class="col">',
             _panel("Card", _source_block(card.get("source"), what="what this card is") + _card(card.get("value"), project)),
-            _panel("Attempt", _attempt(snapshot.get("attempt") or {})),
             _panel(
                 "Agents",
                 _section(
@@ -1101,6 +1129,7 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
                 count=len(agent_items) or None,
             ),
             _panel("Owner's actions", _comment_form(f"/api/tasks/{quote(ref)}/comment", f"card.{ref}", "Tell the head working this card something") + _move_form(ref)),
+            _panel("Attempt", _attempt(snapshot.get("attempt") or {}), open_=False),
             _panel("Product runs", _runs(ref, runs) + '<p id="feedback"></p>', open_=False),
             "</div></div>",
         ]
@@ -1112,7 +1141,7 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
         body,
         script=script + _ACTIONS_SCRIPT,
         nav="dashboard",
-        crumbs=(("Dashboard", "/"), (ref, "")),
+        crumbs=((ref, ""),),
     )
 
 
@@ -1278,7 +1307,7 @@ def _work(work: dict[str, Any]) -> str:
             f"<h3>{escape(title)}</h3>"
             f'<p><span class="state">{escape(str(entry.get("marker") or ""))}</span>{marked} '
             f'<span class="age">at {_or_dash(entry.get("at"))}</span></p>'
-            f"<pre>{escape(str(entry.get('body') or ''))}</pre>"
+            f"{_long(entry.get('body'), chars=200)}"
         )
     outcome = work.get("outcome")
     if isinstance(outcome, dict):
@@ -1306,6 +1335,81 @@ def _event(item: dict[str, Any]) -> str:
         f"<time>{escape(str(item.get('occurred_at') or ''))}</time>"
         f"<b>{escape(str(item.get('kind') or ''))}</b> {escape(str(detail))}</li>"
     )
+
+
+def _long(text: Any, *, chars: int = 160) -> str:
+    """Long text folded to its first line, opened on a click. Short text is shown as it is."""
+    value = str(text or "")
+    if not value.strip():
+        return '<span class="empty">—</span>'
+    first = value.strip().splitlines()[0]
+    if len(value) <= chars and "\n" not in value.strip():
+        return f"<pre>{escape(value)}</pre>"
+    head = first if len(first) <= chars else first[: chars - 1].rstrip() + "…"
+    return f'<details class="text"><summary>{escape(head)}</summary><pre>{escape(value)}</pre></details>'
+
+
+#: The event kinds whose `data.body` is a record somebody wrote about the card: what a transition
+#: is made of, read beside it.
+RECORD_KINDS = {
+    "card.reported": "worker report",
+    "card.verdict": "reviewer verdict",
+    "card.decided": "observer decision",
+}
+
+
+def _timeline(items: list[dict[str, Any]]) -> str:
+    """Every transition of the card, oldest first, each opening on the records that made it.
+
+    A transition is an event carrying `transition` (source and target). The records between the
+    previous transition and this one -- the worker's report before a submit, the verdict before
+    a park in Assessment, the decision before a rework -- are what made it, and they are read
+    under it rather than found in the flat history.
+    """
+    ordered = sorted(items, key=lambda item: str(item.get("occurred_at") or ""))
+    steps: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    pending: list[dict[str, Any]] = []
+    for item in ordered:
+        if item.get("kind") in RECORD_KINDS and (item.get("data") or {}).get("body"):
+            pending.append(item)
+        if isinstance(item.get("transition"), dict) and item["transition"]:
+            steps.append((item, pending))
+            pending = []
+    if not steps:
+        return '<p class="empty">no transition has been recorded for this card yet.</p>'
+    parts = ['<ol class="timeline">']
+    for event, records in steps:
+        transition = event["transition"]
+        when = str(event.get("occurred_at") or "")
+        clock = when[11:19] if len(when) >= 19 else when
+        actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+        reason = str(event.get("reason") or "")
+        short = reason if len(reason) <= 120 else reason[:117].rstrip() + "…"
+        detail = [
+            f'<p class="why">{escape(when)} · {escape(str(actor.get("role") or ""))} {escape(str(actor.get("id") or ""))} · <span class="mono">{escape(str(event.get("kind") or ""))}</span></p>',
+            (f"<div>{_long(reason, chars=300)}</div>" if reason else ""),
+        ]
+        for record in records:
+            data = record.get("data") or {}
+            who = record.get("actor") if isinstance(record.get("actor"), dict) else {}
+            stamp = str(record.get("occurred_at") or "")
+            marker = str(data.get("marker") or data.get("decision") or data.get("status") or "")
+            detail.append(
+                '<div class="record">'
+                f'<div class="who"><b>{escape(RECORD_KINDS[str(record.get("kind"))])}</b>'
+                f'{" · " + escape(marker) if marker else ""} · {escape(stamp[11:19] if len(stamp) >= 19 else stamp)}'
+                f' · {escape(str(who.get("id") or who.get("role") or ""))}</div>'
+                f'{_long(data.get("body"), chars=200)}'
+                "</div>"
+            )
+        parts.append(
+            f'<li><details><summary><time title="{escape(when)}">{escape(clock)}</time>'
+            f"<span>{_state_chip(transition.get('source'))}<span class=\"arrow\">→</span>{_state_chip(transition.get('target'))}"
+            f' <span class="why">{escape(short)}</span></span></summary>'
+            f'<div class="detail">{"".join(part for part in detail if part)}</div></details></li>'
+        )
+    parts.append("</ol>")
+    return "\n".join(parts)
 
 
 def _js(value: str) -> str:
@@ -1620,7 +1724,6 @@ def sprint_form(
         body,
         script=_SPRINT_FORM_SCRIPT,
         nav="new-sprint",
-        crumbs=(("Dashboard", "/"), ("Sprints", "/sprints"), ("New sprint", "")),
     )
 
 
@@ -1920,13 +2023,13 @@ def sprint(document: dict[str, Any]) -> str:
             f"<h1>{escape(ref)}</h1>",
             f'<div class="chips">{"".join(chips)}</div>',
             f'<span class="age" style="margin-left:auto">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span>',
-            (f'<p class="title">{escape(str((value or {}).get("goal") or ""))}</p>' if value and value.get("goal") else ""),
+            (f'<div class="title">{_long((value or {}).get("goal"), chars=200)}</div>' if value and value.get("goal") else ""),
             "</div>",
             '<div class="grid">',
             '<div class="col">',
             _panel("Work", _sprint_work(work)),
-            _panel("Definition of done", f"<pre>{escape(str((value or {}).get('definition_of_done') or ''))}</pre>" if value else '<p class="empty">no sprint was read.</p>'),
-            _panel("The observer's last resume", _resume((value or {}).get("resume")), open_=bool((value or {}).get("resume"))),
+            _panel("Definition of done", f"<pre>{escape(str((value or {}).get('definition_of_done') or ''))}</pre>" if value else '<p class="empty">no sprint was read.</p>', open_=False),
+            _panel("The observer's last resume", _resume((value or {}).get("resume")), open_=False),
             "</div>",
             '<div class="col">',
             _panel("Sprint", _source_block(sprint_section.get("source"), what="what this sprint is") + _sprint_fields(value)),
@@ -1945,7 +2048,7 @@ def sprint(document: dict[str, Any]) -> str:
         body,
         script=_ACTIONS_SCRIPT,
         nav="sprints",
-        crumbs=(("Dashboard", "/"), ("Sprints", "/sprints"), (ref, "")),
+        crumbs=((ref, ""),),
     )
 
 
@@ -2036,5 +2139,5 @@ def _current_task(value: dict[str, Any] | None) -> str:
 def _resume(resume: Any) -> str:
     if not isinstance(resume, dict) or not resume:
         return '<p class="empty">the observer has recorded no resume for this sprint yet.</p>'
-    rows = [[escape(str(name).replace("_", " ")), f"<pre>{escape(str(resume[name]))}</pre>"] for name in sorted(resume)]
+    rows = [[escape(str(name).replace("_", " ")), _long(resume[name], chars=200)] for name in sorted(resume)]
     return _rows(["", ""], rows)
