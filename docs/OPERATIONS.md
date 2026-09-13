@@ -206,6 +206,42 @@ rg -n 'po_memory|secretary-memory-po-bridge' \
   ~/.config/orca/codex-runtime-home/home/config.toml
 ```
 
+### The PO workspace
+
+The product owner head runs with `DATA_DIR/po` as its working directory (`DATA_DIR` is `data_dir`
+of `instance.yaml`). Install and upgrade materialize it in the `po-workspace` step, as the
+installation user:
+
+| Path | Content | On upgrade |
+| --- | --- | --- |
+| `AGENTS.md` | copy of `packaging/po-workspace/AGENTS.md` from the product checkout | rewritten |
+| `CLAUDE.md` | the single line `@AGENTS.md` | rewritten |
+| `NOTES.md` | the PO's local notes | created if absent, never rewritten |
+| `.mcp.json` | Claude project MCP entry `po_memory` | only that entry reconciled |
+| `.codex/config.toml` | Codex `[mcp_servers.po_memory]` | only that section reconciled |
+| `.claude/skills/` | PO skills for Claude | `role-skills sync` |
+| `.agents/skills/` | PO skills for Codex 0.154, which reads this root in its cwd | `role-skills sync` |
+
+The MCP entries are the same stdio bridge as the user-scoped ones above, written by the same
+writers. The skills are the `po` role of `skills/manifest.toml`: `open-sprint`, `open-issue`,
+`grilling`, `knowledge-doc`, delivered through targets whose root starts with `@po/`. A skill entry
+`secretary/open-sprint` reads the skill from the secretary role's tree, so shared skills have one
+source. `role-skills audit|sync` resolves `@po/` from the instance's `data_dir`, or `--data-dir`;
+with no `instance.yaml` those targets are listed as unresolved and skipped.
+
+`role-skills sync` removes a skill copy from a target root once no manifest declares that skill for
+that root, but only a copy it can prove it delivered: one carrying the `.secretary-role-skill`
+marker it writes into every copy, or, for copies delivered before the marker existed, one whose
+`SKILL.md` is byte for byte a version the manifest's repository shipped under that name. Other
+directories in a shell root are never touched. `audit` lists pending removals under `retired`.
+
+Check:
+
+```bash
+ls -la DATA_DIR/po DATA_DIR/po/.claude/skills DATA_DIR/po/.agents/skills
+secretary role-skills audit --instance INSTANCE
+```
+
 ### Read-only checkpoint and quiet-tick check
 
 Observe an ordinary, already-authorized board transition; do not create a card change, invoke

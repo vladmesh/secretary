@@ -6,12 +6,15 @@
 # Anything that only makes sense on one host belongs there, not here.
 #
 # Target roots are written home-relative on purpose: the product does not know which user runs it,
-# and a root is expanded against the home of the installation the sync runs for.
+# and a root is expanded against the home of the installation the sync runs for. A root starting
+# with `@po/` is inside the product owner's workspace, `<data_dir>/po`, of the installation instead.
+#
+# A skill entry `<role>/<skill>` delivers a skill another role declares, from that role's tree, so a
+# skill two roles share still has one source.
 
 [roles.secretary]
 skills = [
   "open-sprint",
-  "spec-card",
   "knowledge-doc",
   "grilling",
   "grill-me",
@@ -22,6 +25,10 @@ skills = [
 
 [roles.curator]
 skills = ["curate"]
+
+# The product owner head, which runs with its workspace in the data directory as cwd.
+[roles.po]
+skills = ["secretary/open-sprint", "open-issue", "secretary/grilling", "secretary/knowledge-doc"]
 
 [roles.retro]
 skills = ["retro"]
@@ -82,3 +89,15 @@ roles = ["curator", "retro", "steward", "observer"]
 shell = "hermes"
 root = "~/.hermes/skills/secretary-roles"
 roles = ["curator", "retro", "steward"]
+
+# Claude Code reads project skills from `.claude/skills` in its cwd; Codex 0.154 reads `.agents/skills`
+# there, git repository or not.
+[targets.claude-po-workspace]
+shell = "claude"
+root = "@po/.claude/skills"
+roles = ["po"]
+
+[targets.codex-po-workspace]
+shell = "codex"
+root = "@po/.agents/skills"
+roles = ["po"]
