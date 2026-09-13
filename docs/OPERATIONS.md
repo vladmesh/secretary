@@ -209,8 +209,10 @@ rg -n 'po_memory|secretary-memory-po-bridge' \
 ### The PO workspace
 
 The product owner head runs with `DATA_DIR/po` as its working directory (`DATA_DIR` is `data_dir`
-of `instance.yaml`). Install and upgrade materialize it in the `po-workspace` step, as the
-installation user:
+of `instance.yaml`). Install and upgrade materialize it in the `po-workspace` step; after
+`role-skills` has delivered into it, `po-workspace-owner` hands the whole tree to the runtime user on
+every root-invoked upgrade (symlinks and hardlinked files are not followed), so a skill root left
+root-owned by an earlier run is repaired:
 
 | Path | Content | On upgrade |
 | --- | --- | --- |

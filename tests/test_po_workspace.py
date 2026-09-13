@@ -72,6 +72,98 @@ class PoWorkspaceStepTests(unittest.TestCase):
         self.assertLess(names.index("step_memory_clients"), names.index("step_po_workspace"))
         self.assertLess(names.index("step_po_workspace"), names.index("step_role_skills"))
 
+    def test_the_workspace_is_handed_over_after_the_skills_are_delivered(self) -> None:
+        names = [step.__name__ for step in upgrade.STEPS]
+
+        self.assertLess(names.index("step_role_skills"), names.index("step_po_workspace_owner"))
+
+    def test_a_root_invoker_hands_the_whole_workspace_to_the_runtime_user_on_every_run(self) -> None:
+        """Skill roots role-skills creates as root are handed over, and repaired on a later run."""
+        context = upgrade.UpgradeContext(
+            instance_path=self.root / "instance",
+            product_root=self.product,
+            base_branch="main",
+            dry_run=False,
+            units=None,
+            orca=None,
+            automations=None,
+            report=SimpleNamespace(data_dir=self.data),
+            runtime_user="po-runtime",
+        )
+        upgrade.step_po_workspace(context)
+        (self.root / "instance").mkdir()
+        with mock.patch.dict(os.environ, {BIN_DIR_ENV: str(self.root / "bin")}):
+            sync(
+                instance_path=self.root / "instance",
+                product_manifest=MANIFEST,
+                home=self.root / "home",
+                data_dir=self.data,
+                target_filter=set(PO_TARGETS),
+            )
+        outside = self.root / "outside"
+        outside.write_text("not the PO's\n", encoding="utf-8")
+        (self.po / "link").symlink_to(outside)
+        account = SimpleNamespace(pw_uid=4321, pw_gid=4321)
+
+        runs: list[tuple[upgrade.StepResult, set[Path]]] = []
+        for _ in range(2):
+            with (
+                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
+                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.upgrade.os.chown") as chown,
+            ):
+                result = upgrade.step_po_workspace_owner(context)
+            runs.append((result, {Path(call.args[0]) for call in chown.call_args_list}))
+
+        for result, owned in runs:
+            with self.subTest(result=result.detail):
+                self.assertFalse(result.failed, result.detail)
+                for path in (
+                    self.po,
+                    self.po / "NOTES.md",
+                    self.po / ".codex" / "config.toml",
+                    self.po / ".claude" / "skills",
+                    self.po / ".agents" / "skills",
+                    self.po / ".agents" / "skills" / "open-issue" / "SKILL.md",
+                ):
+                    self.assertIn(path, owned)
+                self.assertNotIn(self.po / "link", owned)
+                self.assertNotIn(outside, owned)
+
+    def test_a_non_root_invoker_skips_the_handover(self) -> None:
+        upgrade.step_po_workspace(
+            upgrade.UpgradeContext(
+                instance_path=self.root / "instance",
+                product_root=self.product,
+                base_branch="main",
+                dry_run=False,
+                units=None,
+                orca=None,
+                automations=None,
+                report=SimpleNamespace(data_dir=self.data),
+            )
+        )
+        context = upgrade.UpgradeContext(
+            instance_path=self.root / "instance",
+            product_root=self.product,
+            base_branch="main",
+            dry_run=False,
+            units=None,
+            orca=None,
+            automations=None,
+            report=SimpleNamespace(data_dir=self.data),
+            runtime_user="po-runtime",
+        )
+
+        with (
+            mock.patch("secretary.upgrade.os.geteuid", return_value=1000),
+            mock.patch("secretary.upgrade.os.chown") as chown,
+        ):
+            result = upgrade.step_po_workspace_owner(context)
+
+        self.assertEqual(result.status, "skipped")
+        chown.assert_not_called()
+
     def test_a_first_run_materializes_the_workspace(self) -> None:
         result = self.run_step()
 

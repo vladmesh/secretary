@@ -473,7 +473,10 @@ def step_memory_clients(context: UpgradeContext) -> StepResult:
 
 
 def step_po_workspace(context: UpgradeContext) -> StepResult:
-    """Materialize the PO head's working directory; its notes file is never rewritten."""
+    """Materialize the PO head's working directory; its notes file is never rewritten.
+
+    Ownership is handed over by `step_po_workspace_owner`, after the skills are delivered into it.
+    """
     if not (context.product_root / ".venv").is_dir():
         return StepResult("po-workspace", "skipped", "no .venv in the product checkout")
     data_dir = _data_dir(context)
@@ -483,20 +486,33 @@ def step_po_workspace(context: UpgradeContext) -> StepResult:
         result = po_workspace.materialize(context.product_root, data_dir, dry_run=context.dry_run)
     except po_workspace.WorkspaceError as exc:
         return StepResult("po-workspace", "failed", str(exc))
-    if not context.dry_run:
-        try:
-            _set_runtime_directory_owner(result.path, context.runtime_user)
-            _set_runtime_directory_owner(
-                result.path / po_workspace.CODEX_CONFIG_RELATIVE.parent, context.runtime_user
-            )
-            for name in result.changed:
-                _set_runtime_owner(result.path / name, context.runtime_user)
-        except GitError as exc:
-            return StepResult("po-workspace", "failed", str(exc))
     if not result.changed:
         return StepResult("po-workspace", "unchanged", f"{result.path} current")
     action = "would write" if context.dry_run else "wrote"
     return StepResult("po-workspace", "changed", f"{action} {', '.join(result.changed)} in {result.path}")
+
+
+def step_po_workspace_owner(context: UpgradeContext) -> StepResult:
+    """Hand the whole PO workspace to the runtime user once role-skills has delivered into it.
+
+    Runs on every upgrade rather than on change: a root invoker creates the skill roots and their
+    copies after `po-workspace`, and a tree left root-owned by an earlier run is repaired here.
+    """
+    data_dir = _data_dir(context)
+    if data_dir is None:
+        return StepResult("po-workspace-owner", "skipped", "instance data directory is unresolved")
+    workspace = po_workspace.workspace_dir(data_dir)
+    if context.dry_run or not workspace.is_dir():
+        return StepResult("po-workspace-owner", "skipped", f"no {workspace} to hand over")
+    if not context.runtime_user or os.geteuid() != 0:
+        return StepResult(
+            "po-workspace-owner", "skipped", "not a root invoker; files already belong to the caller"
+        )
+    try:
+        _set_runtime_owner(workspace, context.runtime_user)
+    except GitError as exc:
+        return StepResult("po-workspace-owner", "failed", str(exc))
+    return StepResult("po-workspace-owner", "unchanged", f"{workspace} owned by {context.runtime_user}")
 
 
 def _data_dir(context: UpgradeContext) -> Path | None:
@@ -1580,6 +1596,7 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_publish_head_registry,
     step_worktrees,
     step_role_skills,
+    step_po_workspace_owner,
     step_host,
     step_automations,
     step_memory,
