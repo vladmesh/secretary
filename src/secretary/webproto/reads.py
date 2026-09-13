@@ -307,12 +307,26 @@ class ReadLayer(ProtocolBoundary):
                 ).to_json(),
                 "status": None,
             }
-        return {"source": sources.available(now).to_json(), "status": status}
+        return {"source": sources.available(now).to_json(), "status": health_summary(status)}
 
     def _read_status(self, report: InstanceReport) -> dict[str, Any]:
+        """`secretary status`'s own collector, asked for the host and not for every sprint.
+
+        The sprints are not read here and the runtime panels are not probed: the snapshot's own
+        `agents` section answers liveness from process state, and the sprint protocol
+        (`sprint_reads.sprint_list`) answers the sprints. Reading them here as well is what made a
+        live dashboard read take over ten seconds and carry the full status of every sprint the
+        board has ever held.
+        """
         if self._status_reader is not None:
             return self._status_reader()
-        return collect_status(report, offline=self.offline, sprint_client=self._board_client)
+        return collect_status(
+            report,
+            offline=self.offline,
+            sprint_client=self._board_client,
+            sprints=False,
+            probe_panels=False,
+        )
 
     def _projects(self, report: InstanceReport, *, now: float) -> dict[str, Any]:
         """The registered projects, from the bindings the instance already validates."""
@@ -567,3 +581,104 @@ def _reason(exc: Exception) -> str:
 
 def _text(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+# -- installation health, summarized ---------------------------------------------------------------
+
+
+def health_summary(status: dict[str, Any]) -> dict[str, Any]:
+    """The operator's view of `collect_status`: what is wrong, said by name, over the same facts.
+
+    Not a second health model. Every problem listed here is a field the collector already marks as
+    a failure -- a unit that failed or is missing, a paused pipeline, a checkpoint that is blocked
+    or last failed, a store finding -- restated in a sentence, so a dashboard header can say "ok" or
+    name what needs attention without a person reading the whole status document. No threshold is
+    invented here: a value the collector reports without judging it (free disk, load, lag) is
+    carried as data for the page to show, and is not a problem until the collector says so.
+    """
+    installation = _object(status.get("installation"))
+    host = _object(status.get("host"))
+    dispatcher = _object(status.get("dispatcher"))
+    checkpoint = _object(status.get("checkpoint"))
+    pause = _object(dispatcher.get("pause"))
+    problems: list[str] = []
+    units: list[dict[str, Any]] = []
+    for unit in host.get("units") or []:
+        if not isinstance(unit, dict):
+            continue
+        name = _text(unit.get("name"))
+        units.append(
+            {
+                "name": name,
+                "kind": _text(unit.get("kind")) or None,
+                "present": unit.get("present"),
+                "enabled": unit.get("enabled"),
+                "active": unit.get("active"),
+            }
+        )
+        if unit.get("present") is False:
+            problems.append(f"{name} is not installed on this host")
+        elif _text(unit.get("active")) == "failed":
+            problems.append(f"{name} is failed")
+    external = _object(host.get("external_runtime"))
+    if _text(external.get("name")) and external.get("active") not in (None, "active"):
+        problems.append(f"{_text(external.get('name'))} is {_text(external.get('active'))}")
+    for name, error in sorted(_object(host.get("inventory_errors")).items()):
+        problems.append(f"the host inventory could not read {name}: {error}")
+    if pause.get("paused"):
+        problems.append(f"the pipeline is paused ({_text(pause.get('mode')) or 'unknown mode'})")
+    divergences = _object(dispatcher.get("divergences"))
+    if int(divergences.get("open_count") or 0) > 0:
+        problems.append(f"{int(divergences.get('open_count') or 0)} dispatcher divergence(s) are open")
+    if _text(checkpoint.get("blocked_reason")):
+        problems.append(f"the checkpoint is blocked: {_text(checkpoint.get('blocked_reason'))}")
+    if _text(checkpoint.get("checkpoint_status")) == "failed":
+        problems.append(
+            "the last checkpoint failed"
+            + (f": {_text(checkpoint.get('checkpoint_last_failure_reason'))}" if _text(checkpoint.get("checkpoint_last_failure_reason")) else "")
+        )
+    for section in ("board_transport", "card_backend"):
+        findings = _object(status.get(section)).get("findings") or []
+        if findings:
+            problems.append(f"{section} has {len(findings)} finding(s)")
+    key = _object(_object(status.get("secret_store")).get("installation_key"))
+    if key and not key.get("usable"):
+        problems.append("the secret store's installation key is not usable")
+    memory = _object(status.get("memory"))
+    if memory and memory.get("index_present") is False:
+        problems.append("the memory index is missing")
+    return {
+        "state": "ok" if not problems else "attention",
+        "problems": problems,
+        "dispatcher": {
+            "phase": _text(dispatcher.get("phase")) or None,
+            "paused": bool(pause.get("paused")),
+            "pause_mode": _text(pause.get("mode")) or None,
+            "active_attempts": len(dispatcher.get("active_attempts") or []),
+            "observers": len(dispatcher.get("observers") or []),
+            "last_tick_finished_at": _text(_object(dispatcher.get("reconciliation")).get("last_tick_finished_at")) or None,
+        },
+        "units": units,
+        "external_runtime": {
+            "name": _text(external.get("name")) or None,
+            "active": external.get("active"),
+        },
+        "checkpoint": {
+            "status": _text(checkpoint.get("checkpoint_status")) or None,
+            "lag_minutes": checkpoint.get("lag_minutes"),
+            "lag_commits": checkpoint.get("lag_commits"),
+            "blocked_reason": _text(checkpoint.get("blocked_reason")) or None,
+            "next_due_at": _text(checkpoint.get("checkpoint_next_due_at")) or None,
+        },
+        "resources": _object(host.get("resources")),
+        "cards": _object(installation.get("cards")),
+        "card_backend": _text(_object(status.get("card_backend")).get("backend")) or None,
+        "memory": {
+            "fact_count": memory.get("fact_count"),
+            "last_reindex_at": _text(memory.get("last_reindex_at")) or None,
+        },
+    }
+
+
+def _object(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}

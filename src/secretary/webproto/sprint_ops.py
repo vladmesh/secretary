@@ -395,10 +395,15 @@ class SprintOperationLayer(ProtocolBoundary):
         reference: str,
         reason: str,
         closeout: str,
-        decisions: dict[str, list[dict[str, str]]] | None = None,
+        decisions: dict[str, list[dict[str, str]]] | str | None = None,
         role: str = "po",
     ) -> dict[str, Any]:
         """Close one sprint, and answer with what became of its work.
+
+        `decisions` is the normalized document `SprintWriter.close` takes, or the text of the
+        decisions file `secretary sprint close --decisions-file` reads, or nothing. Text is parsed
+        here by the parser that file has (`sprint_close.parse_close_decisions`), so a transport
+        that carries the owner's file as typed refuses exactly what the CLI refuses.
 
         The operation beside `sprint_create` and `sprint_comment`, and a client of
         `SprintWriter.close` in exactly the sense those two are clients of their writers: every rule
@@ -424,13 +429,18 @@ class SprintOperationLayer(ProtocolBoundary):
         (:data:`secretary.sprint_close.CLOSE_NOT_DONE`) rather than leaving a reader to take
         `closed` for `done`.
         """
-        from secretary.sprint_close import CLOSE_NOT_DONE
+        from secretary.sprint_close import CLOSE_NOT_DONE, parse_close_decisions
 
         now = self._clock()
         if not str(request_id or "").strip():
             raise ValidationRefused("a sprint operation names the request it is made under")
         if not str(reference or "").strip():
             raise ValidationRefused("a sprint close names the sprint it closes")
+        if isinstance(decisions, str):
+            try:
+                decisions = parse_close_decisions(decisions) if decisions.strip() else None
+            except TaskError as exc:
+                raise ValidationRefused(exc.message) from None
         if not str(reason or "").strip():
             raise ValidationRefused("a sprint close states why the owner is closing this sprint")
         if not str(closeout or "").strip():

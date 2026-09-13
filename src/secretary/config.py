@@ -18,6 +18,13 @@ from jsonschema import Draft202012Validator
 from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
+#: The safe loader, on libyaml when the interpreter has it. Same YAML, same safe construction --
+#: only the parser is native. An installation is validated on every read of every web layer, and
+#: each validation parses every project, head and skill file of the instance: on the owner's
+#: installation that was 77 documents and three quarters of a second per read in pure Python,
+#: paid four times per dashboard.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 from secretary.sprints import budget_thresholds, open_sprint_limit_invalid
 from secretary.tasks import TaskError
 
@@ -107,7 +114,7 @@ def load_config(path: Path) -> Any:
         raise ConfigError(f"cannot read config: {exc.strerror or 'unreadable'}") from None
     try:
         # YAML is a JSON superset, so this loads both .yaml and .json.
-        return yaml.safe_load(text)
+        return yaml.load(text, Loader=_YAML_LOADER)
     except yaml.YAMLError as exc:
         raise ConfigError(f"cannot parse config: {_safe_yaml_error(exc)}") from None
 

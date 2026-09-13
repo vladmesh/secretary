@@ -370,7 +370,7 @@ class SprintTransportFixture(unittest.TestCase):
         self.sprint_reads = FakeSprintReads()
         self.sprint_ops = FakeSprintOps(self.sprint_reads)
         self.ops = RecordingOps()
-        self.app = WebApp(RecordingOps(), self.ops, self.sprint_reads, self.sprint_ops)
+        self.app = WebApp(RecordingOps(), self.ops, self.sprint_reads, self.sprint_ops, *(RecordingOps() for _ in range(4)))
 
     # -- driving it --------------------------------------------------------------------------
 
@@ -436,7 +436,7 @@ class SprintRouteTests(SprintTransportFixture):
         self.assertEqual(self.sprint_reads.reads, ["sprint_options"])
 
     def test_an_unrouted_sprint_path_is_404_and_reaches_no_layer(self) -> None:
-        for path in ("/sprints/new/again", "/sprints/sprint:1/start", "/api/sprints"):
+        for path in ("/sprints/new/again", "/sprints/sprint:1/start", "/api/sprints/sprint:1"):
             with self.subTest(path=path):
                 self.assertEqual(self.get(path).status, 404)
         self.assertEqual(self.sprint_reads.reads, [])
@@ -1023,7 +1023,7 @@ class RealLayerFormTests(SprintProtocolFixture):
 
     def setUp(self) -> None:
         super().setUp()
-        self.app = WebApp(RecordingOps(), RecordingOps(), self.reads(), self.ops())
+        self.app = WebApp(RecordingOps(), RecordingOps(), self.reads(), self.ops(), *(RecordingOps() for _ in range(4)))
 
     # -- driving it --------------------------------------------------------------------------
 

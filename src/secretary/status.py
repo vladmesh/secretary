@@ -42,8 +42,18 @@ def collect_status(
     offline: bool = False,
     sprint_client: KanboardClient | None = None,
     recovery: dict[str, Any] | None = None,
+    sprints: bool = True,
+    probe_panels: bool | None = None,
 ) -> dict[str, Any]:
-    """Return a stable, non-mutating snapshot for one validated instance."""
+    """Return a stable, non-mutating snapshot for one validated instance.
+
+    `sprints=False` leaves `installation.sprints` as an explicitly skipped section instead of
+    reading every sprint the board holds: a caller that already reads sprints through the sprint
+    protocol (the web dashboard) would otherwise pay that whole pass -- and carry every sprint's
+    full status, hundreds of kilobytes on a live installation -- on a read whose subject is the
+    host. `probe_panels` overrides the default of probing each attempt's runtime panel, which is
+    the other per-attempt cost this collector has; `None` keeps the released behaviour.
+    """
     assert report.data_dir is not None
     data_dir = report.data_dir
     instance_dir = report.instance_path.parent
@@ -71,6 +81,8 @@ def collect_status(
     # Status is a pollable metadata snapshot. Provider-backed readiness is therefore cache-only;
     # doctor supplies an explicitly live inventory when its caller permits live inspection.
     recovery = recovery or collect_recovery_inventory(report, inspect_live=False, checkpoint=checkpoint)
+    if probe_panels is None:
+        probe_panels = not offline and host_fixture is None
     return {
         "schema_version": STATUS_SCHEMA_VERSION,
         "installation": {
@@ -85,7 +97,9 @@ def collect_status(
             },
             "sprints": _sprints(
                 data_dir, report.instance_path.parent, report.instance, production, client=sprint_client
-            ),
+            )
+            if sprints
+            else {"items": [], "error": None, "skipped": "sprints were not read on this call"},
         },
         "host": {
             "units": _units(expected, collected, offline=offline),
@@ -96,7 +110,7 @@ def collect_status(
         },
         "dispatcher": {
             "phase": _text(production.get("phase")) or "new",
-            "active_attempts": _attempts(production, probe_panels=not offline and host_fixture is None),
+            "active_attempts": _attempts(production, probe_panels=probe_panels),
             "observers": _observers(production),
             "pause": _pause_status(data_dir, production),
             "divergences": _divergences(production),

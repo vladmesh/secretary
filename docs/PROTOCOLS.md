@@ -3942,6 +3942,27 @@ neither reaches a handler.
 | GET | `/api/runs/{run_id}` | `ops.run_state` | one run, and where its ending settles |
 | POST | `/api/runs/start` | `ops.run_start` | raise a worker; body `{ref, request_id, profile, instruction?}` |
 | POST | `/api/runs/review` | `ops.run_review` | raise a reviewer; body `{request_id, profile, worker_run_id?, ref?}` |
+| GET | `/history` | `command_reads.command_history` | the whole command history as a page, newest first; `?cursor=C&limit=N` |
+| GET | `/api/pause` | `pause_reads.pause_state` | whether the pipeline is paused, in what mode, since when, and the heads behind its cards |
+| GET | `/api/pause/scope` | `pause_reads.pause_scope` | what a pause would reach: the open sprints, their cards, the running heads |
+| POST | `/api/pause/drain` | `pause_ops.pause_drain` | drain the pipeline (no new claims; running heads finish); body `{reason}`, actor `web` |
+| POST | `/api/pause/resume` | `pause_ops.pause_resume` | clear the pause and put back what a freeze stopped; body `{}` |
+| GET | `/api/sprints` | `sprint_reads.sprint_list` | every sprint and what it is doing; `?status=open` (repeatable) filters |
+| POST | `/api/sprints/{ref}/comment` | `sprint_ops.sprint_comment` | one comment on a sprint, under role `po` and actor `web`; body `{request_id, body}` |
+| POST | `/api/sprints/{ref}/close` | `sprint_ops.sprint_close` | close a sprint; body `{request_id, reason, closeout, decisions?}` — `decisions` is the CLI's decisions file, as text or as its parsed object |
+| GET | `/api/history` | `command_reads.command_history` | a page of the last commands across every entity; `?cursor=C&limit=N` |
+| GET | `/api/history/{request_id}` | `command_reads.command_request` | what became of one request id |
+| POST | `/api/tasks/{ref}/comment` | `card_ops.task_comment` | one comment on a card, under role `po` and actor `web`; body `{request_id, body}` |
+| POST | `/api/tasks/{ref}/move` | `card_ops.task_move` | move a card, the owner's intervention; body `{request_id, target, reason, sprint_override?, sprint_override_reason?}` |
+
+The dashboard (`GET /`) reads four documents beside each other -- the system snapshot, the pause
+state, the open sprints and the last commands -- and one of them refusing marks its own section
+with the reason rather than taking the page down; the snapshot is the route's operation and the
+only one whose refusal is the page's. The card and sprint pages carry the owner's actions as forms
+that post to the routes above from the browser: a comment, a move with its reason, and on an open
+sprint a close. There is no `decide` route on purpose: `TaskWriter.decide` is the observer's and
+refuses every other role, so the owner's intervention on a parked card is a move, and the audit
+says so.
 
 A POST body is a JSON object and carries only the fields listed, except on `/sprints`, which takes
 the submitted form (`application/x-www-form-urlencoded`) whose fields are `request_id`, `product`,

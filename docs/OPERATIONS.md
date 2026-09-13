@@ -2571,6 +2571,35 @@ produced is the one bound, so nothing resolves the name a second time.
 
 
 
+### The operator's screen
+
+The dashboard (`/`) is one screen with four parts, read in this order and failing apart: a section
+whose source refused is marked with the reason, and the rest of the page stands.
+
+1. **pipeline** — running, drained or frozen, since when and by whom, with the one button that is
+   the opposite (`drain` with a reason, or `resume`); the heads the dispatcher holds per card; and
+   installation health as `secretary status` collects it, summarized to one word and a list of what
+   needs attention by name. The summary is a projection of the same collector, read without the
+   sprints and without the runtime panel probes — the sprints come from the sprint protocol below
+   and liveness from process state — which is what took `/api/system` from ~850 KB and over ten
+   seconds down to a few kilobytes.
+2. **open sprints** — one card per open sprint: goal, current card, whether the observer is up and
+   what it is waiting for, the mechanical gate, the budget against its thresholds, the cards by
+   state, and the observer's last recorded decision; under each, a comment to the observer.
+3. **in flight** — the cards the pipeline is carrying and the agents running now.
+4. **recent commands** — the last commands across every entity, newest first, with `/history` for
+   the whole of it a page at a time.
+
+The card page carries the owner's two writes — a comment, and a move with its reason (past the
+sprint's reservation only with a second reason) — and the sprint page carries a comment and, on an
+open sprint, the close with its reason, closeout and optional decisions. All of them post to the
+JSON routes in [Protocols](PROTOCOLS.md#routes) under role `po` and actor `web`, so the audit says
+a browser did it. There is no `decide` from the browser on purpose: a decision on a parked card is
+the observer's, and the owner's intervention is a move.
+
+The page reloads itself every 30 seconds unless something is being typed; the checkbox at the top
+turns that off for the browser it is ticked in.
+
 ### Running a card through the installed service
 
 The two POST routes are the whole of it, and both are reached through the front rather than on
