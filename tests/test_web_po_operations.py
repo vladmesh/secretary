@@ -12,6 +12,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urlencode
 
 from secretary.po import store as po_store
@@ -252,6 +253,54 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual([turn.seq for turn in self.store.turns(finished)], [1])
         self.assertEqual([role for _seq, role, _text in self.feed(finished)], ["owner", "agent"])
         self.assertEqual(self.calls(), 2)
+
+    def test_a_form_sent_again_after_its_turn_failed_to_launch_is_that_turn_and_no_second_launch(
+        self,
+    ) -> None:
+        session_id = self.create()
+        self.runner.executables["claude"] = str(self.root / "no-such-claude")
+
+        with mock.patch.object(self.runner, "_launch", wraps=self.runner._launch) as launch:
+            first = self.send(session_id, "hello", "message-broken")
+            second = self.send(session_id, "hello", "message-broken")
+            replay = self.layer.po_send(request_id="message-broken", session_id=session_id, text="hello")
+
+        self.assertEqual(first.status, 503)
+        self.assertEqual(second.status, 303)
+        self.assertEqual(second.headers["Location"], f"/po/sessions/{session_id}")
+        self.assertEqual(launch.call_count, 1)
+        [turn] = self.store.turns(session_id)
+        self.assertEqual((turn.state, turn.request_id), (po_store.FAILED, "message-broken"))
+        self.assertIn("could not start", turn.reason)
+        self.assertEqual((replay["seq"], replay["state"], replay["repeated"]), (1, po_store.FAILED, True))
+        self.assertEqual(self.feed(session_id), [(1, "owner", "hello")])
+        page = self.page(session_id)
+        self.assertIn('data-state="failed"', page)
+        self.assertIn("could not start", page)
+
+    def test_the_store_answers_a_known_request_id_with_its_turn_and_writes_nothing(self) -> None:
+        session_id = self.create()
+        other = self.create(request_id="create-other")
+
+        def path(seq: int) -> Path:
+            return self.root / f"{seq}.out"
+
+        first, created = self.store.claim_turn(session_id, "one", path, request_id="form-1")
+        running, repeated = self.store.claim_turn(session_id, "one", path, request_id="form-1")
+        self.assertEqual((created, repeated), (True, False))
+        self.assertEqual(running, first)
+        with self.assertRaises(po_store.TurnInProgress):
+            self.store.claim_turn(session_id, "two", path, request_id="form-2")
+
+        self.store.finish_turn(session_id, 1, po_store.FAILED, "could not start")
+        settled, repeated = self.store.claim_turn(session_id, "one", path, request_id="form-1")
+        self.assertEqual((settled.seq, settled.state, repeated), (1, po_store.FAILED, False))
+        self.assertEqual(len(self.store.feed(session_id)), 1)
+
+        elsewhere, created = self.store.claim_turn(other, "one", path, request_id="form-1")
+        self.assertEqual((elsewhere.seq, created), (1, True))
+        without, created = self.store.claim_turn(session_id, "three", path)
+        self.assertEqual((without.seq, without.request_id, created), (2, None, True))
 
 
 if __name__ == "__main__":

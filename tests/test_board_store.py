@@ -452,6 +452,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0009_po_turn_request_id",
                 "0008_po_sessions",
                 "0007_card_transport_key",
                 "0006_sprint_transport_key",
@@ -625,9 +626,7 @@ class IgnoreLifecycleTests(InstanceRepository):
             ensure_ignored(self.instance)
 
     def test_a_literal_ignore_overridden_by_a_negation_is_not_accepted(self) -> None:
-        (self.instance / ".gitignore").write_text(
-            f"/{STORE_FILE}\n!/{STORE_FILE}\n", encoding="utf-8"
-        )
+        (self.instance / ".gitignore").write_text(f"/{STORE_FILE}\n!/{STORE_FILE}\n", encoding="utf-8")
 
         with self.assertRaisesRegex(BoardStoreError, "verify exclusion failed"):
             ensure_ignored(self.instance)

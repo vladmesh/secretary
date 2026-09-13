@@ -39,8 +39,8 @@ from secretary.webproto.po_recovery import recover_po_turns
 from secretary.webproto.po_requests import PoRequestStore, fingerprint
 from secretary.webproto.runs import RequestMismatch
 
+#: Session creation keeps its request ids in `PoRequestStore`; a turn's is a column of the turn.
 CREATE_OPERATION = "po_create_session"
-SEND_OPERATION = "po_send"
 
 
 class PoLayer(ProtocolBoundary):
@@ -142,17 +142,25 @@ class PoLayer(ProtocolBoundary):
         return {"kind": "po_session_created", "request_id": request_id, "repeated": not ran, **result}
 
     def po_send(self, *, request_id: str, session_id: str, text: str) -> dict[str, Any]:
+        """One turn per request id, kept by the board store with the turn itself (`PoStore.claim_turn`).
+
+        A repeat of the same form answers with the turn the first submission created — running,
+        completed, or failed with its reason — and starts nothing, even when that first submission
+        wrote the turn and then failed to launch its CLI.
+        """
         request_id = _required(request_id, "request_id")
         if not str(text or "").strip():
             raise ValidationRefused("an empty message starts no turn")
         runner = self._runner_or_refuse()
-        result, ran = self._once(
-            request_id,
-            SEND_OPERATION,
-            fingerprint(session_id, text),
-            lambda: {"session_id": session_id, "seq": self._store(lambda: runner.send(session_id, text)).seq},
-        )
-        return {"kind": "po_turn_started", "request_id": request_id, "repeated": not ran, **result}
+        turn, created = self._store(lambda: runner.send_request(session_id, text, request_id))
+        return {
+            "kind": "po_turn_started",
+            "request_id": request_id,
+            "session_id": session_id,
+            "seq": turn.seq,
+            "state": turn.state,
+            "repeated": not created,
+        }
 
     def po_stop(self, *, session_id: str, seq: int) -> dict[str, Any]:
         """Stop turn `seq` if it is the one running; a stale stop form stops nothing newer."""

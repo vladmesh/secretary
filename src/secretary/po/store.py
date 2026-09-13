@@ -1,4 +1,4 @@
-"""PO head sessions, turns and feed in the board store (revision `0008_po_sessions`).
+"""PO head sessions, turns and feed in the board store (revisions `0008_po_sessions`, `0009_po_turn_request_id`).
 
 One short connection per operation: the runner's waiter threads settle turns concurrently, and a
 connection shared between them would serialize exactly what must not be serialized. Every state
@@ -64,6 +64,8 @@ class Turn:
     pid: int | None
     process_identity: str | None
     reason: str | None
+    # The form request id the turn was started under (revision 0009), or None.
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,7 +80,7 @@ class FeedEntry:
 
 _SESSION_COLUMNS = "session_id, cli, model, cwd, created_at, state, cli_session_id"
 _TURN_COLUMNS = (
-    "session_id, seq, started_at, finished_at, state, stdout_path, pid, process_identity, reason"
+    "session_id, seq, started_at, finished_at, state, stdout_path, pid, process_identity, reason, request_id"
 )
 _FEED_COLUMNS = "entry_id, session_id, turn_seq, role, text, created_at"
 
@@ -141,8 +143,7 @@ class PoStore:
         """Record the CLI's own id once; an id already recorded is never replaced."""
         with self._transaction() as connection:
             cursor = connection.execute(
-                "UPDATE po_sessions SET cli_session_id = %s "
-                "WHERE session_id = %s AND cli_session_id IS NULL",
+                "UPDATE po_sessions SET cli_session_id = %s WHERE session_id = %s AND cli_session_id IS NULL",
                 (cli_session_id, session_id),
             )
             return cursor.rowcount == 1
@@ -151,12 +152,37 @@ class PoStore:
 
     def begin_turn(self, session_id: str, text: str, stdout_path: Callable[[int], Path]) -> Turn:
         """Atomically: the next turn as `running` and the owner's message in the feed."""
+        return self.claim_turn(session_id, text, stdout_path)[0]
+
+    def claim_turn(
+        self,
+        session_id: str,
+        text: str,
+        stdout_path: Callable[[int], Path],
+        *,
+        request_id: str | None = None,
+    ) -> tuple[Turn, bool]:
+        """`begin_turn`, or the turn `request_id` already started in this session.
+
+        The flag is True when this call created the turn. A request id that already names a turn is
+        answered with that turn in whatever state it is — running, completed, failed or interrupted —
+        and nothing is written, so a repeated form never becomes a second turn. The lookup runs under
+        the same session row lock as the insert, and a unique index on (session_id, request_id)
+        backs it.
+        """
         with self._transaction() as connection:
             found = connection.execute(
                 "SELECT 1 FROM po_sessions WHERE session_id = %s FOR UPDATE", (session_id,)
             ).fetchone()
             if found is None:
                 raise SessionNotFound(f"there is no PO session {session_id}")
+            if request_id is not None:
+                existing = connection.execute(
+                    f"SELECT {_TURN_COLUMNS} FROM po_turns WHERE session_id = %s AND request_id = %s",
+                    (session_id, request_id),
+                ).fetchone()
+                if existing is not None:
+                    return Turn(*existing), False
             busy = connection.execute(
                 "SELECT seq FROM po_turns WHERE session_id = %s AND state = %s",
                 (session_id, RUNNING),
@@ -170,16 +196,16 @@ class PoStore:
                 "SELECT coalesce(max(seq), 0) + 1 FROM po_turns WHERE session_id = %s", (session_id,)
             ).fetchone()[0]
             row = connection.execute(
-                f"INSERT INTO po_turns (session_id, seq, started_at, state, stdout_path) "
-                f"VALUES (%s, %s, now(), %s, %s) RETURNING {_TURN_COLUMNS}",
-                (session_id, seq, RUNNING, str(stdout_path(seq))),
+                f"INSERT INTO po_turns (session_id, seq, started_at, state, stdout_path, request_id) "
+                f"VALUES (%s, %s, now(), %s, %s, %s) RETURNING {_TURN_COLUMNS}",
+                (session_id, seq, RUNNING, str(stdout_path(seq)), request_id),
             ).fetchone()
             connection.execute(
                 "INSERT INTO po_feed (session_id, turn_seq, role, text, created_at) "
                 "VALUES (%s, %s, %s, %s, now())",
                 (session_id, seq, OWNER, text),
             )
-        return Turn(*row)
+        return Turn(*row), True
 
     def record_process(self, session_id: str, seq: int, pid: int, identity: str | None) -> bool:
         with self._transaction() as connection:

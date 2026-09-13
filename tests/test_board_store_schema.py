@@ -79,6 +79,7 @@ REVISIONS = (
     "0006_sprint_transport_key",
     "0007_card_transport_key",
     "0008_po_sessions",
+    "0009_po_turn_request_id",
 )
 
 
@@ -411,7 +412,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
             migrate.alembic_config(connection=connection, passwords=self.passwords),
             "0006_sprint_transport_key",
         )
-        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('butler'), ('codegen-product-kit')")
+        connection.exec_driver_sql(
+            "INSERT INTO projects (project_id) VALUES ('butler'), ('codegen-product-kit')"
+        )
         for ref, project in (("butler-1", "butler"), ("codegen-product-kit-1", "codegen-product-kit")):
             connection.exec_driver_sql(
                 "INSERT INTO tasks (task_ref, project_id, task_number, title, task_type, state, "
@@ -440,15 +443,19 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
 
         self.assertEqual(
-            self.run_migrations(connection), ("0007_card_transport_key", "0008_po_sessions")
+            self.run_migrations(connection),
+            ("0007_card_transport_key", "0008_po_sessions", "0009_po_turn_request_id"),
         )
         rows = connection.exec_driver_sql(
             "SELECT task_ref, project_id, task_number, board_key FROM tasks ORDER BY task_ref"
         ).fetchall()
-        self.assertEqual([(row[0], row[1], row[2]) for row in rows], [
-            ("butler-1", "butler", 1),
-            ("codegen-product-kit-1", "codegen-product-kit", 1),
-        ])
+        self.assertEqual(
+            [(row[0], row[1], row[2]) for row in rows],
+            [
+                ("butler-1", "butler", 1),
+                ("codegen-product-kit-1", "codegen-product-kit", 1),
+            ],
+        )
         self.assertEqual(len({row[3] for row in rows}), 2)
         self.assertEqual(
             connection.exec_driver_sql("SELECT task_ref, marker, body FROM task_comments").fetchall(),

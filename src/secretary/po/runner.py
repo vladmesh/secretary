@@ -238,10 +238,25 @@ class PoRunner:
 
     def send(self, session_id: str, text: str) -> Turn:
         """Start one turn, or refuse with nothing written when one is already running."""
+        return self._send(session_id, text, None)[0]
+
+    def send_request(self, session_id: str, text: str, request_id: str) -> tuple[Turn, bool]:
+        """`send` under a form's request id; the flag says whether this call started the turn.
+
+        A request id that already started a turn in this session gets that turn back and no process:
+        a CLI is launched only for a turn this call created, whatever became of the earlier one.
+        """
+        return self._send(session_id, text, request_id)
+
+    def _send(self, session_id: str, text: str, request_id: str | None) -> tuple[Turn, bool]:
         if not text.strip():
             raise RunnerError("an empty message starts no turn")
         with self._lock:
-            turn = self.store.begin_turn(session_id, text, lambda seq: self.files(session_id, seq).stdout)
+            turn, created = self.store.claim_turn(
+                session_id, text, lambda seq: self.files(session_id, seq).stdout, request_id=request_id
+            )
+            if not created:
+                return turn, False
             files = self.files(session_id, turn.seq)
             try:
                 # Read after the claim: the previous turn may have recorded Codex's thread id.
@@ -280,7 +295,7 @@ class PoRunner:
                     f"the turn's waiter did not start: {type(exc).__name__}: {exc}",
                 )
                 raise
-        return self.store.turn(session_id, turn.seq)
+        return self.store.turn(session_id, turn.seq), True
 
     def _launch(
         self, session: Session, seq: int, argv: list[str], files: TurnFiles

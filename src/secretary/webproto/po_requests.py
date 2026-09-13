@@ -1,13 +1,13 @@
-"""What a request id owns on `/po`: one created session, or one started turn.
+"""What a request id owns on `/po` when it creates a session.
 
 The same idea as the sprint request index (:mod:`secretary.webproto.sprint_requests`): a form carries
-a request id minted when it was served, and a repeat of that id is answered with what the first
-submission produced. Here the lock is held across the operation itself — creating a session or
-starting a turn is one insert and one `Popen` — so a double click waits for the first submission and
-then finds its record, instead of racing it.
+a request id minted when it was served, and a repeat of that id is answered with the session the first
+submission created. The lock is held across the create, one insert, so a double click waits for the
+first submission and then finds its record.
 
-A refused operation records nothing: a turn refused because another one runs wrote nothing, and the
-same form may be submitted again once that turn is over.
+Messages do not use this index: a turn's request id is a column of the turn, written in the same
+transaction that creates it (`secretary.po.store.PoStore.claim_turn`), so a launch that fails after the
+turn exists cannot leave a request id free to start a second one.
 """
 
 from __future__ import annotations
