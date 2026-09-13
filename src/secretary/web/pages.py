@@ -86,6 +86,35 @@ form.sprint .hint { color: var(--dim); font-size: .8rem; }
 .refused { border-left: 3px solid var(--warn); background: #b3541e14; padding: .5rem .75rem; margin: .5rem 0; }
 .pending { border-left: 3px solid var(--warn); background: #b3541e14; padding: .5rem .75rem; margin: .5rem 0; }
 .launch { font-weight: 600; }
+.bar { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; align-items: center; margin: .5rem 0; }
+.light { display: inline-block; padding: .15rem .6rem; border-radius: 1rem; font-weight: 600; font-size: .85rem; }
+.light-running, .light-ok { background: #15803d22; color: #15803d; }
+.light-drain, .light-attention { background: #b3541e22; color: var(--warn); }
+.light-freeze, .light-bad { background: #b91c1c22; color: #b91c1c; }
+.light-unknown { background: #8884; color: var(--dim); }
+.problems { margin: .25rem 0 .5rem 1rem; padding: 0; }
+.problems li { color: var(--warn); }
+.facts { color: var(--dim); font-size: .85rem; }
+.facts b { color: inherit; font-weight: 600; }
+.sprint-card { border: 1px solid var(--line); border-radius: .4rem; padding: .6rem .9rem; margin: .6rem 0; }
+.sprint-card h3 { margin: 0 0 .3rem; font-size: 1rem; }
+.sprint-card .goal { margin: .2rem 0 .5rem; }
+.budget { display: inline-block; width: 8rem; height: .5rem; border: 1px solid var(--line); border-radius: .25rem; vertical-align: middle; overflow: hidden; }
+.budget i { display: block; height: 100%; background: #15803d; }
+.budget.signal i { background: var(--warn); }
+.budget.hard i { background: #b91c1c; }
+.feed td:first-child { white-space: nowrap; }
+.feed .actor { color: var(--dim); }
+.outcome-success { color: #15803d; }
+.outcome-failure, .outcome-refused, .outcome-error { color: #b91c1c; }
+details > summary { cursor: pointer; font-weight: 600; margin: 1rem 0 .4rem; }
+form.act { display: block; border-top: 1px dashed var(--line); padding-top: .5rem; margin-top: .6rem; }
+form.act textarea { width: 100%; min-height: 3.5rem; }
+form.act .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: flex-end; margin: .3rem 0; }
+.feedback:not(:empty) { border-left: 3px solid var(--line); padding: .4rem .75rem; margin: .4rem 0; }
+.feedback.bad { border-left-color: var(--warn); }
+.refresh { float: right; font-size: .8rem; color: var(--dim); }
+.muted { color: var(--dim); }
 """
 
 
@@ -190,28 +219,38 @@ def _or_dash(value: Any) -> str:
 # -- the dashboard ------------------------------------------------------------------------------
 
 
-def dashboard(snapshot: dict[str, Any]) -> str:
-    """Criterion 2: health with its reason and age, projects, current cards, running agents."""
+def dashboard(
+    snapshot: dict[str, Any],
+    *,
+    pause: dict[str, Any] | None = None,
+    sprints: dict[str, Any] | None = None,
+    commands: dict[str, Any] | None = None,
+) -> str:
+    """The operator's one screen: the pipeline's state, the open sprints, what is in flight, and
+    what happened last.
+
+    Three of the four sections come from reads beside the snapshot, each handed in as
+    ``{"available", "reason", "document"}`` by the transport; one that is not available is drawn
+    as the marked block every unreadable source gets, and never as an empty section.
+    """
     installation = snapshot.get("installation") or {}
     projects = snapshot.get("projects") or {}
     tasks = snapshot.get("tasks") or {}
     agents = snapshot.get("agents") or {}
     body = "\n".join(
         [
+            '<label class="refresh"><input type="checkbox" id="auto-refresh"> refresh every 30 s</label>',
             f'<p class="age">read at {escape(str(snapshot.get("observed_at") or "an unknown time"))}</p>',
-            "<section><h2>installation</h2>",
-            _installation(installation),
+            "<section><h2>pipeline</h2>",
+            _pause_bar(pause),
+            _health_line(installation),
+            '<p id="pause-feedback" class="feedback"></p>',
             "</section>",
-            "<section><h2>projects</h2>",
-            _section(
-                projects.get("source"),
-                list(projects.get("items") or []),
-                what="which projects are registered",
-                empty="this installation has no registered project.",
-                table=_project_table(list(projects.get("items") or [])),
-            ),
+            "<section><h2>open sprints</h2>",
+            _open_sprints(sprints),
+            '<p><a href="/sprints/new">open a new sprint</a></p>',
             "</section>",
-            "<section><h2>current tasks</h2>",
+            "<section><h2>in flight</h2>",
             _section(
                 tasks.get("source"),
                 list(tasks.get("items") or []),
@@ -219,8 +258,7 @@ def dashboard(snapshot: dict[str, Any]) -> str:
                 empty="no card is in flight.",
                 table=_task_table(list(tasks.get("items") or [])),
             ),
-            "</section>",
-            "<section><h2>agents</h2>",
+            "<h3>agents</h3>",
             _section(
                 agents.get("source"),
                 list(agents.get("items") or []),
@@ -229,16 +267,397 @@ def dashboard(snapshot: dict[str, Any]) -> str:
                 table=_agent_table(list(agents.get("items") or []), with_ref=True),
             ),
             "</section>",
-            "<section><h2>sprints</h2>",
-            '<p><a href="/sprints/new">open a new sprint</a></p>',
+            "<section><h2>recent commands</h2>",
+            _feed(commands),
+            '<p><a href="/history">the whole history</a></p>',
             "</section>",
-            "<section><h2>start a run</h2>",
+            "<section>",
+            "<details><summary>installation</summary>",
+            _installation(installation),
+            "</details>",
+            "<details><summary>projects</summary>",
+            _section(
+                projects.get("source"),
+                list(projects.get("items") or []),
+                what="which projects are registered",
+                empty="this installation has no registered project.",
+                table=_project_table(list(projects.get("items") or [])),
+            ),
+            "</details>",
+            "<details><summary>start a run by hand</summary>",
             _start_form(list(projects.get("items") or []), list(tasks.get("items") or [])),
             '<p id="feedback"></p>',
+            "</details>",
             "</section>",
         ]
     )
-    return _page("dashboard", body, script=_DASHBOARD_SCRIPT)
+    return _page("dashboard", body, script=_DASHBOARD_SCRIPT + _ACTIONS_SCRIPT + _REFRESH_SCRIPT)
+
+
+def _beside(section: dict[str, Any] | None, *, what: str) -> tuple[dict[str, Any] | None, str]:
+    """A read made beside the page's own: its document, or the marked block saying why none."""
+    if not section or not section.get("available") or not isinstance(section.get("document"), dict):
+        reason = str((section or {}).get("reason") or "this section was not read")
+        return None, (
+            f'<div class="unavailable"><b>could not read {escape(what)}.</b> {escape(reason)}</div>'
+        )
+    return section["document"], ""
+
+
+# -- the pipeline bar -----------------------------------------------------------------------------
+
+#: The word for each pause mode, and the colour class that is its second reading.
+PAUSE_WORDS: dict[str, tuple[str, str]] = {
+    "running": ("running — the dispatcher claims cards and raises heads", "running"),
+    "drain": ("drained — no new card is claimed; running heads finish their work", "drain"),
+    "freeze": ("frozen — no new card is claimed and the heads were stopped", "freeze"),
+    "soft": ("drained — no new card is claimed; running heads finish their work", "drain"),
+    "hard": ("frozen — no new card is claimed and the heads were stopped", "freeze"),
+}
+
+
+def _pause_bar(section: dict[str, Any] | None) -> str:
+    document, refused = _beside(section, what="whether the pipeline is paused")
+    if document is None:
+        return refused
+    state = document.get("state") or {}
+    paused = bool(state.get("paused"))
+    mode = str(state.get("mode") or "") if paused else "running"
+    words, colour = PAUSE_WORDS.get(mode, (f"{mode or 'unknown'} — a pause mode this page does not know", "unknown"))
+    facts = []
+    if paused:
+        facts.append(f"since <b>{_or_dash(state.get('since'))}</b>")
+        facts.append(f"by <b>{_or_dash(state.get('actor'))}</b>")
+        if state.get("pause_reason"):
+            facts.append(f"because <b>{escape(str(state.get('pause_reason')))}</b>")
+    dispatcher = document.get("dispatcher") or {}
+    facts.append(f"dispatcher <b>{_or_dash(dispatcher.get('phase'))}</b>")
+    if dispatcher.get("tracked_cards") is not None:
+        facts.append(f"tracking <b>{escape(str(dispatcher.get('tracked_cards')))}</b> card(s)")
+    if paused:
+        action = (
+            '<form class="pause" data-action="/api/pause/resume" data-confirm="Resume the pipeline? '
+            'A frozen pipeline\'s heads are relaunched in their workspaces.">'
+            "<button type=\"submit\">resume</button></form>"
+        )
+    else:
+        action = (
+            '<form class="pause" data-action="/api/pause/drain" data-confirm="Drain the pipeline? No '
+            'new card is claimed until it is resumed; running heads keep working.">'
+            '<input name="reason" placeholder="why" required size="28">'
+            "<button type=\"submit\">drain</button></form>"
+        )
+    heads = document.get("heads") or {}
+    rows = [
+        [
+            _link(str(card.get("ref") or "")),
+            escape(str(card.get("state") or "")),
+            escape(str(card.get("worker") or "—")),
+            escape(str(card.get("reviewer") or "—")),
+        ]
+        for card in heads.get("cards") or []
+        if isinstance(card, dict)
+    ]
+    return "\n".join(
+        [
+            '<div class="bar">',
+            f'<span class="light light-{escape(colour)}">{escape(words)}</span>',
+            action,
+            "</div>",
+            f'<p class="facts">{" · ".join(facts)}</p>',
+            _source_block(state.get("source"), what="the pause flag"),
+            (_rows(["card", "state", "worker", "reviewer"], rows) if rows else ""),
+        ]
+    )
+
+
+def _health_line(installation: dict[str, Any]) -> str:
+    """Health as the read layer summarizes it: one word, and the problems by name."""
+    health = installation.get("health") or {}
+    status = health.get("status")
+    parts = [_source_block(health.get("source"), what="whether this installation is healthy")]
+    if not isinstance(status, dict) or not status:
+        if (health.get("source") or {}).get("state") == "available":
+            parts.append('<p class="empty">the health collector answered with nothing.</p>')
+        return "\n".join(part for part in parts if part)
+    state = str(status.get("state") or "unknown")
+    problems = [str(item) for item in status.get("problems") or []]
+    colour = "ok" if state == "ok" else ("attention" if state == "attention" else "unknown")
+    parts.append(
+        f'<p>health <span class="light light-{escape(colour)}">{escape(state)}</span> '
+        + (f'<span class="muted">{len(problems)} thing(s) need attention</span>' if problems else "")
+        + "</p>"
+    )
+    if problems:
+        parts.append('<ul class="problems">' + "".join(f"<li>{escape(item)}</li>" for item in problems) + "</ul>")
+    checkpoint = status.get("checkpoint") or {}
+    resources = status.get("resources") or {}
+    cards = status.get("cards") or {}
+    facts = [
+        f"checkpoint <b>{_or_dash(checkpoint.get('status'))}</b>"
+        + (
+            f" (lag {escape(str(checkpoint.get('lag_minutes')))} min, {escape(str(checkpoint.get('lag_commits')))} commit(s))"
+            if checkpoint.get("lag_minutes") is not None
+            else ""
+        ),
+        f"disk free <b>{_gib(resources.get('disk_free_bytes'))}</b>",
+        f"memory free <b>{_gib(resources.get('memory_available_bytes'))}</b>",
+        f"load <b>{_load(resources.get('load_average'))}</b>",
+        f"cards on the board <b>{_or_dash(cards.get('total'))}</b>",
+        f"card backend <b>{_or_dash(status.get('card_backend'))}</b>",
+    ]
+    parts.append(f'<p class="facts">{" · ".join(facts)}</p>')
+    units = [
+        unit
+        for unit in status.get("units") or []
+        if isinstance(unit, dict) and unit.get("active") not in (None, "active") and str(unit.get("kind")) == "timer"
+        or isinstance(unit, dict) and unit.get("active") == "failed"
+    ]
+    if units:
+        parts.append(
+            '<p class="facts">units not active: '
+            + ", ".join(f"<b>{escape(str(unit.get('name')))}</b> ({escape(str(unit.get('active')))})" for unit in units)
+            + "</p>"
+        )
+    return "\n".join(part for part in parts if part)
+
+
+def _gib(value: Any) -> str:
+    try:
+        return f"{float(value) / (1024 ** 3):.1f} GiB"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _load(value: Any) -> str:
+    if not isinstance(value, list) or not value:
+        return "—"
+    try:
+        return " ".join(f"{float(item):.2f}" for item in value[:3])
+    except (TypeError, ValueError):
+        return "—"
+
+
+# -- the open sprints -----------------------------------------------------------------------------
+
+
+def _open_sprints(section: dict[str, Any] | None) -> str:
+    document, refused = _beside(section, what="the open sprints")
+    if document is None:
+        return refused
+    listing = document.get("sprints") or {}
+    items = [item for item in listing.get("items") or [] if isinstance(item, dict)]
+    parts = [_source_block(listing.get("source"), what="which sprints are open")]
+    if not items and (listing.get("source") or {}).get("state") == "available":
+        parts.append('<p class="empty">no sprint is open.</p>')
+    for item in items:
+        parts.append(_sprint_card(item))
+    return "\n".join(part for part in parts if part)
+
+
+def _sprint_card(item: dict[str, Any]) -> str:
+    ref = str(item.get("ref") or "")
+    goal = str(item.get("goal") or "")
+    short = goal if len(goal) <= 240 else goal[:237].rstrip() + "…"
+    return "\n".join(
+        [
+            '<article class="sprint-card">',
+            (
+                f'<h3><a href="/sprints/{quote(ref)}">{escape(ref)}</a> '
+                f'<span class="muted">{_or_dash(item.get("product"))} · {escape(str(item.get("status") or ""))}</span></h3>'
+            ),
+            f'<p class="goal">{escape(short)}</p>',
+            _sprint_work(item),
+            _comment_form(f"/api/sprints/{quote(ref)}/comment", f"sprint.{ref}", "say something to the observer"),
+            "</article>",
+        ]
+    )
+
+
+def _sprint_work(item: dict[str, Any]) -> str:
+    """What a sprint is doing right now, from the sections the listing and the page both carry."""
+    rows: list[list[str]] = []
+    current = item.get("current_task") if isinstance(item.get("current_task"), dict) else {}
+    if current.get("ref"):
+        live = "live" if current.get("live") else "not live"
+        rows.append(["current card", f'{_link(str(current["ref"]))} <span class="muted">({escape(live)})</span>'])
+    elif current:
+        rows.append(["current card", f'<span class="empty">{escape(str(current.get("reason") or "none"))}</span>'])
+    observer = item.get("observer") if isinstance(item.get("observer"), dict) else {}
+    launch = observer.get("launch") or {}
+    if launch:
+        state = str(launch.get("state") or "")
+        words = LAUNCH_WORDS.get(state, state or "unknown")
+        rows.append(["observer", f'{_or_dash((observer.get("declared") or {}).get("profile"))} — <span class="state state-{escape(state)}">{escape(words)}</span>'])
+    waiting = item.get("waiting") if isinstance(item.get("waiting"), dict) else {}
+    if waiting:
+        rows.append(["observer is", f'<b>{escape(str(waiting.get("state") or "unknown"))}</b> <span class="reason">{escape(str(waiting.get("reason") or ""))}</span>'])
+    checks = item.get("checks") if isinstance(item.get("checks"), dict) else {}
+    if checks:
+        gate = checks.get("gate") if isinstance(checks.get("gate"), dict) else {}
+        rows.append(["checks", f'<b>{escape(str(gate.get("state") or "—"))}</b> <span class="reason">{escape(str(checks.get("reason") or ""))}</span>'])
+    budget = item.get("budget") if isinstance(item.get("budget"), dict) else {}
+    if budget:
+        rows.append(["budget", _budget(budget)])
+    cards = item.get("cards") if isinstance(item.get("cards"), dict) else {}
+    states = cards.get("states") if isinstance(cards.get("states"), dict) else {}
+    if states:
+        rows.append(
+            [
+                "cards",
+                " · ".join(
+                    f"{escape(str(state))}: " + ", ".join(_link(str(ref)) for ref in refs)
+                    for state, refs in sorted(states.items())
+                    if isinstance(refs, list) and refs
+                ),
+            ]
+        )
+    decision = item.get("decision") if isinstance(item.get("decision"), dict) else {}
+    entry = decision.get("entry") if isinstance(decision.get("entry"), dict) else {}
+    if entry:
+        freshness = (decision.get("freshness") or {}).get("value") or {}
+        stale = "" if freshness.get("fresh", True) else f' <span class="muted">(stale: {escape(str(freshness.get("error") or ""))})</span>'
+        rows.append(["last decision", f'{escape(str(entry.get("selected_step") or ""))}{stale}<div class="reason">{escape(str(entry.get("selected_why") or ""))}</div>'])
+        if entry.get("next_safe_step"):
+            rows.append(["next step", escape(str(entry.get("next_safe_step")))])
+    if not rows:
+        return '<p class="empty">nothing about this sprint\'s work could be read.</p>'
+    return _rows(["", ""], rows)
+
+
+def _budget(budget: dict[str, Any]) -> str:
+    total = int(budget.get("total") or 0)
+    thresholds = budget.get("thresholds") or {}
+    hard = int(thresholds.get("hard") or 0)
+    signal = int(thresholds.get("signal") or 0)
+    ratio = min(1.0, total / hard) if hard else 0.0
+    colour = "hard" if budget.get("hard_reached") else ("signal" if budget.get("signal_reached") else "")
+    by_type = budget.get("by_type") or {}
+    spent = ", ".join(f"{escape(str(kind))} {escape(str(count))}" for kind, count in sorted(by_type.items()) if count)
+    return (
+        f'<span class="budget {colour}"><i style="width:{ratio * 100:.0f}%"></i></span> '
+        f"{total} of {hard} (signal at {signal})"
+        + (f' <span class="muted">— {spent}</span>' if spent else "")
+    )
+
+
+# -- the command feed -----------------------------------------------------------------------------
+
+
+def _feed(section: dict[str, Any] | None) -> str:
+    document, refused = _beside(section, what="the last commands")
+    if document is None:
+        return refused
+    return _feed_table(document)
+
+
+def _feed_table(document: dict[str, Any]) -> str:
+    commands = document.get("commands") or {}
+    items = [item for item in commands.get("items") or [] if isinstance(item, dict)]
+    parts = [_source_block(commands.get("source"), what="the command history")]
+    if not items:
+        if (commands.get("source") or {}).get("state") == "available":
+            parts.append('<p class="empty">nothing has been recorded.</p>')
+        return "\n".join(part for part in parts if part)
+    rows = []
+    for item in items:
+        actor = item.get("actor") if isinstance(item.get("actor"), dict) else {}
+        entity = item.get("entity") if isinstance(item.get("entity"), dict) else {}
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        outcome = str(result.get("outcome") or "")
+        reason = str(result.get("reason") or "")
+        rows.append(
+            [
+                f'<time>{escape(str(item.get("occurred_at") or ""))}</time>',
+                f'<span class="actor">{escape(str(actor.get("role") or ""))} {escape(str(actor.get("id") or ""))}</span>',
+                escape(str(item.get("action") or "")),
+                _entity_link(entity),
+                (
+                    f'<span class="outcome-{escape(outcome)}">{escape(outcome)}</span> '
+                    f'<span class="reason">{escape(reason if len(reason) <= 200 else reason[:197] + "…")}</span>'
+                ),
+            ]
+        )
+    parts.append('<div class="feed">' + _rows(["when", "who", "action", "on", "result"], rows) + "</div>")
+    return "\n".join(part for part in parts if part)
+
+
+def _entity_link(entity: dict[str, Any]) -> str:
+    ref = str(entity.get("ref") or "")
+    if not ref:
+        return "—"
+    if ref.startswith("sprint:"):
+        return f'<a href="/sprints/{quote(ref)}">{escape(ref)}</a>'
+    if ref.startswith(("issue:", "product:")):
+        return escape(ref)
+    return _link(ref)
+
+
+def commands(document: dict[str, Any]) -> str:
+    """The whole command history, a page at a time, newest first."""
+    listing = document.get("commands") or {}
+    parts = [
+        f'<p class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</p>',
+        "<section><h2>commands</h2>",
+        _feed_table(document),
+    ]
+    if listing.get("has_more") and listing.get("next_cursor"):
+        parts.append(
+            f'<p><a href="/history?cursor={quote(str(listing["next_cursor"]))}&amp;limit={int(document.get("limit") or 25)}">older</a></p>'
+        )
+    parts.append("</section>")
+    return _page("commands", "\n".join(parts))
+
+
+# -- the owner's actions --------------------------------------------------------------------------
+
+
+def _comment_form(action: str, key: str, label: str) -> str:
+    return (
+        f'<form class="act" data-action="{escape(action)}" data-key="{escape(key)}" data-kind="comment">'
+        f'<label>{escape(label)}</label>'
+        '<textarea name="body" required placeholder="a comment the head working this will read"></textarea>'
+        '<div class="row"><button type="submit">comment</button></div>'
+        '<p class="feedback"></p>'
+        "</form>"
+    )
+
+
+def _move_form(ref: str) -> str:
+    options = "".join(f'<option value="{escape(target)}">{escape(target)}</option>' for target in MOVE_TARGETS)
+    return (
+        f'<form class="act" data-action="/api/tasks/{quote(ref)}/move" data-key="move.{escape(ref)}" data-kind="move">'
+        "<label>move this card</label>"
+        '<div class="row"><div><label for="move-target">to</label>'
+        f'<select id="move-target" name="target">{options}</select></div></div>'
+        '<textarea name="reason" required placeholder="why the owner moves it"></textarea>'
+        '<div class="row"><label><input type="checkbox" name="sprint_override"> past its sprint\'s reservation</label>'
+        '<input name="sprint_override_reason" placeholder="why the sprint is overridden" size="40"></div>'
+        '<div class="row"><button type="submit">move</button></div>'
+        '<p class="feedback"></p>'
+        '<p class="empty">a decision on a parked card is the observer\'s; the owner\'s intervention is a move '
+        "with a reason, and the audit says so.</p>"
+        "</form>"
+    )
+
+
+def _close_form(ref: str) -> str:
+    return (
+        f'<form class="act" data-action="/api/sprints/{quote(ref)}/close" data-key="close.{escape(ref)}" data-kind="close">'
+        "<label>close this sprint</label>"
+        '<input name="reason" required placeholder="why the owner closes it" size="60">'
+        '<textarea name="closeout" required placeholder="what became of the work — written into state/knowledge"></textarea>'
+        '<textarea name="decisions" placeholder="decisions, optional, as the CLI\'s decisions file:\n'
+        "issues:\n  - {ref: issue:…, verdict: …, reason: …}\ncards:\n  - {ref: …, verdict: done|drop, reason: …}\"></textarea>"
+        '<div class="row"><button type="submit">close</button></div>'
+        '<p class="feedback"></p>'
+        '<p class="empty">a close is not a completed Definition of Done; the sprint\'s own document says so.</p>'
+        "</form>"
+    )
+
+
+#: The states a move may name, in the layer's spelling. Kept beside the form that offers them.
+MOVE_TARGETS = ("ready", "in_progress", "done", "blocked", "issues", "validate", "assessment")
 
 
 def _installation(installation: dict[str, Any]) -> str:
@@ -371,6 +790,10 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
             "<section><h2>work</h2>",
             _work(snapshot.get("work") or {}),
             "</section>",
+            "<section><h2>owner's actions</h2>",
+            _comment_form(f"/api/tasks/{quote(ref)}/comment", f"card.{ref}", "say something to the head working this card"),
+            _move_form(ref),
+            "</section>",
             "<section><h2>events</h2>",
             _source_block(events.get("source"), what="this card's history"),
             _events(list(events.get("items") or [])),
@@ -380,7 +803,7 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any]) -> str:
     )
     cursor = escape(str(events.get("next_cursor") or ""))
     script = _TASK_SCRIPT.replace("__REF__", _js(ref)).replace("__CURSOR__", _js(cursor))
-    return _page(f"card {ref}", body, script=script)
+    return _page(f"card {ref}", body, script=script + _ACTIONS_SCRIPT)
 
 
 def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:
@@ -622,6 +1045,81 @@ if (form) form.addEventListener('submit', async (event) => {
   say('run ' + document_.run.run_id + ' — ' + document_.state.value, false);
   window.location.href = '/tasks/' + encodeURIComponent(card);
 });
+"""
+
+_ACTIONS_SCRIPT = """
+// The owner's actions: every form with a data-action posts a JSON body to that route, and shows
+// the answer where the form is. The request id belongs to this browser and is kept until the
+// operation answers success: a retry after a network failure repeats the same request, and the
+// next comment is a new one.
+function freshId() { return 'web-' + (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()); }
+function keptId(key) {
+  const name = 'secretary.web.request.' + key;
+  let id = sessionStorage.getItem(name);
+  if (!id) { id = freshId(); sessionStorage.setItem(name, id); }
+  return id;
+}
+function forgetId(key) { sessionStorage.removeItem('secretary.web.request.' + key); }
+async function postJson(url, body) {
+  const response = await fetch(url, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
+  let answer = null;
+  try { answer = await response.json(); } catch (error) { answer = {error: {code: 'unreadable', message: 'the answer was not JSON (' + response.status + ')'}}; }
+  return {ok: response.ok, status: response.status, answer: answer};
+}
+function tell(element, text, bad) { if (!element) return; element.textContent = text; element.className = 'feedback' + (bad ? ' bad' : ''); }
+for (const form of document.querySelectorAll('form.act')) form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const out = form.querySelector('.feedback');
+  const kind = form.dataset.kind;
+  const key = form.dataset.key;
+  const body = {request_id: keptId(key)};
+  for (const field of form.elements) {
+    if (!field.name) continue;
+    if (field.type === 'checkbox') body[field.name] = field.checked; else body[field.name] = field.value;
+  }
+  if (kind === 'move' && !body.sprint_override) { delete body.sprint_override; delete body.sprint_override_reason; }
+  if (kind === 'close' && !body.decisions.trim()) delete body.decisions;
+  if (kind === 'close' && !window.confirm('Close this sprint? Its remaining cards and issues get the decisions stated, and the closeout is written.')) return;
+  tell(out, 'sending...', false);
+  const result = await postJson(form.dataset.action, body);
+  if (!result.ok) { tell(out, result.answer.error.code + ': ' + result.answer.error.message, true); return; }
+  forgetId(key);
+  const answer = result.answer;
+  if (kind === 'comment') tell(out, (answer.saved === false ? 'already saved' : 'saved') + (answer.comment_id ? ' as ' + answer.comment_id : answer.event_id ? ' as ' + answer.event_id : ''), false);
+  else if (kind === 'move') tell(out, 'moved (' + (answer.event_id || 'recorded') + '); reload to see the card\\'s new state', false);
+  else if (kind === 'close') tell(out, 'closed; ' + ((answer.definition_of_done || {}).reason || ''), false);
+  else tell(out, 'done', false);
+  form.reset();
+});
+for (const form of document.querySelectorAll('form.pause')) form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const out = document.getElementById('pause-feedback');
+  if (!window.confirm(form.dataset.confirm)) return;
+  const body = {};
+  for (const field of form.elements) if (field.name) body[field.name] = field.value;
+  tell(out, 'sending...', false);
+  const result = await postJson(form.dataset.action, body);
+  if (!result.ok) { tell(out, result.answer.error.code + ': ' + result.answer.error.message, true); return; }
+  const answer = result.answer;
+  tell(out, (answer.outcome || answer.kind || 'done') + (answer.state && answer.state.mode ? ' — ' + answer.state.mode : '') + '; reloading', false);
+  window.setTimeout(() => window.location.reload(), 800);
+});
+"""
+
+_REFRESH_SCRIPT = """
+// Reload every 30 s while nobody is typing. The choice is this browser's and is remembered.
+const box = document.getElementById('auto-refresh');
+if (box) {
+  try { box.checked = localStorage.getItem('secretary.web.refresh') !== 'off'; } catch (error) { box.checked = true; }
+  box.addEventListener('change', () => { try { localStorage.setItem('secretary.web.refresh', box.checked ? 'on' : 'off'); } catch (error) {} });
+  window.setInterval(() => {
+    if (!box.checked) return;
+    const active = document.activeElement;
+    if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT' || active.tagName === 'SELECT')) return;
+    for (const field of document.querySelectorAll('textarea, input[type=text], input:not([type])')) if (field.value) return;
+    window.location.reload();
+  }, 30000);
+}
 """
 
 _TASK_SCRIPT = """
@@ -1111,10 +1609,17 @@ def sprint(document: dict[str, Any]) -> str:
             "<section><h2>the observer's last resume</h2>",
             _resume((value or {}).get("resume")),
             "</section>",
+            "<section><h2>work</h2>",
+            _sprint_work({**(value or {}), **(document.get("work") or {})}),
+            "</section>",
+            "<section><h2>owner's actions</h2>",
+            _comment_form(f"/api/sprints/{quote(ref)}/comment", f"sprint.{ref}", "say something to the observer"),
+            (_close_form(ref) if str((value or {}).get("status") or "") == "open" else ""),
+            "</section>",
         ]
         if part
     )
-    return _page(f"sprint {ref}", body)
+    return _page(f"sprint {ref}", body, script=_ACTIONS_SCRIPT)
 
 
 def _sprint_fields(value: dict[str, Any] | None) -> str:

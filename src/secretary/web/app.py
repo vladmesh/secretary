@@ -95,6 +95,21 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/api/runs/{run_id}", "run", "ops.run_state"),
     Route("POST", "/api/runs/start", "start", "ops.run_start"),
     Route("POST", "/api/runs/review", "review", "ops.run_review"),
+    # The operator's half, added outside a sprint on 2026-09-13: the pause, the open sprints and
+    # what the owner says to them, the command feed, and the owner's two writes on a card. Each is
+    # one operation of a layer that already existed and had no route; none is a new rule.
+    Route("GET", "/history", "commands_page", "command_reads.command_history", page=True),
+    Route("GET", "/api/pause", "pause", "pause_reads.pause_state"),
+    Route("GET", "/api/pause/scope", "pause_scope", "pause_reads.pause_scope"),
+    Route("POST", "/api/pause/drain", "pause_drain", "pause_ops.pause_drain"),
+    Route("POST", "/api/pause/resume", "pause_resume", "pause_ops.pause_resume"),
+    Route("GET", "/api/sprints", "sprints", "sprint_reads.sprint_list"),
+    Route("POST", "/api/sprints/{ref}/comment", "sprint_comment", "sprint_ops.sprint_comment"),
+    Route("POST", "/api/sprints/{ref}/close", "sprint_close", "sprint_ops.sprint_close"),
+    Route("GET", "/api/history", "commands", "command_reads.command_history"),
+    Route("GET", "/api/history/{request_id}", "command_request", "command_reads.command_request"),
+    Route("POST", "/api/tasks/{ref}/comment", "task_comment", "card_ops.task_comment"),
+    Route("POST", "/api/tasks/{ref}/move", "task_move", "card_ops.task_move"),
 )
 
 #: The fields each POST accepts, and the only ones. A body carrying anything else is refused rather
@@ -102,6 +117,17 @@ ROUTES: tuple[Route, ...] = (
 #: does not, and answering it as though the request had been understood is how a transport grows a
 #: second, undocumented surface.
 START_FIELDS = frozenset({"ref", "request_id", "profile", "instruction"})
+SPRINT_COMMENT_FIELDS = frozenset({"request_id", "body"})
+SPRINT_CLOSE_FIELDS = frozenset({"request_id", "reason", "closeout", "decisions"})
+PAUSE_DRAIN_FIELDS = frozenset({"reason"})
+PAUSE_RESUME_FIELDS: frozenset[str] = frozenset()
+TASK_COMMENT_FIELDS = frozenset({"request_id", "body"})
+TASK_MOVE_FIELDS = frozenset(
+    {"request_id", "target", "reason", "sprint_override", "sprint_override_reason"}
+)
+
+#: How many commands the dashboard's feed and the commands page show per read.
+FEED_LIMIT = 25
 REVIEW_FIELDS = frozenset({"ref", "request_id", "profile", "worker_run_id"})
 SPRINT_FIELDS = frozenset(
     {
@@ -140,11 +166,25 @@ class WebApp:
     reaches that route.
     """
 
-    def __init__(self, reads: Any, ops: Any, sprint_reads: Any, sprint_ops: Any) -> None:
+    def __init__(
+        self,
+        reads: Any,
+        ops: Any,
+        sprint_reads: Any,
+        sprint_ops: Any,
+        pause_reads: Any,
+        pause_ops: Any,
+        command_reads: Any,
+        card_ops: Any,
+    ) -> None:
         self.reads = reads
         self.ops = ops
         self.sprint_reads = sprint_reads
         self.sprint_ops = sprint_ops
+        self.pause_reads = pause_reads
+        self.pause_ops = pause_ops
+        self.command_reads = command_reads
+        self.card_ops = card_ops
 
     # -- the entry point -------------------------------------------------------------------
 
@@ -261,15 +301,134 @@ class WebApp:
             ),
         )
 
+    # -- pause routes ----------------------------------------------------------------------
+
+    def _pause(self, _params, _query, _body) -> Response:
+        return _json(200, self.pause_reads.pause_state())
+
+    def _pause_scope(self, _params, _query, _body) -> Response:
+        return _json(200, self.pause_reads.pause_scope())
+
+    def _pause_drain(self, _params, _query, body) -> Response:
+        _fields(body, PAUSE_DRAIN_FIELDS, "pause drain")
+        return _json(
+            200, self.pause_ops.pause_drain(actor=SPRINT_ACTOR, reason=_required(body, "reason"))
+        )
+
+    def _pause_resume(self, _params, _query, body) -> Response:
+        _fields(body, PAUSE_RESUME_FIELDS, "pause resume")
+        return _json(200, self.pause_ops.pause_resume(actor=SPRINT_ACTOR))
+
+    # -- sprint operation routes -----------------------------------------------------------
+
+    def _sprints(self, _params, query, _body) -> Response:
+        statuses = [value for value in query.get("status") or [] if value]
+        return _json(200, self.sprint_reads.sprint_list(statuses=statuses or None))
+
+    def _sprint_comment(self, params, _query, body) -> Response:
+        _fields(body, SPRINT_COMMENT_FIELDS, "sprint comment")
+        return _json(
+            200,
+            self.sprint_ops.sprint_comment(
+                request_id=_required(body, "request_id"),
+                actor=SPRINT_ACTOR,
+                role=SPRINT_ROLE,
+                reference=params["ref"],
+                body=_required(body, "body"),
+            ),
+        )
+
+    def _sprint_close(self, params, _query, body) -> Response:
+        _fields(body, SPRINT_CLOSE_FIELDS, "sprint close")
+        return _json(
+            200,
+            self.sprint_ops.sprint_close(
+                request_id=_required(body, "request_id"),
+                actor=SPRINT_ACTOR,
+                role=SPRINT_ROLE,
+                reference=params["ref"],
+                reason=_required(body, "reason"),
+                closeout=_required(body, "closeout"),
+                decisions=_decisions(body.get("decisions")),
+            ),
+        )
+
+    # -- command routes --------------------------------------------------------------------
+
+    def _commands(self, _params, query, _body) -> Response:
+        return _json(
+            200, self.command_reads.command_history(_one(query, "cursor"), limit=_limit(query))
+        )
+
+    def _command_request(self, params, _query, _body) -> Response:
+        return _json(200, self.command_reads.command_request(params["request_id"]))
+
+    # -- card operation routes -------------------------------------------------------------
+
+    def _task_comment(self, params, _query, body) -> Response:
+        _fields(body, TASK_COMMENT_FIELDS, "card comment")
+        return _json(
+            200,
+            self.card_ops.task_comment(
+                request_id=_required(body, "request_id"),
+                actor=SPRINT_ACTOR,
+                role=SPRINT_ROLE,
+                reference=params["ref"],
+                body=_required(body, "body"),
+            ),
+        )
+
+    def _task_move(self, params, _query, body) -> Response:
+        _fields(body, TASK_MOVE_FIELDS, "card move")
+        return _json(
+            200,
+            self.card_ops.task_move(
+                request_id=_required(body, "request_id"),
+                actor=SPRINT_ACTOR,
+                role=SPRINT_ROLE,
+                reference=params["ref"],
+                target=_required(body, "target"),
+                reason=_required(body, "reason"),
+                sprint_override=_flag(body.get("sprint_override")),
+                sprint_override_reason=_text(body.get("sprint_override_reason")),
+            ),
+        )
+
     # -- pages -----------------------------------------------------------------------------
 
     def _dashboard(self, _params, _query, _body) -> Response:
-        return _html(200, pages.dashboard(self.reads.system_snapshot()))
+        """The operator's one screen, assembled from four reads that fail apart.
+
+        The snapshot is the route's operation and the only one whose refusal is the page's: the
+        pause, the open sprints and the command feed are read beside it, and one of them refusing
+        marks its own section with the reason rather than taking the dashboard down. The same rule
+        :meth:`_task_page` applies to a card's runs, applied to the three sections this page grew.
+        """
+        snapshot = self.reads.system_snapshot()
+        pause = self._or_reason(self.pause_reads.pause_state)
+        sprints = self._or_reason(lambda: self.sprint_reads.sprint_list(statuses=["open"]))
+        commands = self._or_reason(lambda: self.command_reads.command_history(limit=FEED_LIMIT))
+        return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, commands=commands))
 
     def _task_page(self, params, query, _body) -> Response:
         ref = params["ref"]
         snapshot = self.reads.task_snapshot(ref, events=_events_count(query))
         return _html(200, pages.task(snapshot, runs=self._runs_or_reason(ref)))
+
+    def _commands_page(self, _params, query, _body) -> Response:
+        return _html(
+            200,
+            pages.commands(
+                self.command_reads.command_history(_one(query, "cursor"), limit=_limit(query))
+            ),
+        )
+
+    def _or_reason(self, read: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """A section's document, or the reason it has none, for a page made of several reads."""
+        try:
+            return {"available": True, "reason": None, "document": read()}
+        except ReadError as exc:
+            return {"available": False, "reason": exc.message, "document": None}
 
     def _runs_or_reason(self, ref: str) -> dict[str, Any]:
         """The card's product runs for the page, or the reason there are none to show.
@@ -527,6 +686,32 @@ def _text(value: Any) -> str:
         return ""
     if not isinstance(value, str):
         raise ValidationRefused("every field of these requests is a string")
+    return value
+
+
+def _flag(value: Any) -> bool:
+    """A JSON boolean, or the strings a form sends for one. Anything else is refused by name."""
+    if value is None or value is False or value == "":
+        return False
+    if value is True:
+        return True
+    if isinstance(value, str) and value.lower() in {"true", "on", "yes", "1"}:
+        return True
+    if isinstance(value, str) and value.lower() in {"false", "off", "no", "0"}:
+        return False
+    raise ValidationRefused("sprint_override is a boolean")
+
+
+def _decisions(value: Any) -> Any:
+    """The close decisions as sent: absent, the CLI's decisions file as text, or its parsed object.
+
+    Nothing is parsed here. The layer owns the shape through the one parser the CLI uses, so the
+    web refuses exactly what `secretary sprint close --decisions-file` refuses and nothing else.
+    """
+    if value is None or value == "" or value == {}:
+        return None
+    if not isinstance(value, str | dict):
+        raise ValidationRefused("decisions is the decisions document as text, or as an object")
     return value
 
 

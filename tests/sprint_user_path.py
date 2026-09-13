@@ -34,8 +34,8 @@ from __future__ import annotations
 
 import argparse
 import re
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http.client import HTTPConnection, HTTPResponse
 from threading import Thread
 from typing import Any
@@ -45,7 +45,11 @@ from urllib.parse import quote, urlencode
 from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.web.app import WebApp
 from secretary.web.server import build_server
+from secretary.webproto.card_ops import CardOperationLayer
+from secretary.webproto.command_reads import CommandReadLayer
 from secretary.webproto.ops import OperationLayer
+from secretary.webproto.pause_ops import PauseOperationLayer
+from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.reads import ReadLayer
 from secretary.webproto.runs import RunStoreError
 from secretary.webproto.sprint_requests import SprintRequestStore
@@ -178,6 +182,10 @@ def walk(record: list[Step]) -> list[Step]:
                 OperationLayer(installation.instance, data_dir=installation.data_dir),
                 installation.reads(),
                 installation.ops(),
+                PauseReadLayer(installation.instance, data_dir=installation.data_dir),
+                PauseOperationLayer(installation.instance, data_dir=installation.data_dir),
+                CommandReadLayer(installation.instance, data_dir=installation.data_dir),
+                CardOperationLayer(installation.instance, data_dir=installation.data_dir),
             )
             server = build_server(app, host="127.0.0.1", port=0)
             host, port = server.server_address[0], server.server_address[1]

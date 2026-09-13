@@ -44,6 +44,8 @@ from secretary.web.server import (
 )
 from secretary.web.statuses import HTTP_STATUS_BY_CODE, UNMAPPED_CODE_STATUS, status_for
 from secretary.webproto import errors as error_module
+from secretary.webproto.card_ops import CardOperationLayer
+from secretary.webproto.command_reads import CommandReadLayer
 from secretary.webproto.errors import (
     InstallationUnavailable,
     InvalidCursor,
@@ -55,6 +57,8 @@ from secretary.webproto.errors import (
     ValidationRefused,
 )
 from secretary.webproto.ops import OperationLayer
+from secretary.webproto.pause_ops import PauseOperationLayer
+from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.reads import ReadLayer
 from secretary.webproto.sprint_ops import SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
@@ -72,6 +76,9 @@ from triggered_agents.runtime.head.runtime import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: How many layers the application is built over; every one is handed in.
+LAYERS = 8
 
 WORKER_PROFILE = "codex-product-worker"
 REVIEWER_PROFILE = "claude-product-reviewer"
@@ -297,7 +304,24 @@ class TransportFixture(unittest.TestCase):
         return OperationLayer(self.instance, **options)
 
     def app(self, **kwargs) -> WebApp:
-        return WebApp(self.reads(), self.ops(**kwargs), self.sprint_reads(), self.sprint_ops())
+        return WebApp(
+            self.reads(),
+            self.ops(**kwargs),
+            self.sprint_reads(),
+            self.sprint_ops(),
+            *self.operator_layers(),
+        )
+
+    def operator_layers(self, **kwargs) -> tuple[Any, Any, Any, Any]:
+        """The pause, command and card layers, over the same instance, board and clock."""
+        options = {"data_dir": self.data_dir, "board_client": self.board, "clock": lambda: self.clock}
+        options.update(kwargs)
+        return (
+            PauseReadLayer(self.instance, **options),
+            PauseOperationLayer(self.instance, **options),
+            CommandReadLayer(self.instance, **options),
+            CardOperationLayer(self.instance, **options),
+        )
 
     def sprint_reads(self, **kwargs) -> SprintReadLayer:
         options = {"data_dir": self.data_dir, "board_client": self.board, "clock": lambda: self.clock}
@@ -366,6 +390,18 @@ class StatusMappingTests(unittest.TestCase):
     #: A body each POST route would be answered on, so that a refusal is the layer's and not this
     #: test's. Both encodings are here because both are published: a program sends the JSON object,
     #: and a browser sends the form the sprint page serves.
+    #: Per JSON route, because each POST holds its body to its own closed field list and a body
+    #: another route's fields would be refused by the transport before the layer saw it.
+    JSON_BODIES: ClassVar[dict[str, dict[str, Any]]] = {
+        "/api/runs/start": {"ref": "secretary-1", "request_id": "r", "profile": "p"},
+        "/api/runs/review": {"ref": "secretary-1", "request_id": "r", "profile": "p"},
+        "/api/pause/drain": {"reason": "why"},
+        "/api/pause/resume": {},
+        "/api/sprints/{ref}/comment": {"request_id": "r", "body": "a comment"},
+        "/api/sprints/{ref}/close": {"request_id": "r", "reason": "why", "closeout": "what became"},
+        "/api/tasks/{ref}/comment": {"request_id": "r", "body": "a comment"},
+        "/api/tasks/{ref}/move": {"request_id": "r", "target": "ready", "reason": "why"},
+    }
     BODIES: ClassVar[dict[str, bytes]] = {
         "json": json.dumps({"ref": "secretary-1", "request_id": "r", "profile": "p"}).encode("utf-8"),
         "form": urlencode(
@@ -383,23 +419,39 @@ class StatusMappingTests(unittest.TestCase):
         ).encode("utf-8"),
     }
 
+    def _body(self, route) -> bytes:
+        if route.body == "form":
+            return self.BODIES["form"]
+        if route.method != "POST":
+            return b""
+        return json.dumps(self.JSON_BODIES[route.pattern]).encode("utf-8")
+
+    def test_every_published_post_route_has_a_body_this_test_knows(self) -> None:
+        """A route added without a body here would be answered 400 by the transport and read as a pass."""
+        posted = {route.pattern for route in ROUTES if route.method == "POST" and route.body == "json"}
+        self.assertEqual(posted, set(self.JSON_BODIES))
+
     def test_every_route_answers_a_refusal_with_the_status_of_its_code(self) -> None:
         for error, status in self.CODES.items():
-            app = WebApp(*(RaisingLayer(error) for _ in range(4)))
+            app = WebApp(*(RaisingLayer(error) for _ in range(LAYERS)))
             for route in ROUTES:
-                path = route.pattern.replace("{ref}", "secretary-1").replace("{run_id}", "pr-1")
+                path = (
+                    route.pattern.replace("{ref}", "secretary-1")
+                    .replace("{run_id}", "pr-1")
+                    .replace("{request_id}", "r-1")
+                )
                 with self.subTest(code=error.code, route=route.pattern):
-                    response = app.handle(route.method, path, body=self.BODIES[route.body])
+                    response = app.handle(route.method, path, body=self._body(route))
                     self.assertEqual(response.status, status)
 
     def test_a_refused_json_route_answers_the_protocol_code_itself(self) -> None:
-        app = WebApp(*(RaisingLayer(OwnerConflict("somebody else has this card")) for _ in range(4)))
+        app = WebApp(*(RaisingLayer(OwnerConflict("somebody else has this card")) for _ in range(LAYERS)))
         response = app.handle("GET", "/api/tasks/secretary-1")
         self.assertEqual(response.status, 409)
         self.assertEqual(json.loads(response.body)["error"]["code"], "owner_conflict")
 
     def test_a_refused_page_stays_a_page_and_carries_the_same_status(self) -> None:
-        app = WebApp(*(RaisingLayer(TaskNotFound("no such card")) for _ in range(4)))
+        app = WebApp(*(RaisingLayer(TaskNotFound("no such card")) for _ in range(LAYERS)))
         response = app.handle("GET", "/tasks/secretary-1")
         self.assertEqual(response.status, 404)
         self.assertIn("text/html", response.content_type)
@@ -422,6 +474,18 @@ class RouteTableTests(TransportFixture):
         ("GET", "/api/runs/{run_id}"),
         ("POST", "/api/runs/start"),
         ("POST", "/api/runs/review"),
+        ("GET", "/history"),
+        ("GET", "/api/pause"),
+        ("GET", "/api/pause/scope"),
+        ("POST", "/api/pause/drain"),
+        ("POST", "/api/pause/resume"),
+        ("GET", "/api/sprints"),
+        ("POST", "/api/sprints/{ref}/comment"),
+        ("POST", "/api/sprints/{ref}/close"),
+        ("GET", "/api/history"),
+        ("GET", "/api/history/{request_id}"),
+        ("POST", "/api/tasks/{ref}/comment"),
+        ("POST", "/api/tasks/{ref}/move"),
     }
 
     def test_the_route_table_is_exactly_what_is_documented(self) -> None:
@@ -431,7 +495,10 @@ class RouteTableTests(TransportFixture):
     def test_every_route_is_one_operation_of_the_layer_below(self) -> None:
         for route in ROUTES:
             with self.subTest(route=route.pattern):
-                self.assertRegex(route.operation, r"^(reads|ops|sprint_reads|sprint_ops)\.[a-z_]+$")
+                self.assertRegex(
+                    route.operation,
+                    r"^(reads|ops|sprint_reads|sprint_ops|pause_reads|pause_ops|command_reads|card_ops)\.[a-z_]+$",
+                )
 
     def test_there_is_no_endpoint_that_runs_something_it_was_given(self) -> None:
         """A route that took a command, a script or a path to execute would be the whole hole."""
@@ -590,6 +657,7 @@ class PageTests(TransportFixture):
                 self.ops(),
                 self.sprint_reads(board_client=SilentBoard()),
                 self.sprint_ops(board_client=SilentBoard()),
+                *self.operator_layers(board_client=SilentBoard()),
             ),
         )
         self.assertEqual(response.status, 200)
@@ -1168,6 +1236,7 @@ class FailureContainmentTests(TransportFixture):
             self.ops(),
             self.sprint_reads(),
             self.sprint_ops(),
+            *self.operator_layers(),
         )
         host, port = self.serve(app)
         log = io.StringIO()

@@ -1,6 +1,6 @@
 """`secretary web-serve`: the third command over the same layer, beside `web-read` and `web-run`.
 
-It builds the four layers from the same arguments those groups take -- `--instance`, `--data-dir`,
+It builds the eight layers from the same arguments those groups take -- `--instance`, `--data-dir`,
 `--heads-registry` -- hands them to the application, and serves. Nothing about a snapshot, a state,
 a run or a sprint is decided here.
 """
@@ -14,7 +14,11 @@ import sys
 
 from secretary.web.app import WebApp
 from secretary.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
+from secretary.webproto.card_ops import CardOperationLayer
+from secretary.webproto.command_reads import CommandReadLayer
 from secretary.webproto.ops import OperationLayer
+from secretary.webproto.pause_ops import PauseOperationLayer
+from secretary.webproto.pause_reads import PauseReadLayer
 from secretary.webproto.reads import ReadLayer
 from secretary.webproto.sprint_ops import SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
@@ -61,6 +65,12 @@ def run_web_serve(args: argparse.Namespace) -> int:
         OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
         SprintReadLayer(args.instance, data_dir=args.data_dir),
         SprintOperationLayer(args.instance, data_dir=args.data_dir),
+        PauseReadLayer(args.instance, data_dir=args.data_dir),
+        # The same construction `secretary pause`/`resume` make for the production dispatcher: a
+        # drain or a resume issued from the browser is the operator's own command, not a rehearsal.
+        PauseOperationLayer(args.instance, data_dir=args.data_dir),
+        CommandReadLayer(args.instance, data_dir=args.data_dir),
+        CardOperationLayer(args.instance, data_dir=args.data_dir),
     )
     try:
         return serve(app, host=args.host, port=args.port)

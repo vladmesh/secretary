@@ -4,6 +4,34 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-13 — the operator's dashboard: pause, open sprints, history, and the owner's writes
+
+**Twelve routes joined `secretary.web.app.ROUTES`**, each one operation of a layer that already
+existed and had no transport: `GET /api/pause`, `GET /api/pause/scope`, `POST /api/pause/drain`,
+`POST /api/pause/resume` (`pause_reads`/`pause_ops`); `GET /api/sprints`,
+`POST /api/sprints/{ref}/comment`, `POST /api/sprints/{ref}/close` (`sprint_reads`/`sprint_ops`);
+`GET /api/history`, `GET /api/history/{request_id}` and the `/history` page (`command_reads`); and
+`POST /api/tasks/{ref}/comment`, `POST /api/tasks/{ref}/move` over the new
+`webproto.card_ops.CardOperationLayer`, which wraps `TaskWriter.comment` and `TaskWriter.move`
+under the writer's own rules. Every write from the browser is made under role `po` and actor `web`.
+`WebApp` now takes eight layers, and `secretary web-serve` builds them all.
+
+**The dashboard is one screen** — pipeline state with the drain/resume button, open sprints as
+cards with a comment box, what is in flight, and the last commands — and the card and sprint pages
+carry the owner's actions. See *The operator's screen* in Operations.
+
+**`installation.health.status` on `/api/system` is a summary, not the whole `secretary status`
+document.** `reads.health_summary` restates the collector's own failure marks as a `state` (`ok` or
+`attention`) and a `problems` list, beside the dispatcher, checkpoint, resource, unit and backend
+facts a page shows. `collect_status` grew `sprints=` and `probe_panels=` flags, and the web reads
+it with both off: on the owner's installation that read carried the full status of 110 sprints —
+about 850 KB, over ten seconds — for a page whose sprints come from `sprint_reads.sprint_list`. The
+CLI's `secretary status` is unchanged.
+
+**`sprint_ops.sprint_close` takes `decisions` as text as well as the parsed object**, parsed by
+`sprint_close.parse_close_decisions` — the CLI's own `--decisions-file` parser — so the browser
+refuses exactly what the CLI refuses.
+
 ## 2026-09-12 — a stopped head cannot read as `live-match` (secretary-1622, sprint:1438)
 
 **The launch-identity watchdog no longer calls a reaped head a running one.**
