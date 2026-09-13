@@ -253,7 +253,7 @@ is one CLI process with full permissions (`--dangerously-skip-permissions`,
 
 | CLI | turn 1 | later turns | final answer |
 | --- | --- | --- | --- |
-| Claude | `claude -p --output-format json --session-id UUID` (UUID chosen at session creation) | `--resume UUID` | `result` of the JSON result object |
+| Claude | `claude -p --output-format json --session-id UUID` (UUID chosen at session creation) | `--resume UUID` once a turn completed; before that `--session-id UUID` again | `result` of the JSON result object |
 | Codex | `codex exec --json -C DATA_DIR/po -` | `codex exec resume THREAD_ID -` (`thread_id` from turn 1's event stream) | the `-o` file |
 
 Board store tables (revision `0008_po_sessions`):
@@ -273,8 +273,14 @@ exit status and quotes the stderr tail.
 
 **Stop** kills the turn's process group and marks it `interrupted`. The session continues with
 resume. A Codex turn stopped before its event stream named a `thread_id` leaves no id, and the next
-turn starts a new Codex thread. A Claude session whose first turn was stopped or failed before Claude
-saved the conversation cannot resume; its next turns fail and a new session is needed.
+turn starts a new Codex thread. A Claude session whose turns were all stopped or failed may or may not
+have a saved conversation: the next turn uses `--session-id`, and if Claude answers
+`Session ID UUID is already in use` the same turn is relaunched with `--resume`. Both attempts' output
+is appended to the turn's files.
+
+If the process of a turn starts but cannot be recorded in the store, its process group is killed and
+reaped and the turn is `failed`. If the store does not answer at all, the row stays `running` with no
+pid until `recover()` marks it `interrupted`.
 
 **Restart.** `secretary web-serve` settles turns at start: every `running` turn becomes `interrupted`,
 and its process is killed only if the PID still has the recorded identity (boot id plus kernel start

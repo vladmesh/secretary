@@ -31,8 +31,10 @@ from typing import Any
 
 from secretary.po.store import (
     CLIS,
+    COMPLETED,
     FAILED,
     INTERRUPTED,
+    RUNNING,
     PoStore,
     Session,
     Turn,
@@ -45,6 +47,8 @@ RECOVERED_REASON = "the web service restarted while this turn was running"
 # How much of stderr a failed turn quotes in its reason.
 STDERR_TAIL_BYTES = 2000
 STOP_JOIN_SECONDS = 10.0
+# Claude Code's refusal of `--session-id` for a conversation that already exists (checked on 2.1.270).
+CLAUDE_SESSION_IN_USE = "is already in use"
 
 
 class RunnerError(RuntimeError):
@@ -200,7 +204,8 @@ class PoRunner:
             last_message=directory / f"{stem}.last-message",
         )
 
-    def argv(self, session: Session, seq: int, files: TurnFiles) -> list[str]:
+    def argv(self, session: Session, files: TurnFiles, *, established: bool = False) -> list[str]:
+        """One turn's command. `established`: a Claude conversation is known to exist under its id."""
         executable = self.executables[session.cli]
         if session.cli == "claude":
             assert session.cli_session_id is not None
@@ -213,7 +218,7 @@ class PoRunner:
                 session.model,
                 "--dangerously-skip-permissions",
             ]
-            if seq > 1:
+            if established:
                 return [*argv, "--resume", session.cli_session_id]
             return [*argv, "--session-id", session.cli_session_id]
         options = [
@@ -239,44 +244,100 @@ class PoRunner:
             turn = self.store.begin_turn(
                 session_id, text, lambda seq: self.files(session_id, seq).stdout
             )
-            # Read after the claim: the previous turn may have recorded Codex's thread id.
-            session = self.store.session(session_id)
             files = self.files(session_id, turn.seq)
-            argv = self.argv(session, turn.seq, files)
             try:
+                # Read after the claim: the previous turn may have recorded Codex's thread id.
+                session = self.store.session(session_id)
+                # Claude is resumed only once a turn completed; after a stopped or failed first turn
+                # the conversation may or may not exist, and the waiter settles that (`_resume_instead`).
+                established = any(
+                    earlier.state == COMPLETED
+                    for earlier in self.store.turns(session_id)
+                    if earlier.seq < turn.seq
+                )
+                argv = self.argv(session, files, established=established)
                 files.directory.mkdir(parents=True, exist_ok=True)
                 files.prompt.write_text(text, encoding="utf-8")
-                with (
-                    files.prompt.open("rb") as stdin,
-                    files.stdout.open("wb") as stdout,
-                    files.stderr.open("wb") as stderr,
-                ):
-                    process = subprocess.Popen(
-                        argv,
-                        cwd=session.cwd,
-                        stdin=stdin,
-                        stdout=stdout,
-                        stderr=stderr,
-                        env=self.env,
-                        start_new_session=True,
-                    )
-            except OSError as exc:
-                reason = f"could not start {argv[0]}: {exc}"
-                self.store.finish_turn(session_id, turn.seq, FAILED, reason)
-                raise RunnerError(reason) from None
-            if not self.store.record_process(
-                session_id, turn.seq, process.pid, process_identity(process.pid)
-            ):
-                _kill_group(process.pid)
-            thread = threading.Thread(
-                target=self._wait,
-                args=(session, turn.seq, process, files),
-                name=f"po-turn-{session_id}-{turn.seq}",
-                daemon=True,
-            )
-            self._live[(session_id, turn.seq)] = _Live(process, thread)
-            thread.start()
+            except Exception as exc:
+                self._abandon(session_id, turn.seq, None, f"could not prepare the turn: {type(exc).__name__}: {exc}")
+                raise
+            process = self._launch(session, turn.seq, argv, files)
+            try:
+                thread = threading.Thread(
+                    target=self._wait,
+                    args=(session, turn.seq, process, argv, files),
+                    name=f"po-turn-{session_id}-{turn.seq}",
+                    daemon=True,
+                )
+                self._live[(session_id, turn.seq)] = _Live(process, thread)
+                thread.start()
+            except BaseException as exc:
+                self._live.pop((session_id, turn.seq), None)
+                self._abandon(
+                    session_id, turn.seq, process, f"the turn's waiter did not start: {type(exc).__name__}: {exc}"
+                )
+                raise
         return self.store.turn(session_id, turn.seq)
+
+    def _launch(self, session: Session, seq: int, argv: list[str], files: TurnFiles) -> subprocess.Popen[bytes]:
+        """Start one CLI process for a turn and record it, or leave no live process group behind.
+
+        Output is appended, so a turn relaunched by `_resume_instead` keeps both attempts' raw output.
+        """
+        try:
+            with (
+                files.prompt.open("rb") as stdin,
+                files.stdout.open("ab") as stdout,
+                files.stderr.open("ab") as stderr,
+            ):
+                process = subprocess.Popen(
+                    argv,
+                    cwd=session.cwd,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=stderr,
+                    env=self.env,
+                    start_new_session=True,
+                )
+        except OSError as exc:
+            reason = f"could not start {argv[0]}: {exc}"
+            self._abandon(session.session_id, seq, None, reason)
+            raise RunnerError(reason) from None
+        try:
+            if not self.store.record_process(session.session_id, seq, process.pid, process_identity(process.pid)):
+                raise RunnerError(f"turn {seq} of PO session {session.session_id} was settled while it started")
+        except BaseException as exc:
+            self._abandon(
+                session.session_id,
+                seq,
+                process,
+                f"the turn's process could not be recorded, so it was killed: {type(exc).__name__}: {exc}",
+            )
+            raise
+        return process
+
+    def _abandon(
+        self, session_id: str, seq: int, process: subprocess.Popen[bytes] | None, reason: str
+    ) -> None:
+        """Kill and reap a turn's process group, then settle the turn `failed` if the store answers.
+
+        If it does not, the row stays `running` with no recorded process, and `recover()` marks it
+        `interrupted` later; there is nothing left alive for it to kill.
+        """
+        if process is not None:
+            _kill_group(process.pid)
+            try:
+                process.wait(STOP_JOIN_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            self.store.finish_turn(session_id, seq, FAILED, reason)
+        except Exception as exc:  # noqa: BLE001 - the unsettled row is recover()'s to settle
+            print(
+                f"secretary po: turn {session_id}/{seq} left running for recovery: {reason}; "
+                f"settling it failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
 
     def stop(self, session_id: str) -> Turn | None:
         """Kill the running turn's process group; the turn is `interrupted`, the session goes on."""
@@ -331,10 +392,18 @@ class PoRunner:
     # --- settling ---------------------------------------------------------------------------
 
     def _wait(
-        self, session: Session, seq: int, process: subprocess.Popen[bytes], files: TurnFiles
+        self,
+        session: Session,
+        seq: int,
+        process: subprocess.Popen[bytes],
+        argv: list[str],
+        files: TurnFiles,
     ) -> None:
         try:
             code = process.wait()
+            relaunched = self._resume_instead(session, seq, code, argv, files)
+            if relaunched is not None:
+                code = relaunched.wait()
             self._settle(session, seq, code, files)
         except Exception as exc:  # noqa: BLE001 - a waiter must never leave a turn running without a word
             try:
@@ -353,6 +422,29 @@ class PoRunner:
         finally:
             with self._lock:
                 self._live.pop((session.session_id, seq), None)
+
+    def _resume_instead(
+        self, session: Session, seq: int, code: int, argv: list[str], files: TurnFiles
+    ) -> subprocess.Popen[bytes] | None:
+        """Relaunch as `--resume` when Claude says an earlier stopped or failed turn saved the conversation.
+
+        Claude Code 2.1.270 answers `--session-id` over an existing conversation with
+        `Error: Session ID <uuid> is already in use.` and exit 1, and `--resume` over a missing one with
+        `No conversation found with session ID: <uuid>`. Only the first can follow a turn that never
+        completed, and it is retried here, inside the same turn.
+        """
+        if session.cli != "claude" or code == 0 or "--session-id" not in argv:
+            return None
+        if CLAUDE_SESSION_IN_USE not in self._stderr_tail(files):
+            return None
+        with self._lock:
+            if self.store.turn(session.session_id, seq).state != RUNNING:
+                return None
+            process = self._launch(session, seq, self.argv(session, files, established=True), files)
+            live = self._live.get((session.session_id, seq))
+            if live is not None:
+                live.process = process
+        return process
 
     def _settle(self, session: Session, seq: int, code: int, files: TurnFiles) -> None:
         stdout = files.stdout.read_bytes().decode("utf-8", errors="replace")

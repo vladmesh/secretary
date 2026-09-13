@@ -16,10 +16,11 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from secretary.po import store as po_store
 from secretary.po.runner import PoRunner, codex_thread_id, process_identity
-from secretary.po.store import PoStore, TurnInProgress
+from secretary.po.store import PoStore, PoStoreError, TurnInProgress
 from tests.sql_backend_fixtures import PostgresBoard
 
 BOARD: PostgresBoard
@@ -36,6 +37,18 @@ with open(log, "a") as handle:
     handle.write(json.dumps({"cli": "claude", "argv": argv, "cwd": os.getcwd(), "prompt": prompt}) + "\n")
 flag = "--resume" if "--resume" in argv else "--session-id"
 session = argv[argv.index(flag) + 1]
+# Claude 2.1.270's own refusals: a saved conversation cannot be created again, a missing one resumed.
+saved_path = log + ".saved"
+saved = set(open(saved_path).read().split()) if os.path.exists(saved_path) else set()
+if flag == "--resume" and session not in saved:
+    print(f"No conversation found with session ID: {session}", file=sys.stderr)
+    sys.exit(1)
+if flag == "--session-id" and session in saved:
+    print(f"Error: Session ID {session} is already in use.", file=sys.stderr)
+    sys.exit(1)
+if "NOPERSIST" not in prompt:
+    with open(saved_path, "a") as handle:
+        handle.write(session + "\n")
 print(json.dumps({"type": "system", "subtype": "init", "session_id": session}), flush=True)
 print(json.dumps({"type": "assistant", "message": {"content": [
     {"type": "thinking", "thinking": "THINKING-SECRET"},
@@ -297,7 +310,13 @@ class PoRunnerTests(unittest.TestCase):
         again = self.settle(session.session_id, self.runner.send(session.session_id, "again").seq)
 
         self.assertEqual(again.state, po_store.COMPLETED)
-        self.assertEqual(self.calls()[-1]["argv"][-2:], ["--resume", session.cli_session_id])
+        # The stopped turn had saved the conversation: `--session-id` is refused, and the same turn
+        # goes on with `--resume`.
+        self.assertEqual(
+            [call["argv"][-2:] for call in self.calls()[-2:]],
+            [["--session-id", session.cli_session_id], ["--resume", session.cli_session_id]],
+        )
+        self.assertEqual([turn.seq for turn in self.store.turns(session.session_id)], [1, 2])
         self.assertEqual(
             self.feed(session.session_id),
             [
@@ -306,6 +325,77 @@ class PoRunnerTests(unittest.TestCase):
                 (2, "agent", f"claude --resume {session.cli_session_id}: again"),
             ],
         )
+
+    def test_a_stopped_first_claude_turn_that_saved_nothing_starts_its_conversation_again(self) -> None:
+        session = self.runner.create_session("claude", "opus")
+        self.runner.send(session.session_id, "SLEEP NOPERSIST")
+        self.spawned(1)
+        self.assertEqual(self.runner.stop(session.session_id).state, po_store.INTERRUPTED)
+
+        again = self.settle(session.session_id, self.runner.send(session.session_id, "again").seq)
+        then = self.settle(session.session_id, self.runner.send(session.session_id, "and then").seq)
+
+        self.assertEqual((again.state, then.state), (po_store.COMPLETED, po_store.COMPLETED))
+        sid = session.cli_session_id
+        self.assertEqual(
+            [call["argv"][-2:] for call in self.calls()],
+            [["--session-id", sid], ["--session-id", sid], ["--resume", sid]],
+        )
+        self.assertEqual(
+            self.feed(session.session_id),
+            [
+                (1, "owner", "SLEEP NOPERSIST"),
+                (2, "owner", "again"),
+                (2, "agent", f"claude --session-id {sid}: again"),
+                (3, "owner", "and then"),
+                (3, "agent", f"claude --resume {sid}: and then"),
+            ],
+        )
+
+    def test_a_process_that_cannot_be_recorded_is_killed_with_its_group(self) -> None:
+        pids = self.log.with_name(self.log.name + ".pids")
+        for store_answers in (True, False):
+            with self.subTest(store_answers=store_answers):
+                if pids.exists():
+                    pids.unlink()
+                session = self.runner.create_session("codex", "m")
+                real_finish = self.store.finish_turn
+
+                def record_fails(*_args, **_kwargs):
+                    # Let the child reach its grandchild first, so the kill has a group to reach.
+                    self.spawned(1)
+                    raise PoStoreError("the board store went away")
+
+                def finish(*args, store_answers=store_answers, real_finish=real_finish, **kwargs):
+                    if not store_answers:
+                        raise PoStoreError("the board store is still away")
+                    return real_finish(*args, **kwargs)
+
+                with (
+                    mock.patch.object(self.store, "record_process", side_effect=record_fails),
+                    mock.patch.object(self.store, "finish_turn", side_effect=finish),
+                    self.assertRaises(PoStoreError),
+                ):
+                    self.runner.send(session.session_id, "SLEEP forever")
+
+                [(leader, grandchild)] = self.spawned(1)
+                eventually(
+                    lambda leader=leader, grandchild=grandchild: not alive(leader) and not alive(grandchild),
+                    "the unrecorded group survived",
+                )
+                turn = self.store.turn(session.session_id, 1)
+                self.assertIsNone(turn.pid)
+                self.assertIsNone(turn.process_identity)
+                if store_answers:
+                    self.assertEqual(turn.state, po_store.FAILED)
+                    self.assertIn("could not be recorded", turn.reason)
+                else:
+                    self.assertEqual(turn.state, po_store.RUNNING)
+                    [recovered] = self.make_runner().recover()
+                    self.assertEqual((recovered.session_id, recovered.state), (session.session_id, po_store.INTERRUPTED))
+                    self.assertNotIn("killed", recovered.reason)
+                self.assertEqual(self.feed(session.session_id), [(1, "owner", "SLEEP forever")])
+                self.assertEqual(self.store.running_turns(), [])
 
     def test_a_stopped_codex_first_turn_keeps_its_thread_id_for_resume(self) -> None:
         session = self.runner.create_session("codex", "gpt-5.5")
