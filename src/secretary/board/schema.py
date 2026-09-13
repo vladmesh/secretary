@@ -763,6 +763,87 @@ class BoardEvent(Base):
     )
 
 
+# --- PO head sessions, turns and feed (revision 0008, sprint:1442) -------------------------
+
+
+class PoSession(Base):
+    """One conversation of the PO head with one CLI, run turn by turn by `secretary.po.runner`."""
+
+    __tablename__ = "po_sessions"
+
+    session_id = sa.Column(sa.Text, primary_key=True)
+    cli = sa.Column(sa.Text, nullable=False)
+    model = sa.Column(sa.Text, nullable=False)
+    cwd = sa.Column(sa.Text, nullable=False)
+    created_at = sa.Column(TIMESTAMPTZ, nullable=False)
+    state = sa.Column(sa.Text, nullable=False)
+    # Claude's is chosen by the secretary at creation; Codex's is its thread_id, known after turn 1.
+    cli_session_id = sa.Column(sa.Text)
+
+    __table_args__ = (
+        sa.CheckConstraint("cli IN ('claude','codex')", name="po_session_cli_in_vocabulary"),
+        sa.CheckConstraint("state IN ('open','closed')", name="po_session_state_in_vocabulary"),
+    )
+
+
+class PoTurn(Base):
+    __tablename__ = "po_turns"
+
+    session_id = sa.Column(
+        sa.Text, sa.ForeignKey("po_sessions.session_id", ondelete="CASCADE"), primary_key=True
+    )
+    seq = sa.Column(sa.Integer, primary_key=True, autoincrement=False)
+    started_at = sa.Column(TIMESTAMPTZ, nullable=False)
+    finished_at = sa.Column(TIMESTAMPTZ)
+    state = sa.Column(sa.Text, nullable=False)
+    stdout_path = sa.Column(sa.Text, nullable=False)
+    pid = sa.Column(sa.Integer)
+    # Boot id and kernel start time of `pid`: recovery kills only the process it started.
+    process_identity = sa.Column(sa.Text)
+    reason = sa.Column(sa.Text)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "state IN ('running','completed','failed','interrupted')",
+            name="po_turn_state_in_vocabulary",
+        ),
+        sa.CheckConstraint("seq > 0", name="po_turn_seq_is_positive"),
+        sa.CheckConstraint(
+            "(state = 'running') = (finished_at IS NULL)", name="po_turn_finished_unless_running"
+        ),
+        sa.Index(
+            "po_turns_one_running_per_session",
+            "session_id",
+            unique=True,
+            postgresql_where=sa.text("state = 'running'"),
+        ),
+    )
+
+
+class PoFeedEntry(Base):
+    """The owner's messages and the agent's final answers; never tool calls or reasoning."""
+
+    __tablename__ = "po_feed"
+
+    entry_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
+    session_id = sa.Column(sa.Text, nullable=False)
+    turn_seq = sa.Column(sa.Integer, nullable=False)
+    role = sa.Column(sa.Text, nullable=False)
+    text = sa.Column(sa.Text, nullable=False)
+    created_at = sa.Column(TIMESTAMPTZ, nullable=False)
+
+    __table_args__ = (
+        sa.CheckConstraint("role IN ('owner','agent')", name="po_feed_role_in_vocabulary"),
+        sa.ForeignKeyConstraint(
+            ["session_id", "turn_seq"],
+            ["po_turns.session_id", "po_turns.seq"],
+            name="po_feed_entry_belongs_to_its_turn",
+            ondelete="CASCADE",
+        ),
+        sa.Index("po_feed_by_session", "session_id", "entry_id"),
+    )
+
+
 #: The three §5.5 role names.  They are literals of the design, not of one installation:
 #: `board-store.env` carries the *passwords*, which is what the revision takes as parameters.
 OWNER_ROLE = "secretary_owner"

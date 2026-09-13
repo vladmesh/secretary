@@ -300,6 +300,9 @@ class SchemaModelTests(unittest.TestCase):
                 "board_events",
                 "issue_comments",
                 "issues",
+                "po_feed",
+                "po_sessions",
+                "po_turns",
                 "product_comments",
                 "product_projects",
                 "products",
@@ -349,7 +352,7 @@ class SchemaModelTests(unittest.TestCase):
             if isinstance(constraint, sa.CheckConstraint)
         ]
 
-        self.assertEqual(len(checks), 39, "§3.13 counts 39 CHECK constraints at the head revision")
+        self.assertEqual(len(checks), 45, "§3.13 counts 45 CHECK constraints at the head revision")
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
@@ -371,6 +374,7 @@ class SchemaModelTests(unittest.TestCase):
         self.assertEqual(
             partial,
             [
+                "po_turns_one_running_per_session",
                 "repositories_one_primary",
                 "sprint_decisions_one_per_card",
                 "sprint_decisions_one_per_issue",
@@ -448,6 +452,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0008_po_sessions",
                 "0007_card_transport_key",
                 "0006_sprint_transport_key",
                 "0005_sprint_sql",

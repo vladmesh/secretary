@@ -38,7 +38,7 @@ PHASES = (
 
 UPGRADE_PREREQUISITE = (
     "preserved PostgreSQL target is at 0006_sprint_transport_key; owner/operator must install "
-    "the expected revision, run and verify the external 0007_card_transport_key upgrade, then "
+    "the expected revision, run and verify the external upgrade to the head revision, then "
     "rerun prepare-successor"
 )
 RECEIPT_KIND = "postgres-successor-release"
@@ -200,7 +200,14 @@ def _occupied_proof(
     report_path, report, report_sha = _report(state, artifacts)
     source_config, metadata = postgres_recovery.inspect_source(Path(state["successor_preparation"]["instance"]))
     expected_counts = state["phases"]["full_parity"]["evidence"].get("counts")
-    if metadata["table_counts"] != expected_counts or report.get("counts") != expected_counts:
+    occupied_counts = metadata["table_counts"]
+    if isinstance(expected_counts, dict):
+        # A table a later revision added (0008's PO tables) is absent from older import evidence;
+        # it is not compared, but it must still be empty.
+        occupied_counts = {
+            name: count for name, count in occupied_counts.items() if name in expected_counts or count
+        }
+    if occupied_counts != expected_counts or report.get("counts") != expected_counts:
         raise RuntimeError("occupied PostgreSQL table counts do not match canonical import evidence")
     if metadata["source_schema"] != migrate.head_revision():
         raise RuntimeError("occupied PostgreSQL database is not at the current migration head")
@@ -314,7 +321,7 @@ def status_probe(
             schema_action = {
                 "prerequisite": (
                     "preserved PostgreSQL target has an unsupported schema; owner/operator "
-                    "must verify 0007_card_transport_key before prepare-successor"
+                    f"must verify {migrate.head_revision()} before prepare-successor"
                 ),
                 "next_command": None,
             }
@@ -1011,7 +1018,7 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
                 raise CutoverError(UPGRADE_PREREQUISITE)
             if schema_revision != migrate.head_revision():
                 raise CutoverError(
-                    "preserved PostgreSQL target must be at 0007_card_transport_key before prepare-successor"
+                    f"preserved PostgreSQL target must be at {migrate.head_revision()} before prepare-successor"
                 )
             name = archive_name(state["plan_id"], identity["oid"])
             prep = state["successor_preparation"] = {
@@ -1032,7 +1039,7 @@ def prepare(args: Any, paths: Any) -> dict[str, Any]:
                     raise CutoverError(UPGRADE_PREREQUISITE)
                 if schema_revision != migrate.head_revision():
                     raise CutoverError(
-                        "preserved PostgreSQL target must be at 0007_card_transport_key before prepare-successor"
+                        f"preserved PostgreSQL target must be at {migrate.head_revision()} before prepare-successor"
                     )
         operations = SuccessorOperations(paths, state)
         for name in PHASES:

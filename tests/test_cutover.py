@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import cutover
-from secretary.board import provision
+from secretary.board import migrate, provision
 from secretary.cutover import successor
 
 REVISION = "a" * 40
@@ -608,7 +608,7 @@ class CutoverSuccessorTests(CutoverFixture):
                     mock.patch.object(
                         successor,
                         "inspect_schema_revision",
-                        return_value="0007_card_transport_key",
+                        return_value=migrate.head_revision(),
                     ),
                     mock.patch.object(successor, "_verify_completed_targets", return_value=None),
                     mock.patch.object(successor, "SuccessorOperations", FakeOperations),
@@ -973,7 +973,7 @@ class CutoverSuccessorTests(CutoverFixture):
                 return_value={"oid": 41, "name": "secretary", "owner": "owner", "allow_connections": True},
             ),
             mock.patch.object(
-                successor, "inspect_schema_revision", return_value="0007_card_transport_key"
+                successor, "inspect_schema_revision", return_value=migrate.head_revision()
             ),
             mock.patch.object(successor, "_verify_completed_targets", return_value=None) as verify,
             mock.patch.object(successor, "SuccessorOperations", Operations),

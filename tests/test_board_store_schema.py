@@ -65,8 +65,9 @@ SELECT
 
 #: What the same schema makes of a `postgres:16` at the head revision, and what §3.13 records
 #: beside `0001`'s own numbers. A disagreement here is a defect of the transcription into models,
-#: not of the document. Unchanged by `0003`, which trades one `CHECK` for one `CHECK`.
-DOCUMENTED_COUNTS = (24, 39, 40, 24, 17, 4)
+#: not of the document. Unchanged by `0003`, which trades one `CHECK` for one `CHECK`. `0008` adds
+#: the three PO tables: six `CHECK`, two foreign keys, three primary keys, one partial unique index.
+DOCUMENTED_COUNTS = (27, 45, 42, 27, 17, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -77,6 +78,7 @@ REVISIONS = (
     "0005_sprint_sql",
     "0006_sprint_transport_key",
     "0007_card_transport_key",
+    "0008_po_sessions",
 )
 
 
@@ -292,11 +294,11 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection = self.owner_connection()
         command.upgrade(
             migrate.alembic_config(connection=connection, passwords=self.passwords),
-            "0006_sprint_transport_key",
+            REVISIONS[-2],
         )
         connection.commit()
 
-        self.assertEqual(self.run_migrations(connection), ("0007_card_transport_key",))
+        self.assertEqual(self.run_migrations(connection), (REVISIONS[-1],))
         self.assertEqual(migrate.current_revision(connection), REVISIONS[-1])
 
     def test_a_dry_run_reads_the_version_and_writes_nothing(self) -> None:
@@ -437,7 +439,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
         connection.commit()
 
-        self.assertEqual(self.run_migrations(connection), ("0007_card_transport_key",))
+        self.assertEqual(
+            self.run_migrations(connection), ("0007_card_transport_key", "0008_po_sessions")
+        )
         rows = connection.exec_driver_sql(
             "SELECT task_ref, project_id, task_number, board_key FROM tasks ORDER BY task_ref"
         ).fetchall()

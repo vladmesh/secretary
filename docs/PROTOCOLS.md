@@ -3031,8 +3031,8 @@ Kanboard, and matching import evidence is readable. It requires an absolute expl
 installed revision, non-empty actor and reason, and a confirmation derived from plan ID, configured
 database name and current database OID. `status` renders the token, phase evidence and exact next command
 without credentials. At `0006_sprint_transport_key` that command is the external owner/operator upgrade;
-preparation is a read-only refusal until the preserved database is verified at
-`0007_card_transport_key`.
+preparation is a read-only refusal until the preserved database is verified at the head revision
+(`migrate.head_revision()`).
 
 Its phases: `eligibility`, `occupied_verification`, `dump_publication`, `connection_fence`,
 `database_rename`, `database_create`, `migration`, `role_verification`, `empty_verification`,

@@ -18,6 +18,7 @@ integration-board tests/test_board_boot_race.py
 integration-board tests/test_board_transport.py
 unit tests/test_board_store.py
 integration-board tests/test_board_store_schema.py
+integration-board tests/test_po_runner.py
 integration-board tests/test_board_import_mapping.py
 integration-board tests/test_board_import_integration.py
 integration-board tests/test_product_issues_sql_backend.py
