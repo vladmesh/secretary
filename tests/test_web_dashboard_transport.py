@@ -445,6 +445,21 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn("routing", page)
         self.assertIn('href="/history?cursor=c-2&amp;limit=25"', page)
 
+    def test_the_sprints_page_lists_every_sprint_and_marks_the_filter(self) -> None:
+        page = self.text(self.get("/sprints", "status=open"))
+        self.assertIn("sprint:7", page)
+        self.assertIn('href="/sprints?status=open" aria-current="true"', page)
+        self.assertIn('href="/sprints/sprint%3A7"', page)
+        self.assertEqual(self.sprint_reads.calls[-1][1]["statuses"], ["open"])
+        self.assertIn('aria-current="page"', self.text(self.get("/sprints")))
+
+    def test_every_page_carries_the_primary_navigation(self) -> None:
+        for path in ("/", "/sprints", "/history", "/sprints/sprint:7"):
+            with self.subTest(path=path):
+                page = self.text(self.get(path))
+                self.assertIn('<nav class="primary"', page)
+                self.assertIn('href="/sprints/new"', page)
+
     def test_the_sprint_page_carries_the_comment_and_close_forms_on_an_open_sprint(self) -> None:
         self.sprint_reads = Recording(
             sprint_state={

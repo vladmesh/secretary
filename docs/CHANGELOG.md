@@ -4,6 +4,21 @@ Changes an operator or a caller has to know about: a command whose output moved,
 document that gained or lost a field, a precondition that became stricter. Not a commit log —
 the git history is that, and it is better at it. Newest first.
 
+## 2026-09-13 — the web pages are one interface: navigation, panels, a sprints page
+
+**Every page shares one shell**: a top bar with the product, the primary navigation (Dashboard,
+Sprints, History, New sprint) and a breadcrumb trail, so nothing is reached only by knowing its
+URL. Content sits in panels, one per subject, with a count and a link to the whole of it; the
+dashboard is two columns on a wide screen (sprints and what is in flight, then health and the
+feed) and one on a phone. State is drawn as a chip beside its word — card state, sprint status,
+what the observer is doing — and semantic colour (ok, warning, critical) is separate from the
+accent. Typography is IBM Plex Sans with IBM Plex Mono for references, times and numbers; both
+themes are designed, not inverted.
+
+**`GET /sprints` joined `ROUTES`**: every sprint as a table over `sprint_reads.sprint_list`, with
+`?status=` filters. The card and sprint pages put the work first and the owner's actions in the
+side column; the sprint page shows the Definition of Done in full.
+
 ## 2026-09-13 — the operator's dashboard: pause, open sprints, history, and the owner's writes
 
 **Twelve routes joined `secretary.web.app.ROUTES`**, each one operation of a layer that already
