@@ -6,6 +6,7 @@ token layer is the real one over a token file in a temporary data directory. No 
 
 from __future__ import annotations
 
+import ast
 import json
 import tempfile
 import unittest
@@ -18,7 +19,7 @@ from urllib.parse import urlencode
 from secretary.config import validate
 from secretary.po import token as po_token
 from secretary.po.models import DEFAULT_MODELS, models_from_instance
-from secretary.web.app import PO_OPEN_ROUTES, ROUTES, WebApp, requires_po_token
+from secretary.web.app import PO_FORM_FIELDS, PO_OPEN_ROUTES, ROUTES, WebApp, requires_po_token
 from secretary.web.server import build_server
 from secretary.webproto.errors import InstallationUnavailable, RuntimeUnavailable
 from secretary.webproto.po_auth import PoTokenLayer
@@ -231,6 +232,82 @@ class PoIndicatorTests(PoGateFixture):
         self.assertNotIn("po-indicator", page)
         self.assertIn("running turns could not be counted", page)
         self.assertIn("<h1>Dashboard</h1>", page)
+
+
+class PoRequestIdCoverageTests(PoGateFixture):
+    """Every /po route that takes a request id reaches `PoStore`'s one request transaction."""
+
+    #: The /po routes carrying `request_id`, and the operation each hands it to:
+    #: `po_create_session` -> `PoRunner.create_session_request` -> `PoStore.claim_session`, and
+    #: `po_send` -> `PoRunner.send_request` -> `PoStore.claim_turn`.
+    REQUEST_ROUTES: ClassVar[dict] = {
+        ("POST", "/po/sessions"): "po.po_create_session",
+        ("POST", "/po/sessions/{session}/messages"): "po.po_send",
+    }
+    BODIES: ClassVar[dict] = {
+        "/po/sessions": [("request_id", "form-create"), ("cli", "claude"), ("model", "opus")],
+        "/po/sessions/{session}/messages": [("request_id", "form-send"), ("text", "hello")],
+    }
+
+    def test_every_po_post_declares_its_fields_and_exactly_these_carry_a_request_id(self) -> None:
+        posts = {
+            route.handler: route
+            for route in ROUTES
+            if route.method == "POST" and (route.pattern == "/po" or route.pattern.startswith("/po/"))
+        }
+        self.assertEqual(set(posts), set(PO_FORM_FIELDS))
+        carrying = {
+            (route.method, route.pattern): route.operation
+            for handler, route in posts.items()
+            if "request_id" in PO_FORM_FIELDS[handler]
+        }
+        self.assertEqual(carrying, self.REQUEST_ROUTES)
+
+    def test_each_request_id_route_hands_the_id_to_its_operation(self) -> None:
+        self.po.answers["po_create_session"] = {"kind": "po_session_created", "session_id": "s-1"}
+        cookie = po_token.cookie_value(self.token)
+        for (method, pattern), operation in self.REQUEST_ROUTES.items():
+            with self.subTest(route=pattern):
+                fields = self.BODIES[pattern]
+                response = self.request(
+                    method, concrete(pattern), body=urlencode(fields).encode(), cookie=cookie
+                )
+                self.assertEqual(response.status, 303)
+                name, arguments = self.po.calls[-1]
+                self.assertEqual(name, operation.split(".", 1)[1])
+                self.assertEqual(arguments["request_id"], dict(fields)["request_id"])
+
+    def test_sessions_turns_and_request_rows_are_written_only_inside_the_request_transaction(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        store = root / "src" / "secretary" / "po" / "store.py"
+        tree = ast.parse(store.read_text(encoding="utf-8"))
+        inserts: dict[str, set[str]] = {"po_sessions": set(), "po_turns": set(), "po_requests": set()}
+        recorders: set[str] = set()
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+            for node in ast.walk(function):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    for table in inserts:
+                        if f"INSERT INTO {table} " in node.value:
+                            inserts[table].add(function.name)
+                if isinstance(node, ast.Attribute) and node.attr == "_record_request":
+                    recorders.add(function.name)
+        self.assertEqual(
+            inserts,
+            {
+                "po_sessions": {"claim_session"},
+                "po_turns": {"claim_turn"},
+                "po_requests": {"_record_request"},
+            },
+        )
+        self.assertEqual(recorders, {"claim_session", "claim_turn"})
+        others = [
+            str(path.relative_to(root))
+            for path in (root / "src").rglob("*.py")
+            if path != store
+            and "migrations" not in path.parts
+            and any(f"INSERT INTO {table}" in path.read_text(encoding="utf-8") for table in inserts)
+        ]
+        self.assertEqual(others, [])
 
 
 class PoModelListTests(unittest.TestCase):

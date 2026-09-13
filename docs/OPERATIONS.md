@@ -256,13 +256,14 @@ is one CLI process with full permissions (`--dangerously-skip-permissions`,
 | Claude | `claude -p --output-format json --session-id UUID` (UUID chosen at session creation) | `--resume UUID` once a turn completed; before that `--session-id UUID` again | `result` of the JSON result object |
 | Codex | `codex exec --json -C DATA_DIR/po -` | `codex exec resume THREAD_ID -` (`thread_id` from turn 1's event stream) | the `-o` file |
 
-Board store tables (revisions `0008_po_sessions`, `0009_po_turn_request_id`):
+Board store tables (revisions `0008_po_sessions`, `0009_po_requests`):
 
 | Table | Holds |
 | --- | --- |
 | `po_sessions` | id, cli, model, cwd, created_at, state, the CLI's session id |
-| `po_turns` | session, seq, started/finished, `running`/`completed`/`failed`/`interrupted`, stdout path, pid, process identity, failure reason, the form request id (unique per session) |
+| `po_turns` | session, seq, started/finished, `running`/`completed`/`failed`/`interrupted`, stdout path, pid, process identity, failure reason |
 | `po_feed` | the owner's messages and the agent's final answers only; no tool calls, no reasoning |
+| `po_requests` | each /po form request id: operation (`po_session_create`, `po_send`), fingerprint of its inputs, the session and, for a send, the turn it made |
 
 A partial unique index allows at most one `running` turn per session: a second send is refused and
 writes nothing. Different sessions run turns in parallel.
@@ -322,11 +323,13 @@ one with a CLI and a model from the list below. A session page shows the owner's
 head's final answers and each turn's state (`running`, `completed`, `failed` or `interrupted` with its
 reason), a message box, and `stop turn` while a turn runs; while it runs the page polls
 `/po/api/sessions/ID` every 3 seconds and reloads when the turn ends. A message sent while a turn runs
-is refused on the page (409) and nothing is written. Each form carries a request id minted when the page was served. A message's is
-stored with its turn (`po_turns.request_id`, unique per session) in the transaction that creates the
-turn: sending the same form again answers with that turn — running, completed, or failed with its
-reason, even when its CLI never started — and launches nothing. A new session's request id is
-recorded under `DATA_DIR/webproto/po-requests/`, so a double click creates one session. The dashboard's `Product owner` panel shows only the number of running PO turns
+is refused on the page (409) and nothing is written. Each form carries a request id minted when the page was served. It belongs to one
+operation with fixed inputs, installation-wide: `po_requests` binds it to a session create (CLI and
+model) or a send (session and the exact text), and is written in the transaction that creates the
+session or the turn. Sending the same form again answers with what it made — the session, or the turn
+running, completed, or failed with its reason even when its CLI never started — and writes and launches
+nothing. The same id reused for anything else is refused (409 `request_conflict`). A message refused
+because another turn runs records no request id, so that form can be sent once the turn ends. The dashboard's `Product owner` panel shows only the number of running PO turns
 with a link to `/po`; it needs no token, and a PO store that does not answer hides the number.
 
 **Models.** `instance.yaml`:

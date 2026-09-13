@@ -3,9 +3,9 @@
 One `PoRunner` per web process, built when the layers are assembled (:meth:`PoLayer.start_service`)
 and kept: its waiter threads own the turns it started, and a second runner in the same process would
 not know about them. Every rule about turns — one running per session, how a stop settles, what
-reaches the feed — stays in `secretary.po.runner` and `secretary.po.store`; this layer checks the model
-list, makes a form's request id own one outcome, and translates the store's vocabulary into this
-package's typed codes.
+reaches the feed — and about request ids stays in `secretary.po.runner` and `secretary.po.store`
+(`po_requests`, decided in the transaction that creates the session or the turn); this layer checks the
+model list and translates the store's vocabulary into this package's typed codes.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from secretary.po.store import (
     RUNNING,
     FeedEntry,
     PoStoreError,
+    RequestConflict,
     Session,
     SessionNotFound,
     Turn,
@@ -30,17 +31,13 @@ from secretary.po.store import (
 from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
     InstallationUnavailable,
+    PoRequestConflict,
     PoSessionNotFound,
     PoTurnInProgress,
     RuntimeUnavailable,
     ValidationRefused,
 )
 from secretary.webproto.po_recovery import recover_po_turns
-from secretary.webproto.po_requests import PoRequestStore, fingerprint
-from secretary.webproto.runs import RequestMismatch
-
-#: Session creation keeps its request ids in `PoRequestStore`; a turn's is a column of the turn.
-CREATE_OPERATION = "po_create_session"
 
 
 class PoLayer(ProtocolBoundary):
@@ -123,6 +120,7 @@ class PoLayer(ProtocolBoundary):
     # --- writes -----------------------------------------------------------------------------
 
     def po_create_session(self, *, request_id: str, cli: str, model: str) -> dict[str, Any]:
+        """One session per request id (`PoStore.claim_session`); a repeat answers the same session."""
         request_id = _required(request_id, "request_id")
         models = self._model_list()
         if cli not in models or not models[cli]:
@@ -133,20 +131,20 @@ class PoLayer(ProtocolBoundary):
                 f"{model!r} is not a model this installation offers for {cli}: {', '.join(models[cli])}"
             )
         runner = self._runner_or_refuse()
-        result, ran = self._once(
-            request_id,
-            CREATE_OPERATION,
-            fingerprint(cli, model),
-            lambda: {"session_id": self._store(lambda: runner.create_session(cli, model)).session_id},
-        )
-        return {"kind": "po_session_created", "request_id": request_id, "repeated": not ran, **result}
+        session, created = self._store(lambda: runner.create_session_request(cli, model, request_id))
+        return {
+            "kind": "po_session_created",
+            "request_id": request_id,
+            "session_id": session.session_id,
+            "repeated": not created,
+        }
 
     def po_send(self, *, request_id: str, session_id: str, text: str) -> dict[str, Any]:
-        """One turn per request id, kept by the board store with the turn itself (`PoStore.claim_turn`).
+        """One turn per request id (`PoStore.claim_turn`), bound to this session and this exact text.
 
         A repeat of the same form answers with the turn the first submission created — running,
         completed, or failed with its reason — and starts nothing, even when that first submission
-        wrote the turn and then failed to launch its CLI.
+        wrote the turn and then failed to launch its CLI. The id reused for anything else is refused.
         """
         request_id = _required(request_id, "request_id")
         if not str(text or "").strip():
@@ -205,16 +203,6 @@ class PoLayer(ProtocolBoundary):
         except ConfigError as exc:
             raise InstallationUnavailable(str(exc)) from None
 
-    def _once(
-        self, request_id: str, operation: str, digest: str, action: Callable[[], dict[str, Any]]
-    ) -> tuple[dict[str, Any], bool]:
-        try:
-            return PoRequestStore(self._resolved_data_dir()).once(
-                request_id, operation=operation, fingerprint=digest, action=action
-            )
-        except RequestMismatch as exc:
-            raise ValidationRefused(str(exc)) from None
-
     @staticmethod
     def _store(call: Callable[[], Any]) -> Any:
         try:
@@ -223,6 +211,8 @@ class PoLayer(ProtocolBoundary):
             raise PoSessionNotFound(str(exc)) from None
         except TurnInProgress as exc:
             raise PoTurnInProgress(str(exc)) from None
+        except RequestConflict as exc:
+            raise PoRequestConflict(str(exc)) from None
         except (PoStoreError, RunnerError) as exc:
             raise RuntimeUnavailable(str(exc)) from None
         except ImportError as exc:  # no PostgreSQL driver in this interpreter: the store is unavailable

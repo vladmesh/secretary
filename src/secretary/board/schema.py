@@ -769,8 +769,6 @@ class PoTurn(Base):
     # Boot id and kernel start time of `pid`: recovery kills only the process it started.
     process_identity = sa.Column(sa.Text)
     reason = sa.Column(sa.Text)
-    # The form request id the turn was started under (revision 0009): one request id, one turn.
-    request_id = sa.Column(sa.Text)
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -787,7 +785,6 @@ class PoTurn(Base):
             unique=True,
             postgresql_where=sa.text("state = 'running'"),
         ),
-        sa.Index("po_turns_one_turn_per_request", "session_id", "request_id", unique=True),
     )
 
 
@@ -812,6 +809,37 @@ class PoFeedEntry(Base):
             ondelete="CASCADE",
         ),
         sa.Index("po_feed_by_session", "session_id", "entry_id"),
+    )
+
+
+class PoRequest(Base):
+    """A /po form request id and the one operation, with fixed inputs, it belongs to (revision 0009)."""
+
+    __tablename__ = "po_requests"
+
+    request_id = sa.Column(sa.Text, primary_key=True)
+    operation = sa.Column(sa.Text, nullable=False)
+    fingerprint = sa.Column(sa.Text, nullable=False)
+    session_id = sa.Column(
+        sa.Text, sa.ForeignKey("po_sessions.session_id", ondelete="CASCADE"), nullable=False
+    )
+    # The turn a send started; NULL for a session create.
+    seq = sa.Column(sa.Integer)
+    created_at = sa.Column(TIMESTAMPTZ, nullable=False)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "operation IN ('po_session_create','po_send')", name="po_request_operation_in_vocabulary"
+        ),
+        sa.CheckConstraint(
+            "(operation = 'po_send') = (seq IS NOT NULL)", name="po_request_seq_only_for_a_send"
+        ),
+        sa.ForeignKeyConstraint(
+            ["session_id", "seq"],
+            ["po_turns.session_id", "po_turns.seq"],
+            name="po_request_names_its_turn",
+            ondelete="CASCADE",
+        ),
     )
 
 

@@ -140,3 +140,13 @@ class PoTurnInProgress(ReadError):
     """A turn is already running in this PO session; nothing was written."""
 
     code = "owner_conflict"
+
+
+class PoRequestConflict(ReadError):
+    """A /po request id already belongs to another operation or other inputs; nothing was written.
+
+    Its own code: the request is well formed and not about a running turn, and repeating it can never
+    succeed, so a client must not read it as `owner_conflict` and wait.
+    """
+
+    code = "request_conflict"

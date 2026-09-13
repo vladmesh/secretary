@@ -10,7 +10,10 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 from urllib.parse import urlencode
@@ -270,37 +273,126 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual(second.headers["Location"], f"/po/sessions/{session_id}")
         self.assertEqual(launch.call_count, 1)
         [turn] = self.store.turns(session_id)
-        self.assertEqual((turn.state, turn.request_id), (po_store.FAILED, "message-broken"))
+        self.assertEqual(turn.state, po_store.FAILED)
         self.assertIn("could not start", turn.reason)
+        request = self.store.request("message-broken")
+        self.assertEqual((request.operation, request.session_id, request.seq), (po_store.SEND, session_id, 1))
         self.assertEqual((replay["seq"], replay["state"], replay["repeated"]), (1, po_store.FAILED, True))
         self.assertEqual(self.feed(session_id), [(1, "owner", "hello")])
         page = self.page(session_id)
         self.assertIn('data-state="failed"', page)
         self.assertIn("could not start", page)
 
-    def test_the_store_answers_a_known_request_id_with_its_turn_and_writes_nothing(self) -> None:
+    # --- one request id, one operation with fixed inputs ---------------------------------------
+
+    def assert_request_conflict(self, response) -> None:
+        self.assertEqual(response.status, 409)
+        self.assertIn("refused (request_conflict)", response.body.decode())
+
+    def test_a_request_id_that_created_a_session_is_refused_for_a_message(self) -> None:
+        session_id = self.create(request_id="shared-form")
+
+        with mock.patch.object(self.runner, "_launch", wraps=self.runner._launch) as launch:
+            refused = self.send(session_id, "hello", "shared-form")
+
+        self.assert_request_conflict(refused)
+        self.assertEqual(launch.call_count, 0)
+        self.assertEqual(self.store.turns(session_id), [])
+        self.assertEqual(self.feed(session_id), [])
+        request = self.store.request("shared-form")
+        self.assertEqual(
+            (request.operation, request.session_id, request.seq), (po_store.SESSION_CREATE, session_id, None)
+        )
+
+    def test_a_request_id_that_sent_in_one_session_is_refused_in_another(self) -> None:
+        first = self.create(request_id="create-first")
+        second = self.create(request_id="create-second")
+        self.assertEqual(self.send(first, "hello", "one-form").status, 303)
+        self.settle(first)
+
+        self.assert_request_conflict(self.send(second, "hello", "one-form"))
+
+        self.assertEqual(self.store.turns(second), [])
+        self.assertEqual(self.feed(second), [])
+        self.assertEqual(self.calls(), 1)
+        self.assertEqual(self.store.request("one-form").session_id, first)
+
+    def test_the_same_request_id_with_other_text_is_refused_and_the_feed_is_unchanged(self) -> None:
         session_id = self.create()
-        other = self.create(request_id="create-other")
+        self.assertEqual(self.send(session_id, "hello", "text-form").status, 303)
+        self.settle(session_id)
+        before = self.feed(session_id)
+
+        self.assert_request_conflict(self.send(session_id, "hello, again", "text-form"))
+
+        self.assertEqual(self.feed(session_id), before)
+        self.assertEqual([turn.seq for turn in self.store.turns(session_id)], [1])
+        self.assertEqual(self.calls(), 1)
+
+    def test_an_id_refused_while_another_turn_runs_records_nothing_and_goes_through_after(self) -> None:
+        session_id = self.create()
+        self.assertEqual(self.send(session_id, "SLEEP please", "running-form").status, 303)
+        self.spawned(1)
+
+        refused = self.send(session_id, "later", "waiting-form")
+
+        self.assertEqual(refused.status, 409)
+        self.assertIn("not sent: a turn is still running in this session", refused.body.decode())
+        self.assertIsNone(self.store.request("waiting-form"))
+        self.assertEqual(self.post(f"/po/sessions/{session_id}/stop", [("seq", "1")]).status, 303)
+
+        self.assertEqual(self.send(session_id, "later", "waiting-form").status, 303)
+        self.settle(session_id)
+        self.assertEqual([turn.seq for turn in self.store.turns(session_id)], [1, 2])
+        self.assertEqual(self.store.request("waiting-form").seq, 2)
+
+    def test_concurrent_claims_of_one_new_request_id_have_exactly_one_winner(self) -> None:
+        workers = 8
+
+        def claim_session(_index: int):
+            barrier.wait()
+            return self.store.claim_session(
+                session_id=str(uuid.uuid4()),
+                cli="claude",
+                model="opus",
+                cwd=str(self.data / "po"),
+                cli_session_id=None,
+                request_id="race-create",
+            )
+
+        barrier = threading.Barrier(workers)
+        with ThreadPoolExecutor(workers) as pool:
+            sessions = list(pool.map(claim_session, range(workers)))
+        self.assertEqual(sum(created for _session, created in sessions), 1)
+        self.assertEqual(len({session.session_id for session, _created in sessions}), 1)
+        self.assertEqual(len(self.store.sessions()), 1)
+        session_id = sessions[0][0].session_id
 
         def path(seq: int) -> Path:
             return self.root / f"{seq}.out"
 
-        first, created = self.store.claim_turn(session_id, "one", path, request_id="form-1")
-        running, repeated = self.store.claim_turn(session_id, "one", path, request_id="form-1")
-        self.assertEqual((created, repeated), (True, False))
-        self.assertEqual(running, first)
-        with self.assertRaises(po_store.TurnInProgress):
-            self.store.claim_turn(session_id, "two", path, request_id="form-2")
+        def claim_turn(index: int):
+            barrier.wait()
+            try:
+                return self.store.claim_turn(
+                    session_id, "same" if index % 2 else "other", path, request_id="race-send"
+                )
+            except po_store.RequestConflict:
+                return None
 
-        self.store.finish_turn(session_id, 1, po_store.FAILED, "could not start")
-        settled, repeated = self.store.claim_turn(session_id, "one", path, request_id="form-1")
-        self.assertEqual((settled.seq, settled.state, repeated), (1, po_store.FAILED, False))
-        self.assertEqual(len(self.store.feed(session_id)), 1)
-
-        elsewhere, created = self.store.claim_turn(other, "one", path, request_id="form-1")
-        self.assertEqual((elsewhere.seq, created), (1, True))
-        without, created = self.store.claim_turn(session_id, "three", path)
-        self.assertEqual((without.seq, without.request_id, created), (2, None, True))
+        barrier = threading.Barrier(workers)
+        with ThreadPoolExecutor(workers) as pool:
+            turns = list(pool.map(claim_turn, range(workers)))
+        winners = [turn for turn in turns if turn is not None and turn[1]]
+        self.assertEqual(len(winners), 1)
+        [entry] = self.store.feed(session_id)
+        self.assertEqual(len(self.store.turns(session_id)), 1)
+        self.assertEqual(turns.count(None), workers // 2)
+        self.assertTrue(all(turn[0].seq == 1 for turn in turns if turn is not None))
+        self.assertEqual(
+            [index % 2 for index, turn in enumerate(turns) if turn is not None],
+            [1 if entry.text == "same" else 0] * (workers // 2),
+        )
 
 
 if __name__ == "__main__":

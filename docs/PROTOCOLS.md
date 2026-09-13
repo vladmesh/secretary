@@ -2818,7 +2818,9 @@ unknown field is refused.
 `WebApp.handle` after the cross-origin check and before any handler; the only exception is `POST
 /po/login`. Without it a page route answers 401 with the login form and a JSON route 401
 `po_token_required`; neither reaches the PO runner or the board store. Token and cookie:
-[Operations](OPERATIONS.md#the-po-head-in-the-dashboard).
+[Operations](OPERATIONS.md#the-po-head-in-the-dashboard). A `/po` `request_id` belongs to one operation
+and its inputs installation-wide (`po_requests`): repeated with the same inputs it answers the recorded
+session or turn and does nothing else; reused otherwise it is 409 `request_conflict`.
 
 ### Opening a sprint from a browser
 

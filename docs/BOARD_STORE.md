@@ -700,17 +700,16 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0006_sprint_transport_key` | `sprints.board_key` |
 | `0007_card_transport_key` | `tasks.board_key` from `card_board_key_seq` |
 | `0008_po_sessions` | PO head `po_sessions`, `po_turns` (one running turn per session), `po_feed` |
-| `0009_po_turn_request_id` | nullable `po_turns.request_id`, unique on (`session_id`, `request_id`): one form request id, one turn (head) |
+| `0009_po_requests` | `po_requests`: each /po form request id, its operation and input fingerprint, and the session or turn it made (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
 non-null, unique and range-checked. Refs, numbers, relations, comments and audit rows are untouched.
 
-`0008` only adds tables and `0009` one nullable column and a unique index; their use is in
-[Operations](OPERATIONS.md#po-head-sessions-and-turns).
+`0008` and `0009` only add tables; their use is in [Operations](OPERATIONS.md#po-head-sessions-and-turns).
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 27 tables, 45 `CHECK`, 42 foreign keys, 27 primary keys, 17 `UNIQUE`,
+(including `alembic_version`): 28 tables, 47 `CHECK`, 44 foreign keys, 28 primary keys, 17 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -996,7 +995,7 @@ The cursor names its kind, `offset` or `ordinal`; a cursor of the other kind is 
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0009_po_turn_request_id`). `migrate.assert_schema_revision` is used by the importer; cutover,
+  (`0009_po_requests`). `migrate.assert_schema_revision` is used by the importer; cutover,
   successor preparation and PostgreSQL restore compare against `head_revision()`.
 - **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.

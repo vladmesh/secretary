@@ -135,6 +135,15 @@ PO_LOGIN_FIELDS = frozenset({"token"})
 PO_CREATE_FIELDS = frozenset({"request_id", "cli", "model"})
 PO_SEND_FIELDS = frozenset({"request_id", "text"})
 PO_STOP_FIELDS = frozenset({"seq"})
+#: The form fields of every /po POST, by handler. A field set with `request_id` marks a route whose
+#: operation takes the id into `PoStore`'s request transaction; `tests.test_web_po_transport` holds
+#: the route table to this.
+PO_FORM_FIELDS = {
+    "po_login": PO_LOGIN_FIELDS,
+    "po_create": PO_CREATE_FIELDS,
+    "po_send": PO_SEND_FIELDS,
+    "po_stop": PO_STOP_FIELDS,
+}
 #: How long a browser keeps the PO cookie. Replacing the token file ends it sooner.
 PO_COOKIE_MAX_AGE = 30 * 24 * 3600
 PO_TOKEN_REQUIRED = "the PO head is behind its own token; enter it to continue"

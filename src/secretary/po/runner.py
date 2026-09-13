@@ -181,16 +181,24 @@ class PoRunner:
     # --- sessions ---------------------------------------------------------------------------
 
     def create_session(self, cli: str, model: str) -> Session:
+        return self._create(cli, model, None)[0]
+
+    def create_session_request(self, cli: str, model: str, request_id: str) -> tuple[Session, bool]:
+        """`create_session` under a form's request id; the flag says whether this call created it."""
+        return self._create(cli, model, request_id)
+
+    def _create(self, cli: str, model: str, request_id: str | None) -> tuple[Session, bool]:
         if cli not in CLIS:
             raise RunnerError(f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
         if not model.strip():
             raise RunnerError("a PO session needs a model")
-        return self.store.create_session(
+        return self.store.claim_session(
             session_id=str(uuid.uuid4()),
             cli=cli,
             model=model.strip(),
             cwd=str(self.workspace),
             cli_session_id=str(uuid.uuid4()) if cli == "claude" else None,
+            request_id=request_id,
         )
 
     def files(self, session_id: str, seq: int) -> TurnFiles:
@@ -243,8 +251,9 @@ class PoRunner:
     def send_request(self, session_id: str, text: str, request_id: str) -> tuple[Turn, bool]:
         """`send` under a form's request id; the flag says whether this call started the turn.
 
-        A request id that already started a turn in this session gets that turn back and no process:
-        a CLI is launched only for a turn this call created, whatever became of the earlier one.
+        A request id that already started this send gets that turn back and no process, and one that
+        belongs to anything else is `RequestConflict` (`PoStore.claim_turn`): a CLI is launched only for
+        a turn this call created, after its transaction committed.
         """
         return self._send(session_id, text, request_id)
 
