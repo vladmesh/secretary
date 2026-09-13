@@ -460,6 +460,92 @@ class DashboardPageTests(FakeAppFixture):
                 self.assertIn('<nav class="primary"', page)
                 self.assertIn('href="/sprints/new"', page)
 
+    def test_the_card_page_draws_each_transition_with_the_records_that_made_it(self) -> None:
+        events = [
+            {
+                "event_id": "e1",
+                "kind": "card.started",
+                "occurred_at": "2026-09-13T12:00:00Z",
+                "actor": {"role": "dispatcher", "id": "d"},
+                "reason": "claimed",
+                "transition": {"source": "ready", "target": "in_progress"},
+                "data": {},
+            },
+            {
+                "event_id": "e2",
+                "kind": "card.reported",
+                "occurred_at": "2026-09-13T12:30:00Z",
+                "actor": {"role": "worker", "id": "w"},
+                "reason": "",
+                "transition": None,
+                "data": {"body": "Done the thing.\n\nDetails follow " * 20, "marker": "report:done"},
+            },
+            {
+                "event_id": "e3",
+                "kind": "card.submitted",
+                "occurred_at": "2026-09-13T12:31:00Z",
+                "actor": {"role": "dispatcher", "id": "d"},
+                "reason": "worker report:done",
+                "transition": {"source": "in_progress", "target": "validate"},
+                "data": {},
+            },
+            {
+                "event_id": "e4",
+                "kind": "commented",
+                "occurred_at": "2026-09-13T12:32:00Z",
+                "actor": {"role": "po", "id": "web"},
+                "reason": "",
+                "transition": None,
+                "data": {},
+            },
+        ]
+        self.reads = Recording(
+            task_snapshot={
+                "ref": "secretary-9",
+                "observed_at": "2026-09-13T12:40:00Z",
+                "card": {
+                    "source": available(),
+                    "value": {"title": "a card", "state": "validate", "project": "secretary"},
+                },
+                "project": {"id": "secretary", "registered": True},
+                "attempt": {},
+                "agents": {"source": available(), "items": []},
+                "work": {},
+                "events": {"source": available(), "items": events, "next_cursor": "c"},
+            }
+        )
+        page = self.text(self.get("/tasks/secretary-9"))
+        self.assertEqual(page.count("<li><details><summary><time"), 2)
+        self.assertIn(">12:31:00</time>", page)
+        self.assertIn("worker report:done", page)
+        self.assertIn("worker report", page)
+        self.assertIn("report:done", page)
+        # The long body is folded to its first line and opened on a click, never cut.
+        self.assertIn('<details class="text"><summary>Done the thing.', page)
+        self.assertIn("Details follow", page)
+        # The card page asks for the whole timeline, not the API's short tail.
+        self.assertEqual(self.reads.calls[-1][1]["events"], 200)
+        self.assertEqual(self.get("/tasks/secretary-9", "events=7").status, 200)
+        self.assertEqual(self.reads.calls[-1][1]["events"], 7)
+
+    def test_top_level_pages_carry_no_crumbs_and_nested_pages_only_the_identifier(self) -> None:
+        self.assertNotIn('class="crumbs"', self.text(self.get("/history")))
+        self.assertNotIn('class="crumbs"', self.text(self.get("/sprints")))
+        self.assertNotIn('class="crumbs"', self.text(self.get("/")))
+        self.sprint_reads = Recording(
+            sprint_state={
+                "ref": "sprint:7",
+                "sprint": {
+                    "source": available(),
+                    "value": {"ref": "sprint:7", "status": "open", "goal": "g"},
+                },
+                "observer": {},
+                "work": {},
+            }
+        )
+        page = self.text(self.get("/sprints/sprint:7"))
+        self.assertIn('<div class="crumbs"><span class="here">sprint:7</span></div>', page)
+
     def test_the_sprint_page_carries_the_comment_and_close_forms_on_an_open_sprint(self) -> None:
         self.sprint_reads = Recording(
             sprint_state={
