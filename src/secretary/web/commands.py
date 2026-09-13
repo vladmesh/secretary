@@ -13,6 +13,7 @@ import os
 import sys
 
 from secretary.web.app import WebApp
+from secretary.web.provider_usage import ProviderUsageLayer
 from secretary.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from secretary.webproto.card_ops import CardOperationLayer
 from secretary.webproto.command_reads import CommandReadLayer
@@ -71,6 +72,7 @@ def run_web_serve(args: argparse.Namespace) -> int:
         PauseOperationLayer(args.instance, data_dir=args.data_dir),
         CommandReadLayer(args.instance, data_dir=args.data_dir),
         CardOperationLayer(args.instance, data_dir=args.data_dir),
+        ProviderUsageLayer(),
     )
     try:
         return serve(app, host=args.host, port=args.port)

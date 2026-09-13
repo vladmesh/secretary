@@ -82,6 +82,7 @@ def sprint_item(ref: str = "sprint:7") -> dict[str, Any]:
         "ref": ref,
         "status": "open",
         "product": "secretary",
+        "reservations": ["secretary"],
         "goal": "a goal " * 60,
         "current_task": {"ref": "secretary-9", "live": True, "reason": "cut", "source": available()},
         "observer": {
@@ -370,20 +371,19 @@ class RouteTests(FakeAppFixture):
 
 
 class DashboardPageTests(FakeAppFixture):
-    def test_the_dashboard_reads_the_four_documents_and_draws_each(self) -> None:
+    def test_the_dashboard_is_compact_and_draws_active_sprints(self) -> None:
         page = self.text(self.get("/"))
         self.assertIn("running — the dispatcher claims cards and raises heads", page)
         self.assertIn('data-action="/api/pause/drain"', page)
         self.assertIn("sprint:7", page)
-        self.assertIn("the observer is waiting for the reviewer", page)
-        self.assertIn("13 of 30 (signal at 12)", page)
-        self.assertIn("rework secretary-9", page)
-        self.assertIn("card.assessed", page)
-        self.assertIn("review:red", page)
-        self.assertIn('href="/history"', page)
+        self.assertIn("attention required", page)
+        self.assertIn("Usage limits", page)
+        self.assertIn("Chat — coming later", page)
+        self.assertNotIn("Recent commands", page)
+        self.assertNotIn("Start a run by hand", page)
         self.assertEqual([name for name, _ in self.sprint_reads.calls], ["sprint_list"])
         self.assertEqual(self.sprint_reads.calls[0][1]["statuses"], ["open"])
-        self.assertEqual([name for name, _ in self.command_reads.calls], ["command_history"])
+        self.assertEqual(self.command_reads.calls, [])
 
     def test_a_paused_pipeline_offers_resume_and_says_since_when_and_why(self) -> None:
         self.pause_reads = Recording(pause_state=pause_document(paused=True, mode="drain"))
@@ -396,14 +396,14 @@ class DashboardPageTests(FakeAppFixture):
 
     def test_a_side_read_that_refuses_marks_its_section_and_the_page_stands(self) -> None:
         self.pause_reads = Recording(pause_state=InstallationUnavailable("the pause flag is unreadable"))
-        self.command_reads = Recording(command_history=ReadError("the audit refused"))
+        self.sprint_reads = Recording(sprint_list=ReadError("the sprint registry refused"))
         response = self.get("/")
         page = self.text(response)
         self.assertEqual(response.status, 200)
         self.assertIn("could not read whether the pipeline is paused", page)
         self.assertIn("the pause flag is unreadable", page)
-        self.assertIn("could not read the last commands", page)
-        self.assertIn("sprint:7", page)
+        self.assertIn("could not read the open sprints", page)
+        self.assertIn("the sprint registry refused", page)
 
     def test_the_snapshot_refusing_is_the_page_refusing(self) -> None:
         self.reads = Recording(system_snapshot=InstallationUnavailable("no installation"))
@@ -446,15 +446,88 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn('href="/history?cursor=c-2&amp;limit=25"', page)
 
     def test_the_sprints_page_lists_every_sprint_and_marks_the_filter(self) -> None:
-        page = self.text(self.get("/sprints", "status=open"))
+        page = self.text(self.get("/sprints"))
         self.assertIn("sprint:7", page)
-        self.assertIn('href="/sprints?status=open" aria-current="true"', page)
+        self.assertIn('href="/sprints" aria-current="true"', page)
         self.assertIn('href="/sprints/sprint%3A7"', page)
         self.assertEqual(self.sprint_reads.calls[-1][1]["statuses"], ["open"])
         self.assertIn('aria-current="page"', self.text(self.get("/sprints")))
 
+    def test_archive_requests_terminal_sprints_and_offers_search(self) -> None:
+        second = sprint_item("sprint:8")
+        second["reservations"] = ["orca"]
+        self.sprint_reads = Recording(sprint_list=sprint_listing([sprint_item(), second]))
+        page = self.text(self.get("/sprints", "view=archive&q=goal&project=secretary"))
+        self.assertEqual(self.sprint_reads.calls[-1][1]["statuses"], ["closed", "stopped"])
+        self.assertIn('name="q" value="goal"', page)
+        self.assertIn('<option value="secretary" selected>', page)
+        self.assertIn('<option value="orca">', page)
+        self.assertIn("sprint:7", page)
+        self.assertNotIn("sprint:8</a>", page)
+
+    def test_unknown_sprint_view_is_active_consistently(self) -> None:
+        page = self.text(self.get("/sprints", "view=garbage"))
+        self.assertEqual(self.sprint_reads.calls[-1][1]["statuses"], ["open"])
+        self.assertIn('href="/sprints" aria-current="true"', page)
+
+    def test_projects_have_a_list_and_an_individual_page(self) -> None:
+        self.reads.answers["system_snapshot"]["projects"]["items"] = [
+            {
+                "id": "secretary",
+                "repo": "/srv/secretary",
+                "adapter": "kanboard",
+                "default_branch": "main",
+                "enabled": True,
+            }
+        ]
+        listing = self.text(self.get("/projects"))
+        self.assertIn('href="/projects/secretary"', listing)
+        detail = self.text(self.get("/projects/secretary"))
+        self.assertIn("/srv/secretary", detail)
+        self.assertIn("Sprints", detail)
+        self.assertIn("sprint:7", detail)
+        self.assertEqual(self.get("/projects/missing").status, 404)
+
+    def test_usage_limits_keep_available_stale_and_unavailable_providers_visible(self) -> None:
+        usage = Recording(
+            usage_snapshot={
+                "kind": "provider_usage",
+                "providers": [
+                    {
+                        "id": "claude",
+                        "label": "Claude",
+                        "status": "available",
+                        "reason": None,
+                        "age_seconds": 0,
+                        "windows": [{"name": "5-hour", "remaining_percent": 72, "resets_at": "soon"}],
+                    },
+                    {
+                        "id": "codex",
+                        "label": "Codex",
+                        "status": "stale",
+                        "reason": "old observation",
+                        "age_seconds": 1800,
+                        "windows": [{"name": "weekly", "remaining_percent": 41, "resets_at": "later"}],
+                    },
+                    {
+                        "id": "other",
+                        "label": "Other",
+                        "status": "unavailable",
+                        "reason": "no login",
+                        "age_seconds": None,
+                        "windows": [],
+                    },
+                ],
+            }
+        )
+        app = self.app()
+        app.provider_usage = usage
+        page = self.text(app.handle("GET", "/"))
+        for text in ("Claude", "72%", "Codex", "stale", "old observation", "Other", "no login"):
+            self.assertIn(text, page)
+
     def test_every_page_carries_the_primary_navigation(self) -> None:
-        for path in ("/", "/sprints", "/history", "/sprints/sprint:7"):
+        for path in ("/", "/sprints", "/projects", "/history", "/sprints/sprint:7"):
             with self.subTest(path=path):
                 page = self.text(self.get(path))
                 self.assertIn('<nav class="primary"', page)
