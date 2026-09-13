@@ -13,7 +13,6 @@ import os
 import stat
 import subprocess
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -21,79 +20,12 @@ from unittest import mock
 from secretary.po import store as po_store
 from secretary.po.runner import PoRunner, codex_thread_id, process_identity
 from secretary.po.store import PoStore, PoStoreError, TurnInProgress
+from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, SETTLE_SECONDS, eventually
 from tests.sql_backend_fixtures import PostgresBoard
 
 BOARD: PostgresBoard
-SETTLE_SECONDS = 30
 
 SECRETS = ("THINKING-SECRET", "TOOL-CALL-SECRET")
-
-FAKE_CLAUDE = r"""#!/usr/bin/env python3
-import json, os, subprocess, sys, time
-prompt = sys.stdin.read()
-argv = sys.argv[1:]
-log = os.environ["FAKE_LOG"]
-with open(log, "a") as handle:
-    handle.write(json.dumps({"cli": "claude", "argv": argv, "cwd": os.getcwd(), "prompt": prompt}) + "\n")
-flag = "--resume" if "--resume" in argv else "--session-id"
-session = argv[argv.index(flag) + 1]
-# Claude 2.1.270's own refusals: a saved conversation cannot be created again, a missing one resumed.
-saved_path = log + ".saved"
-saved = set(open(saved_path).read().split()) if os.path.exists(saved_path) else set()
-if flag == "--resume" and session not in saved:
-    print(f"No conversation found with session ID: {session}", file=sys.stderr)
-    sys.exit(1)
-if flag == "--session-id" and session in saved:
-    print(f"Error: Session ID {session} is already in use.", file=sys.stderr)
-    sys.exit(1)
-if "NOPERSIST" not in prompt:
-    with open(saved_path, "a") as handle:
-        handle.write(session + "\n")
-print(json.dumps({"type": "system", "subtype": "init", "session_id": session}), flush=True)
-print(json.dumps({"type": "assistant", "message": {"content": [
-    {"type": "thinking", "thinking": "THINKING-SECRET"},
-    {"type": "tool_use", "name": "Bash", "input": {"command": "TOOL-CALL-SECRET"}}]}}), flush=True)
-if "SLEEP" in prompt:
-    child = subprocess.Popen(["sleep", "300"])
-    with open(log + ".pids", "a") as handle:
-        handle.write(f"{os.getpid()} {child.pid}\n")
-    time.sleep(300)
-if "FAIL" in prompt:
-    print("boom from fake claude", file=sys.stderr)
-    sys.exit(3)
-if "SILENT" in prompt:
-    sys.exit(0)
-print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
-                  "session_id": session, "result": f"claude {flag} {session}: {prompt}"}))
-"""
-
-FAKE_CODEX = r"""#!/usr/bin/env python3
-import json, os, subprocess, sys, time
-prompt = sys.stdin.read()
-argv = sys.argv[1:]
-log = os.environ["FAKE_LOG"]
-with open(log, "a") as handle:
-    handle.write(json.dumps({"cli": "codex", "argv": argv, "cwd": os.getcwd(), "prompt": prompt}) + "\n")
-resume = argv[:2] == ["exec", "resume"]
-thread = argv[-2] if resume else "019a-fake-thread"
-out = argv[argv.index("-o") + 1]
-print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
-print(json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "THINKING-SECRET"}}), flush=True)
-print(json.dumps({"type": "item.completed", "item": {"type": "command_execution", "command": "TOOL-CALL-SECRET"}}), flush=True)
-if "SLEEP" in prompt:
-    child = subprocess.Popen(["sleep", "300"])
-    with open(log + ".pids", "a") as handle:
-        handle.write(f"{os.getpid()} {child.pid}\n")
-    time.sleep(300)
-if "FAIL" in prompt:
-    print("boom from fake codex", file=sys.stderr)
-    sys.exit(4)
-if "SILENT" in prompt:
-    sys.exit(0)
-with open(out, "w") as handle:
-    handle.write(f"codex {'resume' if resume else 'new'} {thread}: {prompt}\n")
-print(json.dumps({"type": "turn.completed"}))
-"""
 
 
 def setUpModule() -> None:
@@ -113,15 +45,6 @@ def alive(pid: int) -> bool:
     except (OSError, IndexError):
         return False
     return state not in ("Z", "X")
-
-
-def eventually(predicate, message: str, timeout: float = SETTLE_SECONDS) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.05)
-    raise AssertionError(message)
 
 
 class PoRunnerTests(unittest.TestCase):
@@ -235,7 +158,13 @@ class PoRunnerTests(unittest.TestCase):
 
         self.assertEqual((first.state, second.state), (po_store.COMPLETED, po_store.COMPLETED))
         runs = self.data / "po-runs" / session.session_id
-        options = ["--json", "-m", "gpt-5.5", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
+        options = [
+            "--json",
+            "-m",
+            "gpt-5.5",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+        ]
         calls = self.calls()
         self.assertEqual(
             calls[0]["argv"],
@@ -392,7 +321,9 @@ class PoRunnerTests(unittest.TestCase):
                 else:
                     self.assertEqual(turn.state, po_store.RUNNING)
                     [recovered] = self.make_runner().recover()
-                    self.assertEqual((recovered.session_id, recovered.state), (session.session_id, po_store.INTERRUPTED))
+                    self.assertEqual(
+                        (recovered.session_id, recovered.state), (session.session_id, po_store.INTERRUPTED)
+                    )
                     self.assertNotIn("killed", recovered.reason)
                 self.assertEqual(self.feed(session.session_id), [(1, "owner", "SLEEP forever")])
                 self.assertEqual(self.store.running_turns(), [])
@@ -419,7 +350,9 @@ class PoRunnerTests(unittest.TestCase):
         own = self.runner.create_session("claude", "opus")
         reused = self.runner.create_session("codex", "gpt-5.5")
         own_turn = self.store.begin_turn(own.session_id, "left running", lambda seq: self.root / "own.out")
-        reused_turn = self.store.begin_turn(reused.session_id, "also left", lambda seq: self.root / "reused.out")
+        reused_turn = self.store.begin_turn(
+            reused.session_id, "also left", lambda seq: self.root / "reused.out"
+        )
         # The process a previous service run started for `own`, still alive after that run ended.
         orphan = subprocess.Popen(["sleep", "300"], start_new_session=True)
         # A stranger that now holds the PID recorded for `reused`: its identity is not the one stored.

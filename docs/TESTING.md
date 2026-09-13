@@ -53,7 +53,8 @@ Each suite also uploads raw coverage `coverage.<suite>` as `ci-coverage-<suite>-
 coverage of `src/secretary` and `src/triggered_agents`; coverage is a CI-only dependency). The
 aggregate step rejects missing, malformed or uncombinable data as an infrastructure failure and
 publishes `ci-coverage-combined-<sha>` with `combined-coverage.json` (per-file executed/missing/excluded
-lines and branches) and `changed-lines.json`. For pull requests, `changed-lines.json` classifies each
+lines and branches and the branch summary; coverage.py's per-function and per-class regions, which restate
+those lists, are left out, and the published file is bounded at 5 MB) and `changed-lines.json`. For pull requests, `changed-lines.json` classifies each
 changed source line against the exact base and head SHAs as `covered`, `missed`, `excluded` or
 `not_executable`; other events mark it not applicable. A successful push to `main` also keeps the
 aggregate as `ci-coverage-baseline-<sha>` for 90 days. There is no coverage threshold and no local

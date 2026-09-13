@@ -107,7 +107,12 @@ main { max-width: 1280px; margin: 0 auto; padding-block: 1.25rem 4rem; padding-i
 .compact-sprint:last-child { border-bottom: 0; padding-bottom: 0; }
 .compact-sprint header { display:flex; gap:.45rem; align-items:center; flex-wrap:wrap; }
 .compact-sprint .goal { margin:.25rem 0; color:var(--muted); }
-.chat-button[disabled] { cursor:not-allowed; opacity:.65; }
+.po-feed { list-style:none; padding:0; margin:0; display:grid; gap:.6rem; }
+.po-entry { border-left: 3px solid var(--line-strong); padding:.35rem .7rem; }
+.po-entry.po-agent { border-left-color: var(--accent); background: var(--raised); }
+.po-entry .who { font-size:.8rem; color:var(--muted); }
+.po-entry .text { white-space: pre-wrap; overflow-wrap:anywhere; }
+.po-mark { font-size:.85rem; color:var(--muted); }
 @media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 
 /* panels: one surface per subject */
@@ -263,6 +268,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("dashboard", "/", "Dashboard"),
     ("sprints", "/sprints", "Sprints"),
     ("projects", "/projects", "Projects"),
+    ("po", "/po", "PO"),
 )
 
 FONTS = "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
@@ -448,6 +454,7 @@ def dashboard(
     pause: dict[str, Any] | None = None,
     sprints: dict[str, Any] | None = None,
     limits: dict[str, Any] | None = None,
+    po: dict[str, Any] | None = None,
 ) -> str:
     """The operator's one screen: the pipeline's state, the open sprints, what is in flight, and
     what happened last.
@@ -480,10 +487,7 @@ def dashboard(
             _panel("Usage limits", _limits_panel(limits)),
             _panel("Doctor", _doctor_panel(installation)),
             _panel("Server", _server_panel(installation), open_=False),
-            _panel(
-                "Product owner",
-                '<button class="quiet chat-button" type="button" disabled title="Chat is planned for a later sprint">Chat — coming later</button>',
-            ),
+            _po_indicator(po),
             "</div></div>",
         ]
     )
@@ -1869,11 +1873,11 @@ START_NOTICE = (
 EXECUTOR_CHOICE = "the observer chooses"
 
 
-def redirect(location: str) -> str:
+def redirect(location: str, *, what: str = "this sprint is open") -> str:
     """The body of a 303. A browser follows the header; anything that does not gets the link."""
     return _page(
         "opened",
-        f'<p>this sprint is open. <a href="{escape(location)}">{escape(location)}</a></p>',
+        f'<p>{escape(what)}. <a href="{escape(location)}">{escape(location)}</a></p>',
     )
 
 
@@ -2385,3 +2389,285 @@ def _resume(resume: Any) -> str:
         return '<p class="empty">the observer has recorded no resume for this sprint yet.</p>'
     rows = [[escape(str(name).replace("_", " ")), _long(resume[name], chars=200)] for name in sorted(resume)]
     return _rows(["", ""], rows)
+
+
+# -- the PO head ----------------------------------------------------------------------------------
+
+PO_NOTICE = (
+    "the PO head runs Claude or Codex with full permissions on this host: what is sent here is carried "
+    "out as if it were typed into a shell"
+)
+#: The words a turn's state is shown in, and their tone.
+TURN_MARKS: dict[str, tuple[str, str]] = {
+    "running": ("running", "accent"),
+    "completed": ("completed", "ok"),
+    "failed": ("failed", "bad"),
+    "interrupted": ("interrupted", "warn"),
+}
+
+
+def _po_indicator(section: dict[str, Any] | None) -> str:
+    """The dashboard's PO panel: how many turns run, and the way in. Only a number, never a session."""
+    if section is None:
+        return ""
+    if not section.get("available"):
+        body = '<a href="/po">PO head</a> <span class="empty">— running turns could not be counted</span>'
+    else:
+        count = int((section.get("document") or {}).get("running") or 0)
+        body = f'<a href="/po" id="po-indicator">{count} PO turn{"" if count == 1 else "s"} running</a>'
+    return _panel("Product owner", body)
+
+
+def po_login(message: str) -> str:
+    body = "\n".join(
+        [
+            '<div class="lead"><h1>Product owner</h1></div>',
+            f'<p class="refused">{escape(message)}</p>',
+            '<form class="sprint" method="post" action="/po/login">',
+            '<div class="field"><label for="po-token">PO token</label> ',
+            '<input id="po-token" name="token" type="password" autocomplete="off" required></div>',
+            '<button type="submit">open</button>',
+            "</form>",
+            (
+                '<p class="hint empty">the token is the file <code>po-web-token</code> in the installation\'s '
+                "data directory; OPERATIONS.md says how to read and rotate it.</p>"
+            ),
+        ]
+    )
+    return _page("Product owner", body, nav="po")
+
+
+def _po_refusal(refusal: dict[str, Any] | None) -> str:
+    if not refusal:
+        return ""
+    code = str(refusal.get("code") or "")
+    message = str(refusal.get("message") or "")
+    if code == "owner_conflict":
+        return (
+            '<p class="refused"><b>not sent: a turn is still running in this session.</b> '
+            "Wait for its answer or stop it, then send again; nothing was written. "
+            f'<span class="reason">{escape(message)}</span></p>'
+        )
+    return f'<p class="refused"><b>refused ({escape(code)}).</b> {escape(message)}</p>'
+
+
+def po_page(
+    overview: dict[str, Any],
+    *,
+    request_id: str,
+    refusal: dict[str, Any] | None = None,
+    submitted: dict[str, Any] | None = None,
+) -> str:
+    """The PO head: every session, and the form that opens a new one."""
+    sessions = overview.get("sessions") or []
+    models = overview.get("models") or {}
+    submitted = submitted or {}
+    rows = [
+        [
+            (
+                f'<a class="ref" href="/po/sessions/{quote(str(item.get("session_id") or ""))}">'
+                f"{escape(str(item.get('session_id') or '')[:8])}</a>"
+            ),
+            _or_dash(item.get("cli")),
+            _or_dash(item.get("model")),
+            _or_dash(item.get("created_at")),
+            _or_dash(item.get("state")),
+            _chip("turn running", "accent") if item.get("running") else '<span class="empty">idle</span>',
+        ]
+        for item in sessions
+    ]
+    table = (
+        _rows(["session", "cli", "model", "created", "state", "turn"], rows)
+        if rows
+        else '<p class="empty">no PO session yet</p>'
+    )
+    body = "\n".join(
+        [
+            '<div class="lead"><h1>Product owner</h1>',
+            f'<span class="age">{escape(str(overview.get("running") or 0))} turn(s) running</span></div>',
+            _po_refusal(refusal),
+            '<div class="grid">',
+            '<div class="col">',
+            _panel("Sessions", table, count=len(sessions) if sessions else None),
+            "</div>",
+            '<div class="col">',
+            _panel("New session", _po_new_session_form(models, request_id=request_id, submitted=submitted)),
+            "</div></div>",
+            f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
+        ]
+    )
+    return _page("Product owner", body, script=_PO_FORM_SCRIPT, nav="po")
+
+
+def _po_new_session_form(models: dict[str, Any], *, request_id: str, submitted: dict[str, Any]) -> str:
+    offered = [(cli, list(values or [])) for cli, values in models.items() if values]
+    if not offered:
+        return '<p class="empty">this installation offers no model for a PO session</p>'
+    chosen_cli = str(submitted.get("cli") or offered[0][0])
+    chosen_model = str(submitted.get("model") or "")
+    cli_options = "".join(
+        f'<option value="{escape(cli)}"{_selected(cli == chosen_cli)}>{escape(cli)}</option>'
+        for cli, _ in offered
+    )
+    groups = "".join(
+        f'<optgroup label="{escape(cli)}">'
+        + "".join(
+            f'<option value="{escape(model)}" data-cli="{escape(cli)}"'
+            f"{_selected(cli == chosen_cli and model == chosen_model)}>{escape(model)}</option>"
+            for model in values
+        )
+        + "</optgroup>"
+        for cli, values in offered
+    )
+    return "\n".join(
+        [
+            '<form class="sprint" id="po-new" method="post" action="/po/sessions">',
+            f'<input type="hidden" name="request_id" value="{escape(request_id)}">',
+            f'<div class="field"><label for="po-cli">CLI</label> <select id="po-cli" name="cli">{cli_options}</select></div>',
+            f'<div class="field"><label for="po-model">model</label> <select id="po-model" name="model">{groups}</select></div>',
+            '<button type="submit">new session</button>',
+            "</form>",
+        ]
+    )
+
+
+def po_session(
+    document: dict[str, Any],
+    *,
+    request_id: str,
+    draft: str = "",
+    refusal: dict[str, Any] | None = None,
+) -> str:
+    """One session: its feed, the state of each turn, the message box and, while a turn runs, stop."""
+    session = document.get("session") or {}
+    session_id = str(session.get("session_id") or "")
+    turns = document.get("turns") or []
+    by_turn: dict[Any, list[dict[str, Any]]] = {}
+    for entry in document.get("feed") or []:
+        by_turn.setdefault(entry.get("turn_seq"), []).append(entry)
+    items: list[str] = []
+    for turn in turns:
+        items.extend(_po_entry(entry) for entry in by_turn.get(turn.get("seq"), []))
+        items.append(_po_turn_mark(turn))
+    feed = (
+        f'<ol class="po-feed" id="po-feed">{"".join(items)}</ol>'
+        if items
+        else '<p class="empty">nothing said yet</p>'
+    )
+    running = bool(document.get("running"))
+    base = f"/po/sessions/{quote(session_id)}"
+    stop = (
+        f'<form method="post" action="{base}/stop">'
+        f'<input type="hidden" name="seq" value="{escape(str(document.get("running_seq") or ""))}">'
+        '<button class="quiet" type="submit">stop turn</button></form>'
+        if running
+        else ""
+    )
+    message = "\n".join(
+        [
+            f'<form class="sprint" id="po-send" method="post" action="{base}/messages">',
+            f'<input type="hidden" name="request_id" value="{escape(request_id)}">',
+            '<div class="field"><label for="po-text">message</label>',
+            f'<textarea id="po-text" name="text" required>{escape(draft)}</textarea></div>',
+            '<button type="submit">send</button>',
+            "</form>",
+        ]
+    )
+    head = " · ".join(
+        escape(str(value))
+        for value in (
+            session.get("cli"),
+            session.get("model"),
+            session.get("created_at"),
+            session.get("state"),
+        )
+        if value
+    )
+    body = "\n".join(
+        [
+            f'<div class="lead"><h1>PO session {escape(session_id[:8])}</h1><span class="age">{head}</span></div>',
+            _po_refusal(refusal),
+            _panel("Feed", feed + stop, more='<a class="more" href="/po">all sessions</a>'),
+            _panel("Send", message + '<p class="feedback" id="po-status"></p>'),
+            f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
+        ]
+    )
+    last = turns[-1] if turns else {}
+    script = (
+        _PO_SESSION_SCRIPT.replace("__SESSION__", _js(session_id))
+        .replace("__RUNNING__", "true" if running else "false")
+        .replace("__TURNS__", str(len(turns)))
+        .replace("__LAST__", _js(str(last.get("state") or "")))
+    )
+    return _page(
+        f"PO session {session_id[:8]}",
+        body,
+        script=script,
+        nav="po",
+        crumbs=(("PO", "/po"), (session_id[:8], base)),
+    )
+
+
+def _po_entry(entry: dict[str, Any]) -> str:
+    role = "agent" if entry.get("role") == "agent" else "owner"
+    who = "PO head" if role == "agent" else "owner"
+    return (
+        f'<li class="po-entry po-{role}"><div class="who">{who} · turn {escape(str(entry.get("turn_seq")))}'
+        f" · {escape(str(entry.get('created_at') or ''))}</div>"
+        f'<div class="text">{escape(str(entry.get("text") or ""))}</div></li>'
+    )
+
+
+def _po_turn_mark(turn: dict[str, Any]) -> str:
+    state = str(turn.get("state") or "unknown")
+    word, tone = TURN_MARKS.get(state, (state, ""))
+    reason = turn.get("reason")
+    said = f' <span class="reason">{escape(str(reason))}</span>' if reason else ""
+    return f'<li class="po-mark" data-state="{escape(state)}">turn {escape(str(turn.get("seq")))} {_chip(word, tone)}{said}</li>'
+
+
+_PO_FORM_SCRIPT = """
+// Narrow the model select to the chosen CLI. Without this every model stays listed and the server
+// still refuses a pair it does not offer.
+const cli = document.getElementById('po-cli');
+const model = document.getElementById('po-model');
+function narrowModels() {
+  if (!cli || !model) return;
+  let first = null;
+  for (const option of model.querySelectorAll('option')) {
+    const owned = option.dataset.cli === cli.value;
+    option.hidden = !owned;
+    option.disabled = !owned;
+    if (owned && first === null) first = option;
+  }
+  const current = model.selectedOptions[0];
+  if ((!current || current.disabled) && first) first.selected = true;
+}
+if (cli) { cli.addEventListener('change', narrowModels); narrowModels(); }
+"""
+
+_PO_SESSION_SCRIPT = """
+// While a turn runs, poll this session's JSON and reload once the turn has ended. Typed text is never
+// thrown away by a reload: the page says the answer arrived instead.
+const SESSION = '__SESSION__';
+const TURNS = __TURNS__;
+const LAST = '__LAST__';
+const status = document.getElementById('po-status');
+const draft = document.getElementById('po-text');
+if (__RUNNING__) {
+  if (status) status.textContent = 'the turn is running; this page updates when it ends';
+  const timer = window.setInterval(async () => {
+    let doc;
+    try {
+      const response = await fetch('/po/api/sessions/' + encodeURIComponent(SESSION), { cache: 'no-store' });
+      if (!response.ok) { if (status) status.textContent = 'could not refresh (' + response.status + ')'; return; }
+      doc = await response.json();
+    } catch (error) { return; }
+    const last = doc.last_turn ? doc.last_turn.state : '';
+    if (doc.running && doc.turns.length === TURNS && last === LAST) return;
+    window.clearInterval(timer);
+    if (draft && draft.value) { if (status) status.textContent = 'the turn has ended; reload to see the answer'; return; }
+    window.location.reload();
+  }, 3000);
+}
+"""

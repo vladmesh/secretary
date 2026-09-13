@@ -47,9 +47,7 @@ def installed_inventory() -> cutover.UnitInventory:
     them that host happens to have.  Nothing here mutates a unit either way, but a rehearsal whose
     result depends on the machine is not a rehearsal of the installation.
     """
-    return cutover.UnitInventory(
-        {declaration.name: "loaded" for declaration in cutover.DECLARED_UNITS}
-    )
+    return cutover.UnitInventory({declaration.name: "loaded" for declaration in cutover.DECLARED_UNITS})
 
 
 def cutover_source(repository: Path) -> BoardSource:
@@ -165,14 +163,26 @@ def cutover_source(repository: Path) -> BoardSource:
                 curator_roots=(),
             ),
             RegistryEntry(
-                project_id="butler", repo=str(repository.parent / "butler"), remote=None,
-                default_branch="main", adapter=None, orca_binding="butler", enabled=True,
-                plane="orchestrator", curator_roots=(),
+                project_id="butler",
+                repo=str(repository.parent / "butler"),
+                remote=None,
+                default_branch="main",
+                adapter=None,
+                orca_binding="butler",
+                enabled=True,
+                plane="orchestrator",
+                curator_roots=(),
             ),
             RegistryEntry(
-                project_id="codegen-product-kit", repo=str(repository.parent / "codegen-product-kit"),
-                remote=None, default_branch="main", adapter=None, orca_binding="codegen-product-kit", enabled=True,
-                plane="orchestrator", curator_roots=(),
+                project_id="codegen-product-kit",
+                repo=str(repository.parent / "codegen-product-kit"),
+                remote=None,
+                default_branch="main",
+                adapter=None,
+                orca_binding="codegen-product-kit",
+                enabled=True,
+                plane="orchestrator",
+                curator_roots=(),
             ),
         ),
         budget_records=(),
@@ -234,9 +244,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.addCleanup(reset_card_backend)
         self.addCleanup(self.environment.stop)
 
-    def _store(
-        self, name: str, *, revision: str | None = None
-    ) -> tuple[Path, BoardStoreConfig]:
+    def _store(self, name: str, *, revision: str | None = None) -> tuple[Path, BoardStoreConfig]:
         instance = self.root / name
         data_dir = self.root / f"{name}-data"
         instance.mkdir()
@@ -420,15 +428,20 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             "createTask", project_id=1, title="Butler collision", reference="butler-1", column_id=2
         )
         kit_key = client.call(
-            "createTask", project_id=1, title="Kit collision", reference="codegen-product-kit-1",
+            "createTask",
+            project_id=1,
+            title="Kit collision",
+            reference="codegen-product-kit-1",
             column_id=2,
         )
         client.call(
-            "saveTaskMetadata", task_id=butler_key,
+            "saveTaskMetadata",
+            task_id=butler_key,
             values={"record_type": "task", "project": "butler", "task_type": "code"},
         )
         client.call(
-            "saveTaskMetadata", task_id=kit_key,
+            "saveTaskMetadata",
+            task_id=kit_key,
             values={
                 "project": "codegen-product-kit",
                 "record_type": "task",
@@ -437,12 +450,18 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             },
         )
         writer.comment(
-            role="worker", actor="test", reference="butler-1", body="butler collision comment",
+            role="worker",
+            actor="test",
+            reference="butler-1",
+            body="butler collision comment",
             request_id="comment-butler-collision",
         )
         writer.comment(
-            role="worker", actor="test", reference="codegen-product-kit-1",
-            body="kit collision comment", request_id="comment-kit-collision",
+            role="worker",
+            actor="test",
+            reference="codegen-product-kit-1",
+            body="kit collision comment",
+            request_id="comment-kit-collision",
         )
         client.call("closeTask", task_id=butler_key)
         self.assertNotEqual(butler_key, kit_key)
@@ -682,7 +701,11 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 # Close the seeded sprint through the installed protocol first: the canary is
                 # the shape of a window with no open sprint, and the installation admits one.
                 listing = cutover._secretary(paths, "task", "list", "--sprint", "sprint:1")["document"]
-                rows = listing if isinstance(listing, list) else listing.get("tasks") or listing.get("items") or []
+                rows = (
+                    listing
+                    if isinstance(listing, list)
+                    else listing.get("tasks") or listing.get("items") or []
+                )
                 dispositions = "".join(
                     f"  - ref: {row['ref']}\n    verdict: drop\n    reason: canary rehearsal closes the seeded sprint\n"
                     for row in rows
@@ -702,9 +725,23 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 closeout = self.root / "seeded-sprint-closeout.md"
                 closeout.write_text("# seeded sprint closed before the canary rehearsal\n", encoding="utf-8")
                 cutover._secretary(
-                    paths, "sprint", "close", "--role", "po", "--actor", "test", "--ref", "sprint:1",
-                    "--reason", "canary rehearsal", "--decisions-file", str(decisions),
-                    "--closeout-file", str(closeout), "--data-dir", str(data),
+                    paths,
+                    "sprint",
+                    "close",
+                    "--role",
+                    "po",
+                    "--actor",
+                    "test",
+                    "--ref",
+                    "sprint:1",
+                    "--reason",
+                    "canary rehearsal",
+                    "--decisions-file",
+                    str(decisions),
+                    "--closeout-file",
+                    str(closeout),
+                    "--data-dir",
+                    str(data),
                 )
                 with mock.patch.object(cutover, "_acceptance_project", return_value="canary"):
                     canary_accepted = canary_operation.installed_protocol_acceptance()
@@ -756,9 +793,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         import psycopg
         import psycopg.sql
 
-        instance, original = self._store(
-            "successor", revision="0006_sprint_transport_key"
-        )
+        instance, original = self._store("successor", revision="0006_sprint_transport_key")
         data = self.root / "successor-data"
         init_layout(data)
         paths = cutover.Paths(instance, data)
@@ -785,12 +820,8 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 "created_at, updated_at, board_key) VALUES "
                 "('sprint:1', 1, 'collision sprint', 'holds butler-1', 'open', now(), now(), 1)"
             )
-            connection.execute(
-                "UPDATE tasks SET sprint_ref = 'sprint:1' WHERE task_ref = 'butler-1'"
-            )
-            connection.execute(
-                "UPDATE sprints SET current_task_ref = 'butler-1' WHERE ref = 'sprint:1'"
-            )
+            connection.execute("UPDATE tasks SET sprint_ref = 'sprint:1' WHERE task_ref = 'butler-1'")
+            connection.execute("UPDATE sprints SET current_task_ref = 'butler-1' WHERE ref = 'sprint:1'")
             connection.execute(
                 "INSERT INTO task_comments (task_ref, marker, body, actor_role, created_at) "
                 "VALUES ('butler-1', 'note', 'butler collision comment', 'worker', now()), "
@@ -855,8 +886,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                     "SELECT request_id, operation, status, ref FROM requests ORDER BY request_id"
                 ).fetchall(),
                 "board_events": connection.execute(
-                    "SELECT event_id, request_id, kind, ref, committed FROM board_events "
-                    "ORDER BY event_id"
+                    "SELECT event_id, request_id, kind, ref, committed FROM board_events ORDER BY event_id"
                 ).fetchall(),
             }
         predecessor_metadata = {
@@ -896,7 +926,8 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             "recovery": {"branch": "kanboard-before-first-write"},
             "phases": {
                 "final_fenced_import": {
-                    "status": "complete", "evidence": {"report": str(report_path), "import": report}
+                    "status": "complete",
+                    "evidence": {"report": str(report_path), "import": report},
                 },
                 "full_parity": {
                     "status": "complete",
@@ -931,15 +962,21 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
 
         applied_upgrade = migrate.migrate_instance(instance, reuse_existing_roles=True)
         provision.verify_roles(instance)
-        self.assertEqual(applied_upgrade, ("0007_card_transport_key", "0008_po_sessions"))
+        self.assertEqual(applied_upgrade, ("0007_card_transport_key", "0008_po_sessions", "0009_po_requests"))
         before_content = content_snapshot(original)
-        injected = {name: True for name in (
-            "database_rename", "database_create", "migration", "empty_verification",
-            "history_publication", "canonical_release", "release_receipt",
-        )}
-        real_methods = {
-            name: getattr(successor.SuccessorOperations, name) for name in injected
+        injected = {
+            name: True
+            for name in (
+                "database_rename",
+                "database_create",
+                "migration",
+                "empty_verification",
+                "history_publication",
+                "canonical_release",
+                "release_receipt",
+            )
         }
+        real_methods = {name: getattr(successor.SuccessorOperations, name) for name in injected}
 
         def interrupted(name: str):
             def operation(operation_self):
@@ -948,13 +985,18 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                     injected[name] = False
                     raise RuntimeError(f"injected after real {name} effect")
                 return evidence
+
             return operation
 
         attempts = 0
         with (
             mock.patch.object(cutover, "_provenance", return_value={"installed_revision": "a" * 40}),
             mock.patch.object(cutover, "_backend", return_value="kanboard"),
-            mock.patch.object(cutover, "_source_evidence", return_value={"fingerprint": "later-kanboard", "parity": {"ok": True}}),
+            mock.patch.object(
+                cutover,
+                "_source_evidence",
+                return_value={"fingerprint": "later-kanboard", "parity": {"ok": True}},
+            ),
             mock.patch.multiple(
                 successor.SuccessorOperations,
                 **{name: interrupted(name) for name in injected},
@@ -1036,17 +1078,25 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         predecessor = successor_plan["recovered_predecessors"][0]["successor_preparation"]
         self.assertEqual(predecessor["archived_database"]["original_oid"], original_identity["oid"])
         self.assertEqual(predecessor["archived_database"]["successor_oid"], configured["oid"])
-        print("successor evidence:", json.dumps({
-            "original_oid": original_identity["oid"], "archive_name": archived["name"],
-            "successor_oid": configured["oid"], "schema_head": fresh["source_schema"],
-            "original_schema_head": "0006_sprint_transport_key",
-            "external_upgrade": list(applied_upgrade),
-            "counts": predecessor_metadata["table_counts"],
-            "dump_sha256": result["successor_preparation"]["dump"]["sha256"],
-            "real_postgres_failure_injections": list(injected),
-            "post_rotation_content_comparison": sorted(after_content),
-            "successor_plan_id": successor_plan["plan_id"],
-        }, sort_keys=True))
+        print(
+            "successor evidence:",
+            json.dumps(
+                {
+                    "original_oid": original_identity["oid"],
+                    "archive_name": archived["name"],
+                    "successor_oid": configured["oid"],
+                    "schema_head": fresh["source_schema"],
+                    "original_schema_head": "0006_sprint_transport_key",
+                    "external_upgrade": list(applied_upgrade),
+                    "counts": predecessor_metadata["table_counts"],
+                    "dump_sha256": result["successor_preparation"]["dump"]["sha256"],
+                    "real_postgres_failure_injections": list(injected),
+                    "post_rotation_content_comparison": sorted(after_content),
+                    "successor_plan_id": successor_plan["plan_id"],
+                },
+                sort_keys=True,
+            ),
+        )
 
     def test_full_backup_destroy_source_restore_target_and_rerun(self) -> None:
         self._seed()
@@ -1121,26 +1171,18 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 archive.extractfile("secretary-backup/secretary-data/board/audit.json").read().decode("utf-8")
             )["events"]
         cards_by_ref = {card["reference"]: card for card in cards}
-        self.assertEqual(
-            [card["reference"] for card in cards].count("butler-1"), 1
-        )
-        self.assertEqual(
-            [card["reference"] for card in cards].count("codegen-product-kit-1"), 1
-        )
+        self.assertEqual([card["reference"] for card in cards].count("butler-1"), 1)
+        self.assertEqual([card["reference"] for card in cards].count("codegen-product-kit-1"), 1)
         self.assertTrue(cards_by_ref["butler-1"]["closed"])
         self.assertFalse(cards_by_ref["codegen-product-kit-1"]["closed"])
-        self.assertEqual(
-            cards_by_ref["codegen-product-kit-1"]["metadata"]["blocked_by"], "butler-1"
-        )
+        self.assertEqual(cards_by_ref["codegen-product-kit-1"]["metadata"]["blocked_by"], "butler-1")
         self.assertIn(
             "butler collision comment",
             "\n".join(comment["text"] for comment in cards_by_ref["butler-1"]["comments"]),
         )
         self.assertIn(
             "kit collision comment",
-            "\n".join(
-                comment["text"] for comment in cards_by_ref["codegen-product-kit-1"]["comments"]
-            ),
+            "\n".join(comment["text"] for comment in cards_by_ref["codegen-product-kit-1"]["comments"]),
         )
         self.assertEqual(cards_by_ref["secretary-1"]["metadata"]["issues"], "issue:recovery")
         self.assertEqual(cards_by_ref["secretary-2"]["metadata"]["supersedes"], "secretary-1")
@@ -1388,9 +1430,7 @@ class RecoveryBackupBackendBoundaryTests(unittest.TestCase):
         self.assertIn("postgres_dump", components)
         self.assertIn("board_history", components)
         self.assertNotIn("raw_board", components)
-        self.assertEqual(
-            components["postgres_dump"]["source_endpoint_id"], endpoint_identity(self.config)
-        )
+        self.assertEqual(components["postgres_dump"]["source_endpoint_id"], endpoint_identity(self.config))
         self.assertGreater(components["postgres_dump"]["bytes"], 0)
         archive = Path(evidence["archives"][0])
         with tarfile.open(archive) as tar:

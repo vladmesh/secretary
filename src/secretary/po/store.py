@@ -1,14 +1,25 @@
-"""PO head sessions, turns and feed in the board store (revision `0008_po_sessions`).
+"""PO head sessions, turns, feed and request ids in the board store (revisions `0008_po_sessions`, `0009_po_requests`).
 
 One short connection per operation: the runner's waiter threads settle turns concurrently, and a
 connection shared between them would serialize exactly what must not be serialized. Every state
 change of a turn is conditional on the turn still being `running`, so a stop, a recovery and a
 process exit racing each other settle a turn once, by whichever came first.
+
+**Request ids.** A /po form's request id belongs to exactly one operation with fixed inputs,
+installation-wide, and `po_requests` is the one place that says so. :meth:`PoStore.claim_session` and
+:meth:`PoStore.claim_turn` decide it inside the transaction that creates the session or the turn, in a
+fixed order: a known id with the same operation and inputs answers the recorded outcome and writes
+nothing; a known id with anything else is :class:`RequestConflict`; an unknown id for a send while
+another turn runs is :class:`TurnInProgress` and writes nothing; otherwise the session or the turn is
+created together with its request row. Same-id transactions are serialized by an advisory lock taken
+first, and the primary key on `request_id` backs it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,8 +37,13 @@ INTERRUPTED = "interrupted"
 OWNER = "owner"
 AGENT = "agent"
 
+SESSION_CREATE = "po_session_create"
+SEND = "po_send"
+
 # The partial unique index that holds "at most one running turn per session".
 ONE_RUNNING_INDEX = "po_turns_one_running_per_session"
+# The two-key advisory lock namespace for PO request ids ("POR" + "Q"); the second key is the id's hash.
+REQUEST_LOCK_CLASS = 0x504F5251
 
 
 class PoStoreError(RuntimeError):
@@ -40,6 +56,10 @@ class SessionNotFound(PoStoreError):
 
 class TurnInProgress(PoStoreError):
     """A turn is already running in this session; nothing was written."""
+
+
+class RequestConflict(PoStoreError):
+    """The request id already belongs to another operation or other inputs; nothing was written."""
 
 
 @dataclass(frozen=True)
@@ -76,11 +96,34 @@ class FeedEntry:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class PoRequest:
+    request_id: str
+    operation: str
+    fingerprint: str
+    session_id: str
+    seq: int | None
+    created_at: datetime
+
+
 _SESSION_COLUMNS = "session_id, cli, model, cwd, created_at, state, cli_session_id"
-_TURN_COLUMNS = (
-    "session_id, seq, started_at, finished_at, state, stdout_path, pid, process_identity, reason"
-)
+_TURN_COLUMNS = "session_id, seq, started_at, finished_at, state, stdout_path, pid, process_identity, reason"
 _FEED_COLUMNS = "entry_id, session_id, turn_seq, role, text, created_at"
+_REQUEST_COLUMNS = "request_id, operation, fingerprint, session_id, seq, created_at"
+
+
+def session_fingerprint(cli: str, model: str) -> str:
+    """What a session-create request id is bound to: the operation, the CLI and the model."""
+    return _digest([SESSION_CREATE, cli, model])
+
+
+def send_fingerprint(session_id: str, text: str) -> str:
+    """What a send request id is bound to: the operation, the session and the exact text."""
+    return _digest([SEND, session_id, hashlib.sha256(text.encode("utf-8")).hexdigest()])
+
+
+def _digest(parts: list[str]) -> str:
+    return hashlib.sha256(json.dumps(parts).encode("utf-8")).hexdigest()
 
 
 class PoStore:
@@ -108,18 +151,80 @@ class PoStore:
         except psycopg.Error as exc:
             raise PoStoreError(f"the board store did not answer a PO session operation: {exc}") from exc
 
+    # --- request ids ------------------------------------------------------------------------
+
+    def request(self, request_id: str) -> PoRequest | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                f"SELECT {_REQUEST_COLUMNS} FROM po_requests WHERE request_id = %s", (request_id,)
+            ).fetchone()
+        return PoRequest(*row) if row is not None else None
+
+    @staticmethod
+    def _known_request(
+        connection: Any, request_id: str, operation: str, fingerprint: str
+    ) -> tuple[str, int | None] | None:
+        """Steps 1-3: lock the id, then its recorded (session, seq), a conflict, or None when unknown."""
+        connection.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (REQUEST_LOCK_CLASS, request_id))
+        row = connection.execute(
+            "SELECT operation, fingerprint, session_id, seq FROM po_requests WHERE request_id = %s",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if (row[0], row[1]) != (operation, fingerprint):
+            raise RequestConflict(
+                f"request id {request_id!r} already belongs to another {row[0]} request; "
+                "a request id is repeated only with the same operation and inputs"
+            )
+        return row[2], row[3]
+
+    @staticmethod
+    def _record_request(
+        connection: Any, request_id: str, operation: str, fingerprint: str, session_id: str, seq: int | None
+    ) -> None:
+        connection.execute(
+            f"INSERT INTO po_requests ({_REQUEST_COLUMNS}) VALUES (%s, %s, %s, %s, %s, now())",
+            (request_id, operation, fingerprint, session_id, seq),
+        )
+
     # --- sessions ---------------------------------------------------------------------------
 
     def create_session(
         self, *, session_id: str, cli: str, model: str, cwd: str, cli_session_id: str | None
     ) -> Session:
+        return self.claim_session(
+            session_id=session_id, cli=cli, model=model, cwd=cwd, cli_session_id=cli_session_id
+        )[0]
+
+    def claim_session(
+        self,
+        *,
+        session_id: str,
+        cli: str,
+        model: str,
+        cwd: str,
+        cli_session_id: str | None,
+        request_id: str | None = None,
+    ) -> tuple[Session, bool]:
+        """The new session, or the one `request_id` already created; the flag is True when this call did."""
+        fingerprint = session_fingerprint(cli, model)
         with self._transaction() as connection:
+            if request_id is not None:
+                known = self._known_request(connection, request_id, SESSION_CREATE, fingerprint)
+                if known is not None:
+                    row = connection.execute(
+                        f"SELECT {_SESSION_COLUMNS} FROM po_sessions WHERE session_id = %s", (known[0],)
+                    ).fetchone()
+                    return Session(*row), False
             row = connection.execute(
                 f"INSERT INTO po_sessions ({_SESSION_COLUMNS}) "
                 f"VALUES (%s, %s, %s, %s, now(), %s, %s) RETURNING {_SESSION_COLUMNS}",
                 (session_id, cli, model, cwd, SESSION_OPEN, cli_session_id),
             ).fetchone()
-        return Session(*row)
+            if request_id is not None:
+                self._record_request(connection, request_id, SESSION_CREATE, fingerprint, session_id, None)
+        return Session(*row), True
 
     def session(self, session_id: str) -> Session:
         with self._transaction() as connection:
@@ -141,8 +246,7 @@ class PoStore:
         """Record the CLI's own id once; an id already recorded is never replaced."""
         with self._transaction() as connection:
             cursor = connection.execute(
-                "UPDATE po_sessions SET cli_session_id = %s "
-                "WHERE session_id = %s AND cli_session_id IS NULL",
+                "UPDATE po_sessions SET cli_session_id = %s WHERE session_id = %s AND cli_session_id IS NULL",
                 (cli_session_id, session_id),
             )
             return cursor.rowcount == 1
@@ -151,7 +255,30 @@ class PoStore:
 
     def begin_turn(self, session_id: str, text: str, stdout_path: Callable[[int], Path]) -> Turn:
         """Atomically: the next turn as `running` and the owner's message in the feed."""
+        return self.claim_turn(session_id, text, stdout_path)[0]
+
+    def claim_turn(
+        self,
+        session_id: str,
+        text: str,
+        stdout_path: Callable[[int], Path],
+        *,
+        request_id: str | None = None,
+    ) -> tuple[Turn, bool]:
+        """The new turn, or the one `request_id` already started; the flag is True when this call did.
+
+        A replay answers with that turn in its current state — running, completed, failed or
+        interrupted — before "a turn is running" is asked, so a replay during its own turn is that turn.
+        """
+        fingerprint = send_fingerprint(session_id, text)
         with self._transaction() as connection:
+            if request_id is not None:
+                known = self._known_request(connection, request_id, SEND, fingerprint)
+                if known is not None:
+                    row = connection.execute(
+                        f"SELECT {_TURN_COLUMNS} FROM po_turns WHERE session_id = %s AND seq = %s", known
+                    ).fetchone()
+                    return Turn(*row), False
             found = connection.execute(
                 "SELECT 1 FROM po_sessions WHERE session_id = %s FOR UPDATE", (session_id,)
             ).fetchone()
@@ -179,7 +306,9 @@ class PoStore:
                 "VALUES (%s, %s, %s, %s, now())",
                 (session_id, seq, OWNER, text),
             )
-        return Turn(*row)
+            if request_id is not None:
+                self._record_request(connection, request_id, SEND, fingerprint, session_id, seq)
+        return Turn(*row), True
 
     def record_process(self, session_id: str, seq: int, pid: int, identity: str | None) -> bool:
         with self._transaction() as connection:
@@ -265,11 +394,17 @@ __all__ = [
     "INTERRUPTED",
     "OWNER",
     "RUNNING",
+    "SEND",
+    "SESSION_CREATE",
     "FeedEntry",
+    "PoRequest",
     "PoStore",
     "PoStoreError",
+    "RequestConflict",
     "Session",
     "SessionNotFound",
     "Turn",
     "TurnInProgress",
+    "send_fingerprint",
+    "session_fingerprint",
 ]

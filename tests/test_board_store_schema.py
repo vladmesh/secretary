@@ -67,7 +67,8 @@ SELECT
 #: beside `0001`'s own numbers. A disagreement here is a defect of the transcription into models,
 #: not of the document. Unchanged by `0003`, which trades one `CHECK` for one `CHECK`. `0008` adds
 #: the three PO tables: six `CHECK`, two foreign keys, three primary keys, one partial unique index.
-DOCUMENTED_COUNTS = (27, 45, 42, 27, 17, 5)
+#: `0009` adds `po_requests`: two `CHECK`, two foreign keys, one primary key.
+DOCUMENTED_COUNTS = (28, 47, 44, 28, 17, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -79,6 +80,7 @@ REVISIONS = (
     "0006_sprint_transport_key",
     "0007_card_transport_key",
     "0008_po_sessions",
+    "0009_po_requests",
 )
 
 
@@ -411,7 +413,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
             migrate.alembic_config(connection=connection, passwords=self.passwords),
             "0006_sprint_transport_key",
         )
-        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('butler'), ('codegen-product-kit')")
+        connection.exec_driver_sql(
+            "INSERT INTO projects (project_id) VALUES ('butler'), ('codegen-product-kit')"
+        )
         for ref, project in (("butler-1", "butler"), ("codegen-product-kit-1", "codegen-product-kit")):
             connection.exec_driver_sql(
                 "INSERT INTO tasks (task_ref, project_id, task_number, title, task_type, state, "
@@ -440,15 +444,19 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
 
         self.assertEqual(
-            self.run_migrations(connection), ("0007_card_transport_key", "0008_po_sessions")
+            self.run_migrations(connection),
+            ("0007_card_transport_key", "0008_po_sessions", "0009_po_requests"),
         )
         rows = connection.exec_driver_sql(
             "SELECT task_ref, project_id, task_number, board_key FROM tasks ORDER BY task_ref"
         ).fetchall()
-        self.assertEqual([(row[0], row[1], row[2]) for row in rows], [
-            ("butler-1", "butler", 1),
-            ("codegen-product-kit-1", "codegen-product-kit", 1),
-        ])
+        self.assertEqual(
+            [(row[0], row[1], row[2]) for row in rows],
+            [
+                ("butler-1", "butler", 1),
+                ("codegen-product-kit-1", "codegen-product-kit", 1),
+            ],
+        )
         self.assertEqual(len({row[3] for row in rows}), 2)
         self.assertEqual(
             connection.exec_driver_sql("SELECT task_ref, marker, body FROM task_comments").fetchall(),

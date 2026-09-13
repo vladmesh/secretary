@@ -64,9 +64,7 @@ metadata = Base.metadata
 SPRINT_NUMBER_SEQ = sa.Sequence("sprint_number_seq", metadata=metadata)
 
 #: The shared board-client identity for Cards. Public per-project task numbers are separate.
-CARD_BOARD_KEY_SEQ = sa.Sequence(
-    "card_board_key_seq", metadata=metadata, start=1, maxvalue=1_999_999_999
-)
+CARD_BOARD_KEY_SEQ = sa.Sequence("card_board_key_seq", metadata=metadata, start=1, maxvalue=1_999_999_999)
 
 
 # --- §3.1 Products, projects, repositories ------------------------------------------------
@@ -240,21 +238,15 @@ class Sprint(Base):
 class SprintRepository(Base):
     __tablename__ = "sprint_repositories"
 
-    sprint_ref = sa.Column(
-        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True
-    )
-    repository_id = sa.Column(
-        sa.BigInteger, sa.ForeignKey("repositories.repository_id"), primary_key=True
-    )
+    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True)
+    repository_id = sa.Column(sa.BigInteger, sa.ForeignKey("repositories.repository_id"), primary_key=True)
     ordinal = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
 
 
 class SprintIssue(Base):
     __tablename__ = "sprint_issues"
 
-    sprint_ref = sa.Column(
-        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True
-    )
+    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True)
     issue_id = sa.Column(sa.Text, sa.ForeignKey("issues.issue_id"), primary_key=True)
     ordinal = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
 
@@ -265,9 +257,7 @@ class SprintResume(Base):
     __tablename__ = "sprint_resumes"
 
     resume_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    sprint_ref = sa.Column(
-        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False
-    )
+    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False)
     selected_step = sa.Column(sa.Text, nullable=False)
     selected_why = sa.Column(sa.Text, nullable=False)
     rejected_alternatives = sa.Column(sa.Text, nullable=False)
@@ -291,9 +281,7 @@ class SprintBudgetEvent(Base):
     budget_event_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
     # Since the sprint's identity is its reference, this is the reference itself: the generated
     # `sprint_ref` column §3.9's claim key used to need is now the scoping column.
-    sprint_ref = sa.Column(
-        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False
-    )
+    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False)
     event_type = sa.Column(sa.Text, nullable=False)
     charged = sa.Column(sa.Boolean, nullable=False)
     task_ref = sa.Column(sa.Text)
@@ -410,9 +398,7 @@ class TaskRetryHead(Base):
 
     __tablename__ = "task_retry_heads"
 
-    task_ref = sa.Column(
-        sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), primary_key=True
-    )
+    task_ref = sa.Column(sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), primary_key=True)
     ordinal = sa.Column(sa.Integer, primary_key=True, autoincrement=False)
     head = sa.Column(sa.Text, nullable=False)
 
@@ -420,9 +406,7 @@ class TaskRetryHead(Base):
 class TaskIssue(Base):
     __tablename__ = "task_issues"
 
-    task_ref = sa.Column(
-        sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), primary_key=True
-    )
+    task_ref = sa.Column(sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), primary_key=True)
     issue_id = sa.Column(sa.Text, sa.ForeignKey("issues.issue_id"), primary_key=True)
 
 
@@ -438,9 +422,7 @@ class TaskDependency(Base):
 
     __tablename__ = "task_dependencies"
 
-    task_ref = sa.Column(
-        sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), primary_key=True
-    )
+    task_ref = sa.Column(sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), primary_key=True)
     depends_on = sa.Column(sa.Text, primary_key=True)
     depends_on_task = sa.Column(sa.Text, sa.ForeignKey("tasks.task_ref"))
 
@@ -458,9 +440,7 @@ class TaskSupersession(Base):
 
     __tablename__ = "task_supersessions"
 
-    task_ref = sa.Column(
-        sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), primary_key=True
-    )
+    task_ref = sa.Column(sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), primary_key=True)
     supersedes = sa.Column(sa.Text, sa.ForeignKey("tasks.task_ref"), nullable=False)
     recorded_at = sa.Column(TIMESTAMPTZ, nullable=False)
 
@@ -473,9 +453,7 @@ class TaskSupersession(Base):
 class SprintProject(Base):
     __tablename__ = "sprint_projects"
 
-    sprint_ref = sa.Column(
-        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True
-    )
+    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), primary_key=True)
     project_id = sa.Column(sa.Text, sa.ForeignKey("projects.project_id"), primary_key=True)
     ordinal = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     reserved = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("true"))
@@ -500,9 +478,7 @@ class SprintComment(Base):
     __tablename__ = "sprint_comments"
 
     comment_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    sprint_ref = sa.Column(
-        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False
-    )
+    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False)
     marker = sa.Column(sa.Text)  # "po", "sprint:resume", NULL for unmarked
     body = sa.Column(sa.Text, nullable=False)
     actor_role = sa.Column(sa.Text)
@@ -527,9 +503,7 @@ class TaskComment(Base):
     __tablename__ = "task_comments"
 
     comment_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    task_ref = sa.Column(
-        sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), nullable=False
-    )
+    task_ref = sa.Column(sa.Text, sa.ForeignKey("tasks.task_ref", ondelete="CASCADE"), nullable=False)
     marker = sa.Column(sa.Text)  # role, or report:/review:/decision:*
     body = sa.Column(sa.Text, nullable=False)
     actor_role = sa.Column(sa.Text)
@@ -562,9 +536,7 @@ class IssueComment(Base):
     __tablename__ = "issue_comments"
 
     comment_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    issue_id = sa.Column(
-        sa.Text, sa.ForeignKey("issues.issue_id", ondelete="CASCADE"), nullable=False
-    )
+    issue_id = sa.Column(sa.Text, sa.ForeignKey("issues.issue_id", ondelete="CASCADE"), nullable=False)
     marker = sa.Column(sa.Text)  # role, or issue:* — the same vocabulary §8.1 lists
     body = sa.Column(sa.Text, nullable=False)
     actor_role = sa.Column(sa.Text)
@@ -591,9 +563,7 @@ class ProductComment(Base):
     __tablename__ = "product_comments"
 
     comment_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    product_id = sa.Column(
-        sa.Text, sa.ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False
-    )
+    product_id = sa.Column(sa.Text, sa.ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False)
     marker = sa.Column(sa.Text)
     body = sa.Column(sa.Text, nullable=False)
     actor_role = sa.Column(sa.Text)
@@ -623,9 +593,7 @@ class SprintDecision(Base):
     __tablename__ = "sprint_decisions"
 
     decision_id = sa.Column(sa.BigInteger, sa.Identity(always=True), primary_key=True)
-    sprint_ref = sa.Column(
-        sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False
-    )
+    sprint_ref = sa.Column(sa.Text, sa.ForeignKey("sprints.ref", ondelete="CASCADE"), nullable=False)
     subject_kind = sa.Column(sa.Text, nullable=False)
     # Both subjects are scoped to this sprint below; neither is a bare existence check.
     issue_id = sa.Column(sa.Text)
@@ -841,6 +809,37 @@ class PoFeedEntry(Base):
             ondelete="CASCADE",
         ),
         sa.Index("po_feed_by_session", "session_id", "entry_id"),
+    )
+
+
+class PoRequest(Base):
+    """A /po form request id and the one operation, with fixed inputs, it belongs to (revision 0009)."""
+
+    __tablename__ = "po_requests"
+
+    request_id = sa.Column(sa.Text, primary_key=True)
+    operation = sa.Column(sa.Text, nullable=False)
+    fingerprint = sa.Column(sa.Text, nullable=False)
+    session_id = sa.Column(
+        sa.Text, sa.ForeignKey("po_sessions.session_id", ondelete="CASCADE"), nullable=False
+    )
+    # The turn a send started; NULL for a session create.
+    seq = sa.Column(sa.Integer)
+    created_at = sa.Column(TIMESTAMPTZ, nullable=False)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "operation IN ('po_session_create','po_send')", name="po_request_operation_in_vocabulary"
+        ),
+        sa.CheckConstraint(
+            "(operation = 'po_send') = (seq IS NOT NULL)", name="po_request_seq_only_for_a_send"
+        ),
+        sa.ForeignKeyConstraint(
+            ["session_id", "seq"],
+            ["po_turns.session_id", "po_turns.seq"],
+            name="po_request_names_its_turn",
+            ondelete="CASCADE",
+        ),
     )
 
 

@@ -420,6 +420,8 @@ class StatusMappingTests(unittest.TestCase):
     }
 
     def _body(self, route) -> bytes:
+        if route.pattern == "/po/login":
+            return urlencode([("token", "t")]).encode("utf-8")
         if route.body == "form":
             return self.BODIES["form"]
         if route.method != "POST":
@@ -433,12 +435,19 @@ class StatusMappingTests(unittest.TestCase):
 
     def test_every_route_answers_a_refusal_with_the_status_of_its_code(self) -> None:
         for error, status in self.CODES.items():
-            app = WebApp(*(RaisingLayer(error) for _ in range(LAYERS)))
+            # The PO layers refuse too: the token check itself answers a refusing token layer with
+            # the status of its code, so every /po route is held to the same table.
+            app = WebApp(
+                *(RaisingLayer(error) for _ in range(LAYERS)),
+                po_auth=RaisingLayer(error),
+                po=RaisingLayer(error),
+            )
             for route in ROUTES:
                 path = (
                     route.pattern.replace("{ref}", "secretary-1")
                     .replace("{run_id}", "pr-1")
                     .replace("{request_id}", "r-1")
+                    .replace("{session}", "s-1")
                 )
                 with self.subTest(code=error.code, route=route.pattern):
                     response = app.handle(route.method, path, body=self._body(route))
@@ -489,6 +498,13 @@ class RouteTableTests(TransportFixture):
         ("GET", "/api/history/{request_id}"),
         ("POST", "/api/tasks/{ref}/comment"),
         ("POST", "/api/tasks/{ref}/move"),
+        ("POST", "/po/login"),
+        ("GET", "/po"),
+        ("POST", "/po/sessions"),
+        ("GET", "/po/sessions/{session}"),
+        ("POST", "/po/sessions/{session}/messages"),
+        ("POST", "/po/sessions/{session}/stop"),
+        ("GET", "/po/api/sessions/{session}"),
     }
 
     def test_the_route_table_is_exactly_what_is_documented(self) -> None:
@@ -500,7 +516,7 @@ class RouteTableTests(TransportFixture):
             with self.subTest(route=route.pattern):
                 self.assertRegex(
                     route.operation,
-                    r"^(reads|ops|sprint_reads|sprint_ops|pause_reads|pause_ops|command_reads|card_ops)\.[a-z_]+$",
+                    r"^(reads|ops|sprint_reads|sprint_ops|pause_reads|pause_ops|command_reads|card_ops|po_auth|po)\.[a-z_]+$",
                 )
 
     def test_there_is_no_endpoint_that_runs_something_it_was_given(self) -> None:
