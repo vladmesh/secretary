@@ -49,6 +49,18 @@ COVERAGE_RAW_PREFIX = "coverage."
 COVERAGE_JSON_NAME = "combined-coverage.json"
 CHANGED_LINES_JSON_NAME = "changed-lines.json"
 MAX_COVERAGE_JSON_BYTES = 5_000_000
+# `coverage json` also writes per-function and per-class regions, which restate the file's line and
+# branch lists and dominate its size (about 85% for the full product). They are read under this looser
+# intake bound and not published; the published artifact keeps exactly these per-file keys.
+MAX_NATIVE_COVERAGE_JSON_BYTES = 50_000_000
+COVERAGE_LIST_KEYS = (
+    "executed_lines",
+    "missing_lines",
+    "excluded_lines",
+    "executed_branches",
+    "missing_branches",
+)
+COVERAGE_FILE_KEYS = (*COVERAGE_LIST_KEYS, "summary")
 MAX_CHANGED_LINES = 10_000
 OUTCOMES = (
     "success",
@@ -708,28 +720,26 @@ def _source_file(path: str) -> bool:
 
 
 def _coverage_payload(path: Path) -> dict[str, object]:
-    if not path.is_file() or path.stat().st_size > MAX_COVERAGE_JSON_BYTES:
+    """The native `coverage json` output, validated, with each file reduced to `COVERAGE_FILE_KEYS`."""
+    if not path.is_file() or path.stat().st_size > MAX_NATIVE_COVERAGE_JSON_BYTES:
         raise CoverageError("combined coverage JSON is missing, empty, or exceeds its bound")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         files = data["files"]
         if not isinstance(files, dict) or not files:
             raise TypeError("files is empty or not an object")
+        reduced: dict[str, dict[str, object]] = {}
         for filename, payload in files.items():
             if not isinstance(filename, str) or not _source_file(filename) or not isinstance(payload, dict):
                 raise TypeError("coverage includes a file outside the configured source roots")
-            for key in (
-                "executed_lines",
-                "missing_lines",
-                "excluded_lines",
-                "executed_branches",
-                "missing_branches",
-            ):
+            for key in COVERAGE_LIST_KEYS:
                 if not isinstance(payload.get(key), list):
                     raise TypeError(f"coverage file lacks {key}")
             summary = payload.get("summary")
             if not isinstance(summary, dict) or not isinstance(summary.get("num_branches"), int):
                 raise TypeError("coverage file lacks branch summary")
+            reduced[filename] = {key: payload[key] for key in COVERAGE_FILE_KEYS}
+        data["files"] = reduced
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise CoverageError(f"malformed combined coverage JSON: {exc}") from exc
     return data
@@ -884,7 +894,8 @@ def aggregate_coverage(
         changed_path = output_dir / CHANGED_LINES_JSON_NAME
         # Per-file line and branch detail is large for the full product. Keep
         # the downloaded evidence deterministic and within its published bound
-        # without dropping any machine-readable coverage detail.
+        # without dropping any line or branch detail; only the per-function and
+        # per-class regions, which restate those lists, are left out.
         combined_path.write_text(
             json.dumps(combined, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
         )

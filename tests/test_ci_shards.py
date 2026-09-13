@@ -80,9 +80,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                     del sys.modules[name]
             sys.modules.update(loaded_tests)
 
-    def _run_generated_suite(
-        self, root: Path, suite: str, report_dir: Path, test_source: str
-    ) -> int:
+    def _run_generated_suite(self, root: Path, suite: str, report_dir: Path, test_source: str) -> int:
         tests = root / "tests"
         tests.mkdir()
         (tests / "__init__.py").write_text("", encoding="utf-8")
@@ -508,6 +506,46 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             },
         }
 
+    def test_the_published_coverage_keeps_lines_and_branches_and_leaves_out_derived_regions(self) -> None:
+        """coverage.py's functions/classes regions pushed the full product past the bound (secretary-1631)."""
+        native = self._coverage_payload()
+        region = {"executed_lines": [2, 4], "missing_lines": [3], "summary": {"num_statements": 3}}
+        entry = native["files"]["src/secretary/example.py"]
+        entry["functions"] = {f"f{index}": region for index in range(400)}
+        entry["classes"] = {"": region}
+        native_text = json.dumps(native)
+        bound = len(native_text) // 2
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            for suite in SUITES:
+                path = raw / f"ci-coverage-{suite}-{CANDIDATE_SHA}" / f"coverage.{suite}"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"coverage data")
+            output = root / "combined"
+
+            def write_native_json(command: list[str], _root: Path) -> None:
+                if "json" in command:
+                    Path(command[command.index("-o") + 1]).write_text(native_text, encoding="utf-8")
+
+            with (
+                patch("scripts.ci_test_shards._candidate_checkout"),
+                patch("scripts.ci_test_shards._validate_coverage_datum"),
+                patch("scripts.ci_test_shards._run_coverage", side_effect=write_native_json),
+                patch("scripts.ci_test_shards.MAX_COVERAGE_JSON_BYTES", bound),
+                redirect_stdout(StringIO()),
+            ):
+                self.assertEqual(aggregate_coverage(root, raw, output, CANDIDATE_SHA, None), 0)
+
+            combined_path = output / COVERAGE_JSON_NAME
+            published = json.loads(combined_path.read_text(encoding="utf-8"))
+            self.assertLessEqual(combined_path.stat().st_size, bound)
+
+        self.assertEqual(
+            published["coverage"]["files"]["src/secretary/example.py"],
+            self._coverage_payload()["files"]["src/secretary/example.py"],
+        )
+
     def test_coverage_aggregate_combines_one_named_datum_per_suite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -720,9 +758,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             root.mkdir()
             evidence_dir = Path(tmp) / "evidence"
             report_dir = evidence_dir / "integration-memory"
-            self.assertEqual(
-                self._run_generated_suite(root, "integration-memory", report_dir, source), 3
-            )
+            self.assertEqual(self._run_generated_suite(root, "integration-memory", report_dir, source), 3)
             evidence = _read_evidence(report_dir)
             summary = StringIO()
             with redirect_stdout(summary):
@@ -775,9 +811,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             root.mkdir()
             evidence_dir = Path(tmp) / "evidence"
             report_dir = evidence_dir / "integration-memory"
-            self.assertEqual(
-                self._run_generated_suite(root, "integration-memory", report_dir, source), 0
-            )
+            self.assertEqual(self._run_generated_suite(root, "integration-memory", report_dir, source), 0)
             evidence = _read_evidence(report_dir)
             self.assertEqual(self._aggregate_generated_suite(evidence_dir, "integration-memory"), 0)
 
