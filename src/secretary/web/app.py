@@ -86,6 +86,8 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/", "dashboard", "reads.system_snapshot", page=True),
     Route("GET", "/tasks/{ref}", "task_page", "reads.task_snapshot", page=True),
     Route("GET", "/sprints", "sprints_page", "sprint_reads.sprint_list", page=True),
+    Route("GET", "/projects", "projects_page", "reads.system_snapshot", page=True),
+    Route("GET", "/projects/{project}", "project_page", "reads.system_snapshot", page=True),
     Route("GET", "/sprints/new", "sprint_form", "sprint_reads.sprint_options", page=True),
     Route("POST", "/sprints", "sprint_create", "sprint_ops.sprint_create", body=FORM_BODY, page=True),
     Route("GET", "/sprints/{ref}", "sprint_page", "sprint_reads.sprint_state", page=True),
@@ -123,9 +125,7 @@ SPRINT_CLOSE_FIELDS = frozenset({"request_id", "reason", "closeout", "decisions"
 PAUSE_DRAIN_FIELDS = frozenset({"reason"})
 PAUSE_RESUME_FIELDS: frozenset[str] = frozenset()
 TASK_COMMENT_FIELDS = frozenset({"request_id", "body"})
-TASK_MOVE_FIELDS = frozenset(
-    {"request_id", "target", "reason", "sprint_override", "sprint_override_reason"}
-)
+TASK_MOVE_FIELDS = frozenset({"request_id", "target", "reason", "sprint_override", "sprint_override_reason"})
 
 #: How many commands the dashboard's feed and the commands page show per read.
 FEED_LIMIT = 25
@@ -180,6 +180,7 @@ class WebApp:
         pause_ops: Any,
         command_reads: Any,
         card_ops: Any,
+        provider_usage: Any | None = None,
     ) -> None:
         self.reads = reads
         self.ops = ops
@@ -189,6 +190,7 @@ class WebApp:
         self.pause_ops = pause_ops
         self.command_reads = command_reads
         self.card_ops = card_ops
+        self.provider_usage = provider_usage
 
     # -- the entry point -------------------------------------------------------------------
 
@@ -315,9 +317,7 @@ class WebApp:
 
     def _pause_drain(self, _params, _query, body) -> Response:
         _fields(body, PAUSE_DRAIN_FIELDS, "pause drain")
-        return _json(
-            200, self.pause_ops.pause_drain(actor=SPRINT_ACTOR, reason=_required(body, "reason"))
-        )
+        return _json(200, self.pause_ops.pause_drain(actor=SPRINT_ACTOR, reason=_required(body, "reason")))
 
     def _pause_resume(self, _params, _query, body) -> Response:
         _fields(body, PAUSE_RESUME_FIELDS, "pause resume")
@@ -360,9 +360,7 @@ class WebApp:
     # -- command routes --------------------------------------------------------------------
 
     def _commands(self, _params, query, _body) -> Response:
-        return _json(
-            200, self.command_reads.command_history(_one(query, "cursor"), limit=_limit(query))
-        )
+        return _json(200, self.command_reads.command_history(_one(query, "cursor"), limit=_limit(query)))
 
     def _command_request(self, params, _query, _body) -> Response:
         return _json(200, self.command_reads.command_request(params["request_id"]))
@@ -411,8 +409,8 @@ class WebApp:
         snapshot = self.reads.system_snapshot()
         pause = self._or_reason(self.pause_reads.pause_state)
         sprints = self._or_reason(lambda: self.sprint_reads.sprint_list(statuses=["open"]))
-        commands = self._or_reason(lambda: self.command_reads.command_history(limit=FEED_LIMIT))
-        return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, commands=commands))
+        limits = self._or_reason(self.provider_usage.usage_snapshot) if self.provider_usage else None
+        return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, limits=limits))
 
     def _task_page(self, params, query, _body) -> Response:
         ref = params["ref"]
@@ -422,20 +420,38 @@ class WebApp:
         return _html(200, pages.task(snapshot, runs=self._runs_or_reason(ref)))
 
     def _sprints_page(self, _params, query, _body) -> Response:
-        statuses = [value for value in query.get("status") or [] if value]
+        view = "archive" if _one(query, "view") == "archive" else "active"
+        statuses = ["open"] if view == "active" else ["closed", "stopped"]
         return _html(
             200,
             pages.sprints_page(
-                self.sprint_reads.sprint_list(statuses=statuses or None), statuses=statuses
+                self.sprint_reads.sprint_list(statuses=statuses),
+                view=view,
+                search=_one(query, "q") or "",
+                project=_one(query, "project") or "",
             ),
         )
+
+    def _projects_page(self, _params, _query, _body) -> Response:
+        return _html(200, pages.projects_page(self.reads.system_snapshot()))
+
+    def _project_page(self, params, _query, _body) -> Response:
+        snapshot = self.reads.system_snapshot()
+        projects = (snapshot.get("projects") or {}).get("items") or []
+        if not any(
+            str(item.get("id") or "") == params["project"] for item in projects if isinstance(item, dict)
+        ):
+            return _html(
+                404, pages.error(404, "project_not_found", f"project {params['project']} is not registered")
+            )
+        sprints = self._or_reason(lambda: self.sprint_reads.sprint_list(statuses=None))
+        markup = pages.project_page(snapshot, project_id=params["project"], sprints=sprints)
+        return _html(200, markup)
 
     def _commands_page(self, _params, query, _body) -> Response:
         return _html(
             200,
-            pages.commands(
-                self.command_reads.command_history(_one(query, "cursor"), limit=_limit(query))
-            ),
+            pages.commands(self.command_reads.command_history(_one(query, "cursor"), limit=_limit(query))),
         )
 
     def _or_reason(self, read: Callable[[], dict[str, Any]]) -> dict[str, Any]:
@@ -777,7 +793,10 @@ def _all(form: dict[str, Any], name: str) -> list[str]:
 #: emptinesses a person can see on their own screen; everything about whether a filled-in value is
 #: *admissible* belongs to the writer and is never re-decided here.
 _REQUIRED: tuple[tuple[str, str], ...] = (
-    ("request_id", "this submission carries no request id, so it cannot be repeated safely; open the form again"),
+    (
+        "request_id",
+        "this submission carries no request id, so it cannot be repeated safely; open the form again",
+    ),
     ("product", "choose the product this sprint serves"),
     ("goal", "say what this sprint is for; a sprint with no goal cannot be reviewed against one"),
     ("definition_of_done", "say what would make this sprint done"),

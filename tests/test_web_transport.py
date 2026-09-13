@@ -465,6 +465,8 @@ class RouteTableTests(TransportFixture):
         ("GET", "/"),
         ("GET", "/tasks/{ref}"),
         ("GET", "/sprints"),
+        ("GET", "/projects"),
+        ("GET", "/projects/{project}"),
         ("GET", "/sprints/new"),
         ("POST", "/sprints"),
         ("GET", "/sprints/{ref}"),
@@ -627,21 +629,11 @@ class CursorOverHttpTests(TransportFixture):
 
 
 class PageTests(TransportFixture):
-    def test_the_dashboard_tells_an_empty_list_from_a_source_that_refused(self) -> None:
-        # Nothing is running and nothing is on the board, and both sources answered.
+    def test_the_dashboard_omits_card_and_agent_lists(self) -> None:
         page = self.text_of(self.get("/"))
-        self.assertIn("no agent is running.", page)
-        self.assertIn("no card is in flight.", page)
-        self.assertNotIn("could not find out which agents are running", page)
-
-        # Now the dispatcher's state cannot be read. The page still renders, and says so.
-        (self.data_dir / "dispatcher" / "production-state.json").unlink()
-        broken = self.get("/")
-        self.assertEqual(broken.status, 200)
-        markup = self.text_of(broken)
-        self.assertIn("could not find out which agents are running", markup)
-        self.assertNotIn("no agent is running.", markup)
-        self.assertIn("unavailable", markup)
+        self.assertNotIn("no agent is running.", page)
+        self.assertNotIn("no card is in flight.", page)
+        self.assertIn("no sprint is open.", page)
 
     def test_an_unreadable_board_does_not_take_the_dashboard_down(self) -> None:
         class SilentBoard:
@@ -662,9 +654,9 @@ class PageTests(TransportFixture):
             ),
         )
         self.assertEqual(response.status, 200)
-        self.assertIn("could not find out which cards the pipeline is carrying", self.text_of(response))
+        self.assertIn("could not find out which sprints are open", self.text_of(response))
 
-    def test_the_dashboard_names_the_projects_the_cards_and_the_agents(self) -> None:
+    def test_the_dashboard_stays_compact_when_cards_and_agents_are_running(self) -> None:
         self._card()
         self._production(
             {
@@ -677,11 +669,9 @@ class PageTests(TransportFixture):
             }
         )
         markup = self.text_of(self.get("/"))
-        self.assertIn("secretary", markup)
-        self.assertIn('href="/tasks/secretary-run-1"', markup)
-        self.assertIn("worker", markup)
-        # Criterion 3's invariant reaches the page as a state, never as a window.
-        self.assertRegex(markup, r"state-(unknown|process_failed|running|source_unavailable|finished)")
+        self.assertNotIn('href="/tasks/secretary-run-1"', markup)
+        self.assertNotIn("In flight", markup)
+        self.assertIn("Open sprints", markup)
 
     def test_the_card_page_shows_state_events_output_and_result(self) -> None:
         task_id = self._card()
@@ -857,7 +847,9 @@ class PageTests(TransportFixture):
         the reason the layer gave.
         """
         task_id = self._card()
-        self.board.comments[task_id] = [{"date_creation": 1, "comment": "[report:done]\nwhat the worker said"}]
+        self.board.comments[task_id] = [
+            {"date_creation": 1, "comment": "[report:done]\nwhat the worker said"}
+        ]
         self._journal([self._event("secretary-run-1", 0)])
         runs = self.data_dir / "webproto" / "runs"
         runs.mkdir(parents=True, exist_ok=True)
@@ -890,7 +882,7 @@ class PageTests(TransportFixture):
     def test_a_page_escapes_what_the_board_gave_it(self) -> None:
         self._card(column=2)
         self.board.tasks[0]["title"] = "<script>alert(1)</script>"
-        markup = self.text_of(self.get("/"))
+        markup = self.text_of(self.get("/tasks/secretary-run-1"))
         self.assertNotIn("<script>alert(1)</script>", markup)
         self.assertIn("&lt;script&gt;", markup)
 
@@ -1029,9 +1021,11 @@ class LoopbackTests(TransportFixture):
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", 0)),
         ]
-        with mock.patch.object(socket, "getaddrinfo", return_value=mixed):
-            with self.assertRaises(LoopbackOnly):
-                check_bind("localhost")
+        with (
+            mock.patch.object(socket, "getaddrinfo", return_value=mixed),
+            self.assertRaises(LoopbackOnly),
+        ):
+            check_bind("localhost")
 
     def test_the_command_defaults_to_loopback_and_refuses_anything_else(self) -> None:
         from secretary.cli import build_parser
