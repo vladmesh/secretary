@@ -1,16 +1,10 @@
 """The initial revision against a real PostgreSQL, in a throwaway container.
 
-§10 of ``docs/BOARD_STORE.md`` is the reason this file exists: two earlier revisions of that
-document each shipped a statement PostgreSQL refuses, and both were found by executing them, not
-by reading them. The same applies to the schema's transcription into SQLAlchemy models, so the
-Alembic revision is executed here and the result is counted against the numbers the document's own
-run produced. Four revisions ship now, and §3.13 records the numbers of each: `0001_initial` built 22 tables,
-34 `CHECK`, 36 foreign-key, 22 primary-key and 12 unique constraints and 4 partial unique indexes;
-`0002_board_gaps`, which closes the gaps the first import of real data found, makes that 23, 37,
-38, 23, 13 and 4; `0003_task_type_optional` leaves every one of those six numbers alone; and
-`0007_card_transport_key` makes the head counts 24, 39, 40, 24, 17 and 4. The last table and
-the last primary key are Alembic's `alembic_version`, which since the owner's decision of
-2026-09-07 stands where §7.4's `schema_migrations` stood.
+Schema defects of the kind PostgreSQL refuses are found by executing the migration, not by reading
+it, so the Alembic revisions are executed here and the result is counted against the head catalogue
+in ``docs/BOARD_STORE.md`` §3.13: 24 tables, 39 `CHECK`, 40 foreign-key, 24 primary-key and 17
+unique constraints and 4 partial unique indexes. The last table and the last primary key are
+Alembic's `alembic_version` (§7.4).
 
 The counting is not the strongest thing here. `test_the_migrated_database_still_matches_the_models`
 asks Alembic to autogenerate a diff between the database this revision built and the models, and
@@ -102,7 +96,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         for module, why in (
-            ("psycopg", "the driver docs/BOARD_STORE.md §5.8 chose"),
+            ("psycopg", "the board store driver, docs/BOARD_STORE.md §5.8"),
             ("sqlalchemy", "the schema's source of truth since 2026-09-07"),
             ("alembic", "the migration tool since 2026-09-07"),
         ):

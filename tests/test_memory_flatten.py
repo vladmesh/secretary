@@ -1,6 +1,6 @@
 """Memory lives flat in the private repo: writer target and coexistence.
 
-Contract: docs/RECOVERY.md, "Layout" and "Writer".
+Contract: docs/RECOVERY.md, "Layout" and "Writers".
 """
 
 from __future__ import annotations

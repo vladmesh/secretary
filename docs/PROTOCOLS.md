@@ -12,34 +12,32 @@ python3 -P -m secretary doctor --offline --instance INSTANCE
 python3 -P -m secretary doctor --instance INSTANCE --host-fixture DIR
 ```
 
-`doctor` is always read-only. A normal run checks config, data and live inventory; `--offline` keeps
-only config and data; `--host-fixture` replaces live inventory with a deterministic fixture. A fixture
-cannot be combined with `--offline`. Exit code `0` means the check completed with no findings, `1`
-means findings (or warnings under `--strict`), `2` means invalid input or unreachable inventory.
-Without `--strict`, warnings alone stay green.
+`doctor` is read-only. A normal run checks config, data and live inventory; `--offline` keeps only
+config and data; `--host-fixture` replaces live inventory with a deterministic fixture and cannot be
+combined with `--offline`. Exit `0`: no findings; `1`: findings (or warnings under `--strict`); `2`:
+invalid input or unreachable inventory. Without `--strict`, warnings alone stay green.
 
-Live parity is derived from the same desired state as `reconcile`: each project checkout is checked
-against the normalised absolute path from its binding, including a path outside the projects root; the
-projects root itself is only needed to find unmanaged checkouts. An unreachable or unnormalisable
-expected checkout makes project inventory unavailable and yields code `2` rather than a missing-on-host
-finding. Unit files, session-manager registrations and the required enabled/active state of
-long-running services and timers are checked. A missing resource or an unhealthy required runtime state
-is a finding and code `1`; a oneshot service may be inactive. Units listed in `foreign_units` are
-excluded from managed parity and are not conflicts.
+Live parity uses the same desired state as `reconcile`: each project checkout is checked against the
+normalised absolute path from its binding, including a path outside the projects root; the projects
+root is only used to find unmanaged checkouts. An unreachable or unnormalisable expected checkout
+makes project inventory unavailable (exit `2`), not a missing-on-host finding. Unit files,
+session-manager registrations and the enabled/active state of long-running services and timers are
+checked; a missing resource or unhealthy required state is a finding (exit `1`); a oneshot service
+may be inactive. Units in `foreign_units` are excluded from managed parity.
 
 ```bash
 python3 -P -m secretary reconcile plan --instance INSTANCE [--host-fixture DIR]
 python3 -P -m secretary reconcile adopt --instance INSTANCE --logical-id ID [--yes]
 ```
 
-`reconcile plan` reads desired state and inventory, applies nothing and writes no manifest.
-`--offline` is deliberately rejected. Code `0` means a plan without conflicts, `1` means conflicts, `2`
-means invalid input or unreachable inventory.
+`reconcile plan` reads desired state and inventory, applies nothing and writes no manifest;
+`--offline` is rejected. Exit `0`: no conflicts; `1`: conflicts; `2`: invalid input or unreachable
+inventory.
 
-`reconcile adopt` touches one existing desired session-manager registration. It checks the name and the
-normalised repository path, shows a fingerprint, and stays a preview without `--yes`. A confirmed run
+`reconcile adopt` touches one existing desired session-manager registration. It checks the name and
+normalised repository path, shows a fingerprint, and is a preview without `--yes`. A confirmed run
 atomically adds a managed record without changing the session manager, systemd or worktrees. Unit
-resources are not adopted through this path.
+resources are not adopted this way.
 
 ## Tasks
 
@@ -51,708 +49,480 @@ Issues → ready → in_progress → validate → assessment → done
                          └───────────────────────────→ blocked
 ```
 
-The board columns are `Issues, Ready, In progress, Validate, Assessment, Blocked, Done`, in that
-order.
+Board columns, in order: `Issues, Ready, In progress, Validate, Assessment, Blocked, Done`.
 
-`assessment` is a durable wait for a decision, not for a machine. A substantive reviewer verdict,
-green or red, parks the card there: the reviewer is stopped, the worker of the round stays suspended
-with its workspace, and nothing merges or reworks until somebody decides. Mechanical gate outcomes
-never pass through it: CI, the stand run and the pre-merge re-check all resolve in Validate, so a
-card that is parked has passed everything a machine decides. The steward may move a card from
-Assessment to Blocked with a reason, its usual escalation when nobody comes back for a decision;
-workers and reviewers move nothing, there as everywhere else. A card left in Assessment past the
-steward's stale threshold is reported like any other stuck card.
+`assessment` is a durable wait for a decision. A substantive reviewer verdict, green or red, parks
+the card there: the reviewer is stopped, the round's worker stays suspended with its workspace, and
+nothing merges or reworks until a decision. Mechanical gate outcomes (CI, stand run, pre-merge
+re-check) resolve in Validate and never pass through Assessment. The steward may move a card from
+Assessment to Blocked with a reason; workers and reviewers move nothing. A card left in Assessment
+past the steward's stale threshold is reported like any other stuck card.
 
 ## Codex provider-internal fan-out policy
 
 Codex fan-out is a best-effort operational preference, not a lifecycle or security boundary. Every
 worker, reviewer and observer launch uses the strongest validated low-fan-out CLI configuration and
-receives an explicit instruction to perform its turn in the current head without spawning or
-delegating to children. A rare provider-internal child is acceptable product behaviour.
+an explicit instruction to do its turn in the current head without spawning or delegating to
+children. A rare provider-internal child is acceptable. The launch policy is practical suppression,
+not capability isolation.
 
-The capability evidence is in
-[Codex provider-internal fan-out capability evidence](evidence/codex-provider-fanout-2026-08-13.md).
-For the installed 0.147.0 CLI it records no provable native boundary: `--disable multi_agent` still
-produced a real collaboration call, while the globally configured v2 wait-disabled row had no
-collaboration call but no schema evidence. The artifact records strict-config rejection and
-ignored-role state as typed evidence, so neither a rejected candidate nor a silently ignored role
-can pass as isolation. Consequently the product describes its launch policy as practical
-suppression, never as capability isolation.
+`triggered_agents.runtime.codex_preflight` is the one pre-pane preparation boundary. Its v1 record
+keeps `schema_absent`, `schema_unknown`, `allowed`, `unknown` and `violation` as diagnostics; none of
+these fan-out states permits or refuses a pane. Workspace trust is the hard pre-pane requirement.
+Launches proceed with `schema_absent`, an unbound structured journal source where available, and the
+low-fan-out launch configuration.
 
-`triggered_agents.runtime.codex_preflight` remains the one pre-pane preparation boundary. Its v1
-record preserves `schema_absent`, `schema_unknown`, `allowed`, `unknown` and `violation` as honest
-diagnostics, but none of those fan-out states permits or refuses a pane. Workspace trust is the hard
-pre-pane requirement. Current 0.147.0 launches proceed with `schema_absent`, an unbound structured
-journal source where available, and the explicit low-fan-out launch configuration.
+Provider-edge collection is bound to the same run. It appends one of `collaboration_call`,
+`child_thread_edge`, `unknown_thread_edge` or `unparseable_provider_event`, with parent and child
+thread identities when present, tool name when known, SHA-256 raw-event digest, source
+sequence/location and capture time. A collaboration call or non-empty child edge is a violation. An
+unknown tool or relation, missing expected parent, malformed event or failed event write is unknown.
+These states are telemetry only: they never stop or replace the HeadRun, block a card or sprint,
+refuse prompt delivery, or affect continuation liveness. Telemetry loss is non-fatal. An observed
+edge is recorded and the run continues.
 
-Provider-edge collection is bound to that same run. It appends one
-of `collaboration_call`, `child_thread_edge`, `unknown_thread_edge` or
-`unparseable_provider_event`, with parent and child thread identities when present, tool name when
-known, SHA-256 raw-event digest, source sequence/location and capture time. A collaboration call or
-non-empty child edge is a violation. An unknown tool or relation, missing expected parent,
-malformed event or failed event write is unknown. These states are telemetry only: they never stop
-or replace the HeadRun, block a card or sprint, refuse prompt delivery, or affect continuation
-liveness. Telemetry loss is also non-fatal.
-
-The live canary measures practical suppression. The configured run should normally produce no child
-edge, but an observed edge is recorded and the run continues.
-
-The concrete Codex source is its structured session-event JSONL, not a pane read and not the
-tolerant workspace-level session liveness lookup. The pre-pane attestation stores the v1 source
-root and the set of journal paths that existed before the pane. The collector reads the journal's
-`session_meta` and `event_msg` envelopes, never pane text. The retained TUI collaboration shape is
+The Codex source is its structured session-event JSONL, not a pane read and not the workspace-level
+session liveness lookup. The pre-pane attestation stores the v1 source root and the set of journal
+paths that existed before the pane. The collector reads the journal's `session_meta` and `event_msg`
+envelopes, never pane text. The TUI collaboration shape is
 `event_msg.payload.item.type = CollabAgentToolCall`, with `tool`, `sender_thread_id` and
-`receiver_thread_ids`; the documented `collab_tool_call` shape is also normalized. An unfamiliar
-collaboration-shaped item is `unknown`, never ordinary output. Before the first prompt, exactly one
-newly created journal for that workspace must supply one session identity. An explicit parent
-`thread.started` is preferred; Codex 0.147 journals which omit it use the same selected
-`session_meta` id as the parent/root identity. That path and identity, plus durable first/root/last record anchors and a
-digest of the initially observed range, are written onto the same `HeadRun` with a zero cursor anchored
-to the first raw record. The one scanner then classifies the complete selected source range from that
-first record, through the selected root, and through every already-present tail line before delivery.
-Source selection does not exempt a session preamble or any pre-root record. Ordinary records may
-durably advance the cursor. A malformed, collaboration, child-edge, unknown-relation or cursor-write
-failure becomes typed diagnostic evidence where writable and never gates a prompt. Recovery reopens
-the same path where available and verifies its
-complete initial range, session id, workspace, parent identity and prior cursor before reading a later
-line. Missing, unreadable, changed or ambiguous source evidence is non-fatal `unknown` telemetry.
+`receiver_thread_ids`; the `collab_tool_call` shape is also normalized. An unfamiliar
+collaboration-shaped item is `unknown`, never ordinary output.
+
+Before the first prompt, exactly one newly created journal for that workspace must supply one
+session identity. An explicit parent `thread.started` is preferred; a journal that omits it uses the
+selected `session_meta` id as parent/root identity. That path and identity, durable first/root/last
+record anchors and a digest of the initially observed range are written onto the same `HeadRun` with
+a zero cursor anchored to the first raw record. The scanner classifies the complete selected range
+from that first record through the root and every already-present tail line before delivery;
+pre-root records are not exempt. Ordinary records may durably advance the cursor. A malformed,
+collaboration, child-edge, unknown-relation or cursor-write failure becomes typed diagnostic evidence
+where writable and never gates a prompt. Recovery reopens the same path where available and verifies
+its complete initial range, session id, workspace, parent identity and prior cursor before reading a
+later line. Missing, unreadable, changed or ambiguous source evidence is non-fatal `unknown`.
 
 ### Post-delivery HeadRun handoff
 
-There is one authoritative `HeadRun` after a launch delivery. The writer order is fixed: construct
-and validate the exact run; persist its handleless preflight identity in the role launch intent;
-create and bind the pane; persist the rebound handle and leaf; bind and persist the Codex source
-when applicable; capture that post-delivery run; then write routing, role state and clear the
-intent. `head_ops.spawn` returns the captured run, and worker, reviewer and observer launchers,
-intent confirmation and adoption consume that value rather than a pre-delivery local copy.
+There is one authoritative `HeadRun` after a launch delivery. Writer order: construct and validate
+the run; persist its handleless preflight identity in the role launch intent; create and bind the
+pane; persist the rebound handle and leaf; bind and persist the Codex source when applicable; capture
+that post-delivery run; then write routing, role state and clear the intent. `head_ops.spawn` returns
+the captured run, and worker, reviewer and observer launchers, intent confirmation and adoption
+consume that value, not a pre-delivery copy.
 
 The provider callback owns source facts. A later launcher or lifecycle writer may add only the pane
 address it proved and its own forward lifecycle evidence. It cannot remove a bound source, move a
 cursor backwards, replace a bound session/range, or replace run id, spec, workspace, task, role or
 pid identity. A conflicting, stale, malformed or foreign candidate is an identity fence: it is not
-adopted, resumed, signalled, stopped, replaced or attributed. The same merge is used by worker,
-reviewer and observer recovery, so a retained continuation and an observer watchdog read the exact
-source delivery committed. Source binding is observational for lifecycle purposes and never grants
-fan-out telemetry the authority to change that lifecycle.
+adopted, resumed, signalled, stopped, replaced or attributed. Worker, reviewer and observer recovery
+use the same merge. Source binding never gives fan-out telemetry lifecycle authority.
 
-Observer event delivery has one narrow exception to screen-advisory liveness: when a retained Codex
-observer HeadRun carries its v1 source descriptor, the dispatcher persists a versioned
-`wake_liveness` episode before it interprets `tui-idle`. The episode names that exact run id and
-HeadRun fingerprint, source fingerprint and opaque cursor, first observation, last admitted
-progress, no-progress rung and terminal outcome. A new admitted cursor keeps the same head and
-event batch and resets only that batch's no-progress ladder. Missing, malformed, incomplete and
-foreign source evidence is typed unavailable or identity-mismatch; it cannot refresh, reset or
-rebind an episode. A bound unavailable episode retains its binding and observation across dispatcher
-reload; without an admitted baseline, a later cursor cannot create one for that same batch. This is
-provider-progress liveness only. Fan-out events remain telemetry and
-have no stop, delivery, replacement, cleanup or blocking authority.
-At an identity-fenced observer replacement, the old episode is first terminalized and retained as
-audit evidence; the replacement launch intent then opens a fresh episode bound only to the new
-HeadRun while carrying the unchanged delivery id and event high-water mark.
+Observer event delivery: when a retained Codex observer HeadRun carries its v1 source descriptor, the
+dispatcher persists a versioned `wake_liveness` episode before it interprets `tui-idle`. The episode
+names the exact run id and HeadRun fingerprint, source fingerprint and opaque cursor, first
+observation, last admitted progress, no-progress rung and terminal outcome. A new admitted cursor
+keeps the same head and event batch and resets only that batch's no-progress ladder. Missing,
+malformed, incomplete and foreign source evidence is typed unavailable or identity-mismatch and
+cannot refresh, reset or rebind an episode. A bound unavailable episode keeps its binding and
+observation across dispatcher reload; without an admitted baseline a later cursor cannot create one
+for the same batch. This is provider-progress liveness only; fan-out events have no stop, delivery,
+replacement, cleanup or blocking authority. At an identity-fenced observer replacement the old
+episode is terminalized and retained as audit evidence; the replacement launch intent opens a fresh
+episode bound only to the new HeadRun, carrying the unchanged delivery id and event high-water mark.
 
 ## Receipt names
 
 The protocol names exactly two receipts:
 
-- A worker-local broad receipt is owned by the worker. It attests one local broad suite's result
-  for the current content, stays in that worker's workspace and never travels downstream.
-- A dispatcher-owned exact-SHA gate receipt is owned by the dispatcher. It attests completed
-  terminal gate checks for one exact SHA and lifecycle stage, then travels with the active card to
-  review and Assessment and into the release audit.
+- A **worker-local broad receipt**, owned by the worker. It attests one local broad suite's result for
+  the current content, stays in that worker's workspace and never travels downstream.
+- A **dispatcher-owned exact-SHA gate receipt**, owned by the dispatcher. It attests completed
+  terminal gate checks for one exact SHA and lifecycle stage, and travels with the active card to
+  review, Assessment and the release audit.
 
 ### Dispatcher-owned exact-SHA gate receipt
 
-Every real mechanical gate result materializes a dispatcher-owned exact-SHA gate receipt bound to
-one checkout and containing:
-`validated_sha`, `base_sha`, `gate_mode`, terminal `required_checks` (name, conclusion and URL),
-`completed_at`, and a `command_or_check_set_digest`. For a local gate this is the configured
-command's digest; for GitHub it is a stable required-check-set identity, not a workflow-definition
-or run digest.
-Both object IDs are full 40-character SHA-1 or 64-character SHA-256 values; abbreviations are not
-evidence. A local gate captures HEAD before and after its command and fails closed if the command
-moves it. Only `local` and `github` may carry receipts; `none` and noop are valid only without one,
-and an unknown mode is never accepted.
-The dispatcher persists the dispatcher-owned exact-SHA gate receipt with the active card, renders it
-into the reviewer's task document, replaces it with the fresh post-review receipt in the Assessment
-delivery, and writes the fresh final receipt into the release audit after the mandatory exact-SHA
-pre-merge re-check. That document is written outside the checkout, under the run artifacts and
-private to the installation, because a workspace's identity is the tracked diff and untracked files
-a receipt hashes; the pane
-receives only a bounded pointer to it. `TASK.md` is likewise a generated, git-ignored workspace
-handoff packet. These are operational projections, not repository documentation or candidate
-changes. A receipt is evidence, not permission to skip the pre-merge check or independent review.
+Every real mechanical gate result produces a receipt bound to one checkout with `validated_sha`,
+`base_sha`, `gate_mode`, terminal `required_checks` (name, conclusion, URL), `completed_at` and
+`command_or_check_set_digest` (local gate: the configured command's digest; GitHub: a stable
+required-check-set identity, not a workflow or run digest). Both object IDs are full 40-character
+SHA-1 or 64-character SHA-256; abbreviations are not evidence. A local gate captures HEAD before and
+after its command and fails closed if the command moves it. Only `local` and `github` carry
+receipts; `none` and noop are valid only without one; an unknown mode is never accepted.
+
+The dispatcher persists the receipt with the active card, renders it into the reviewer's task
+document, replaces it with the fresh post-review receipt in the Assessment delivery, and writes the
+fresh final receipt into the release audit after the mandatory exact-SHA pre-merge re-check. The
+reviewer document is written outside the checkout, under the installation-private run artifacts; the
+pane receives only a bounded pointer. `TASK.md` is a generated, git-ignored workspace handoff packet.
+Neither is repository documentation or a candidate change. A receipt does not permit skipping the
+pre-merge check or independent review.
 
 ## Seed and integration base
 
-A card names at most two git refs and they answer different questions. The **seed** is where its
-checkout starts: `workspace.seed_ref`, a ref name or an exact object id. The **integration base** is
-where its increment lands: `workspace.base_branch`, which is the pull request's base, the range the
-candidate history is read over, the `base_sha` of the exact-SHA gate receipt, and the branch the
-merge writes to. A card with no seed starts from its integration base, which is what every card did
-before the two were separated and what every ordinary card still does; a card with neither field
-starts from and lands on the project's default branch.
+A card names at most two git refs:
 
-They were one field until secretary-1541, and that is exactly the defect. A reslice successor
-legitimately needs its predecessor's unreleased content, so the successor was created with
-`base_branch` pointing at the predecessor's `pipeline/*` card branch. The checkout was then right
-and everything else was wrong: the gate opened the release pull request into that card branch, the
-project's `pull_request` workflow triggers only for its own long-lived branches, GitHub created
-**zero** check-runs, and an empty rollup is `PENDING`. The card answered `gate-pending` every tick
-until the six-hour pending ceiling, twice — `codegen-orchestrator-1197`
-(issue:a858c044707de792a10f) and `codegen-orchestrator-1236` (issue:2c82ba8f5d1c3bf5b8cc) — and both
-times a person, not the pipeline, was what noticed.
+- **seed** — `workspace.seed_ref`, a ref name or exact object id: where its checkout starts;
+- **integration base** — `workspace.base_branch`: the PR base, the range candidate history is read
+  over, the receipt's `base_sha`, and the branch the merge writes to.
 
-A successor therefore inherits its predecessor's **content**, never its branch as a target:
+A card with no seed starts from its integration base; a card with neither starts from and lands on
+the project's default branch.
+
+A successor inherits its predecessor's content, never its branch as a target:
 
     secretary task create --project <p> --type code --title '<t>' \
       --seed-ref <predecessor candidate sha> --supersedes <predecessor card ref>
 
-Provenance is required rather than encouraged: a seed without `--supersedes` is refused, because
-without it nobody can tell an intentional reslice from a stray ref, and `--supersedes` without a
-seed is refused for the same reason in reverse. A seed may be a branch or an exact object id; an
-object id is fetched with the whole remote and then required to be present, since a predecessor
-candidate that was never published is this card's own contract failing rather than a checkout to
-invent.
+A seed without `--supersedes` is refused, and `--supersedes` without a seed is refused. A seed may be
+a branch or an exact object id; an object id is fetched with the whole remote and must then be
+present.
 
-An integration base is **refused**, not normalised. The two were weighed and refusal won:
-normalising `base_branch: pipeline/x` into a seed would silently rewrite what somebody typed into
-something with a different meaning, and the case where that guess is wrong — a card that really did
-mean to integrate somewhere else — is the case where being wrong is most expensive. A refusal names
-the flag that does what the writer wanted.
+An integration base override must be a branch the project declares it integrates into: its binding's
+`default_branch` or one of the optional `integration_bases`. It is refused, never normalised, in two
+places:
 
-The rule is one sentence — an override must be a branch the project declares it integrates into,
-its binding's `default_branch` or one of the optional `integration_bases` beside it — but it is
-**enforced in two places, and which place is not a choice**:
+- **at admission**, by the board: a per-card `pipeline/*` branch (refused by name), an object id
+  (refused as "that is a seed"), or a value that is not a well-formed git ref;
+- **at run time**, by the dispatcher: a well-formed branch outside the declared set, refused with the
+  set listed (the board does not read bindings).
 
-  * **at admission**, by the board, are the refusals that need only the value: a per-card
-    `pipeline/*` branch, refused by name; an object id, refused as "that is a seed"; and any value
-    that is not a well-formed git ref. These cost one error message at the cheapest possible
-    moment, before a workspace, a head or a pull request exists;
-  * **at run time**, by the dispatcher, is "not a declared integration target". It cannot happen at
-    admission: the answer lives in the project's binding, and the board does not read bindings. So
-    the catalog resolves the card's project first, and only then can a well-formed branch outside
-    the declared set be refused with that set listed.
-
-Cards admitted before the split, and cards a restore reproduces, still carry whatever they hold —
-restore replays history rather than admitting new work. They too are refused by the runtime, the
-first time a tick reads them, on the same path as the declared-target refusal above: a task-class
-bring-up outcome with cause `base_branch_contract` — fast, typed, once, and never as an
-infrastructure failure the dispatcher would retry.
+Cards already carrying an invalid base (admitted earlier or reproduced by restore) are refused the
+first time a tick reads them, as a task-class bring-up outcome with cause `base_branch_contract` —
+once, and never as a retried infrastructure failure.
 
 ## The pull request a GitHub gate opens
 
-A `github` gate opens the pull request the `pull_request` workflow needs, and that pull request is
-also the only description of the change a later reader of `main` gets: its title lands in the merge
-commit. Both title and body are built deterministically from the board — no model is asked anything
-on this path. The title is `<ref>: <card title>`. The body names the card and the branch it merges
-into, quotes the card's statement, and carries the worker's own account of the round from its
-`report:done` comment; each source is bounded, redacted like any other board excerpt, and simply
-omitted when the gate runs before it exists. The gate re-runs on every later tick and once more
-before the merge, and each run brings an already-open pull request up to the better description it
-can now build.
+A `github` gate opens the pull request the `pull_request` workflow needs. Title and body are built
+deterministically from the board; no model is involved. The title is `<ref>: <card title>` (it lands
+in the merge commit). The body names the card and the target branch, quotes the card's statement and
+carries the worker's `report:done` account; each source is bounded, redacted like other board
+excerpts, and omitted when not yet present. Every later gate run, and the one before merge, brings
+an already-open PR up to the best description it can build.
 
-An already-open pull request is also checked against the card's integration base on every tick, and
-retargeted when it points anywhere else. That repair is topology, not code: the candidate is
-untouched, the card keeps its state, and the worker is not run again — it is the repair the PO made
-by hand on `codegen-orchestrator-1236`. The base edit alone would not be enough, because
-`pull_request` workflows subscribe to `opened`, `synchronize` and `reopened` and a base change is
-none of those, so the pull request is closed and reopened on the same head commit to produce an
-event the project's own CI answers. A backend that refuses either half is a determinate gate
-failure and says which half it refused.
+On every tick an open PR is checked against the card's integration base and retargeted when it
+points elsewhere. The candidate, card state and worker are untouched. Because `pull_request`
+workflows subscribe to `opened`, `synchronize` and `reopened` and a base change is none of those, the
+PR is closed and reopened on the same head commit. A backend that refuses either half is a
+determinate gate failure naming that half. Retargeting is not bounded by the authorship record below;
+its scope is: only the base, only for a head in the dispatcher's `pipeline/<ref>` namespace, only
+when the base is not the card's integration base, and the PR is left open. Title and body are never
+rewritten by this path.
 
-Retargeting is deliberately **not** bounded by the authorship record that bounds the description,
-and the asymmetry is worth stating because closing somebody's pull request is a heavier outward act
-than editing prose. Two different things are being protected. The description rule protects a
-person's *words*, which the gate can only claim when it can show it wrote them; there is no way to
-read authorship out of a body, so the safe answer is to leave it alone. The base protects the
-delivery topology of a branch the dispatcher owns outright: `pipeline/<ref>` is the namespace the
-dispatcher publishes into and nothing else may write to, a pull request from that head is a release
-pull request for that card by construction, and one pointing somewhere the project's CI cannot run
-is a card that will sit until a human notices — the failure this whole section exists to prevent. A
-gate that refused to repair it because it could not prove it opened it would reproduce the incident
-whenever the record was lost to a restore or a re-adoption. The scope is narrow on purpose: only the
-base is touched, only for a head in the dispatcher's own namespace, only when the base is not the
-card's integration base, and the pull request is left open at the end. A person's title and body are
-never rewritten by this path.
+Rewriting a description is bounded by the dispatcher's own record, never by PR text. When the gate
+opens or edits a PR and the backend accepts, it records on the card's dispatcher record which PR it
+wrote and a digest of the exact title and body sent. A later tick may rewrite that PR only while that
+record exists, names that PR, and still matches what GitHub returns. Everything else is left alone:
+a PR a person opened (including one with an empty body), one edited after the gate wrote it, one
+opened before the record existed, and any PR whose card lost its record to a restore, reinstallation
+or re-adoption. Text that already matches the record is not re-sent. Anyone who can edit the
+dispatcher's production state can claim any PR; repository write access does not confer that.
 
-What bounds that is the dispatcher's own record, never the pull request's text. When the gate
-opens or edits a pull request and the backend accepts the write, it records on the card's
-dispatcher record which pull request it wrote and a digest of the exact title and body it sent.
-A later tick may rewrite that pull request only while that record exists, names that pull request,
-and still describes what GitHub returns. Everything else is somebody's writing and is left alone
-for good: a pull request a person opened (an empty description is the ordinary case of this — a
-body is optional on GitHub, and emptiness is not evidence of authorship), one whose body or title
-was edited after the gate wrote it, one opened before this record existed, and every pull request
-belonging to a card whose record was lost to a restore, a reinstallation or a re-adoption from the
-board. A lost record costs a description that stops being refreshed; the opposite default would
-cost somebody their words. Text that already matches the record is not re-sent, so a repeat tick
-on unchanged data makes no call at all.
-
-Refreshing is scoped, by decision, to the pull requests the gate recorded writing. A pull request
-opened before this record existed keeps the fixed stub the old gate gave it — it is not read, not
-edited, and updated by hand if anyone cares. There is no migration, no recognition of the legacy
-stub text and no operator override, because each of those would infer authorship from something
-other than the gate's own accepted write.
-
-Authorship is deliberately not readable out of the pull request: a body is supplied by whoever
-edited it last, so no marker, digest or phrasing inside it can say who wrote the text around it.
-The boundary this does not defend is a forgery by someone who can already write to the
-installation's own state — anyone who can edit the dispatcher's production state can claim any
-pull request. Write access to the repository does not confer that.
-The description is not a condition on the code:
-a backend that refuses the update leaves the pull request as it is and the gate's verdict unchanged,
-while a pull request that cannot be opened at all is still a gate failure, because without it the
-project's CI never runs.
+The description is not a condition on the code: a refused update leaves the PR and the gate verdict
+unchanged. A PR that cannot be opened at all is a gate failure, because the project's CI never runs.
 
 ## Publishing the candidate branch
 
-The gate publishes the worker's branch itself, and that publication is a rewrite of a ref this
-dispatcher owns. A worker held between rounds rebases — after a reslice, after a red review, after
-the base moved — so its branch is routinely not a fast-forward of what the remote carries. A plain
-push fails that case before CI ever starts, and retrying cannot help: the same local branch against
-the same unmoved remote ref is rejected identically, so the card stands until a human force-pushes
-by hand, looking the whole time as if its code failed validation.
+The gate publishes the worker's branch itself. A worker held between rounds rebases, so its branch is
+routinely not a fast-forward of the remote.
 
-So the push is fenced rather than plain, and fenced rather than forced. It carries a lease on the
-object id this dispatcher last published to that branch, which is recorded on the card's dispatcher
-record the moment a publication succeeds. The lease is that durable record and not a read taken just
-before the push, because a read taken then authorises whatever a foreign push has already landed,
-which is the one thing the fence exists to refuse. A branch the dispatcher has never published seeds
-the lease from a read of the remote, and the push still fences that read against the moment it
-lands: a remote that moves in between is refused, not overwritten.
+The push carries a lease on the object id this dispatcher last published to that branch, recorded on
+the card's dispatcher record when a publication succeeds (not a read taken just before the push). A
+branch never published seeds the lease from a read of the remote, and the push still fences that
+read: a remote that moves in between is refused.
 
-A refusal the lease produces is a red gate of its own kind, not a rejected non-fast-forward and not
-a red CI run. Nothing was published, so no check ran and there is nothing in the code for the worker
-to repair; the card says exactly that, and carries both object ids — the one the dispatcher expected
-and the one it observed. It is classified `publication` on the gate result and on the record, which
-keeps it out of the infrastructure class the dispatcher reruns by itself. The remote's answer is
-still an answer: a lease refusal is git's own push report from the server, so it is never mistaken
-for a backend that went silent, and a transport failure on the same push is never mistaken for a
+A lease refusal is its own red gate class, `publication`, on the gate result and the record. Nothing
+was published, no check ran, and the card carries both object ids (expected and observed). It is not
+`infrastructure` and is not rerun by the dispatcher. A lease refusal is git's push report from the
+server, so it is never mistaken for a silent backend, and a transport failure is never mistaken for a
 refusal.
 
-Two observations are not divergence and are re-leased once instead of refused: a remote already
-contained in the candidate's history loses nothing when it is published over. That is the
-publication whose record write was lost, and the human repair that force-pushed this very head. The
-re-lease is fenced on the value just observed, so a remote moving again is still refused, and it
-happens at most once per gate run.
+A remote already contained in the candidate's history is re-leased once instead of refused (a lost
+record write, or a human force-push of this head). The re-lease is fenced on the value just observed
+and happens at most once per gate run.
 
-Nothing bounds a repeated refusal inside the gate, because nothing the worker does moves a ref
-somebody else owns. The ordinary stale-done bound is what ends it: the refusal returns the card to
-its worker, an unchanged done report on the same rejected SHA is bounced once with instructions, and
-the next one moves the card to Blocked for a human. The gate never force-pushes past the refusal on
-its own.
+Repeated refusals are ended by the ordinary stale-done bound: the refusal returns the card to its
+worker, an unchanged done report on the same rejected SHA is bounced once, and the next one moves the
+card to Blocked. The gate never force-pushes past a refusal.
 
 ## A rollup nothing can fill
 
-Zero checks on a candidate has two causes that look identical in the rollup: they have not appeared
-yet, or nothing can ever post them. The second one used to be indistinguishable from the first and
-therefore cost the whole `GATE_PENDING_STALL_SECONDS` ceiling before anybody learned anything.
+When the check rollup is empty, the gate reads the candidate's `.github/workflows` and asks whether
+any declares a pull-request trigger admitting this base, honouring `branches`, `branches-ignore` and
+GitHub's glob (`*` stops at `/`). Only a definite negative changes the verdict: workflow files exist,
+every one parses, and none admits the base. Then the verdict is red, class `topology`, reason
+`ci-trigger-impossible`, naming the base and the files read. A missing directory, an unparsable file,
+or any admitting workflow leaves the verdict ordinary pending.
 
-So when the rollup is empty, the gate reads the candidate's own `.github/workflows` — which is where
-GitHub resolves a `pull_request` workflow from — and asks whether any of them declares a
-pull-request trigger admitting this base, honouring `branches`, `branches-ignore` and GitHub's glob
-where `*` stops at a `/`. Only a positive answer changes anything: workflow files exist, every one
-of them parses, and not one admits the base. Then the verdict is a red of class `topology` with
-reason `ci-trigger-impossible`, naming the base and the files that were read. A missing directory, a
-file that will not parse, or one workflow that does admit the base all leave the verdict where it
-was — ordinary pending — because a project may also be checked by something that is not Actions.
-
-A `topology` red is the one red class that does not go back to the worker. Nothing was validated and
-no round of rework could change that, so the card goes to Blocked with the cause on it, for a person
-to repair the card's integration base or the project's triggers. It is kept apart from `publication`
-(the branch could not be published) and from `infrastructure` (the only class the dispatcher reruns
-by itself).
+A `topology` red does not go back to the worker: the card goes to Blocked with the cause, for a
+person to repair the integration base or the project's triggers. It is distinct from `publication`
+and from `infrastructure` (the only class the dispatcher reruns itself).
 
 ## Candidate history
 
-Before a gate publishes or validates anything, the dispatcher reads the candidate's own commit
-messages over `base..HEAD` and rejects forbidden AI attribution: a `Co-Authored-By:` trailer
-belonging to a coding agent. The check is deterministic and dispatcher-owned, it covers the common
-agents whatever runtime wrote the commit, and it leaves ordinary human co-authorship alone. It runs
-in every validation mode — `none` opts out of mechanical validation, not out of this boundary,
-because a project without a gate merges its candidate just the same — so a violation is a red gate
-with the commits named and a local repair spelled out: `git commit --amend` or `git rebase -i` in
-the worker's own checkout, then report done again. Nothing is rewritten and nothing is force-pushed
-for the worker, then or later. Every worker launch packet carries the same instruction, independent
-of model family, and the reviewer reads the commit messages again as defence in depth.
+Before a gate publishes or validates anything, the dispatcher reads the candidate's commit messages
+over `base..HEAD` and rejects forbidden AI attribution: a `Co-Authored-By:` trailer belonging to a
+coding agent. The check is deterministic, covers the common agents whatever runtime wrote the commit,
+and leaves human co-authorship alone. It runs in every validation mode, `none` included. A violation
+is a red gate naming the commits, with the local repair (`git commit --amend` or `git rebase -i` in
+the worker's checkout, then report done again). Nothing is rewritten or force-pushed for the worker.
+Every worker launch packet carries the same instruction, and the reviewer re-reads commit messages.
 
-A commit message is untrusted input written by the head under review. Two rules follow. Messages are
-never framed against each other on a delimiter a message could contain: the object ids are listed
-first from `%H`, which message text cannot influence, a listing that is not object ids is refused,
-and each message is then read on its own. An addressed co-author is rejected only when its complete,
-normalized name/address pair is in the narrow registered-agent list: neither a vendor domain nor an
-ambiguous local part is evidence by itself, because either can belong to a human. A trailer with no
-address at all is compared against the agents' exact full names. Anything the check
-cannot read — a missing workspace, a base that resolves nowhere, an unreadable message — fails
-closed: the gate cannot say what it would publish, so the card stops rather than the boundary being
-skipped.
+Commit messages are untrusted input. Object ids are listed first from `%H`; a listing that is not
+object ids is refused; each message is then read on its own. An addressed co-author is rejected only
+when its complete normalized name/address pair is in the registered-agent list; a vendor domain or
+ambiguous local part alone is not evidence. A trailer with no address is compared against the
+agents' exact full names. Anything unreadable — missing workspace, unresolvable base, unreadable
+message — fails closed and stops the card.
 
-A gate that could not reach its backend gave no verdict, and the dispatcher does not read that
-absence as a red one. A timeout, a TLS or DNS failure, a dropped connection or a 5xx served by the
-backend itself leaves the card exactly where it is — no board move, no head stopped, no verdict or
-decision spent — and the same question is asked again on the next tick. Every retry is one
-`gate-transport-retry` action in the tick output, carrying the attempt number and the transport
-error. The retries are bounded (`SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS`, five by default) and count
-consecutive silence only: any answer, green, red or pending, starts the budget over. Once the budget
-is spent the card moves to Blocked with a reason that names the transport and the last error, so an
-operator reads it as a network failure and not as a judgement on the branch. This holds on every
-path where the dispatcher asks the gate backend: the pre-review gate, the pre-merge re-check under a
-green verdict, and the release re-check of a parked decision. An answer that did arrive keeps
-deciding as before — a failed required check is still a red gate and still returns the card to its
-worker.
+### Gate transport failures
 
-"No answer came back" is decided where the question is asked, not afterwards from the wording of an
-error. Every remote question the gate puts — the base fetch, the remote branch read, the branch
-publish, the open-PR probe, the PR create and retarget, the repository name, the check rollup, the
-failed-job log — goes through one call helper, and only that helper raises the transport failure. A
-step that talks to nothing therefore cannot produce one: a local validation command that hangs past
-its own ceiling is a determinate answer about the branch and blocks the card immediately with that
-reason, however its message reads. Each call carries the tool's own output into that decision, so a
-probe never converts silence into a positive fact about the backend's state — an unanswered open-PR
-probe is not "there is no PR". Where a failed remote command still has to be sorted into answered
-and unanswered, that judgement lives inside the helper, and it recognises the answer rather than
-the failure: an HTTP status the tool quotes (unless it is a 5xx, which is the backend failing to
-serve one), a GraphQL error or a response body it parsed, or git's push report from the remote.
-Anything else a backend call prints — a transport message, an empty stderr, a wording nobody has
-captured yet — is silence, and the card waits. The default runs that way round on purpose: a wrong
-"no answer" costs a few retries and a Blocked reason that quotes the tool, while a wrong "answer"
-costs an immediate Blocked on a moment of bad network, which is the failure this contract exists to
-prevent.
+A gate that could not reach its backend gave no verdict. A timeout, TLS or DNS failure, dropped
+connection or backend-served 5xx leaves the card where it is — no board move, no head stopped, no
+verdict or decision spent — and the question is asked again next tick. Each retry is one
+`gate-transport-retry` action carrying the attempt number and error. Retries are bounded by
+`SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS` (default 5) and count consecutive silence only; any answer
+(green, red, pending) resets the budget. When spent, the card moves to Blocked with a reason naming
+the transport and last error. This applies to the pre-review gate, the pre-merge re-check and the
+release re-check of a parked decision. An answer that did arrive decides as usual.
 
-A reviewer that cannot be started is a failure of the review stage, not a verdict on the candidate.
-A split pane that will not open, an unavailable reviewer resource, or an unwritable launch intent:
-the card holds its green dispatcher-owned exact-SHA gate receipt, its candidate SHA, its report
-round and request ids and its suspended worker session, and the next tick launches the reviewer again
-against that same evidence. It does not move through Ready, does not launch a worker, does not re-run
-the mechanical gate or any broad validation,
-does not regenerate the candidate, and charges the sprint no budget event; each attempt is one
-`review-infrastructure-retry` action naming the held candidate. The retries are bounded
-(`SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS`, ten by default) and count consecutive failures only. Once
-the ceiling is reached the card moves to Blocked with a reason that names the infrastructure, the
-untouched receipt and the candidate SHA, so recovery is another reviewer launch rather than a new
-worker round over the same code. An inventory that will not answer is
-different: it cannot prove whether a reviewer is already live, so it preserves launch ambiguity
-and retries the inventory without launching another head or consuming the headless-failure ceiling. Those
-retries and the block that ends them are classified by the one bring-up vocabulary
-[below](#bring-up-outcomes): the retry ceiling is spent before the outcome is written, and spending
-it produces an infrastructure outcome over the held candidate, never a verdict about the card.
+"No answer" is decided where the question is asked. Every remote gate call — base fetch, remote
+branch read, branch publish, open-PR probe, PR create and retarget, repository name, check rollup,
+failed-job log — goes through one helper, and only that helper raises the transport failure. A local
+validation command that hangs past its ceiling is a determinate answer and blocks the card
+immediately. A probe never turns silence into a fact (an unanswered open-PR probe is not "no PR").
+Inside the helper, an answer is recognised positively: an HTTP status the tool quotes (except a 5xx),
+a GraphQL error or parsed response body, or git's push report from the remote. Anything else is
+silence and the card waits.
 
-When a reviewer pane and heartbeat already exist but its document nudge receives typed `busy`
-evidence before any send, that is a pending delivery rather than a started review. The launch
-intent retains the exact reviewer HeadRun, handle/leaf binding and workspace with a capped durable
-retry schedule. Until a later nudge confirms delivery, recovery does not freeze or signal the
-worker, write reviewer routing or lifecycle attribution, clear the intent, or replace the pane.
-Successful confirmation crosses the ordinary launch adoption boundary once; `unavailable`, malformed
-and stale-handle evidence remain separately typed and use their existing conservative recovery paths.
+### Review infrastructure retries
+
+A reviewer that cannot be started (split pane will not open, reviewer resource unavailable, launch
+intent unwritable) is a review-stage failure, not a verdict. The card keeps its green gate receipt,
+candidate SHA, report round, request ids and suspended worker session, and the next tick relaunches
+the reviewer against the same evidence: no move through Ready, no worker launch, no gate or broad
+re-run, no regenerated candidate, no budget event. Each attempt is one `review-infrastructure-retry`
+action naming the held candidate. Retries are bounded by `SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS`
+(default 10), consecutive failures only. At the ceiling the card moves to Blocked with a reason naming
+the infrastructure, the untouched receipt and the candidate SHA. An inventory that will not answer
+cannot prove whether a reviewer is live, so it keeps launch ambiguity and retries the inventory
+without launching another head or consuming the headless-failure ceiling. Those retries and the
+resulting block use the [bring-up](#bring-up-outcomes) vocabulary: the ceiling is spent before the
+outcome is written and yields an infrastructure outcome over the held candidate.
+
+When a reviewer pane and heartbeat exist but the document nudge gets typed `busy` evidence before any
+send, delivery is pending, not started. The launch intent keeps the exact reviewer HeadRun,
+handle/leaf binding and workspace with a capped durable retry schedule. Until a later nudge confirms
+delivery, recovery does not freeze or signal the worker, write reviewer routing or lifecycle
+attribution, clear the intent, or replace the pane. Confirmation crosses the ordinary launch adoption
+boundary once; `unavailable`, malformed and stale-handle evidence keep their own conservative paths.
 
 ### A pane that is ready is not a pane that is sendable
 
-Orca answers `tui-idle` from the pane's agent status and, failing that, from a quiescence window.
-A TUI holding its own update dialog, or still starting its MCP servers, is perfectly quiescent: it
-answers `tui-idle` satisfied, `terminal send` answers `accepted` with a byte count, and nothing
-reaches a provider. So readiness and sendability are two questions, and the delivery boundary asks
-both. It classifies the screen into a **pre-delivery state**, typed and named, distinct from `busy`
-and from `blocked`.
+Orca answers `tui-idle` from the pane's agent status or a quiescence window. A TUI holding an update
+dialog or still starting MCP servers is quiescent: `tui-idle` is satisfied, `terminal send` answers
+`accepted`, and nothing reaches the provider. The delivery boundary therefore classifies the screen
+into a typed **pre-delivery state**, distinct from `busy` and `blocked`.
 
-What that classification can answer *before* a byte is written is bounded by what the backend
-paints, and the honest answer is narrower than it looks. Measured against real Codex and real Orca
-on this host across a startup window held open on purpose: Orca answers `tui-idle` satisfied with
-no `blockedReason` throughout, its output cursor does not advance at all, and the startup status is
-painted as a character-by-character redraw whose fragments spell no phrase. So **nothing this
-backend offers before a write asserts that a composer is live and idle.** The pre-write step is
-therefore about dialogs and only dialogs; everything else is recorded as
-`sendability=unestablished`, which is a statement about the boundary's knowledge and never a proof
-of readiness. `starting` is real and stays named, but it is observed *after* the write, when the
-pointer is in the composer and Codex paints `tab to queue message` there. The guarantee rests on
-the receipt, not on a pre-write wait.
+Nothing the backend offers before a write asserts a live idle composer. The pre-write step checks for
+dialogs only; otherwise it records `sendability=unestablished`, which is not a proof of readiness.
+The guarantee rests on the delivery receipt.
 
-That classification is asked of the **live screen** and never of the whole answer `terminal read`
-returns. Orca retains a pane's raw output rather than a rendered screen, and a TUI redraws in
-place, so every frame it ever painted is still in that text: a started, idle Codex pane keeps
-`Starting MCP servers` in its tail with its output cursor no longer moving, and a settled update
-modal keeps its own words there too. The live screen is what follows the last prompt marker the TUI
-paints, or the bounded end of the tail when nothing is painting a composer — which is what a dialog
-owning the terminal looks like. Reading the tail as a screen is how a boundary built to stop a
-false delivery instead refuses every real one.
+Classification reads the **live screen**, never the whole `terminal read` output. Orca retains raw
+output and a TUI redraws in place, so old frames (e.g. `Starting MCP servers`, a settled modal) stay
+in the tail. The live screen is what follows the last prompt marker the TUI paints, or the bounded end
+of the tail when no composer is painted (a dialog owning the terminal).
 
+- `update-modal` — Codex's `Update available! … 1. Update now 2. Skip 3. Skip until next version`.
+  Preflight prevents it: before the pane exists, the runtime `CODEX_HOME`'s `version.json` gets
+  `dismissed_version` set to the version found, the same thing "Skip until next version" writes. If
+  one appears anyway it is answered on screen with that choice, a bounded number of times, and
+  readiness is proved again before the pointer is written. No delivery ever upgrades. The keystroke
+  requires both that the screen is the known modal and that the modal is the frame painted now; a
+  modal recognised only in history is a refusal with nothing typed.
+- `starting` — `Starting MCP servers`, and the composer that queues rather than submits (`tab to
+  queue message`). A post-write observation, recorded in `pre_delivery_after`; not a pre-write gate.
+- `unknown-dialog` — anything else dialog-shaped: an Orca `blockedReason`, or Codex's `Press enter to
+  continue` footer under an unmatched screen. Fails closed: no keystroke, a typed refusal, a bounded
+  caller retry, and an operator-visible infrastructure outcome at the ceiling. Never a second head.
 
-  * `update-modal` — Codex's own `Update available! … 1. Update now 2. Skip 3. Skip until next
-    version`. Preferably it never appears: the runtime `CODEX_HOME`'s `version.json` has
-    `dismissed_version` set to the version the check found at preflight, before the pane exists,
-    which is exactly what codex writes when a person picks "Skip until next version" — the same
-    place and the same shape as the directory-trust answer. If one appears anyway it is answered on
-    screen with that one documented choice, a bounded number of times, and readiness is proved
-    again before the pointer is written. **Upgrading is a separate, explicit action; no delivery
-    ever performs one to get past a dialog**, so the other two choices are not reachable from here.
-    Two conditions authorise that keystroke and they are asked separately: the screen is the modal
-    this code knows, *and* that dialog is the frame the pane is painting now. The second is not a
-    consequence of the first and never inherited by a pattern added later — a modal recognised in
-    history is a refusal with nothing typed, because a `3` at a live composer is not a dismissal
-    but a bare prompt submitted to the provider;
-  * `starting` — `Starting MCP servers`, and the composer that queues rather than submits (`tab to
-    queue message`). A **post-write** observation: it is recorded in `pre_delivery_after` and names
-    what was holding a pointer the composer did not accept. It is deliberately not a pre-write
-    gate, because the pane paints nothing before the write that the code can read;
-  * `unknown-dialog` — anything else that is dialog-shaped: Orca naming a `blockedReason`, or
-    Codex's `Press enter to continue` footer under a screen none of the known patterns match. It
-    **fails closed**. No keystroke is sent at a screen the code does not recognise; the refusal is
-    typed, the caller's retry is bounded, and the ceiling produces an operator-visible
-    infrastructure outcome. It never silently opens a second head beside the first.
-
-The evidence records which state was observed, and it keeps three facts apart that used to be one
-"delivered" bit: **modal resolution** (`modal_resolution`, `modal_answers`, `pre_delivery_*`),
-**delivery receipt** (`delivery_receipt`, from `payload_left_in_composer` and `turn_confirmed`) and
-**provider binding** (`provider_bound`, the caller's own criterion — what the provider wrote down
-about the turn), with `sendability` beside them saying what could be established before the write.
-A head a dialog will not release inside the bounded window is a typed refusal, never a pane that
-keeps being typed at.
+The evidence keeps apart **modal resolution** (`modal_resolution`, `modal_answers`,
+`pre_delivery_*`), **delivery receipt** (`delivery_receipt`, from `payload_left_in_composer` and
+`turn_confirmed`) and **provider binding** (`provider_bound`, the caller's criterion), with
+`sendability` beside them. A head a dialog will not release inside the bounded window is a typed
+refusal.
 
 ### A live head is not a delivered pointer
 
-`delivery_receipt` is the one predicate the launch, the recovery and the adoption all ask, so they
-cannot answer it differently. It reads the delivery boundary's own evidence and nothing else: a
-live pid, a writable pane and Orca's `accepted`/`bytesWritten` are exactly what used to be mistaken
-for delivery and are never consulted. Positive `payload_left_in_composer` evidence is a determinate
-`refused`, not an ambiguity, and it outranks a provider turn — a journal can gain a user record
-from another turn while this pointer is still sitting in the composer.
+`delivery_receipt` is the one predicate launch, recovery and adoption all ask. It reads only the
+delivery boundary's evidence; a live pid, a writable pane and Orca's `accepted`/`bytesWritten` are
+never consulted. Positive `payload_left_in_composer` evidence is a determinate `refused` and outranks
+a provider turn.
 
-A bring-up that aborted with its pane already open carries that receipt onto its launch intent.
-Adoption then refuses an undelivered launch outright: no claim, no routing event, no
-`review_starting`, no `reviewing`, no `waiting-review-verdict`, no worker freeze, and the intent is
-**not spent** — the head stays recoverable and its pointer stays owed. The refusal is bounded by
-`SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` (five). Inside it, a reviewer re-delivers the *same*
-immutable pointer at the same path over the exact run the launch recorded — never a rebuilt or
-duplicated one, and the document body never enters the terminal — so a tick that died between the
-modal, the write and the confirmation resumes one delivery transaction rather than starting a
-second. Past the ceiling the head is stopped through its own intent first and the ordinary path
-launches again, which is why replacement never puts a second head beside the first; a stop the host
-will not confirm keeps the intent instead.
+A bring-up that aborted with its pane open carries that receipt onto its launch intent. Adoption
+refuses an undelivered launch: no claim, no routing event, no `review_starting`, no `reviewing`, no
+`waiting-review-verdict`, no worker freeze, and the intent is **not spent**. The refusal is bounded by
+`SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` (default 5). Inside it, a reviewer re-delivers the *same*
+immutable pointer at the same path over the exact recorded run (the document body never enters the
+terminal), so an interrupted tick resumes one delivery transaction. Past the ceiling the head is
+stopped through its own intent and the ordinary path launches again; a stop the host will not confirm
+keeps the intent.
 
-This is about delivery and adoption only. It does not change the vitality watchdog's rungs or the
-`healthy_quiet` ceiling for an idle Codex shell, and the headless Blocked→In-progress adopt with no
-worker identity is settled by the recovery in the next section. The two share the word and not the
-code, and they compose by **ordering**: the delivery-evidence refusal above runs first inside
-`_adopt_launch_intent` and returns before any identity question is asked, because a head that never
-took its pointer is not this card's head however completely it can be identified. The
-missing-identity path is `_adopt`, which rebuilds a record from the board and has no launch intent
-and no delivery evidence to consult at all — so it cannot ask "was this head ever delivered to",
-and it does not pretend to.
+This covers delivery and adoption only; it does not change watchdog rungs or the `healthy_quiet`
+ceiling. Ordering with the headless recovery below: the delivery-evidence refusal runs first inside
+`_adopt_launch_intent` and returns before any identity question. The missing-identity path is
+`_adopt`, which has no launch intent or delivery evidence to consult.
 
 ### A card in an active state with no worker
 
-A card can arrive in an active execution column with nothing running: a raw board move out of
-Blocked back into In progress, or a bring-up whose tick died before it bound anything. `_adopt`
-rebuilds a record from the board, and unless the worker's own pid heartbeat is there to bind, that
-record names no head — no HeadRun, no pane, no heartbeat path, no launch intent. Such a record used
-to settle `adopted` with an empty handle and the tick answered `waiting-worker-report`: a wait for a
-report from a worker that had been stopped, while the board showed work in progress.
+A card can be in an active column with nothing running: a raw board move out of Blocked into In
+progress, or a bring-up whose tick died before binding anything. `_adopt` rebuilds a record from the
+board; unless the worker's own pid heartbeat can be bound, that record names no head.
 
-The tick now settles it before any wait. Exactly one of three things is durably established:
+The tick settles it before any wait, establishing exactly one of:
 
-* **a verified live worker identity** — `_adopt` binds the worker's own heartbeat only after its
-  self-described run, role and card binding are promoted into a HeadRun and re-checked;
-* **a replacement launch** — the launch intent is written to disk first, bound to the retained
-  checkout and its exact candidate, and the head is brought up under it. The checkout is bound and
-  described before anything is launched into it: path, branch, clean/dirty tree and exact SHA.
-  Nothing is recreated from base, re-seeded or reset, and no other workspace is substituted;
-* **a refusal** — the card goes back to Blocked with a named recovery error on the card itself:
-  `workspace_missing`, `workspace_unbindable`, `workspace_unreadable`, `candidate_unknown` or
-  `round_already_answered`.
+- **a verified live worker identity** — `_adopt` binds the worker heartbeat only after its run, role
+  and card binding are promoted into a HeadRun and re-checked;
+- **a replacement launch** — the launch intent is written first, bound to the retained checkout and
+  its exact candidate (path, branch, clean/dirty tree, exact SHA), and the head is brought up under
+  it. Nothing is recreated from base, re-seeded or reset, and no other workspace is substituted;
+- **a refusal** — the card goes back to Blocked with a named recovery error: `workspace_missing`,
+  `workspace_unbindable`, `workspace_unreadable`, `candidate_unknown` or `round_already_answered`.
 
-`round_already_answered` is the field case (`issue:59ac13b5cafdf93f61b6`, card
-codegen-orchestrator-1232): the retained checkout holds the document of a round the board has
-already consumed a worker report for. There is then no worker work left to do, and the right
-continuation is a dispatcher-owned exact-SHA validation of the unchanged candidate
-(`issue:3a0b263fd519d7d0f62e`), which is a different path. This one refuses and names the situation
-rather than inventing a worker round for it. The evidence is the card's own consumed report markers
-and the checkout's TASK.md round record — an adopted record has no launch intent and no delivery
-receipt, so no receipt is invented for it either.
+`round_already_answered`: the retained checkout holds the document of a round the board has already
+consumed a worker report for (evidence: the card's consumed report markers and the checkout's TASK.md
+round record). No worker round is invented and no receipt is invented.
 
-A live heartbeat at this card's worker pid path that cannot be bound to it is neither: it is
-reported `orphan-worker-heartbeat-unbound` and nothing is launched beside it and nothing is
-signalled, the same refusal the claim path makes.
+A live heartbeat at the card's worker pid path that cannot be bound is reported
+`orphan-worker-heartbeat-unbound`; nothing is launched beside it and nothing is signalled.
 
-Every episode gets its own answer. A card with no dispatcher record is ticked under the constant
-`production_adopt_attempt_id(ref)` — one string per card, forever — so an attempt-scoped request id
-would make the second return of the same card replay the first refusal's committed event: no board
-move, no comment, and a tick still reporting a transition. The refusal and the relaunch comment are
-therefore keyed on the episode as well, by the stamp written when the episode was first observed
-plus the card's comment count at that moment. Within one episode that stamp does not move, so a tick
-that died between the board move and its own bookkeeping replays onto the same id and moves nothing
-twice; across episodes it always does, so returning the same card a second time gets a second
-refusal on the card.
+A card with no dispatcher record is ticked under the constant `production_adopt_attempt_id(ref)`, so
+the refusal and relaunch comment are keyed on the episode too: the stamp written when the episode was
+first observed plus the card's comment count at that moment. Within one episode a retried tick
+replays onto the same id; a second episode on the same card gets a second refusal.
 
-While such a card is unresolved, `secretary status` shows it as degraded rather than active. The
-attempt row carries `headless` — record state, that no handle and no heartbeat are known, how long
-it has been so, the retained workspace, branch, dirty flag and candidate SHA — and the sprint
-summary lists the same cards under `degraded_cards`. An In progress column on its own is not
-evidence of active work.
+While unresolved, `secretary status` shows the card as degraded. The attempt row carries `headless`
+(record state, that no handle and heartbeat are known, since when, retained workspace, branch, dirty
+flag, candidate SHA), and the sprint summary lists it under `degraded_cards`.
 
 ### Broad-check handling
 
-Workers use focused checks while developing and run no more than one local broad suite for a report
-generation/unchanged SHA unless they state why it was rerun. That broad run goes through
-`secretary check broad`, which streams the combined output, returns the check's own exit status and
-writes a worker-local broad receipt under the ignored `state/checks/` path: command and check-set
-digest, cwd and imported project provenance, start/end/duration, exit code, parsed verdict and
-counts where the runner prints them (scanned off the stream, so cleanup output after a summary
-cannot erase it), and a bounded diagnostic tail. The worker-local broad receipt is evidence about
-content, not time: it records the content as one git tree object id, the tree this worktree with
-tracked edits and untracked files would commit to. `secretary check show` therefore answers whether
-it still describes the code in front of the role, and committing that content unchanged keeps the
-worker-local broad receipt usable. While a usable worker-local broad receipt exists, rerunning the
-broad suite only because the pane scrolled its output away is prohibited; an edited worktree or a
-concrete red result being fixed opens a justified new run, named in the report. A worker-local broad
-receipt only ever claims an import it observed from the process that ran the check. The `--module`
-shape runs the suite itself and records what that process imported. An arbitrary
-`--command` shell may change directory or import environment before any interpreter starts, so it
-attests no import and is never reused in place of a run. Reuse asks more than that the import was
-observed: it has to have resolved inside the candidate workspace, so a legitimate import environment
-that resolves the project to another checkout is recorded truthfully and still refused. One
-predicate answers that question for every route, and a check is keyed by its structured check set —
-shape, module and exact argument vector — so two invocations that render alike cannot answer for
-each other.
-Anything less than an intact, finished receipt with observed provenance for exactly this content — a
-truncated or edited artifact, a result no run could have written, a killed or timed-out run, a
-checkout with no resolvable identity — is not a summary and does not attest anything. The
-worker-local broad receipt never leaves the workspace and is never committed: only an executed
-local/GitHub gate with a valid dispatcher-owned exact-SHA gate receipt is authoritative reusable
-evidence downstream. A none/noop gate or missing dispatcher-owned exact-SHA gate receipt attests no
-broad suite, so the role runs or requests validation appropriate to the decision. Reviewers
-independently inspect changed code and invariants, but do not repeat an attested broad command on
-the same SHA without a recorded `rerun_reason`; targeted reproduction remains appropriate for a new
-blocker, uncovered external behaviour, or security/data-loss risk. Re-review
+Workers use focused checks while developing and run at most one local broad suite per report
+generation/unchanged SHA unless they state why it was rerun. The broad run goes through
+`secretary check broad`, which streams output, returns the check's exit status and writes a
+worker-local broad receipt under the ignored `state/checks/` path: command and check-set digest, cwd
+and imported project provenance, start/end/duration, exit code, parsed verdict and counts (scanned off
+the stream), and a bounded diagnostic tail. The receipt records content as one git tree object id —
+the tree this worktree, with tracked edits and untracked files, would commit to — so
+`secretary check show` answers whether it still describes the code, and committing that content
+unchanged keeps it usable. While a usable receipt exists, rerunning the broad suite only because
+output scrolled away is prohibited; an edited worktree or a concrete red result being fixed justifies
+a new run, named in the report.
+
+A receipt only claims an import it observed from the process that ran the check. The `--module` shape
+runs the suite itself and records what that process imported. An arbitrary `--command` shell may
+change directory or import environment before any interpreter starts, so it attests no import and is
+never reused in place of a run. Reuse also requires the import to have
+resolved inside the candidate workspace; an import resolving to another checkout is recorded and
+refused. One predicate answers
+this for every route, and a check is keyed by its structured check set (shape, module, exact argument
+vector). A truncated or edited artifact, a result no run could have written, a killed or timed-out
+run, or a checkout with no resolvable identity attests nothing.
+
+The worker-local receipt never leaves the workspace and is never committed. Only an executed
+local/GitHub gate with a valid dispatcher-owned exact-SHA gate receipt is reusable evidence
+downstream. A none/noop gate or missing receipt attests no broad suite, so the role runs or requests
+appropriate validation. Reviewers inspect changed code and invariants but do not repeat an attested
+broad command on the same SHA without a recorded `rerun_reason`; targeted reproduction stays
+appropriate for a new blocker, uncovered external behaviour, or security/data-loss risk. Re-review
 packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path
-delta, so the next reviewer verifies the delta and closure rather than restarting at the original base.
+delta.
 
-Worker and reviewer shells execute with `workspace/.secretary-task-env/venv/bin` first. When an
-adapter declares `broad_check` and omits `broad_check.interpreter`, its candidate `.[dev]` install
-supplies the project runtime there; this is an adapter capability, not a project-name exception. An
-adapter with no `broad_check` declared gets a bare reserved environment because it declared no
-candidate-install contract.
-Adapter setup runs outside both virtualenvs, and an adapter's explicit relative broad-check
-interpreter may select its exclusively owned `.venv`. The general role environment removes the
-launcher's production `PYTHONPATH`. The module receipt records the check process's actual
-interpreter, environment prefix and import origin, and an origin outside the candidate remains a
-refusal. One control-plane renderer makes every head-visible Secretary protocol, report, verdict,
-`check broad` and `check show` command explicitly name the absolute production interpreter, `-P`,
-and registered production `src`, instead of lending every shell the production virtualenv. A fit
-broad contract may then select an explicit candidate interpreter for its inner suite. Missing,
-refused and module-less contracts keep the production wrapper reachable but infer no inner runtime
-from `PATH`.
+Worker and reviewer shells run with `workspace/.secretary-task-env/venv/bin` first. When an adapter
+declares `broad_check` without `broad_check.interpreter`, its candidate `.[dev]` install supplies the
+project runtime there. Adapter setup runs outside both virtualenvs, and an explicit relative
+broad-check interpreter may select the adapter's own `.venv`. The role environment removes the
+launcher's production `PYTHONPATH`. The module receipt records the actual interpreter, environment
+prefix and import origin; an origin outside the candidate is a refusal. One control-plane renderer
+makes every head-visible Secretary protocol, report, verdict, `check broad` and `check show` command
+name the absolute production interpreter, `-P`, and registered production `src`. A fit broad contract
+may select an explicit candidate interpreter for its inner suite; missing, refused and module-less
+contracts keep the production wrapper reachable but infer no inner runtime from `PATH`.
 
-One production-runtime provenance probe fences workspace prepare, worker/reviewer launch, both
-sides of a gate query, both sides of release, and worktree removal. It invokes the fixed production
+One production-runtime provenance probe fences workspace prepare, worker/reviewer launch, both sides
+of a gate query, both sides of release, and worktree removal. It runs the fixed production
 interpreter in isolated mode and classifies `interpreter_unavailable`, `missing_import`, `wrong_root`
-and `workspace_targeted_editable`. The last class scans plain editable paths, executable editable
-finder modules named by `.pth`, and `direct_url.json`, including vanished paths beneath the
-dispatcher workspace root. Any refusal becomes durable blocked evidence and keeps the checkout; the
-dispatcher never repairs installation metadata implicitly.
+and `workspace_targeted_editable` (plain editable paths, executable editable finder modules named by
+`.pth`, and `direct_url.json`, including vanished paths under the dispatcher workspace root). Any
+refusal becomes durable blocked evidence and keeps the checkout; installation metadata is never
+repaired implicitly.
 
-Before a card is given to a worker at all, the dispatcher asks whether the registered project's
-broad-check contract can attest that project, through the same implementation the worker's own
-`secretary check broad --module` resolves through, so a card is never issued on a contract the
-worker would then refuse. The question costs a read of the project binding and of the adapter
-beside it: no workspace, no head, no process. The answer is one of three named states, and every
-caller branches on them by name, with no default branch that lets an unrecognised answer through as
-permission:
+Before a card is given to a worker, the dispatcher asks whether the project's broad-check contract
+can attest the project, through the same implementation `secretary check broad --module` uses. It
+reads only the project binding and adapter. The answer is one of three named states, and no caller
+treats an unrecognised answer as permission:
 
-- `fit` — the contract is declared usably, and the card is issued as always;
-- `refused(shape)`, one of six enumerated shapes — `adapter_unavailable`, `adapter_invalid`,
-  `broad_check_incomplete`, `broad_check_not_declared`, `interpreter_unavailable`,
-  `cannot_attest_project`. A refusal always
-  wins, and always before the card is put in work: no workspace, no head, no round spent. The card
-  is blocked through the bring-up vocabulary [below](#bring-up-outcomes), because an installation
-  whose registry cannot supply a usable contract is a failure of the host and not a verdict about
-  the card, so it carries the infrastructure class, the `contract-preflight-infrastructure-blocked`
-  action token and the refusal shape as its evidence;
-- `undecidable(question)`, one of three enumerated questions — `relative_interpreter`,
-  `no_registered_project`, `project_unavailable`. The card goes to work.
+- `fit` — the card is issued;
+- `refused(shape)` — one of `adapter_unavailable`, `adapter_invalid`, `broad_check_incomplete`,
+  `broad_check_not_declared`, `interpreter_unavailable`, `cannot_attest_project`. Always before the
+  card is put in work (no workspace, head or round). The card is blocked through the
+  [bring-up](#bring-up-outcomes) vocabulary as infrastructure, with action token
+  `contract-preflight-blocked` and the refusal shape as evidence;
+- `undecidable(question)` — one of `relative_interpreter`, `no_registered_project`,
+  `project_unavailable`. The card goes to work.
 
-The two boundaries around that are deliberate. The preflight answers for the *declared* contract
-only. The adapter schema resolves a relative interpreter against the candidate workspace, and at
-preflight there is no candidate workspace, so the question belongs to the side that will hold that
-tree and comes back as `relative_interpreter` rather than being answered against the registered
-checkout, which is a different directory. `undecidable` therefore resolves in favour of
-compatibility rather than of saving the round: it is a named decision to let the card through,
-carrying its own evidence, not the absence of an answer. A relative interpreter is the documented
-and recommended spelling, and breaking that published promise to make an internal check convenient
-would move the product contract the wrong way.
+The preflight answers for the declared contract only. A relative interpreter resolves against the
+candidate workspace, which does not exist at preflight, so it is `relative_interpreter`, not answered
+against the registered checkout. A declared contract is executed as declared: the preflight checks
+only that it is complete and that the named interpreter starts; what a run actually imported is
+caught by the receipt's provenance.
 
-The second boundary is that a declared contract is executed as declared, not checked against a
-layout heuristic. The adapter states which interpreter runs the check and which package that run
-must import; the preflight asks only whether that statement is complete and whether the interpreter
-it names can be started. What such a run actually imported is caught afterwards, by the receipt's
-own import provenance. No contract is judged against a checkout's layout any more.
+Declaring `broad_check` is mandatory for every project that gets cards. An adapter without one is
+refused as `broad_check_not_declared` and its cards block at preflight. `cannot_attest_project` means
+a declared contract that cannot attest its own checkout.
 
-Declaring `broad_check` is therefore mandatory for every project that gets cards. An adapter that
-declares none is refused as `broad_check_not_declared`, and its cards block at preflight until a
-person adds the block — silence no longer means "the same broad check as Secretary". It used to:
-an adapter that said nothing inherited Secretary's own default (this interpreter, importing
-`secretary`), which was a true contract for the Secretary project and for nobody else. That default
-gave a project one of two wrong answers — a checkout without a `secretary` package was refused as
-`cannot_attest_project`, whose wording blamed a substituted package rather than the real cause, and
-a checkout that happened to hold one was attested against a contract its owner never wrote.
-`cannot_attest_project` is now left to mean only what it says: a *declared* contract that cannot
-attest its own checkout.
+Observers consume the worker report, reviewer verdict and gate receipt before code/CI exploration. A
+valid executed gate receipt suppresses a routine broad rerun; none/noop or missing evidence does not.
+Contradictory evidence, RED/Blocked classification, a real Definition-of-Done gap, or a
+security/data-loss concern requires research. The role that owns a further broad rerun records its
+reason in the report; a worker-local receipt never transfers ownership of an unexplained rerun or
+suppresses a targeted reproduction of a new concrete risk.
 
-Observers consume the worker report, reviewer verdict and dispatcher-owned exact-SHA gate receipt
-before code/CI exploration. A valid executed dispatcher-owned exact-SHA gate receipt suppresses its
-routine broad rerun; none/noop or missing evidence does not, and permits appropriate focused or
-broad validation. Contradictory evidence, RED/Blocked classification, a real Definition-of-Done gap,
-or a security/data-loss concern also requires research. The role that owns a further broad rerun
-records its reason in the report; a worker-local broad receipt never transfers ownership of an unexplained
-rerun or suppresses a targeted reproduction of a new concrete risk.
+### Decisions on a parked card
 
-A card parks only where a decision can come from: its sprint is open and declares a concrete
-observer head. A card with no linked sprint, or one whose sprint declares `--observer none` or has
-closed, keeps the immediate behaviour, where the verdict acts on its own tick.
+A card parks only where a decision can come from: its sprint is open and declares a concrete observer
+head. A card with no linked sprint, or whose sprint declares `--observer none` or has closed, acts on
+its verdict on its own tick.
 
-The decision and its effect are two writes. The observer records the decision on the card, and the
-dispatcher performs it: merge and `assessment -> done` for a release, a new worker round and
-`assessment -> in_progress` for a rework, `assessment -> blocked` for a reslice.
+The observer records the decision; the dispatcher performs it: merge and `assessment -> done` for a
+release, a new worker round and `assessment -> in_progress` for a rework, `assessment -> blocked` for
+a reslice.
 
 ```bash
 python3 -P -m secretary task decide --role observer --ref PROJECT-N \
   --kind release --reason-file REASON.md --request-id REQUEST_ID
 ```
 
-`--kind` is `release`, `rework` or `reslice`, and the reason is required. The observer is the only
-role that decides; a PO that has to intervene moves the card itself, and on a sprint-reserved
-project that move carries `--sprint-override` and a reason, which reads in the audit as the
-override it is.
+`--kind` is `release`, `rework` or `reslice`; the reason is required. Only the observer decides, and
+only about a card whose project an open sprint reserves; otherwise it is refused.
 
-The move out of Assessment carries the decision it performs, and each decision has one destination:
-`release` goes to Done, `rework` to In progress, `reslice` to Blocked. A `--decision` that names one
-the card's audit does not hold since it entered the column is refused, whoever passes it, as is one
-paired with the wrong destination; that is what makes the seam checkable from the audit alone.
-Needing a decision at all binds the dispatcher, the role that performs them: a dispatcher move to
-Done or In progress without `--decision` is refused, and so are `assessment -> ready`, `-> validate`
-and `-> issues`, each of which leaves the column with nothing decided while Ready additionally
-clears the claim. The PO is held to none of that, because its move is the escape hatch out of a seam
-that is stuck. `assessment -> blocked` takes no decision from anyone: it is the escalation path the
-steward and the dispatcher's own failures use, and a card that cannot be blocked is a card nothing
-can rescue.
+A move out of Assessment carries the decision it performs, with one destination each: `release` →
+Done, `rework` → In progress, `reslice` → Blocked. A `--decision` the card's audit does not hold since
+it entered the column, or paired with the wrong destination, is refused whoever passes it. The
+dispatcher must carry a decision: its move to Done or In progress without `--decision` is refused, as
+are `assessment -> ready`, `-> validate` and `-> issues`. The PO is not bound by this (its move is the
+escape hatch; on a sprint-reserved project it carries `--sprint-override` and a reason).
+`assessment -> blocked` takes no decision from anyone (steward escalation and dispatcher failures).
+The observer takes no exit out of Assessment at all, even with a matching decision; its authority is
+`task decide`.
 
-The observer takes no exit out of Assessment at all, not even one carrying a matching decision. A
-matching move is checkable but it is not a release: the board would read Done with nothing merged.
-The observer's authority over a parked card is `task decide`; the effect is the dispatcher's. The
-PO's override and the steward's escalation to Blocked are the two moves out of the column that do
-not go through the dispatcher.
+A release the dispatcher cannot carry out (merge rejected, or pre-merge re-check red while parked)
+takes the card to Blocked with the failure. Deciding again on a partly failed release is a separate
+card.
 
-An observer decides only about a card whose project an open sprint reserves, the same guard
-`task move` carries. A decision on a card no open sprint holds is refused.
-
-A release the dispatcher cannot carry out never leaves the card looking reworkable: it takes the
-card to Blocked with the failure on it, whether the merge was rejected or the pre-merge re-check
-went red while the card was parked. Deciding again on a release that failed part-way through is a
-separate card; until it exists, Blocked is the one answer, because it cannot publish twice.
-
-`secretary task move` is the writer for the transition itself. The board has one role and transition
-model, this one. There is no parallel `triggered_agents pipeline` writer: steward report cards,
-steward signals, and retro Done retention enter through Secretary's canonical TaskReader/TaskWriter
-adapters, preserving the audit and sprint guards. `--target` is accepted as a second spelling of
-`--to` on that command; both name the same destination state.
+`secretary task move` is the one transition writer. Steward report cards, steward signals and retro
+Done retention go through Secretary's TaskReader/TaskWriter adapters with the same audit and sprint
+guards. `--target` is an alias of `--to`.
 
 ```bash
 python3 -P -m secretary task list --project PROJECT
@@ -768,51 +538,40 @@ python3 -P -m secretary task create --role po --project PROJECT --type code --ti
   --sprint-override --sprint-override-reason-file REASON.md
 ```
 
-`create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields.
-A new execution task requires `--sprint`: the sprint must be open and the task project must be one
-of its reservations. A closed sprint and an unreserved project are separate errors, both before the
-first backend write. Tasks never accept product priority; `--priority` is rejected rather than
-ignored. Execution tasks are created in Ready, never in Issues; the worker, reviewer and retro roles
-create nothing but a proposal in Issues, which a PO later triages to Ready.
+`create` accepts `--description` or `--body-file`, plus dependency, workspace and routing fields. A
+new execution task requires `--sprint`: the sprint must be open and the project one of its
+reservations (a closed sprint and an unreserved project are separate errors, both before any backend
+write). `--priority` is rejected. Execution tasks are created in Ready; worker, reviewer and retro
+roles create only proposals in Issues, which a PO triages to Ready.
 
-When `task create` omits `--ref`, Secretary allocates `PROJECT-N` from the project's board-wide
-high-water mark across both open and closed cards. Whichever way the reference is arrived at, the
-board is asked whether that exact reference is claimed before it is written, and a claimed one is
-refused: an allocation is only as free as the enumeration it was counted from, and an archived card
-holds its reference for good. Allocation, staging and `createTask` are one
-locally serialized operation, so concurrent local creators cannot reserve the same reference. The
-pending audit first records the chosen reference and, once the backend returns it, the Kanboard task id;
-a recovered pending create verifies and repairs only that durable recorded backend task id, including the
-legacy blank-reference rules. An older id-less pending create has no automatic adoption or repair path:
-it remains fail-closed for manual resolution rather than searching for a plausible live row or creating a
-duplicate.
+Without `--ref`, `task create` allocates `PROJECT-N` from the project's board-wide high-water mark
+over open and closed cards. Any reference, allocated or given, is checked as unclaimed before it is
+written; an archived card holds its reference for good. Allocation, staging and the backend create
+are one locally serialized operation. The pending audit records the chosen reference and, once
+returned, the backend task id; a recovered pending create verifies and repairs only that recorded
+backend id. A pending create without a recorded id is not adopted or repaired automatically.
 
-`--codex-mode` is valid only for a worker profile on a `codex` adapter, and `tui` is the only
-value it takes. Every Codex head is one interactive session that the launcher brings up empty and
-then sends the prompt into; the one-shot `codex exec` head is gone, so `--codex-mode exec` is
-rejected before the board is touched, a head profile that names it fails registry validation, and a
-card restored or read with it carries no launch mode at all.
+`--codex-mode` is valid only for a worker profile on a `codex` adapter, and its only value is `tui`:
+every Codex head is one interactive session. `exec` is rejected before the board is touched, a head
+profile naming it fails registry validation, and a card read or restored with it carries no launch
+mode.
 
-`archive` closes an execution task in the backend and removes it from ordinary active listings without
-deleting board history. It is PO-only, requires a non-empty reason, writes append-only audit and
-supports idempotent retry through `--request-id`. Only a card with no live work can be archived:
-in-progress and validate cards, and cards with an active claim, are rejected. A card closed from Done
-stays a satisfied dependency; a card closed from any other column is not Done and does not unblock
-anything. It cannot close a Product or Issue: use `secretary issue close` for the latter.
+`archive` closes an execution task and removes it from active listings without deleting board
+history. PO-only, non-empty reason, append-only audit, idempotent through `--request-id`. Cards in
+In progress or Validate, or with an active claim, are rejected. A card archived from Done stays a
+satisfied dependency; from any other column it is not Done and unblocks nothing. It cannot close a
+Product or Issue (use `secretary issue close`).
 
-`edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (the full new text, not
-a diff), `--head`, `--review-head`. PO, dispatcher and observer may edit, but an ordinary card is only
-editable in Ready or Blocked: on an active card the worker is working against a snapshot of the
-task document, so an edit goes through preempt and requeue rather than a silent swap. The `edited` audit
-event records the old and new digests; the full text of past versions is recoverable from the Git history
-of the board export in the checkpoint. Comments stay the dialogue of an attempt; the spec lives only in
-the description.
+`edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (full new text),
+`--head`, `--review-head`. PO, dispatcher and observer may edit; an ordinary card is editable only in
+Ready or Blocked (an active card goes through preempt and requeue). The `edited` audit event records
+old and new digests; past text is recoverable from the checkpoint's board export history. Comments
+are the dialogue of an attempt; the spec lives only in the description.
 
 ## Products and issues
 
-`secretary product` and `secretary issue` use typed records in the existing Pipeline backend. They do
-not introduce a file or a second board as a competing source of truth, so normal board export,
-checkpoint and restore carry their metadata and comments.
+`secretary product` and `secretary issue` use typed records in the existing Pipeline backend, so
+board export, checkpoint and restore carry their metadata and comments.
 
 ```bash
 python3 -P -m secretary product create --role po --id secretary --project secretary --title Secretary
@@ -824,73 +583,56 @@ python3 -P -m secretary issue append --role po --ref issue:123 --reason REASON -
 python3 -P -m secretary issue close --role po --ref issue:123 --reason resolved
 ```
 
-A Product id is stable and its non-empty project set must contain only ids registered under the
-instance `projects/` directory. Product ids cannot be duplicated. Every new issue requires its
-Product, one kind (`bug`, `feature`, `question`, `improvement`) and one priority (`P0` through `P3`).
-Priority changes require a non-empty reason, add an `[issue:priority]` board comment and append a
-durable audit event. Only the PO may close an issue, using exactly one of `resolved`, `invalid`,
-`duplicate` or `wont_do`; closure archives the backend record but leaves its comments and audit
-history available through `issue show --ref` and checkpoint recovery. `sprint close` closes an issue
-through this same lifecycle when its decisions file gives one of those four verdicts, with the same role
-and the same reasons; it never closes an issue because a sprint that declared it ended, and it never
-records an issue somebody else closed as a verdict of its own. `issue list --closed` includes
-both open and closed issues; without it the list contains only open issues.
+A Product id is stable and unique; its non-empty project set may contain only ids registered under
+the instance `projects/` directory. Every new issue requires its Product, one kind (`bug`, `feature`,
+`question`, `improvement`) and one priority (`P0`–`P3`). A priority change requires a non-empty
+reason, adds an `[issue:priority]` board comment and a durable audit event. Only the PO may close an
+issue, with exactly one of `resolved`, `invalid`, `duplicate` or `wont_do`; closure archives the
+backend record and keeps comments and audit available through `issue show --ref` and checkpoint
+recovery. `sprint close` closes an issue through this same lifecycle when its decisions file gives
+one of those verdicts; it never closes an issue merely because a sprint that declared it ended, and
+never records somebody else's close as its own verdict. `issue list --closed` includes open and
+closed issues; without it only open issues are listed.
 
-`issue append` is the only change an issue description takes after create, and it only adds: the
-`--body-file` block goes after the current text, which stays byte for byte, under a `---` rule and an
-`[issue:appended <UTC time> by <actor>]` line, so `issue show` says what was added and when. There is no
-replacement of the description. Only the PO may append, with a non-empty reason and a non-empty block; a
-closed issue refuses it. It passes the board host like a priority change and writes one `entity.updated`
-event: besides the Issue it carries `data.append` with the SHA-256 of the block as given (`body_sha256`)
-and of the description before and after (`description_sha256_was`, `description_sha256`). A repeat of the
-same `--request-id` with the same ref, reason and block is answered without a second block or event,
-because it is matched by `body_sha256` rather than by rebuilding the text; the same id with anything else
-is `validation`.
+`issue append` is the only change to an issue description after create, and it only adds: the
+`--body-file` block goes after the unchanged current text, under a `---` rule and an
+`[issue:appended <UTC time> by <actor>]` line. PO-only, non-empty reason and block; a closed issue
+refuses it. It writes one `entity.updated` event carrying `data.append` with `body_sha256` (the block
+as given), `description_sha256_was` and `description_sha256`. A repeat of the same `--request-id` with
+the same ref, reason and block (matched by `body_sha256`) is answered without a second block or event;
+the same id with anything else is `validation`.
 
-A Product and an Issue are not execution tasks and never enter the execution columns: `move` and `claim`
-both reject one before any write, whatever column it currently sits in. Work on an issue is a separate
-card the PO creates in Ready.
+Products and Issues never enter the execution columns: `move` and `claim` reject one before any write.
+Work on an issue is a separate card the PO creates in Ready.
 
-A record belongs to its product, so every Product and Issue row is created in the lane of that product:
-the active swimlane whose name is exactly the product id, created on demand when the board has none. An
-Issue takes it from `issue_product`, a Product from its own id. Nothing about the board takes part in the
-choice - not the order of the lanes, not which lane is first, not whether a `Default swimlane` exists -
-so every writer, every retry and every restore of the same record choose the same lane. The project
-bindings of a product take no part either, which is why a product bound to several projects is not
-ambiguous: the lane is named after the product, never after one of its projects, and it never becomes a
-second source of truth about what a record belongs to. Execution cards are unaffected: they stay in the
-lane of their project.
+Every Product and Issue row is created in its product's lane: the active swimlane named exactly after
+the product id, created on demand. An Issue uses `issue_product`, a Product its own id. Board lane
+order, first lane, `Default swimlane` and the product's project bindings take no part. Execution cards
+stay in their project's lane.
 
-The rule binds every write, but not the rows that predate it, and a restore puts a record back into the
-lane its checkpoint recorded, so a board can hold rows the rule would place elsewhere. Their supported
-repair is one idempotent command, which plans by default and writes only when told to:
+Rows placed otherwise (pre-existing, or restored into their checkpoint lane) are repaired by one
+idempotent command that plans by default:
 
 ```bash
 python3 -P -m secretary product reconcile-lanes
 python3 -P -m secretary product reconcile-lanes --apply
 ```
 
-The plan writes nothing: it reports every row that is out of place with the lane it sits in and the lane
-it belongs in, the lanes that have to be created, and a per-product summary. `--apply` performs exactly
-those moves. The destination is the same `product_swimlane_id` every writer uses, so the command has no
-second opinion about where a record belongs. A move is one `moveTaskPosition` into another lane of the
-same column, so the row keeps its reference, metadata, comments, column and open or closed state, and the
-rows that travel together arrive after whatever the destination lane already holds, in the order the plan
-lists them. A run on a board already in order moves nothing and says so, and a run interrupted halfway is
-simply continued by the next one, which re-reads the board and plans only what is still out of place.
-Closed records are not moved, only counted, and a record whose product is unstated or is not a registered
-Product is never guessed at: it is listed in the output so a human decides what it belongs to. A row that
-is both is both: it is counted among the closed records whether or not its product can be resolved, and
-still listed as unresolved, because the closed count is the visible half of that decision and must not
-depend on anyone being able to tell what the row belongs to.
+The plan writes nothing and reports each misplaced row with its current and target lane, the lanes to
+create and a per-product summary. `--apply` performs exactly those moves, using the same
+`product_swimlane_id` every writer uses. A move is one `moveTaskPosition` into another lane of the same
+column, keeping reference, metadata, comments, column and open/closed state; moved rows land after the
+destination lane's rows, in plan order. A board already in order moves nothing; an interrupted run is
+continued by the next one. Closed records are counted, not moved. A record whose product is unstated or
+not a registered Product is listed for a human, never guessed; a closed unresolved row is both counted
+as closed and listed as unresolved.
 
-Every Product and Issue write is staged before it touches the backend, and a staged write that is neither
-finished nor dropped blocks checkpoint and board export. A refusal that a retry cannot turn into a success
-therefore has to end the transaction rather than leave it: a `createTask` the backend declines is reported
-as `backend_rejected`, and once the board shows no row of that request the staged document is dropped with
-it. `validation` and `closed` refusals before the first backend write end the same way.
+Every Product and Issue write is staged before it touches the backend, and an unfinished staged write
+blocks checkpoint and board export. A backend-declined create is reported as `backend_rejected`, and
+once the board shows no row for that request the staged document is dropped. `validation` and `closed`
+refusals before the first backend write also drop it.
 
-A staged write that did reach the backend stays, and belongs to its own request id. Its supported repair is:
+A staged write that reached the backend stays under its request id. Repair:
 
 ```bash
 python3 -P -m secretary product transaction list
@@ -899,21 +641,19 @@ python3 -P -m secretary product transaction discard --request-id REQUEST_ID
 python3 -P -m secretary product transaction adopt --path FILE
 ```
 
-`transaction list` includes typed Product/Issue pending events as read-only entries with their request id,
-event kind and subject ref, as well as released transaction documents. `retry` finishes the staged operation
-exactly where it stopped and commits its one audit event; a request already committed is answered with its
-record. `discard` drops a released transaction only after reading the board: a create whose row exists and a
-priority or close change whose board comment exists are refused as `live_write` and have to be retried instead.
-It never discards a typed pending event, which is also refused as `live_write` and repaired by retry. `adopt`
-files a released transaction document that lives outside the journal back under its own request id, which is
-how a document carried out of the journal comes back into `retry` or `discard`. The commands cover Product
-and Issue writes alike; the journal is one.
+`list` includes typed Product/Issue pending events (read-only: request id, event kind, subject ref) and
+released transaction documents. `retry` finishes the staged operation where it stopped and commits its
+one audit event; an already committed request is answered with its record. `discard` drops a released
+transaction only after reading the board: a create whose row exists, or a priority/close change whose
+board comment exists, is refused as `live_write` and must be retried. A typed pending event is never
+discarded (`live_write`; repaired by retry). `adopt` files a released transaction document from outside
+the journal back under its request id. One journal covers Product and Issue writes. Runbook:
+[Operations](OPERATIONS.md#a-checkpoint-blocked-by-a-productissue-transaction).
 
 ## Sprints
 
-A sprint is a data entity on a separate `Secretary sprints` board, not a Pipeline card. One board task
-is one sprint. The board is created lazily and idempotently, so a repeat call creates no duplicate. A
-reference has the form `sprint:ID`, a separate namespace from the `PROJECT-N` card convention.
+A sprint is a data entity on a separate `Secretary sprints` board: one board task per sprint, board
+created lazily and idempotently. References have the form `sprint:ID`, separate from `PROJECT-N`.
 
 ```bash
 python3 -P -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
@@ -933,101 +673,74 @@ python3 -P -m secretary sprint close --role po --ref sprint:ID --reason WHY \
 python3 -P -m secretary sprint close-result --ref sprint:ID --event-id evt_ID
 ```
 
-Stored fields are the goal, the Definition of Done text, repositories, the owning product, its issues,
-the reserved projects, open/closed/stopped status, the declared observer, the optional worker and
-reviewer pins, a budget counter by event type, the current card and a structured resume entry. The six valid budget event
-types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task` and `hotfix`. Production derives
-them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, a preempt of
-an active card back to Ready, or a tagged recreation or hotfix creation. The card-event id becomes the
-budget request id, so a repeated tick cannot charge it twice. Green cards and observer activity have no
-matching event and do not move the counter. Beside those six there is one recorded type that is
-never charged: a bring-up that never produced a head is counted as `infrastructure_blocked`, in its
-own stored field, so that an observer can see how often the host failed to bring a card up while
-counting it can never move a threshold. See [Bring-up outcomes](#bring-up-outcomes).
+Stored fields: goal, Definition of Done text, repositories, owning product, its issues, reserved
+projects, `open`/`closed`/`stopped` status, declared observer, optional worker and reviewer pins, a
+budget counter by event type, current card and a structured resume entry.
+
+The six charged budget event types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task`
+and `hotfix`. Production derives them from durable card audit events: a red review, a move to Blocked,
+a red mechanical gate, a preempt of an active card back to Ready, or a tagged recreation or hotfix
+creation. The card-event id is the budget request id, so a repeated tick cannot charge twice. Green
+cards and observer activity do not move the counter. One further type, `infrastructure_blocked`, is
+recorded in its own field and never charged; see [Bring-up outcomes](#bring-up-outcomes).
 
 A new sprint belongs to a Product, serves at least one of its open Issues and reserves at least one
-registered project. `--product` names an existing Product, every `--issue` is an open Issue of that
-Product, and every `--project` is an id from the instance project registry; `--repository` keeps its own
-meaning as the write-guard scope. A repository root is canonicalized where it is declared, so the row
-persists the absolute path and a root this host cannot resolve is refused with the value it could not
-resolve. An Issue of another Product and a closed Issue are refused with their
-own messages. By default one installation holds at most one open sprint, and the gated pilot that raises
-that to two is [below](#the-open-sprint-limit), which is also where what admission checks and in what
-order is stated. Every one of these checks is a read, so a
-refused sprint leaves no board row, no metadata and no audit event. A repeated `--request-id` still
-returns the first event instead of colliding with the sprint it already opened.
+registered project: `--product` names an existing Product, every `--issue` is an open Issue of that
+Product, every `--project` is an id from the instance project registry. `--repository` is the
+write-guard scope; a repository root is canonicalized when declared (absolute path persisted; an
+unresolvable root is refused with the value). An Issue of another Product and a closed Issue are
+refused with their own messages. Conflict and limit rules are in
+[The open-sprint limit](#the-open-sprint-limit). Every check is a read, so a refused sprint leaves no
+board row, metadata or audit event. A repeated `--request-id` returns the first event.
 
-Because the rules are reads of live state, `create` and `reopen` hold one exclusive lock on the data
-directory (`sprints/admission.lock`) across the check and the write it admits. Two writers on the same
-installation are serialized by it, so the second sees the sprint the first opened rather than a state
-from before it. The lock is an admission gate only: it holds no sprint state and is released with the
-write.
+`create`, `reopen` and `close` hold one exclusive lock on the data directory
+(`sprints/admission.lock`) across check and write. The lock holds no sprint state.
 
-Admission runs in one fixed order, the one Product and Issue writes already use. `create` and `reopen`
-are the two transitions into `open` and both run it, on that same staged-intent journal:
+Admission order for `create` and `reopen` (both on the staged-intent journal):
 
 1. take the admission lock;
-2. under it, settle the request id first. A committed or staged intent of the same request id comes back
-   as it is, before any check of live state, so a repeat that overlaps the request it repeats is replayed
-   rather than refused as a conflict with the sprint it opened itself. The same request id carrying a
-   different payload is refused as `validation` before any side effect;
-3. check product, issues, registry and both conflict rules only for a fresh request. A staged intent is
-   resumed on the state it was admitted on, so a Product or Issue that changed after the refusal does not
-   turn a repeat into a validation error;
-4. apply the backend steps through the staged intent. Each one recognises what an earlier attempt of the
-   same request already did. A metadata answer other than `True` is a backend refusal, not a success:
-   the call reports `audit_pending` instead of `created` or `reopened`, the staged intent stays and the
-   retry with the same request id finishes that same operation;
-5. commit one audit event, however often the delivery repeats.
+2. settle the request id: a committed or staged intent with the same id is returned as is, before any
+   live-state check; the same id with a different payload is `validation`;
+3. for a fresh request only, check product, issues, registry and both conflict rules (a staged intent
+   resumes on the state it was admitted on);
+4. apply backend steps through the staged intent, each recognising what an earlier attempt did; a
+   metadata answer other than `True` is a backend refusal and the call reports `audit_pending` (the
+   staged intent stays; retry with the same request id);
+5. commit one audit event.
 
-A sprint reference passed by the caller is used as given; without one, `sprint:N` is allocated from
-the sprint board's own high-water mark over open and archived rows, by the same rule and with the
-same claim check as a card, and is remembered so a repeat of a stalled create writes the reference
-it was already going to write. It is never derived from the row's Kanboard identifier: row ids and
-references are separate sequences, and a sprint numbered after its row takes a reference the board
-handed out long before.
+A caller-supplied sprint reference is used as given; otherwise `sprint:N` is allocated from the
+sprint board's high-water mark over open and archived rows, with the same claim check as a card, and
+remembered so a repeat writes the same reference. It is never derived from the Kanboard row id.
 
-The sprint reference is written last, and writing it is what publishes the sprint: a row on the sprint
-board counts as a sprint only once it carries one. An interrupted create is therefore never observed as
-an open sprint without its product, issues and reservations.
+The sprint reference is written last and publishes the sprint: a sprint-board row counts as a sprint
+only once it carries one, so an interrupted create is never observed as an open sprint.
 
-An unfinished create holds nothing. Instead of holding the installation it compensates: a step refused
-after the row was created takes that row back, so no unreferenced row is left behind, and only when the
-backend also refuses that does the row stay for the repair to pick up. Before it publishes, a resumed
-create or reopen re-checks both conflict rules; if another sprint took the slot or the project meanwhile, the
-repeat is refused as `sprint_conflict` or `resource_conflict` naming that sprint and publishes nothing.
-That refusal is only the answer once the request holds nothing: if the row cannot be taken back, or a
-refused `reopen` cannot write its observer preimage back, the caller is told `audit_pending` instead and
-retries under the same request id until the cleanup goes through.
-The losing request is then filed again as a fresh one. Like a staged Product or Issue write, an
-unfinished sprint create blocks the checkpoint until it is retried or dropped.
+A step refused after the row was created takes the row back; only if that also fails does the row stay
+for repair. Before publishing, a resumed create or reopen re-checks both conflict rules; if another
+sprint took the slot or project meanwhile, it is refused as `sprint_conflict` or `resource_conflict`
+naming that sprint and publishes nothing — unless the row cannot be taken back or a refused `reopen`
+cannot restore its observer preimage, in which case the answer is `audit_pending` and the caller
+retries under the same request id until cleanup succeeds, then files the request again as a fresh one.
+An unfinished sprint create blocks the checkpoint until retried or dropped.
 
-Sprints created before ownership existed carry none of these fields. They stay readable, exportable and
-restorable exactly as they are, and nothing fills the fields in for them: `show`, `status`, the board
-export and the checkpoint record leave the three fields out rather than answering `""` and `[]`. `reopen` re-checks every rule
-above, so such a sprint is refused with a message that names what it lacks; the supported move is to open
-a new sprint that owns its issues. `reopen` is refused the same way when the sprint's own issues have
-since been closed or its projects are held elsewhere.
+Sprints without ownership fields stay readable, exportable and restorable; `show`, `status`, the board
+export and the checkpoint omit the three fields rather than answering `""`/`[]`. `reopen` re-checks
+every rule, so such a sprint is refused naming what it lacks (open a new sprint instead). `reopen` is
+also refused when the sprint's issues have closed or its projects are held elsewhere.
 
-`sprint close` freezes the active cards linked to that sprint. It archives its terminal Done tasks with
-the normal task archive audit and returns that list.
-The Done transition clears the completed worker claim and its resolved routing fields, so that stale
-ownership does not prevent normal terminal archival; `archive` still refuses a live claim.
-Cards without that `sprint_ref` are not considered. Product and Issue records are never closure targets,
-including if malformed metadata links one to the sprint, whatever the close was told to decide: an Issue
-is closed only through the Issue lifecycle and never archived as a card. The close request is staged:
-retrying the same request id after a lost archive, issue close, disposition or status reply resumes the
-same task set, repeats none of those writes and records one sprint close event; a retry that states other
-decisions is refused rather than answered with the staged ones.
-Legacy sprints without reservations are closed without retroactively archiving cards, and they declare
-no issues, so they need no decisions either.
+`sprint close` freezes the active cards linked to the sprint, archives its terminal Done tasks with
+the normal archive audit, and returns that list. The Done transition clears the completed worker claim
+and resolved routing fields so terminal archival is not blocked; `archive` still refuses a live claim.
+Cards without that `sprint_ref` are not considered. Product and Issue records are never closure
+targets, even if malformed metadata links one to the sprint. The close request is staged: retrying the
+same request id after a lost archive, issue close, disposition or status reply resumes the same task
+set, repeats none of those writes and records one close event; a retry stating other decisions is
+refused. Sprints without reservations are closed without archiving cards and declare no issues, so they
+need no decisions.
 
 ### The decisions a close carries
 
-A close states what became of every issue the sprint declared and of every card it still holds in a
-working state. Neither follows from the close: a sprint may close with its Definition of Done only
-partly reached, so a closed sprint is not a done issue, and a card left in Ready under a closed contract
-is not a disposition. Both are stated by the closing PO in one file:
+A close states what became of every declared issue and every card still in a working state:
 
 ```yaml
 issues:
@@ -1048,123 +761,83 @@ cards:
     reason: its own head put it back in Ready before the close got to it
 ```
 
-Both sections are optional in the file and neither is optional in the close. Every declared issue needs
-a verdict and every card that is not Done needs a disposition; a close short of one is refused with
-`validation` before the transaction is opened, naming the issues without a decision and the cards with
-their states, and writing nothing at all. An unknown ref, a ref decided twice, an unknown verdict, an
-empty reason, an unknown field or section, a key that is not a name at all (`1: x`, which YAML reads as
-an integer key) and an unparsable file are refused the same way. `actual` is required by the two
-confirmations below and refused on every other decision.
+Both sections are optional in the file; neither is optional in the close. Every declared issue needs a
+verdict and every card not in Done needs a disposition; a close short of one is refused with
+`validation` before the transaction opens, naming the undecided issues and the cards with their states,
+and writes nothing. Also refused that way: an unknown ref, a ref decided twice, an unknown verdict, an
+empty reason, an unknown field or section, a non-string key (`1: x`), an unparsable file. `actual` is
+required by the two confirmations and refused on every other decision.
 
-A closing verdict closes the issue through the same lifecycle as `issue close`, with that reason and no
-new role. `open` writes nothing to the issue: the sprint's close event carries the basis, which is where
-the audit keeps the reason an issue was allowed to outlive its sprint.
+A closing verdict closes the issue through the `issue close` lifecycle with that reason. `open` writes
+nothing to the issue; the close event carries the basis.
 
-A disposition ends with the card archived, and what the board records before that is the verdict: `done`
-moves it to Done, `drop` moves it through Ready, which is the released edge that releases a retained
-worker — a card still holding a claim cannot be archived. Both moves carry the disposition's reason as
-the card's comment, and the archive carries it again. A card whose dispatcher work is still live is not
-disposable at all: the close refuses with `live_work` and names it, and the head is settled first.
+A disposition ends with the card archived. `done` moves it to Done; `drop` moves it through Ready (the
+edge that releases a retained worker). Both moves carry the disposition's reason as the card comment,
+and the archive carries it again. A card whose dispatcher work is still live is refused with
+`live_work`, naming it; settle the head first.
 
-`closed` is published as the last step of the close. The terminal phase runs in one order — the verdicts
-on the declared issues, the archival of the Done cards, the dispositions, the knowledge closeout, then the
-status, then the reserved-project index and the completion of the transaction — and an interrupted close
-therefore leaves the sprint open. That is what keeps a successor out of an unfinished close: an open sprint still reserves
-its projects, and `create` already refuses a second sprint on a reserved project, so the retry of the
-close finishes its dispositions before any successor can be opened. `close` also takes the admission lock
-(`sprints/admission.lock`) that `create` and `reopen` take, so a concurrent create waits for the answer
-rather than racing the status it depends on; the invariant does not depend on how long that lock is held.
-Because a disposition then moves a card of a sprint that is still open, and the reservation guard refuses
-a PO move into an open sprint's project, the close carries the guard's own `sprint_override` with the
-reason `disposed by the close of <sprint-ref>: <the disposition's reason>`. There is no other way around
-the guard.
+`closed` is published as the last step. The terminal phase order is the verdicts on the declared issues, the archival of the Done cards, the dispositions, the knowledge closeout, then the
+status, then the reserved-project index and completion of the transaction. An interrupted close leaves
+the sprint open and still reserving its projects, so no successor can be created on them until the
+retry finishes. Because dispositions move cards of a still-open sprint, the close carries the guard's
+own `sprint_override` with reason `disposed by the close of <sprint-ref>: <the disposition's reason>`.
 
-A close that has performed a step is never thrown away. A terminal refusal discards the staged close only
-while nothing has been written; from the first issue write onwards — the marker is durable before that
-write, as it is before the status change — the refusal is `audit_pending` and the staged plan stays on
-the record, and a retry that states other decisions is still refused.
+A terminal refusal discards the staged close only while nothing has been written. From the first issue
+write onward (the marker is durable before that write) a refusal is `audit_pending`, the staged plan
+stays, and a retry stating other decisions is still refused.
 
-No step of a close can be left unresolvable, and no step ends on anything but its own committed event.
-Every step — an issue verdict, an archival, a disposition's move and its archival — runs under a request
-id derived from the close's, and that id is the only proof the step happened. A pending event under it is
-a step whose backend effect landed and whose journal write did not: the close drives the same id again
-and does not finish while it is still pending. The state an object is observed in is never proof: a card
-sitting in the state a disposition wanted is as easily somebody else's move as this close's. Whether a
-disposition needs its move at all is read from the state this close froze into its plan, not from the
-board as it stands now.
+Every step — issue verdict, archival, disposition move and its archival — runs under a request id
+derived from the close's, and that id's committed event is the only proof the step happened. A pending
+event under it means the backend effect landed and the journal write did not; the close drives the
+same id again and does not finish while it is pending. Observed object state is never proof. Whether a
+disposition needs its move is read from the state frozen into the close's plan.
 
-An object that changed under a close, with no committed step of this close's to account for it, is
-somebody else's change, and it is settled by an explicit decision rather than adopted:
+An object changed under a close with no committed step of this close to account for it is settled by
+explicit decision:
 
-- **Before any write.** The preflight reads every declared issue. A closing verdict for an issue somebody
-  else has already closed is refused with `validation`, naming each ref and the reason it carries, before
-  the transaction is opened; so is a decision to leave such an issue open. The closer rewrites the file,
-  confirming what happened with `already_closed` and naming that reason in `actual`. A confirmation of an
-  issue that is open, or one naming a reason the issue does not carry, is refused the same way. The set of
-  issue *close reasons* is unchanged; what gains a value is the set of decisions the file may state.
-- **In flight, once the preflight has passed and writes have begun.** The close neither finishes nor
-  invents a verdict: it stops with `close_conflict`, naming the ref, the stated verdict and the fact that
-  actually holds, and records the conflict on its own transaction. The retry of the same request id may
-  amend exactly those refs, to exactly the confirmation of what happened (`already_closed` with the
-  issue's reason, `already_moved` with the card's state), and nothing else; every other change is refused
-  as a restated file, as before. So the step stays resolvable, and the closer resolves it.
+- **Before any write.** Preflight reads every declared issue. A closing verdict, or `open`, for an
+  issue somebody else already closed is refused with `validation`, naming each ref and its reason. The
+  closer confirms with `already_closed` and that reason in `actual`. Confirming an open issue, or naming
+  a reason the issue does not carry, is refused the same way.
+- **In flight** (preflight passed, writes begun). The close stops with `close_conflict`, naming the
+  ref, the stated verdict and the actual fact, and records the conflict on its transaction. A retry
+  under the same request id may amend exactly those refs to the matching confirmation
+  (`already_closed` with the issue's reason, `already_moved` with the card's state) and nothing else.
 
-A confirmation writes nothing to the object it confirms. `already_closed` leaves the issue with the reason
-it carries; `already_moved` skips the disposition's move and archives the card where it stands, and it is
-accepted only for the states a disposition of this close would have produced (`done`, `ready`), so a
-confirmation cannot take a card off the contract while it is still in a working state. Both are recorded
-in the close event with their prose, which is where the audit keeps why the sprint accepted them.
+A confirmation writes nothing to its object. `already_closed` leaves the issue's reason;
+`already_moved` skips the move and archives the card where it stands, accepted only for `done` or
+`ready`. Both are recorded in the close event with their prose.
 
 #### The closeout a close writes
 
-A close writes one knowledge document, and it is a step of the close rather than something a person
-remembers to do afterwards. It is written into `state/knowledge` through `write_knowledge_document`, the
-only writer of that plane, and there is no second one. Its path is derived from the sprint and the day the
-close was staged (`closeouts/<day>-<sprint-ref>.md`) and frozen into the staged plan, so a retry the next
-day writes the same document rather than a second one beside it.
+A close writes one knowledge document as a step of the close, into `state/knowledge` through
+`write_knowledge_document`. Its path, `closeouts/<day>-<sprint-ref>.md`, uses the day the close was
+staged and is frozen into the staged plan, so a retry on a later day writes the same document.
 
-The step runs under a request id derived from the close's, exactly as every other step of the terminal
-phase does, and that id's committed event is the only proof the document was written. So a failure at or
-after the step is repaired by repeating the same close request: the retry that finds the step committed
-skips it, and the retry that finds it pending drives the same write, whose content is already on disk and
-which therefore commits nothing further. Exactly one document, whatever failed. Its position in the order
-is before the status, so an interrupted close still leaves the sprint open and still holding its projects,
-and a sprint that reads `closed` has its closeout written.
+The step runs under a derived request id like every other terminal step; a retry skips it when
+committed and re-drives the identical write when pending. Exactly one document results. It runs before
+the status, so a sprint that reads `closed` has its closeout.
 
-**What is in it is the closing PO's, not the operation's.** The account of what became of the work — what
-was achieved, what is left unfinished, and the decision the owner made about the remainder — is supplied
-by the caller and carried verbatim. What the close composes around it is what only the close knows: the
-sprint it is about, who closed it and why, the verdict on every declared issue and the disposition of
-every card that was not done. The operation never decides what the sprint achieved.
+The account of what was achieved, what is unfinished and the owner's decision about the remainder is
+supplied by the caller and carried verbatim. The close adds what only it knows: the sprint, who closed
+it and why, the verdict on every declared issue and the disposition of every card not done.
 
-**A close is not a completed Definition of Done, and every one of these says so.** The closeout carries
-that sentence, the answer to a close carries it in a `definition_of_done` field that is `satisfied:
-false` and nothing else, and this section is where it is stated: *closing a sprint states what became of
-its work; it is not a statement that the sprint's Definition of Done was reached.* A sprint may close with
-its contract only partly satisfied — that is the ordinary case, and it is why the decisions file exists —
-so no field, name or sentence of a close may let a closed sprint read as a satisfied contract.
+A close is not a completed Definition of Done. The closeout carries that sentence; a close answer
+carries `definition_of_done` with `satisfied: false` only. Closing a sprint states what became of its
+work; it is not a statement that the sprint's Definition of Done was reached.
 
-A close made with no closeout writes none. Requiring one belongs to the protocol operation
-([Closing one](#closing-one)), where the caller is a closing PO; the writer takes it as an option so that
-recovery and the callers that merely need a closed sprint are not made to invent an account of one.
+A close made with no closeout writes none. The protocol operation requires one
+([Closing one](#closing-one)); the writer takes it as an option for recovery and internal callers.
 
 #### A comment on a sprint that has ended
 
-A closed or stopped sprint takes no further *semantic* work: no current task is set on it and no observer
-resume is recorded against it, because both are statements about work in progress under a contract that
-has ended. **A comment is not that, and it is accepted.** Adding the outcome after the fact is what a PO
-does with a sprint that is over, and refusing it is what sent one reaching past this protocol into the
-board's own comment API.
+A closed or stopped sprint accepts no current task and no observer resume. A comment is accepted. It
+does not change status, reopen the sprint, restore a reservation, or wake or launch a head (the tick
+stops the observer of a non-open sprint and drops its record). It is idempotent on `request_id` like
+every sprint write. Its delivery reads `not_deliverable`.
 
-What such a comment does not do is exhaustive: it does not change the sprint's status, does not reopen it,
-does not restore a reservation (the reserved-project index holds projects for *open* sprints only), and
-wakes or launches no head — the production tick stops the observer of a sprint that is no longer open and
-drops its record, so there is nothing to wake. It is idempotent on `request_id` by the same audit claim
-every sprint write is. Reading what happened to it answers `not_deliverable` rather than `saved`, because
-`saved` would say no batch carries it *yet*, and no batch ever will.
-
-What `SprintWriter._write` does with every sprint write it handles when the sprint is `closed` or
-`stopped`. This is the whole set, not the interesting part of it:
+What `SprintWriter._write` answers for every sprint write it handles when the sprint is `closed` or
+`stopped` (the complete set; pinned by a test that derives the kinds from `SprintWriter`):
 
 | sprint write | a `closed` or `stopped` sprint |
 | --- | --- |
@@ -1174,160 +847,121 @@ What `SprintWriter._write` does with every sprint write it handles when the spri
 | `restored` | `accepted` |
 | `resume_recorded` | `refused` — `closed`, exit status `3` |
 
-The two refusals are the semantic ones, for the reason above. The three acceptances are each deliberate
-and each predate the accepted comment. A **budget** charge on a sprint that has ended is recorded like any
-other: the hard-limit edge that stops a sprint is taken only from `open`, so a late charge changes the
-totals `show` reports and can neither re-stop the sprint nor move its status. A **restore** is not an
-operator's mutation of a sprint at all — it is the recovery path that rebuilds a sprint's fields from a
-backup, and refusing it on the status it is restoring would make a closed sprint unrecoverable.
+A late budget charge updates the totals `show` reports but cannot stop the sprint again or change its
+status (the hard-limit edge is taken only from `open`). A restore rebuilds fields from a backup and is
+accepted on any status.
 
-That table is the contract and it is pinned, and the pin does not trust this list: the test reads the kinds
-out of `SprintWriter`'s own calls to `_write`, drives every one of them against both terminal statuses, and
-holds each answer to the row here. A write added to the writer tomorrow and left out of this table fails
-that test — which is what the first version of this pin, carrying a hand-written three, could not do.
+### Budget
 
-Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
-schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.
-Each charge is a `budget_recorded` audit event; the charge that stops a sprint is paired with a
-`budget_hard_stopped` event carrying the hard limit and the triggering card-event identity. `show`
-returns the thresholds and `signal_reached`/`hard_reached` with the totals. The signal appears in a newly
-launched observer prompt but does not stop work. At the hard limit the dispatcher marks the sprint
-`stopped`, stops its observer and skips new linked claims; active cards continue their normal cycle. Only
+Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults 3 and 6. Omitted
+values resolve to defaults before a hard limit below the signal limit is rejected. Each charge is a
+`budget_recorded` audit event; the charge that stops a sprint is paired with a `budget_hard_stopped`
+event carrying the hard limit and the triggering card-event identity. `show` returns thresholds and
+`signal_reached`/`hard_reached` with totals. The signal appears in a newly launched observer prompt
+and does not stop work. At the hard limit the dispatcher marks the sprint `stopped`, stops its
+observer and skips new linked claims; active cards continue their cycle. Only
 `sprint reopen --role po` clears the stop.
 
+### Resume and observer wakes
+
 `sprint resume` accepts JSON with required string fields `selected_step`, `selected_why`,
-`rejected_alternatives`, `current_task`, `dod_state` and `next_safe_step`. It is stored separately from
-normal comments and carries a `[sprint:resume]` marker. The entry is a concise semantic delta, not a copy of
-machine-derived delivery, CI or board telemetry. `show` and `status` compute freshness only from semantic
-observer work: a card entering Assessment, Blocked or Done; a budget event; or a PO comment on the
-sprint. Claims, reports, Validate moves, reviewer launches, routing and observer-authored events do not make a
-resume stale. Missing data is `resume_missing`; a semantic transition may trail its resume for up to five
-minutes, then is `resume_stale`. That comparison belongs to an open sprint. A closed or stopped sprint
-records no resume and takes no current task — both are statements about work in progress under a contract
-that has ended — so the record on its row is the last one anybody wrote, and freshness for it is read from
-that record alone: no later event ages it and no status path reads the audit for it. A post-close comment
-is accepted ([A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended)) and does not
-disturb that: a terminal sprint's freshness never reads the audit the comment is recorded in, so there is
-no event for it to age the frozen record with. `reopen` puts the sprint back under the ordinary comparison.
-A sprint summary therefore reads the committed audit at most once per operation, and an installation whose
-sprints have all finished does not read it at all. Neither command reads an observer transcript. The dispatcher records a
-durable delivery batch before it wakes or replaces an observer, coalesces pending semantic events to one
-high-water mark, and owns all waiting for workers, reviewers and CI. An observer acknowledges it by passing
-the matching `--delivery-id` and `--through-event` from `status` to `sprint resume`; those values are audit payload,
-not part of the six stored resume fields. `secretary status --json` exposes the
-same entity-derived state for every sprint in `installation.sprints.items`, including stopped status and
-its reason, budget, resume freshness and observer state. If the live board cannot be read, that fact is
-reported in `installation.sprints.error`.
+`rejected_alternatives`, `current_task`, `dod_state` and `next_safe_step`. It is stored apart from
+normal comments with a `[sprint:resume]` marker, as a concise semantic delta rather than a copy of
+machine telemetry. For an open sprint, `show` and `status` compute freshness only from semantic
+observer work: a card entering Assessment, Blocked or Done; a budget event; or a PO sprint comment.
+Claims, reports, Validate moves, reviewer launches, routing and observer-authored events do not age a
+resume. Missing data is `resume_missing`; a semantic transition may trail its resume for up to five
+minutes, then `resume_stale`.
 
-Wakes are intentionally sparse: only the semantic card edges (Assessment, Blocked and Done), an eligible
-human control-plane return to Issues, sprint budget events and PO sprint comments open observer work.
-Claims, routing, reports, validation telemetry and observer-authored writes do not. Prompt acceptance is
-out of band: delivery records only that the pane took the prompt, and the next ordinary reconciliation
-reads one durable audit snapshot to close the batch only on the matching resume. Delivery therefore never
-polls the board or calls an observer-facing `Monitor` command. Legacy broad cursors are narrowed without
-discarding still-unacknowledged semantic work.
+A closed or stopped sprint records no resume and takes no current task, so its freshness is read from
+its row's last record alone. A post-close comment is accepted
+([A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended)), and a terminal sprint's freshness never reads the audit the comment is recorded in. `reopen`
+restores the ordinary comparison. A sprint summary reads the committed audit at most once per
+operation, and not at all when every sprint has ended. Neither command reads an observer transcript.
 
-An Assessment entry is one decision visit. The first observer `task decide` is canonical for that visit;
-a redelivered observer turn repeating the same kind returns that decision without adding another comment,
-and a different kind is refused until the card enters Assessment again. This protects the release/rework
-seam from delivery retries without weakening RED or Blocked classification. The complete decision
-transaction is serialized per card, including the fresh state read, visit resolution and staged board/audit
-write; two observer processes cannot each make a different decision for the same Assessment visit.
+The dispatcher records a durable delivery batch before it wakes or replaces an observer, coalesces
+pending semantic events to one high-water mark, and owns all waiting for workers, reviewers and CI. An
+observer acknowledges by passing the `--delivery-id` and `--through-event` from `status` to
+`sprint resume` (audit payload, not resume fields). `secretary status --json` exposes the same state
+for every sprint in `installation.sprints.items` (stopped status and reason, budget, resume freshness,
+observer state); an unreadable live board is reported in `installation.sprints.error`.
+
+Only these open observer work: semantic card edges (Assessment, Blocked, Done), an eligible human
+control-plane return to Issues, sprint budget events and PO sprint comments. Claims, routing, reports,
+validation telemetry and observer-authored writes do not. Delivery records only that the pane took the
+prompt; the next ordinary reconciliation reads one durable audit snapshot and closes the batch only on
+the matching resume. Delivery never polls the board or calls an observer-facing `Monitor` command.
+
+An Assessment entry is one decision visit. The first observer `task decide` is canonical for that
+visit; a redelivered turn repeating the same kind returns that decision without another comment, and
+a different kind is refused until the card enters Assessment again. The decision transaction (fresh
+state read, visit resolution, staged board/audit write) is serialized per card.
 
 ### The open-sprint limit
 
-How many sprints an installation may hold open at once is the instance setting `open_sprint_limit`, an
-integer that is either 1 or 2. Absent means 1, which is the shipped default; an installation may
-explicitly enable 2 for the gated pilot. Nothing enables the pilot by itself. A value the setting cannot honour
-(3, a string, `true`, anything the schema refuses) fails closed to 1 rather than raising, so a malformed
-setting can never widen the limit and can never stop admission either; `validate_instance` reports it as
-an `open_sprint_limit` finding, because failing closed is otherwise silent to the operator who wrote it.
-The limit is read from the installation config at the moment admission asks for it, so changing it needs
-no restart and an installation whose config cannot be read answers 1.
+The instance setting `open_sprint_limit` is `1` or `2`; absent means `1`. A value the schema refuses
+fails closed to `1` (never widening the limit or stopping admission), and `validate_instance` reports
+an `open_sprint_limit` finding. The limit is read from installation config at admission time, so
+changes need no restart; an unreadable config answers `1`.
 
-What admission checks, in which order, and at which limit is stated here and nowhere else; every other
-passage in these docs points here rather than repeating it. Each check is a read of live state, and all
-of them run before the first board write. In the order admission applies them:
+This section is the single statement of what admission checks. Each check reads live state before the
+first board write, in this order:
 
-1. **disjoint project reservations**, at either limit. A project another open sprint already reserves is
-   refused, naming the project and its holder. This rule predates the limit and reads the same at 1 and
-   at 2.
-2. **a different product**, at limit 2 only. Two open sprints may not share the owning Product. A sprint
-   that declares no product at all, a row from before sprints owned one, cannot be proven disjoint and is
-   refused, whichever of the two it is: the candidate is judged on its own value first, so the answer
-   does not depend on which row was looked at first.
-3. **non-overlapping canonical repository roots**, at limit 2 only. Roots are compared as absolute
-   resolved paths, and overlap includes nesting: two spellings of one working tree are one working tree,
-   and a root that contains another's is the same tree twice. A stored root that is not already absolute
-   is refused on either side rather than resolved at check time, because resolving it would answer
-   against the working directory of whichever process happens to run admission. The candidate's own roots
-   are judged before any pairwise comparison and whether or not another sprint is open, so a one-row open
-   set published by restore or by a reopen cannot carry a root the next check would read as a different
-   tree.
+1. **disjoint project reservations**, at either limit: a project another open sprint reserves is
+   refused, naming the project and holder;
+2. **a different product**, at limit 2 only: two open sprints may not share the owning Product. A
+   sprint with no product cannot be proven disjoint and is refused, whichever side it is on (the
+   candidate is judged on its own value first);
+3. **non-overlapping canonical repository roots**, at limit 2 only, compared as absolute resolved
+   paths; nesting counts as overlap. A stored root that is not absolute is refused on either side, not
+   resolved at check time. The candidate's own roots are judged before any pairwise comparison, whether
+   or not another sprint is open;
 4. **the count**, at either limit: the installation already holds as many open sprints as it may.
 
-The count is last because it names every open sprint and distinguishes none of them, so a caller who acts
-on it can close the wrong one and come back for a second refusal. A resource refusal names the sprint
-holding the resource, and closing that one sprint both frees a slot and clears the collision. Every
-collision above the count is therefore reported before it, including when the installation is already at
-its limit.
+Resource collisions are reported before the count, including at the limit, because a resource refusal
+names the sprint holding it. At limit 1 only checks 1 and 4 run.
 
-At limit 1, where checks 2 and 3 do not run, admission reads exactly as it did before the pilot: a project
-another open sprint reserves is refused first, and everything else is refused on the count.
-
-`create`, `reopen` and restore are held to the same invariants, under the same
-`sprints/admission.lock`. `restore_create` is deliberately not an admission decision, since it reproduces
-exported rows one after another, so recovery judges the exported open sprints as a *set* instead: once,
-before the first backend write of either set, by admitting the rows one at a time in reference order
-against the rows already accepted. An archive is therefore not a way to arrive at a pair admission would
-have refused. The limit applied is the target installation's, not the source's, and the whole restore runs
-inside the admission lock so a `create` cannot slip between recovery's check and its write.
+`create`, `reopen` and restore hold the same invariants under `sprints/admission.lock`. Restore judges
+the exported open sprints as a set: once, before the first backend write of either set, admitting rows
+one at a time in reference order against the rows already accepted, at the *target* installation's
+limit, with the whole restore inside the admission lock.
 
 ### The declared observer
 
-A sprint carries exactly one observer value in `sprint_observer`. There is no dynamic default, no
-value inherited from `role_defaults.observer`, no missing-field fallback and no permanent
-tri-state. Four tagged forms exist, and only the first two are executable:
+A sprint carries exactly one observer value in `sprint_observer`. There is no default, no inheritance
+from `role_defaults.observer` and no missing-field fallback. Four tagged forms exist; only the first two
+are executable:
 
 | form | meaning |
 | --- | --- |
 | `{"kind": "head", "profile": "claude-observer"}` | the sprint is observed by that one head profile |
 | `{"kind": "none"}` | the sprint runs without an observer |
-| `{"kind": "historical", "profile": HEAD, "source": "observer_lifecycle_audit", "event_id": EVT}` | a closed row whose head was recovered from durable lifecycle events when the field was introduced |
-| `{"kind": "historical", "profile": null, "source": "migration_unknown"}` | a closed row that never launched an observer, so there is nothing honest to recover |
+| `{"kind": "historical", "profile": HEAD, "source": "observer_lifecycle_audit", "event_id": EVT}` | a closed row whose head was recovered from durable lifecycle events |
+| `{"kind": "historical", "profile": null, "source": "migration_unknown"}` | a closed row that never launched an observer |
 
-A `historical` value is provenance of what ran, never a declaration of what to run. An open sprint
-carrying one is corrupt in exactly the way a missing value is.
+A `historical` value is provenance, not a declaration; an open sprint carrying one is corrupt.
 
-`create` and `reopen` both require `--observer`, spelled either `none` or one head profile from
-`heads.yaml`. Absent, null, empty, `default` and `inherited` are not interpretations this model has.
-A named profile is resolved against this installation's head snapshot — the same registry the
-dispatcher launches from — at every boundary that can put one on a row: create, reopen, and the
-restore preflight. A sprint is never opened, reopened or republished on a head that does not exist,
-because the fence would stop its projects on the first tick and the operator would be reading a
-critical outcome instead of a validation error. Registry drift *after* the
-declaration is what the fence is for.
-`reopen` writes the fresh choice while the sprint is still closed and only then changes its status,
-so the row is never readable open under a value the reopening caller did not choose; `create` writes
-it with the rest of the fields, before the reference publishes the row.
+`create` and `reopen` require `--observer`: `none` or one head profile from `heads.yaml` (absent, null,
+empty, `default` and `inherited` are refused). A named profile is resolved against this installation's
+head registry at create, reopen and the restore preflight; a sprint is never opened, reopened or
+republished on a head that does not exist. Registry drift after declaration is handled by the fence.
+`reopen` writes the new choice while the sprint is still closed and then changes status; `create`
+writes it before the reference publishes the row.
 
-The reader is strict everywhere and always: an open sprint whose observer metadata is missing,
-unreadable, historical, or names a profile the registry does not have is corrupt. It is not launched
-from `role_defaults.observer`, its cards do not move, and it does not silently become observer-free.
+The reader is strict: an open sprint whose observer metadata is missing, unreadable, historical, or
+names a profile the registry lacks is corrupt. It is not launched from `role_defaults.observer`, its
+cards do not move, and it does not become observer-free.
 
-Restore validates the whole exported set before the first backend write of any set, cards included,
-and refuses rather than publishing part of it. Every exported row must carry a value, closed rows
-too. A row without one is named and refused, and the refusal does not guess why: an export can lack
-the field because it is damaged or because it was taken before the field existed, and nothing in the
-archive tells the two apart. The repair is the same either way — declare the value on that row in
-the export's `state/board/sprints.json` and restore again. So is the repair for an open row whose
-declared head has left the registry.
+Restore validates the whole exported set, cards included, before the first backend write, and refuses
+rather than publishing part of it. Every exported row, closed rows included, must carry a value; a row
+without one is named and refused. Repair: declare the value on that row in the export's
+`state/board/sprints.json` and restore again. The same repair applies to an open row whose declared head
+left the registry.
 
 ### The optional executor pins
 
-Beside its observer a sprint may fix the head profile its cards run on, for the worker role in
-`sprint_worker` and for the reviewer role in `sprint_reviewer`. The two are independent, and each has
-three states:
+A sprint may fix the worker profile (`sprint_worker`) and the reviewer profile (`sprint_reviewer`)
+its cards run on. Each is independent:
 
 | state | meaning |
 | --- | --- |
@@ -1335,954 +969,215 @@ three states:
 | the field holds a profile name | every card of this sprint runs that role on exactly that profile |
 | the field holds anything else | corruption, reported as such; it is never read as "pinned nothing" |
 
-Absence is a decision the model has, not a gap to fill. `sprint show` answers both roles always, as
-`{"state": "unset"}` or `{"state": "pinned", "profile": HEAD}`, and `sprint status` carries the same
-two states beside the live observer state. No read path substitutes `role_defaults`, an empty string
-or a `null`-as-error for the absent state, and nothing infers a pin from what the cards happen to run
-on.
+`sprint show` always answers both roles as `{"state": "unset"}` or
+`{"state": "pinned", "profile": HEAD}`; `sprint status` carries the same beside the observer state. No
+read substitutes `role_defaults`, an empty string or `null`, and no pin is inferred from cards.
 
-There is no `none` here, and the empty string is not a spelling of the absent state either. `--observer
-none` says a sprint runs without an observer, which is a way a sprint can run; a card that runs without
-a worker is not, so both words are refused at `sprint create` rather than folded into "pinned nothing".
-A role is left unpinned by leaving its option out.
+`none` and the empty string are refused at `sprint create`; a role is left unpinned by omitting its
+option. A named profile is resolved against the head registry at `sprint create`, before any row,
+field or audit event; an unknown profile or unreadable registry is refused. `sprint reopen` does not
+restate pins; they survive a close.
 
-A named profile is resolved against this installation's head snapshot — the same registry and the same
-refusal the declared observer gets — at `sprint create`, before any row, field or audit event exists.
-An unknown profile, a profile that has left the registry and a registry that cannot be read are all
-refused there, and the sprint is not created.
+The observer launch document prints both roles in an `## Executors` section: the pinned profile, or
+that the owner fixed none and the observer chooses per card.
 
-`sprint reopen` does not restate the pins: unlike the observer, which is decided again at every
-transition into `open`, a pin is a property of the sprint that survives its close.
+Every write of a card's `head` or `review_head` — `task create` (first, later or recreated card) and
+`task edit` — goes through one check: it writes the pinned profile when the caller names none (including
+an edit that would clear the field), and refuses a different profile with `sprint_executor_pinned`,
+naming the sprint and pinned profile. An unreadable pin refuses both with `sprint_executor_unreadable`.
+The dispatcher's `resolved_head` at claim is not a separate write path: it launches the profile the
+card declares. A sprint that pins nothing adds no check.
 
-The pins are what the observer is told and what the card guard holds it to. The launch document the
-dispatcher writes for the observer prints both roles in an `## Executors` section — the pinned profile,
-or, for an unpinned role, that the owner fixed none and the observer chooses one per card.
-
-A card of a sprint that pins a role must run that role on that profile, and the constraint has one
-door. Every write of a card's `head` or `review_head` goes through the same check: `task create`, for a
-first card, a later one, or one recreated after a rework or a reslice, and `task edit`, which revises a
-card until it is claimed. Both write the pinned profile when the caller names none — including an edit
-that would clear the field — and both refuse a value naming a different profile with
-`sprint_executor_pinned`, which names the sprint and the pinned profile. A sprint whose row carries an
-unreadable pin refuses both with `sprint_executor_unreadable` rather than writing a card under a
-constraint nobody can read. What the dispatcher records in `resolved_head` when it claims a card is not
-a third door: it launches the profile the card declares and records the one it launched.
-
-A sprint that pins nothing adds no check at all on any of those paths, and a card's actually chosen
-profiles stay readable on the card itself, where they have always been: there is no second routing
-registry and no new resolver.
-
-The pins are part of the durable entity, so they travel its recovery path. The normalized export
-carries a key per role only where the row declares a pin, absence stays absence through the round trip,
-and both fields are compared by the sprint parity check. An exported key that is not a profile name
-stops the restore in the preflight, beside the observer set and before the first backend write, because
-recovering it as "the owner pinned nobody" would turn a constraint the owner set into a free choice.
+Pins travel the recovery path: the normalized export carries a key per role only where pinned, absence
+survives the round trip, both fields are compared by sprint parity, and an exported key that is not a
+profile name stops restore in preflight before the first backend write.
 
 ### The observer fence
 
-The production tick checks every open sprint's observer before it reconciles records, advances
-active cards or claims Ready. The check is pure: it reads the sprint board, the head registry and
-the observer records, and launches nothing.
+The production tick checks every open sprint's observer before it reconciles records, advances active
+cards or claims Ready. The check reads the sprint board, head registry and observer records and
+launches nothing.
 
 A sprint is fenced when its declared head has not been launched, is dead, does not match the running
-record, is parked behind a failed bring-up, or when its declaration is corrupt. Fencing is
-project-local: it excludes that sprint's reserved projects and linked cards from reconciliation,
-active advancement and Ready claims, and leaves every other project running. `{"kind": "none"}`
-passes with no launch and no probe.
+record, is parked behind a failed bring-up, or its declaration is corrupt. Fencing is project-local: it
+excludes that sprint's reserved projects and linked cards from reconciliation, advancement and Ready
+claims; other projects run. `{"kind": "none"}` passes with no launch and no probe.
 
-A sprint board that cannot be read is fenced, not waved through. The sprint board and the Pipeline
-board are separate Kanboard projects and fail separately, so the tick can read a sprint's cards
-while its declaration is unreadable, and advancing them would be moving cards whose observer nobody
-could check. Each successful pass records every open sprint's reservations in the production state;
-a pass that cannot read the board fences from that snapshot, plus every card whose own metadata
-names a sprint. Cards belonging to no sprint keep running. A sprint admitted since that last
-successful pass is in neither source's reach: the snapshot predates its reservations, so a card
-sitting in a project it reserves without naming the sprint itself is fenced by neither and can
-advance or be claimed while the board is down. That window runs from the admission to the next pass
-that reads the sprint board.
+An unreadable sprint board fences. Each successful pass records every open sprint's reservations in
+production state; a pass that cannot read the board fences from that snapshot plus every card whose
+metadata names a sprint. Cards in no sprint keep running. Known gap: a sprint admitted after the last
+successful pass is in neither source, so a card in a project it reserves that does not name the sprint
+can advance or be claimed until the next pass that reads the sprint board.
 
 The fence writes one durable `observer_fence_raised` event with `outcome: critical` per reason, and
-clears with `observer_fence_cleared` once adoption is confirmed: a record for that sprint naming
-exactly the declared profile, with a pid on disk that is alive. A pid that has not been written yet
-does not clear it. The lifecycle grace window that reads an unwritten pid as alive exists to decide
-whether to relaunch a head, and a head can die before it ever reaches the observer prompt; releasing
-another role's cards needs the stronger proof. Clearing is therefore normally a later tick's: the
-launch happens after the fence in the same tick and the pid lands after that.
+`observer_fence_cleared` once adoption is confirmed: a record for that sprint naming exactly the
+declared profile, with a live pid on disk. An unwritten pid does not clear it, so clearing normally
+happens on a later tick than the launch.
 
-A fence that cannot be evaluated ends the tick. If the check raises — most plausibly because its
-critical outcome cannot be staged on a full or unwritable volume — the tick returns
-`observer-fence-unavailable` and runs no reconciliation, no advancement, no budget accounting, no
-observer reconciliation and no Ready claim. An empty fence is not "nothing was decided", it is
-"everything may move", and the sprint whose outcome could not be written is exactly the one whose
-cards must not.
+If the fence check raises (e.g. its critical outcome cannot be staged on a full or unwritable volume),
+the tick returns `observer-fence-unavailable` and runs no reconciliation, advancement, budget
+accounting, observer reconciliation or Ready claim.
 
-`task create --sprint` records the sprint reference in Pipeline-card metadata. `task show` and
-`task list` expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` derives its
-`cards` list from that live card metadata rather than storing a duplicate list. New links and comments
-are refused after a sprint is closed. `current-task` additionally requires that the selected card already
-carries this sprint reference.
+### The sprint guard
 
-An open sprint holds every project in its `reservations`: only its observer may create a card in such a
-project, and
-only with `--sprint` naming that sprint. Observer and dispatcher may move and edit linked cards, so the
-ordinary claim, report and review cycle gains no extra step. The PO may create, move or edit only with an
-explicit `--sprint-override` plus a non-empty `--sprint-override-reason-file`; the reason text is stored
-as its own field in the durable audit. Without the flag the PO gets `sprint_write_forbidden`, as do retro,
-steward and every other role. The refusal names the holding sprint and asks the caller to write through
-its entity.
+`task create --sprint` records the sprint reference in card metadata; `task show` and `task list`
+expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` derives `cards` from live
+card metadata. New links are refused after a sprint is closed. `current-task` requires that the card
+already carries this sprint reference.
 
-Both answers the guard can give are audited, and neither is duplicated when the same request id is
-retried. A refusal is a `sprint_guard_denied` record; a granted override is a `sprint_guard_override`
-record carrying the project, the holding sprint, the override reason and the request id of the operation
-it authorized. Each is written under its own derived request id, so the operation keeps its own retry key,
-and the grant is written before that operation stages or effects anything: an override that could not be
-recorded does not happen. The grant is a control-plane record about authority, deliberately separate from
-the operation's own record — a migrated Card transition's typed event describes the lifecycle edge, not
-who was permitted to make it — which is what keeps the answer to "who overrode this sprint's reservation,
-and why" in one shape across `move`, `create` and `edit`.
+An open sprint holds every project in its `reservations`: only its observer may create a card there,
+and only with `--sprint` naming that sprint. Observer and dispatcher may move and edit linked cards.
+The PO may create, move or edit only with `--sprint-override` plus a non-empty
+`--sprint-override-reason-file` (the reason is stored as its own audit field). Without it the PO gets
+`sprint_write_forbidden`, as do retro, steward and every other role; the refusal names the holding
+sprint.
 
-A write of role `observer` is authenticated against the sprint it names before any of that. The
-dispatcher launches a head for one sprint and binds `SECRETARY_OBSERVER_SPRINT` and
-`SECRETARY_OBSERVER_GENERATION` into that head's own command line; `runtime.env` cannot supply or
-replace them. A card linked to another sprint, and a `sprint resume` or `sprint current-task` naming
-another entity, are refused as `observer_sprint_mismatch`; a head that carries no binding is refused as
-`observer_identity_unbound` on its first write, because a caller that cannot name its sprint cannot
-be placed at all. Both refusals are audited as `sprint_guard_denied` with that code, which is how an
-identity failure reads apart from a role that has no such right.
+Both guard answers are audited once per request id: a refusal as `sprint_guard_denied`; a granted
+override as `sprint_guard_override` carrying project, holding sprint, override reason and the request id
+of the authorized operation. Each has its own derived request id, and the grant is written before the
+operation stages or effects anything; an override that could not be recorded does not happen. The
+grant record is separate from the operation's own record, with the same shape across `move`, `create`
+and `edit`.
 
-The check keys off the declared role, and the caller declares it. `sprint close`, `sprint reopen` and
-the budget write take role `po` and no binding, and each takes the sprint reference as an argument, so a
-head declaring `--role po` reaches any open sprint rather than only its own. The observer's own close of
-its sprint is that call. Nothing below the CLI distinguishes it from the PO making the same call, and the
-audit shows it as `role=po` with the observer's actor id.
+A write with role `observer` is authenticated against the sprint it names first. The dispatcher binds
+`SECRETARY_OBSERVER_SPRINT` and `SECRETARY_OBSERVER_GENERATION` into the head's command line;
+`runtime.env` cannot supply or replace them. A card linked to another sprint, or `sprint resume` /
+`sprint current-task` naming another sprint, is refused as `observer_sprint_mismatch`; a head with no
+binding is refused as `observer_identity_unbound`. Both are audited as `sprint_guard_denied` with that
+code.
 
-The index of the projects open sprints reserve is kept locally next to the audit log, keyed by project id.
-An index written in an older key space is rebuilt from the sprints board before it answers. For a project
-outside any open
-sprint it triggers no read of the sprints board. For a write into a held project the sprint is re-read
-live: an unreachable board returns `sprint_guard_unavailable` rather than allowing the write. Closing or
-stopping a sprint releases the hold.
+The check keys off the declared role. `sprint close`, `sprint reopen` and the budget write take role
+`po` with no binding and a sprint reference argument, so a head declaring `--role po` reaches any open
+sprint. An observer closing its own sprint makes that call, audited as `role=po` with the observer's
+actor id.
 
-Sprint mutations share the board event log and pending-audit recovery with card mutations. They carry the
-sprint reference as `ref`, and a repeated `--request-id` returns the committed event without recording a
-second one.
+The index of projects held by open sprints is kept next to the audit log, keyed by project id; an index
+in an older key space is rebuilt from the sprints board before it answers. A project outside any open
+sprint triggers no sprints-board read. For a write into a held project the sprint is re-read live; an
+unreachable board returns `sprint_guard_unavailable`. Closing or stopping a sprint releases the hold.
 
-Every write command passes role guards and transition checks. A mutation first receives an append-only
-pending audit event, is then checked against the live board, and only then counts as committed. An
-unresolved pending write blocks a consistent export and the recovery checkpoint until `reconcile-audit`.
+### Task writes and the audit
 
-A Card state change is the one mutation that has moved to the board protocol. `move` and `claim` run
-through the board host, which records each occurrence as a typed protocol event in the same
-`events.ndjson`: `record_type` is `board.protocol_event`, the lifecycle edge is the object
-`transition: {source, target}`, and the reason is carried as text rather than as a digest. Released
-generic `moved` and `claimed` rows stay readable exactly as they were written, and every other operation
-(`report`, `verdict`, `decide`, `routing`, comments, create/edit/archive) keeps its generic record. A
-reader that cares about card transitions therefore has to handle both shapes explicitly; `record_type` is
-what tells them apart. A request id written before the migration also keeps the operation it named: a
-retry of a released generic `move` or `claim` id replays that record and finishes its released cleanup,
-rather than being read as a typed request it never was.
+Sprint mutations share the board event log and pending-audit recovery with card mutations, carry the
+sprint reference as `ref`, and a repeated `--request-id` returns the committed event.
 
-One staged occurrence has exactly one owner of its outcome, `MutationEventTransaction`, and one window in
-which its record may be discarded: the call that issues the single column operation, and nothing else.
-Everything before that call — reading the card, re-authorizing the edge against the live state — is inside
-the window, because none of it has touched the board. Everything after it is fail-closed. That includes
-the read that confirms the move: a read which times out, or which finds another writer's column, says
-nothing about whether this move was applied, so it keeps the exact pending typed record rather than
-reporting the card as never moved. The same holds for the follow-up board work and for the event commit.
+Every write passes role guards and transition checks. A mutation first receives an append-only pending
+audit event, is checked against the live board, and only then counts as committed. An unresolved
+pending write blocks a consistent export and the recovery checkpoint until `reconcile-audit`.
 
-That board work is inside the same transaction, not after it. The claim metadata a `claim` writes, the
-routing and retry fields a move into Ready or Done resets, the review head a move out of Validate clears
-and the move's reason comment all run once the column effect is confirmed and before the event commits.
-So a refused or failed column move leaves nothing behind at all - no claimed-but-Ready card, no event -
-and a follow-up that does not land keeps the exact pending typed record instead of reporting a clean
-journal over a half-written card.
+Card state changes (`move`, `claim`) run through the board host and are recorded as typed protocol
+events in `events.ndjson`: `record_type` is `board.protocol_event`, the edge is
+`transition: {source, target}`, and the reason is text. Older generic `moved` and `claimed` rows stay
+readable as written; every other operation (`report`, `verdict`, `decide`, `routing`, comments,
+create/edit/archive) keeps its generic record. Readers of card transitions must handle both shapes,
+distinguished by `record_type`. A request id recorded as a generic `move` or `claim` keeps that
+operation: a retry replays that record and finishes its cleanup.
 
-Recovery is likewise split. A pending typed transition is repaired by re-reading the card and committing
-its exact event only when the requested target is live on the board. It never repeats a column move, and
-it refuses an effect that is unproven, contradicted or gone, leaving the pending record for an operator
-instead of publishing a transition that never happened. Where the outstanding board work is recomputable
-from the card - the Ready and Done reset - recovery finishes it first and refuses to close the record
-while it remains incomplete, so a transient backend fault resolves on the next `reconcile-audit` rather
-than stranding claim metadata under a clean audit. A claim's own metadata is not recomputable: the worker
-id and the resolved heads are dispatcher decisions no reader of the card can reconstruct. Refusing there
-would make a proven start permanently unrecoverable, so recovery publishes the occurrence it proved and
-leaves the missing claim to the dispatcher's live claim check, which reports it as a controlled
-divergence instead of launching on it. Retrying the same request id is the repair that also restores the
-metadata, and only while the record is still pending: it repeats no admission check and no column move,
-finishes the metadata and then publishes. Once `reconcile-audit` has published the occurrence, that retry
-answers from the committed event and writes nothing further, so the claim gap is the dispatcher's to
-report from there on.
+One staged occurrence has one outcome owner, `MutationEventTransaction`, and one window in which its
+record may be discarded: the call that issues the single column operation. Everything before that call
+(reading the card, re-authorizing the edge) is inside the window. Everything after is fail-closed,
+including the confirming read: a read that times out or finds another writer's column keeps the exact
+pending typed record.
 
-A `--request-id` is an ownership claim over the operation it recorded, not only a de-duplication key for
-the append. A retry under an id the audit already holds, committed or still staged, is answered from that
-record only when the caller means the same operation: the same event kind, the same card, and the same
-request. Every task write is compared this way, `create`, `comment`, `report`, `verdict`, `decide`,
-`claim`, `move`, `edit`, `archive`, `routing` and the restore writes alike. For a report the comparison
-covers the marker, the body digest and the classification, so a second `report --kind done` on one card
-under the previous round's id and with a new body is refused with error code `validation` and exit code 2
-instead of being answered with the old event: no second audit event, no second comment, and no success
-reported for a report the board never received.
+Follow-up board work runs inside the same transaction, after the column effect is confirmed and before
+the event commits: claim metadata for `claim`, the routing and retry reset on a move into Ready or
+Done, clearing the review head on a move out of Validate, and the move's reason comment. A refused or
+failed column move leaves nothing; a follow-up that does not land keeps the pending typed record.
 
-Three fields are left out of that comparison, and only because a retry after the write cannot recompute
-them: the column a `move` left, the digests of the text an `edit` overwrote, and the body a restored
-comment carries until it is confirmed on the card. Each describes the state the write itself replaced, so
-comparing it would refuse ordinary retries. Everything the caller asked for is compared.
+Recovery re-reads the card and commits a pending typed transition's exact event only when the requested
+target is live. It never repeats a column move and refuses an unproven, contradicted or gone effect,
+leaving the pending record. Recomputable outstanding work (the Ready and Done reset) is finished first,
+and the record is not closed while incomplete. A claim's metadata (worker id, resolved heads) is not
+recomputable: recovery publishes the proven occurrence and leaves the missing claim to the dispatcher's
+live claim check, which reports a controlled divergence instead of launching. Retrying the same request
+id while the record is still pending also restores the metadata (no admission check or column move is
+repeated); once `reconcile-audit` has published the occurrence, the retry answers from the committed
+event and writes nothing.
 
-Every task write result carries `replayed`. It is `false` when this call performed the write, and `true`
-when it answered from an event an earlier call under the same id had already committed or staged, so a
-caller distinguishes an accepted write from a replay without parsing prose.
+A `--request-id` is an ownership claim over the operation it recorded. A retry under an id the audit
+holds, committed or staged, is answered from that record only for the same event kind, card and
+request — for `create`, `comment`, `report`, `verdict`, `decide`, `claim`, `move`, `edit`, `archive`,
+`routing` and restore writes alike. For a report the comparison covers the marker, body digest and
+classification, so a second `report --kind done` under the previous round's id with a new body is
+refused with `validation` (exit 2): no second event, comment or false success. Three fields are excluded
+because a retry cannot recompute them: the column a `move` left, the digests of text an `edit`
+overwrote, and a restored comment's body until confirmed on the card.
 
-`report --kind done` checks `git status --porcelain` of the worker's workspace before writing anything and
-refuses with `uncommitted` if there are uncommitted changes: the worker fixes that in its own session
-instead of learning about it later from a blocked card. An untracked runtime tail is not counted as dirt,
-`--kind blocked` is not gated because work in progress is legitimate there, and the dispatcher's after-the-
-fact check stays as defence in depth.
+Every task write result carries `replayed`: `false` when this call performed the write, `true` when it
+answered from an event an earlier call under the same id had committed or staged.
 
-`report --kind blocked` also requires `--classification`, one of `external_fact` when the blocker is a fact
-outside the card that somebody has to change first, or `wrong_task_definition` when the card itself is wrong.
-The two are repaired by different people in different places, so the worker's own view of which one it hit is
-what the observer starts its analysis from. The value goes into the `reported` audit payload as
-`classification`, and into the report comment as a `classification:` line under the marker, so it is readable
-without parsing the report prose. Both are written by the one backend write the report already makes; the
-classification is deliberately not card metadata, because a second write that can fail on its own would leave
-a card field that silently disagrees with the audit. `--kind done` takes no classification and is refused if
-given one. An observer moving a card out of Blocked must give a non-empty reason, the same requirement the
-steward carries moving one into it; the reason is a comment on the card and is carried by the card's
-transition event, so how a Blocked card was disposed of stays answerable.
+`report --kind done` checks `git status --porcelain` of the worker's workspace first and refuses with
+`uncommitted` when there are uncommitted changes (an untracked runtime tail does not count). `--kind
+blocked` is not gated. The dispatcher's later check stays as defence in depth.
 
-The `reported` events are the authoritative copy and keep the classification of every block, so counting how
-often one head blocks is a question for the audit. The retired `triggered_agents pipeline` CLI is no longer a
-write path; the vocabulary has one definition, in `secretary.tasks`. Its `--kind done` is unchanged.
+`report --kind blocked` requires `--classification`: `external_fact` (a fact outside the card must
+change first) or `wrong_task_definition` (the card itself is wrong). It goes into the `reported` audit
+payload as `classification` and into the report comment as a `classification:` line under the marker,
+in the one backend write the report makes; it is not card metadata. `--kind done` refuses a
+classification. An observer moving a card out of Blocked must give a non-empty reason (as the steward
+must moving one in); it is a card comment carried by the transition event. The `reported` events are
+the authoritative copy of block classifications. The report vocabulary is defined once, in
+`secretary.tasks`.
 
-The dispatcher also remembers the SHA that a mechanical gate or a red review rejected in the current
-attempt. A `done` report on the same SHA normally does not move to Validate: the first such report sends the
-worker back to rework in the same workspace, requiring a new commit. The second moves the card to Blocked so
-the rework loop cannot spin forever. The exception is a red GitHub gate classified from its failed
-job and step as an enumerated infrastructure failure: action-download HTTP 5xx, unavailable image
-registry or Buildx registry setup, or an unavailable runner during `Set up job`. Classification
-reads only the failed `gh run view --log-failed` fragment: action download requires its runner
-notice adjacent to a failed-download 5xx entry; registry failures require a container/Buildx step
-and either a named registry outage or a Docker daemon HTTP 5xx; runner failures require a
-runner-service diagnostic. That exact SHA stays in Validate for an automatic gate retry and opens
-no worker round. The gate asks GitHub to rerun the failed Actions run, then treats the rollup as
-pending until that run has a new terminal state; rereading a concluded failure is not a retry.
-Reruns are SHA-scoped and bounded by `SECRETARY_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS` (two by
-default). The rerun request itself uses the normal `SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS`
-transport ceiling. An exhausted ceiling, or a run GitHub cannot rerun, moves the card to Blocked
-with the infrastructure class and count or unavailable-rerun cause. This rule applies to both the
-pre-review and pre-merge gates. A setup-step name, a card comment, or a manual flag never
-classifies the failure; service evidence must be in that failed step, so a pytest assertion
-mentioning a registry or a 503 remains substantive, as does a broken workflow setup. If the code
-deliberately does not change for a substantive rejection, for instance when the defect is in a
-test or in the gate itself, the worker reports
-`--kind blocked` with the analysis instead of another `done`.
+### Rejected SHAs and gate infrastructure reruns
 
-A recovered stale worker result bearing that infrastructure class is accepted once into the same bounded gate
-path. A further report of that unchanged SHA is Blocked visibly, naming the class and the prior retry, rather
-than replaying the first report's request id as a quiet tick.
+The dispatcher remembers the SHA a mechanical gate or red review rejected in the current attempt. A
+`done` report on the same SHA does not move to Validate: the first sends the worker back to rework in
+the same workspace (a new commit is required); the second moves the card to Blocked. If the code
+deliberately does not change for a substantive rejection (e.g. the defect is in a test or the gate),
+the worker reports `--kind blocked` with the analysis.
 
-That gate class and the bring-up classes [below](#bring-up-outcomes) are two axes and not one
-vocabulary used twice. The gate sorts a red result over code that exists and calls its other class
-`substantive`; a bring-up is sorted before any line of the card's work has been read, and the
-sprint's word for its other class is `task`. The two names are one correspondence and nothing more,
-so a reader of either side can find the other. What they share is the principle: a failure of the
-host is not a verdict about the card.
+Exception: a red GitHub gate classified from its failed job and step as an enumerated infrastructure
+failure — action-download HTTP 5xx, unavailable image registry or Buildx registry setup, or an
+unavailable runner during `Set up job`. Classification reads only the `gh run view --log-failed`
+fragment: action download needs its runner notice adjacent to a failed-download 5xx entry; registry
+failures need a container/Buildx step and either a named registry outage or a Docker daemon HTTP 5xx;
+runner failures need a runner-service diagnostic. A setup-step name, card comment or manual flag never
+classifies; a pytest assertion mentioning a registry or 503, or a broken workflow setup, stays
+substantive. The SHA stays in Validate for an automatic retry with no worker round, no `gate-red`
+transition and no `red_ci` budget event: the gate asks GitHub to rerun the failed run and treats the
+rollup as pending until that run reaches a new terminal state. Reruns are SHA-scoped and bounded by
+`SECRETARY_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS` (default 2); the rerun request uses the
+`SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS` ceiling. An exhausted ceiling, or a run GitHub cannot rerun,
+moves the card to Blocked with the infrastructure class and count or unavailable-rerun cause. This
+applies to the pre-review and pre-merge gates and the release re-check; the pending-stall ceiling
+covers a rerun that never completes.
 
-The audit trail is always written to the installation's data directory: `--data-dir`, else
+A recovered stale worker result bearing that infrastructure class is accepted once into the same
+bounded gate path; a further report of the unchanged SHA is Blocked, naming the class and prior retry.
+
+The gate classes (`substantive` vs infrastructure) and the bring-up classes (`task` vs
+`infrastructure`, [below](#bring-up-outcomes)) are separate axes: a host failure is not a verdict about
+the card in either.
+
+The audit trail is always written to the installation data directory: `--data-dir`, else
 `SECRETARY_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
-instance file, not the working directory, so a call from another project's workspace does not leave a data
-directory there. If the data directory cannot be resolved, the command fails with a usage error rather than
-writing next to the process.
+instance file. An unresolvable data directory is a usage error.
 
 ### The no-observer ceiling
 
-A card whose sprint declares a concrete observer is bounded by that observer's judgement: the
-verdict parks and a person decides how many rounds it is worth. A card with no observer (no
-sprint, a sprint that declares `none`, a closed sprint, a sprint board that cannot be read) has
-nobody to say stop, so a ceiling on substantive red reviews says it instead.
-
-The count is the card's own `review:red` comments, so it needs no sprint to live in, survives
-anything the dispatcher forgets, and is idempotent without bookkeeping: a retried verdict write
-dedupes on its request id and leaves no second comment. A red mechanical gate and a red CI rollup
-leave dispatcher comments with no verdict marker and are not counted, the same separation the
-sprint budget makes between `red_review` and `red_ci`. The third red review moves the card to
-Blocked with a reason naming the ceiling instead of opening another worker round. Only the
-terminals are stopped: the workspace and the branch stay as the round left them, and coming back
-is one explicit transition. Three is early on purpose. Blocking a card nobody is watching is a
-question to a person, not lost work, and it is cheaper than letting the card eat five rounds
-unattended.
-
-The ceiling does not bind a card that parks for a decision. The observer is the ceiling there, and
-a counter that fired would be deciding a card the observer is still holding.
-
-The other half of the rule, that a dead head on an unobserved card gets one replacement per
-attempt and the second death blocks, is not implemented. A dead head is answered by the wait
-watchdog's own per-kind respawn ceiling, on an unobserved card as on any other.
+A card with no observer (no sprint, a sprint declaring `none`, a closed sprint, or an unreadable sprint
+board) is bounded by a ceiling on substantive red reviews. The count is the card's own `review:red`
+comments (a retried verdict write dedupes on its request id). Red mechanical gates and red CI rollups
+leave no verdict marker and are not counted. The third red review moves the card to Blocked with a
+reason naming the ceiling instead of opening another round; only the terminals stop, and workspace and
+branch stay as the round left them. The ceiling does not apply to a card that parks for a decision. A
+dead head is handled by the wait watchdog's per-kind respawn ceiling, observed or not.
 
 ### Routing telemetry per attempt
 
-A card does not keep routing history: the resolved review head is cleared when it leaves Validate, and the
-whole routing block is reset on a return to Ready. So "who was the worker and who was the reviewer on
-attempt N" lives only in the append-only journal, as `kind: "routing"` events. The dispatcher writes them
-without touching the backend: the event has no mutation, only a record written through the normal
-pending/commit path, idempotent by request id.
+A card keeps no routing history (the resolved review head is cleared on leaving Validate; the routing
+block is reset on a return to Ready). Who worked and reviewed attempt N lives only in the append-only
+journal as `kind: "routing"` events, written by the dispatcher through the normal pending/commit path
+with no backend mutation, idempotent by request id.
 
 An attempt (round) is one worker launch plus the review it earned. A claim opens attempt 1; each bounce
-back to rework (a red verdict, a red gate) opens the next. Respawn, resume after a pause and a restart
-after a rejected SHA stay inside their attempt. A return to Ready followed by a new claim adds an attempt
-rather than overwriting the previous one: the number comes from the journal, not from dispatcher state, so
-it survives both a lost record and a restore.
-
-A return to Ready counts as such in both forms: an operator retry of an already blocked card, and an
-ordinary preempt or requeue of a live card from in-progress or validate. The dispatcher issues the attempt
-a new attempt id at that moment, otherwise a repeat claim would land on an already committed claim request
-id, return the old event and leave the card in Ready. The previous attempt's heads are stopped, because the
-new round enters the same workspace.
-
-### Attempt outcome ledger v1
-
-`attempt.outcome` version 1 is append-only observational telemetry. It is written by the dispatcher
-lifecycle owner only after its terminal effect has been confirmed. It is never a lifecycle input: no card
-move, merge, retry, admission, gate, observer decision or recovery decision reads it.
-
-New dispatcher terminal effects cross one forward-only typed taxonomy before their observational fields
-are written. Its independent disposition axis is
-`release|rework|reslice|blocked|drop|operator_stop`; its blocked-reason axis is
-`implementation|review|task_contract|gate|provider|infrastructure|operator|other`. The transition keeps
-the taxonomy's `source_evidence` beside its normalized reason. Thus a new worker
-`wrong_task_definition` report maps to `task_contract` while retaining that source token, and an
-`external_fact` report remains source evidence under `other` rather than being recast as a more precise
-cause. Invalid forward values are rejected by that typed boundary. Missing taxonomy data and historical
-reason tokens read as explicit `legacy`/`other` evidence, without a rewrite, backfill or inference from
-request ids, prose, timestamps or live state.
-
-The same normalizer accepts the actual terminal cause once and persists a forward record with the
-exact disposition, normalized reason, source evidence and budget class. That immutable record travels
-with the lifecycle effect, supplies its post-effect `attempt.outcome` obligation, and is the only
-forward input to budget reconciliation. The committed record's own disposition is read during recovery,
-so an assessment `reslice` that targets Blocked remains `reslice` rather than being recast as a blocked
-taxonomy disposition, while its retained `blocked` budget class still charges the Blocked transition.
-Only a genuine classified head bring-up infrastructure outcome is recorded as uncharged
-`infrastructure_blocked`; worker-result, gate, merge, adoption and durable-state mismatch causes retain
-their own charged class. Every other normalized block is charged as `blocked`. A committed older forward
-record remains authoritative and derives its compatible class; only an event with no taxonomy predates
-the boundary and keeps its durable action-token budget class, while its taxonomy read remains explicit
-`legacy`/`other` evidence. These consumers are observational: a malformed or unavailable
-taxonomy/outcome/budget observation cannot gate, reorder, retry or undo the lifecycle effect. A malformed
-record yields the named non-gating `terminal-taxonomy-invalid` budget diagnostic and does not stop later
-budget events.
-
-Its natural key is exactly `(card_ref, attempt_id, report_generation)`. `attempt` is the observed ordinal
-and is not part of the key. The Card subject supplies `card_ref`; `data` carries `version: 1`, non-empty
-`attempt_id`, positive `attempt` and `report_generation`, nullable `sprint_ref` and
-`specification_revision`, `terminal_state` (`done`, `blocked` or `in_progress` for a rework effect),
-`verdict` (`green|red|blocked|missing|legacy`), `disposition`
-(`release|rework|reslice|blocked|drop|operator_stop`), and nullable `blocked_reason`
-(`implementation|review|task_contract|gate|provider|infrastructure|operator|other`). A blocked reason is
-present exactly when disposition is `blocked`.
-
-`source_event_ids` always contains nullable `report`, `verdict`, `decision`, `effect`, `worker_usage` and
-`review_usage` references. `usage_completeness` always contains `worker` and `review`, each one of
-`collected|degraded|missing|legacy`. Collected or degraded usage has its matching usage-event ref; missing
-and legacy usage has no such ref. The existing marker protocol does not bind marker records to an attempt,
-so an unknown report/verdict/decision reference remains null rather than being inferred from timestamp,
-request-id grammar, marker prose, live state or ordering.
-
-`null`, missing, degraded and legacy are distinct. A null field is not a token zero. `missing` says no
-forward occurrence was available, `degraded` says an occurrence exists but did not yield usable phase
-measurement, and `legacy` names evidence predating this contract. Historical events are neither rewritten
-nor backfilled.
-
-The exact replay returns the staged or committed immutable occurrence. A retry that proposes a different
-payload for the same natural key raises the named `AnalyticsOutcomeConflict` diagnostic. A crash after the
-stage reuses that exact pending event. A crash before stage remains owed on the confirmed terminal
-lifecycle event, whose immutable outcome obligation carries the round identity and disposition; the
-lifecycle owner reconstructs the occurrence from that durable event and other typed journal occurrences,
-never from request-id grammar, time, marker prose, live state or a control-plane reader. Any unreadable,
-conflicting, staging or append failure is reported as a degraded analytics diagnostic and leaves the
-lifecycle effect and teardown unchanged. Unknown versions, fields and enums are rejected by the ordinary
-typed board-event reader.
-
-Only a dispatcher-owned transition that closes a started round with durable round context carries an
-outcome obligation. Waiting, reviewer-launch and pre-claim refusal/retry paths are not terminal rounds.
-A lost claimed record that cannot be adopted is a no-identity boundary: its Blocked lifecycle effect still
-commits, but it cannot construct a v1 key from request-id grammar, time, prose or live state. Operator
-stop/drop likewise produces an outcome only where the stopping lifecycle record already carries a durable
-attempt id and positive round and generation; it never invents one for analytics.
-
-### Offline analytics projection v1
-
-`secretary.board.analytics.project_analytics_checkpoint(directory)` is the canonical offline reader for one
-copied `state/board` checkpoint. Its first operation is `verify_analytics_checkpoint(directory)`. Only
-after that manifest-verifier boundary succeeds does it parse `cards.ndjson`, `sprints.ndjson` and
-`events.ndjson` below that verified directory. `export.json` is verifier-checked only as a count summary;
-it is not evidence for an analytics row or an alternative proof of the cut. The reader has no live board,
-dispatcher, provider session, comment, transcript or lifecycle dependency and never mutates a checkpoint.
-`cards.ndjson` and `sprints.ndjson` are membership sources for typed event subjects: repeated references,
-including an archived and live Card row with the same reference, and rows without a usable reference do not
-create an analytics identity or invalidate unrelated evidence.
-
-The versioned result has `checkpoint_id`, `rows`, `incomplete` and `incomplete_reasons`; `ndjson()` emits
-one deterministic object per row. Every row is keyed exactly by `card_ref`, `attempt_id` and
-`report_generation` and carries the outcome's round fields, terminal taxonomy, `source_event_ids`,
-`usage_completeness`, and nullable `worker_usage` and `review_usage` objects. A usage object preserves the
-usage event id, typed phase identity, collection outcome and all three nullable token accounts. It is never
-manufactured from a token total or replaced with a zero.
-
-The only usage join is the matching non-null `source_event_ids.worker_usage` or
-`source_event_ids.review_usage`. The referred event must be a typed `attempt.usage` on the same Card with
-the same attempt id, numeric attempt and report generation; worker requires role/phase `worker`/`worker`,
-and review requires `reviewer`/`review`. A `collected` completeness requires a collected usage occurrence;
-`degraded` requires a typed non-collected occurrence. `missing` and `legacy` carry no usage-event reference
-and remain visibly distinct from each other and from a null token dimension. No order, timestamp, request
-id, prose, marker, provider state or live Card field participates in a join.
-
-The projection fails closed with named `AnalyticsProjectionError` diagnostics: `analytics_malformed_row`,
-`analytics_read_failed`, `analytics_invalid_typed_event`, `analytics_conflicting_event_identity`,
-`analytics_conflicting_request_ownership`,
-`analytics_conflicting_outcome_natural_key`, `analytics_dangling_card_ref`,
-`analytics_dangling_sprint_ref`, `analytics_dangling_source_event_ref`,
-`analytics_incompatible_source_event_ref`, and `analytics_incompatible_usage_join`. Each names its sealed
-file and record number. Exact replay of the same typed event and request is one occurrence; another event,
-request owner or payload is not. A sealed cut with no v1 outcome reports no rows and
-`no_attempt_outcome_v1`; legacy outcome or usage evidence sets explicit incompleteness rather than a
-historical backfill.
-
-### What a finished phase cost
-
-Every completed worker phase and every completed review phase leaves one `attempt.usage` event on the
-card, so phase cost is answerable from the Secretary journal alone and nobody has to reopen a provider
-session file to get it. It is a typed board protocol event (`kind: "attempt.usage"`, a Card subject) with
-no backend mutation, written through the same append-only audit as every other event: the normal
-board/audit export therefore carries it, and a reader selects it by kind rather than by parsing marker
-prose. There is no backfill. Cards that finished before this event existed have no usage record, and that
-absence is not a zero.
-
-**When it is written.** On the acceptance path itself, and only for an accepted terminal outcome: a
-`report:done` or `report:blocked` the dispatcher accepts, and a `review:green` or `review:red` verdict it
-acts on. A done report bounced at an already-rejected checkout is not an acceptance and writes nothing.
-The write sits where the exact completed run is still on the record with its bound provider session — a
-retained worker before its freeze, a reviewer after its pane is confirmed closed but while its run and
-session are still recorded — so relaunch, rework and a later recovery cannot re-attribute the account to a
-different session.
-
-**What it binds.** The event is self-contained: card ref and subject, the numeric attempt and the attempt
-id, the report generation the phase closed, the role (`worker`/`reviewer`) and phase (`worker`/`review`),
-the head id, adapter, resolved model and `model_source`, the launch id, the provider `session_id` or its
-typed absence with the reason for it, the collection outcome, and the three token accounts below. The
-identity fields are the routing journal's own launch snapshot, resolved the same way a routing event
-resolves them; this is not a second journal and does not re-read `heads.toml` for a head launched hours ago.
-
-**Token fields.** Five canonical dimensions — `input` (uncached input), `cache_input` (cache
-creation/write input), `cache_read_input` (input served from cache), `output` (total generated output,
-including reasoning), and `reasoning` (the reasoning subset of `output`) — each a non-negative integer or
-`null`. The additive token total is `input + cache_input + cache_read_input + output`; consumers must not
-add `reasoning` again, because `output` is inclusive of it in both adapters and `reasoning` is a contained
-subset: in every account where both are known, `reasoning <= output`. `null` means the provider did not
-report that dimension, and is deliberately not `0`: a zero is a real count. The occurrence carries them
-three times: `tokens` is the interval this phase owns, `session_totals` is the running provider-session
-total the phase ended at, and `phase_baseline` is the boundary it started from.
-
-The three accounts are nullable **per dimension and independently of each other**, because a provider
-dimension can be absent from the predecessor and present here, or the reverse. What is *attributed* stays
-checkable: for every dimension the phase owns, `tokens = session_totals - phase_baseline`, and a dimension
-it owns names both the boundary it was measured from and the total it was measured to. A dimension nobody
-could attribute says so as `null` in **both** `tokens` and `phase_baseline` — never as a zero — while
-`session_totals` keeps whatever the provider did report. A `collected` outcome reports at least one
-`session_totals` dimension, which is what makes it a read at all; `tokens` and `phase_baseline` may be
-entirely null under it, and that is a phase which read a real total and could own none of it. Every degraded
-outcome reports no dimension in any account, so no reader can mistake an unreadable phase for a free one.
-Occurrences written before this rule existed carry every dimension in all three accounts or in none of
-them, which is a special case of it: they remain readable unchanged, and there is no migration or backfill.
-There is no price table and no monetary conversion here.
-
-**The phase-attribution lattice.** One rule produces all three accounts, for every provider and every
-lifecycle path — first phase and retained phase, Codex and Claude, a live acceptance, a staged obligation
-and a replayed one. No adapter, replay or recovery path does missingness or zero-baseline arithmetic of its
-own. It turns on two independent questions, and conflating them is the defect it exists to prevent: whether
-a predecessor *occurrence* exists at all, and whether that predecessor and this read each know a given
-*dimension*.
-
-* **No predecessor occurrence.** Every dimension this phase knows begins at a boundary of zero and the
-  phase owns its whole current value; a dimension the provider did not report stays `null` in `tokens` and
-  `phase_baseline` alike.
-* **A predecessor, both values known and nondecreasing.** The phase owns their difference. This is the
-  ordinary retained-session case.
-* **A predecessor, and either value unavailable.** Phase ownership for that dimension is `null` in both
-  `tokens` and `phase_baseline`, and no zero is invented in either: the phase cannot be charged for work
-  whose starting point nobody recorded, and the predecessor cannot be retroactively credited with a zero it
-  never reported. The `session_totals` value this phase actually read is preserved, so the dimension
-  re-establishes a boundary here and the phase after it subtracts from that boundary normally. An
-  unattributable dimension is therefore a gap of one phase, never a permanent poisoning of the dimension.
-* **A predecessor, and the current value is numerically below it.** That contradicts an immutable earlier
-  occurrence, so the whole occurrence takes the typed `arithmetic_contradiction` outcome and publishes no
-  account at all rather than disguising the contradiction as a zero interval.
-
-Containment is validated where the accounts are produced as well as where they are written: if `reasoning`
-escapes `output` in any of the three, the occurrence degrades the same way a decrease does.
-
-This matters because an optional provider dimension is genuinely optional. Claude publishes its reasoning
-subset in `output_tokens_details`, and a real session journal streams a detail-less record of an assistant
-message before the completed duplicate that carries it — a terminal report tool can run inside that gap. So
-phase 1 can end having seen a complete usage object with no reasoning in it, while phase 2 on the same
-retained session sees the whole of it. Reading phase 1's missing dimension as a zero boundary would charge
-phase 2 for the entire session's reasoning; nulling phase 2's own session total would leave the dimension
-unusable for every phase after it. The lattice does neither.
-
-**Canonical occurrence projection and phase accounting.** One repository projection is the source of
-truth for usage. It reads the card's committed and staged TaskAudit records under the audit lock, validates
-every `attempt.usage` record through the typed event schema, and returns each immutable occurrence with a
-separate `pending` publication flag. An exact committed-plus-pending copy is one occurrence. A request id
-with another payload, an event id with another request owner, an unreadable record, or conflicting phase
-ownership makes the projection unavailable; readers fail closed instead of silently dropping evidence.
-The flag changes only export visibility. It never changes the event's identity, payload or semantic
-authority: a successful stage is immediately an accounted occurrence even before its journal append.
-
-Both providers journal a *session*, not a phase, and one session can serve several phases: the ordinary
-red-review rework retains the worker and resumes the same conversation into the next round. One rule covers
-both adapters. A phase owns the usage recorded after the previous authoritative terminal boundary for that
-same card, role, adapter and provider `session_id`, through its own terminal boundary. The predecessor is
-selected by the explicit causal identity in the events — numeric attempt, attempt id ownership, report
-generation and phase — never by committed or pending iteration order and never by append time. Delayed or
-reversed publication therefore cannot change an interval already staged. A session with no matching prior
-occurrence starts at zero. A matching predecessor whose whole typed degraded occurrence carries no
-`session_totals` at all is an audit failure rather than a session that starts over: reading it as "no
-predecessor" would be indistinguishable from there having been none, so the later phase stays in place and
-no zero baseline is invented. That is a different thing from a predecessor which recorded *some* dimensions
-and not others, which the lattice above owns dimension by dimension. An unreadable or conflicting
-projection is likewise an audit failure.
-
-**Order and failure precedence.** One order, for every provider and every lifecycle path. Projection
-integrity and causal identity are settled **first**, because neither depends on what a provider journal
-says: the projection is read and the causal predecessor selected, and a phase slot already owned by a
-conflicting attempt id fails closed whatever the read that follows would have produced. The provider read
-is **second**, and is only a read: a whole-session total with no boundary subtracted and no account
-attributed. Attribution and cross-account validation are **third**, in the one place that does either.
-Immutable staging is **fourth**, and publication recovery **last**. Provider-read failure precedence is
-unchanged by this: a degraded read needs no interval arithmetic, does not consult the predecessor's
-boundary, writes its named outcome and proceeds normally without rereading the provider.
-
-**Adapter aggregation.** Codex writes cumulative `token_count` snapshots, but a new user turn can reset
-`total_token_usage` while retaining the same session and rollout file. A decrease in any raw counter starts
-a new segment. The session total is the sum of each segment's final snapshot, so it is monotone across one
-or many resets; repeated or replayed snapshots within a segment still add nothing. Codex's
-`cached_input_tokens` and `cache_write_input_tokens` are contained in `input_tokens`, while
-`reasoning_output_tokens` is contained in `output_tokens`. At each segment endpoint the adapter exports
-`input_tokens - cached_input_tokens - cache_write_input_tokens` as `input`, retains `output_tokens` as the
-inclusive `output`, and exposes `reasoning_output_tokens` as its contained `reasoning` subset. All five raw
-fields and valid containment are required for a usable Codex snapshot, so
-missing or impossible relations degrade as malformed instead of creating an ambiguous immutable event.
-Claude writes one `usage` object per assistant message, and its `input_tokens` is already exclusive of
-`cache_creation_input_tokens` and `cache_read_input_tokens`. Those three values map directly to `input`,
-`cache_input`, and `cache_read_input`. The session total is their **sum** over distinct messages: a message id
-contributes its last usage object exactly once, which is what keeps a streamed message and a resumed
-session's repeated records from being counted twice. Claude's `output_tokens` maps directly to the same
-inclusive `output` meaning as Codex. After message-id deduplication, the adapter reads
-`output_tokens_details.thinking_tokens` as the contained `reasoning` subset. It sums reasoning only when
-every contributing usage object supplies a valid detail, including an explicit zero; if any omits the
-detail, aggregate `reasoning` is `null` while the known total `output` remains available. `output_tokens_details`
-is optional metadata about a usage object that is otherwise complete, so it can only ever cost the reasoning
-subset: a detail that is missing, malformed or out of range — not an object, or a thinking count that is not
-a non-negative integer contained in that message's output — makes aggregate `reasoning` unavailable and is
-counted in `skipped_records`, while that message's `input`, cache and total `output` counts are still
-retained. Malformed *core* usage is unchanged and still follows the malformed outcome below: a `usage`
-object that is not an object, or that carries no usable count at all, contributes nothing.
-
-**Degraded outcomes.** One value says the counts are real and the rest name a specific failure:
-`collected`; `arithmetic_contradiction` (a readable current total is below an immutable earlier boundary, or
-an attributed account's reasoning escapes its own output);
-`adapter_unsupported` (the head ran on an adapter with no structured usage records);
-`session_unavailable` (no provider session identity was bound to the run); `source_unavailable` (the
-structured record source was never bound, or names no journal); `source_unreadable` (the journal exists and
-could not be read); `records_malformed`; `usage_absent` (the journal parsed and holds no usage record).
-`records_malformed` and `usage_absent` are deliberately different answers: a record that *declares* itself a
-usage record — a Codex `token_count`, an assistant message with a `usage` field — and then carries a schema
-this adapter does not publish is malformed, and so is a journal in which nothing parsed at all. A journal
-that simply holds no usage record is absent. A provider schema change is therefore visible as a broken read
-rather than as a phase that cost nothing. A truncated tail — the normal shape of a journal read while its
-writer is still around — is one skipped line, not a failed read: the complete records before it are still
-counted. `skipped_records` counts everything unusable, both unparseable lines and schema-invalid declared
-usage records; `records` counts what the aggregation used.
-
-**Idempotency.** One occurrence per completed phase, keyed by attempt id, phase and the round it closed
-(attempt number and report generation). A replayed request or a re-entered acceptance commits the event
-that already owns that id rather than a freshly computed one, so a recovery reading a session that has
-since grown can neither add a second occurrence nor overwrite the first, and a second phase on a retained
-session reproduces its original interval instead of re-reading a larger whole-session total. A repeated done
-report inside one round — the infrastructure-classified gate retry — returns the occurrence that round
-already owns.
-
-**Durability order.** A completed phase never advances past its own account. On every worker-report and
-reviewer-verdict path the occurrence is made durable in the append-only audit *before* the control event and
-the transition: it is staged under its request id and then appended. A card may advance past a staged
-obligation, because the exact staged record is still owed and a later tick publishes it; it may not advance
-past nothing at all.
-
-**Where a staged obligation is settled.** One site, and it is not the card's own tick. A phase can finish
-and take its card out of the pipeline in the same breath — `report:blocked` moves it to Blocked, a green
-verdict with no observer moves it to Done — and the dispatcher drops that card's record on the way out.
-Nothing that walks active cards, dispatcher records or the board would ever reach it again. So every
-production tick *begins*, once the singleton, pause and mutation guards have permitted work and before
-observer fencing, `ACTIVE_STATES` selection, active-card reconciliation, any phase-boundary read and any new
-claim, by publishing every occurrence the canonical projection marks pending. That pass takes no dispatcher
-record, no board lookup and no card state as input, and pending usage publication
-takes precedence over every piece of card lifecycle work in the tick. A publication failure publishes
-nothing in the record's place: the exact staged occurrence stays pending, the tick reports it as a degraded
-`attempt-usage-recovery` action naming the cards still owed, and it is eligible again on every later
-permitted tick whatever state its card has reached by then. Phase-boundary selection consumes the same
-projection, so it sees a staged predecessor directly and does not depend on recovery winning a publication
-race first. Publication always finishes the exact staged occurrence, never a re-derived one, so a session file
-that grew in between cannot change what the phase was accounted for, and it is idempotent: a record already
-appended is simply not in the pending set, and a tick that owes nothing does nothing and reports nothing.
-
-**Non-blocking, and what is not.** Reading the provider never decides anything: a missing session, an
-unreadable journal and malformed records are named degraded outcomes inside the occurrence, and the worker
-report or reviewer verdict is accepted, the cleanup and freeze unchanged, the card moving exactly where it
-was going, and later dispatcher recovery unaffected. Failing to make the occurrence durable is not a
-collection outcome — it is an audit failure, and it is raised rather than swallowed. That ends the card's
-tick with the phase unadvanced and the report or verdict still standing on the board; the dispatcher's
-per-card error handling records it and the next tick retries the same acceptance, which is what keeps the
-control event and the transition from outrunning the account of the phase they close.
-
-### The report generation
-
-A worker round is identified by a report generation: a counter in the dispatcher's own record that
-starts at 1 when the card is claimed and advances by one whenever a new report round opens, whether
-that is a red mechanical gate, a red review or a done report bounced back at an already-rejected
-checkout. It never repeats within an attempt and never goes backwards. A respawn inside a round does
-not advance it: the head that died never reported, and the round is still waiting for that report.
-It advances once for each such round however many ticks the round takes to open: a red transition
-reserves the round's generation with the intent it writes before moving the board, and the tick that
-finishes the transition assigns that reservation rather than computing a new number, so a recovery
-that re-enters the completion does not spend a second generation on one round.
-
-The generation is the round key of the report identity. It is the suffix of the `done` and `blocked`
-request ids in `TASK.md`, and of the report body path those commands name; the two block
-classifications get an id each, because a request id claims its payload and a block restated under
-the other classification is a different report. One value serves all of them: the generation is
-persisted before any document names it, the `TASK.md` a head is given is written from it, and the
-prompt that wakes a retained worker names it and says which suffix the round's commands carry. The
-number is there so a command replayed out of the retained conversation is visibly the wrong one to
-the agent and to a human reading the pane before the call is made.
-
-What such a replay does is worth being exact about, because the id alone does not stop it. A request
-id is an ownership claim over its payload: a stale command carrying a new body is refused with
-`validation` and exit code 2, but an identical retry is a retry, and the protocol answers it from
-its committed event with `replayed: true` while the board gains no marker. So the round's body files
-go when the next round opens, all of them, the round about to start included; a replayed command
-that reads one of them fails on its first step. What it cannot do is refuse a worker that writes the
-old path again with the same contents, which the protocol answers as the retry it looks like. So the
-guarantee here is exactly this and no more: a command from a round that is over never records a
-report of the current round, and it can still answer its caller with a success that belongs to the
-round it came from. Refusing that call outright means authorising the attempt's open generation
-inside the report protocol, which is a durable protocol change with its own compatibility promise
-for stale retries, and it is not part of this contour.
-
-What ends the round instead is the dispatcher, which is the only place that knows which round is
-open, and it ends it on two facts of its own. The first is which report belongs to the round. The
-marker on the card cannot say: it is `[report:done]` whoever filed it and for whichever round. The
-request id can, and the audit keeps it beside the marker, so a report is attributed to a round by
-the id its command carried and by nothing else. That id is the round's identity in full, attempt
-and generation both, so an id from a round that is over names that round, an id from an earlier
-attempt on the same card names that attempt, and an id a head invented for itself names nothing.
-None of them ends the round that is open, and all of them leave the card exactly where it was,
-which is the second fact: a head that has stopped working with its round unreported is pointed at
-the current command once and then the card is blocked. That covers a stale call as it covers a call
-never made, whatever the head did or did not run, because both leave the same nothing behind. The
-mechanics of that wait are in `docs/OPERATIONS.md`.
-
-Which ids a round issued is read from the checkout first and from the dispatcher's own state only
-as a fallback, and for the same reason the generation is: the document is what the live worker is
-holding, and a record that was lost and re-adopted carries a fresh attempt id while that worker
-keeps reporting through the commands it was given. Only ids that name the open generation are taken
-from the document, so a checkout a round behind cannot hand back the previous round's ids. When the
-checkout cannot be read at all, the ids are the ones the dispatcher would issue itself from the
-record's attempt and the open generation, which is what makes a live worker holding older ids get
-bounced once and re-materialised on the same round.
-
-The document answers through a record of the dispatcher's own, never by scanning it for report
-commands. Every worker `TASK.md` ends with a hidden `<!-- report-round generation=N ids=... -->`
-line carrying that round's request ids base64-encoded, on the same terms as the decision record
-below it: written last, after every section a card description or an observer decision is rendered
-into, matched as a whole line, and the last such line in the file taken. A card description is
-arbitrary Markdown that is copied into the document unchanged, so a `--request-id` token in ordinary
-prose is indistinguishable from a rendered command; reading the commands would make such a token an
-id "this round issued" and let a report committed under it end a round the dispatcher never handed
-it to. The generation the checkout names is read from the same record, and the same reasoning
-applies to it.
-
-Only a committed audit event ends a round. A write stages its event before it touches the backend,
-so a staged `reported` event is a report that may never reach the card, and a tick that consumed one
-would end the round on a call that had not happened. The other side of that window is a report whose
-comment landed and whose audit append then failed: the round stays open until the audit is repaired,
-which is what retrying the same command does, and until then the wait is a wait like any other.
-
-Reading the round out of the audit rather than off the board is what keeps this inside the
-dispatcher. Nothing is added to the report protocol: the same call from the same worker is still
-accepted, still idempotent under its own id, and still answers a same-payload retry with the
-original event.
-
-It is dispatcher state, so a dispatcher that lost its record recovers it: the `TASK.md` in the
-checkout names the round its live worker is working from, and the rounds already reported and
-consumed are the floor when no document can be read. Both are lower bounds and the larger one wins,
-so a recovered generation may skip a number but cannot reuse one. Only consumed reports count in
-that floor. A report still waiting to be read belongs to the round that is running, so counting it
-would hand the adopted record a generation that no report on the board names, and the report that
-is already there could never end its round.
-
-The comment index a new report marker is scanned against is a separate value and stays a comment
-count. A generation that skips or lags the card's comments does not blind the dispatcher to a fresh
-report, and `review_baseline` is likewise only the comment index the next review verdict is read
-from and the round key of the reviewer's own verdict identity.
-
-### The observer decision a rework round is opened on
-
-A round opened by a `rework` decision is opened on that decision, and the worker of the round is
-handed it. The decision text is frozen where and when the round's generation is: written into the
-red transition's intent before the board moves, assigned to the record when the transition
-completes, and rendered into every `TASK.md` that round produces, the replacement head's and the
-retained head's alike. It is never looked up again at document-build time. "The most recent
-`decision:rework` comment on the card" is a different question, and a decision recorded after the
-round opened would answer it and silently replace the instruction the round is running under.
-
-In the document the decision comes first, under a heading that names it as the instruction to
-follow, and the reviewer's red body is kept below it as the context it was decided on. Where the two
-disagree the document says the decision wins, so a decision that accepts some findings and rejects
-others reads as exactly that. The prompt that wakes a retained worker names the decision as the
-authoritative instruction rather than only pointing at the file, because a conversation that is only
-sent back to a document ranks its sections itself.
-
-Nothing inherits: every round that opens carries the decision that opened it and no other, so the
-value is written wherever a round is opened. The red transition assigns it unconditionally, and the
-stale-done bounce clears it in the same mutation that advances the generation. A round opened by a
-red mechanical gate or by a bounced done report therefore carries no decision, its document reads as
-it did before this existed, and it never inherits the adjudication of a review it has nothing to do
-with. A round opened with no decision behaves throughout as it always did.
-
-Like the generation, this is dispatcher state that a lost record recovers from the checkout, so an
-adopted card reads back what its live worker was told to follow instead of consulting the card's
-newer comments. Every worker `TASK.md` ends with a hidden
-`<!-- observer-decision generation=N body=... -->` line carrying the round's decision base64-encoded,
-empty body included when the round has none, and the recovery reads the last such line in the file.
-Descriptions and decisions are both arbitrary Markdown, so neither the delimiters nor the field can
-be anything either of them may contain: an encoded field has no character that ends it, and the
-dispatcher's own line comes after every section they are rendered into.
-
-### Revision-bound worker feedback
-
-The description rendered in a worker `TASK.md` is authoritative. A create or description edit has
-an immutable audit event and description digest; its event id is the card's current specification
-revision. Reviewer verdicts and observer decisions record that revision and digest when they are
-written. The task-document feedback selector renders a red review, or a rework decision and any
-supporting red review that is present, only when each rendered item is bound to the current revision.
-A correctly bound rework decision remains the instruction that opened the round even when no red
-review exists or the available red review predates the revision boundary. A reslice followed by
-a description edit therefore starts a fresh worker on the edited description without a prior
-reviewer's instructions. The selector is deliberately fail-closed: missing, malformed, or ambiguous
-audit/comment binding omits historical feedback rather than presenting a possibly superseded order.
-
-### Head heartbeat identity
-
-Every dispatcher-launched worker, reviewer and observer writes one atomically replaced, version-1 JSON heartbeat
-before its shell `exec`s the provider. It contains the pid, Linux boot id and process start ticks together with the
-durable `HeadRun` id, role, card or sprint binding and the pane leaf once that leaf is known. The writer begins with
-the run, role and task binding. Terminal creation and the writer have no ordering guarantee, so pane creation first
-atomically writes a matching leaf handoff beside the heartbeat: a later writer incorporates it in its first record,
-while an already-written matching record receives a guarded second atomic replace. The writer checks the handoff
-again after its base replace, covering both orders without letting a late binder annotate another process that has
-reused the pid-file path.
-
-Readers classify a matching live record, a dead record, a live identity mismatch, a missing not-yet-written record,
-and an unreadable record separately. Boot, start ticks, run id, role, task and a known leaf all have to agree before
-a process counts as this head. Lifecycle and recovery consumers use one HeadRun classification boundary: it constructs
-that expected identity before a stop can persist `finishing` or `stopped_by`, a review launch can become `reviewing`,
-or a pane/workspace can be relocated or closed. A mismatch is an operator-facing degraded state, not evidence of a
-head to adopt or a process to signal: retention, launch recovery, watchdogs, stop paths and observer reconciliation
-leave the prior run un-attributed and never open a replacement beside it. The same guard is rechecked immediately
-before every destructive pane close, workspace stop and heartbeat signal. Raw command overrides write no heartbeat
-and receive no synthetic identity;
-they retain only the documented launch grace and pane-output fallbacks.
-
-Whether a head is alive and whether its runtime pane is drawn are two questions with two sources,
-and only the first is a statement about the head. A head is alive when its own observation says so:
-the heartbeat above, read as a live matching identity whose process is running or suspended, or a
-provider cursor bound to that same `HeadRun` that advanced, which proves work is being done. Only
-the heartbeat may say a head is gone, because it is the only source that observes the process.
-Anything else is `unproven` — a statement about the observation, not about the head — and a role the
-dispatcher holds a head identity for but no durable `HeadRun` is unproven by construction, since a
-snapshot bound to nothing would have to borrow another run's evidence. Pane and terminal readings
-never enter that answer: a pty the renderer draws nowhere, a disconnected pty, a pty no inventory
-names and a pane channel that refused are four different facts about the window, and none of them is
-evidence that a head is absent. `secretary head-status` is where an operator reads the two halves
-apart; see [Head status in a live workspace](OPERATIONS.md#head-status-in-a-live-workspace).
-
-A live PID is not indefinite evidence of liveness either. A head whose progress source has gone
-dark — or never answered — is held healthy only while that outage is under a bounded window; past
-it the head ages to `suspected_stall` and takes the existing rungs, starting with the one
-conversational report nudge, and the recorded reason names which source is dark and for how long.
-A source is dark when it does not answer, which includes producing no reading at all: the status
-shapes for a live head whose pane the inventory lost, or whose pane is not connected, carry a
-heartbeat and no progress channel, and are read as an outage rather than as a source still
-answering. That nudge really restarts the head's quiet clock, so the conversational rung stands
-between a quiet head and anything destructive instead of being spent in name only.
-A head the dispatcher is deliberately retaining is exempt from every rung, and nothing destructive
-follows from a conclusion no progress source is answering for until the role's whole outer ceiling
-has also elapsed. Separately, a done report the dispatcher rejected and the head has not answered,
-followed by a turn that ended, is an explicit watchdog signal rather than something a ceiling
-eventually notices. The sequence therefore always ends in a wake, a rebind, a respawn or a typed
-outcome — never in a card that stays claimed with nothing running. See
-[Head vitality](HEAD_VITALITY.md).
-
-### Worker retention through validation and review
-
-After a worker reports `done`, the dispatcher suspends its live, addressable worker session before
-moving the card to Validate. A head with no pane handle is not retained: nothing can address it,
-so it is stopped with a confirmed stop instead. The record carries the retained state through the mechanical
-gate and through the review that follows it, so the worker cannot change the checkout while either
-is judging it. Before the reviewer starts, the dispatcher confirms that suspension from the head's
-heartbeat; a session it cannot confirm gets a confirmed stop, and the round loses its continuation.
-Nothing here stops every terminal in the worktree, so the worker's own pane stays the reviewer's
-split anchor.
-
-While that retention is on the record, no vitality path may wake the session it holds. The head
-watchdog reads a stopped process as a head to revive, and the retention is a stopped process the
-dispatcher parked on purpose: read as an ordinary suspension it was SIGCONT'd out from under the
-pending gate within a tick, and the red verdict that followed then found the session no longer
-confirmably suspended and replaced it instead of reusing it. The vitality reduction is therefore
-told whose stop signal it is: a confirmed retention reduces to its own `Retained` verdict, which
-earns no recovery rung anywhere — not from the gate-pending tick, not from the report wait, and not
-from the destructive guard, which refuses every destructive step over it. A head stopped without an
-active retention keeps the ordinary suspension ladder (SIGCONT, response window, operator
-escalation). None of this hides a failed retention: a retained session that is provably gone still
-reduces to `Dead`, and one whose process is running again is still caught by the heartbeat
-confirmation immediately before the delivery boundary, which stops and replaces it exactly once.
-See [Head vitality](HEAD_VITALITY.md).
-
-Substantive red verdicts return the card to In progress through one transition, and both hand the
-round back to the session that wrote the code. An enumerated infrastructure red from the mechanical
-gate instead holds the card in Validate while the gate reruns the failed Actions run for the same
-SHA, with no `gate-red` transition and therefore no `red_ci` budget event. The rerun has a bounded
-per-SHA ceiling and is never emulated by polling the old terminal run; an unavailable rerun or an
-exhausted ceiling is Blocked visibly. The same pending-stall ceiling covers a rerun that never
-completes on the first gate, the pre-merge re-check, or the release re-check after an observer
-decision.
-What differs is what opens a substantive rework. A substantive red mechanical gate opens it
-directly: nothing about that failed gate is a judgement anyone has to make. A red review on a card
-whose sprint
-declares a concrete observer opens nothing by itself; the card parks in
-Assessment once the reviewer's stop is confirmed, and the transition runs on the tick that performs
-a recorded `rework` decision. A red review on a card with no observer to decide opens it directly
-after that same confirmed stop, up to the no-observer ceiling above, which blocks the card instead
-of opening the round. Nothing else moves a card to In progress for rework, and the
-transition always runs the same order, differing only in the phase it records:
-
-1. The red intent, with its phase, the baseline of the report it closes, the generation it reserves
-   for the round it opens, the observer decision opening it if there is one, and the reason the card
-   is moving, goes to disk.
-2. The card moves.
-3. The reserved generation and that decision become the record's, and are persisted.
-4. The delivery decision is made: a confirmed-suspended session takes the continuation, and
-   anything else gets a confirmed stop and exactly one replacement. Either way the head is given a
-   `TASK.md` written for the new generation before it is woken or launched.
-
-Whether a session is held changes only the last step. A round with nothing to reuse opens the same
-durable intent, because it is the round whose replacement a crash would otherwise lose: the record
-would still name the report that closed the round, and the next tick would replay that report as a
-new completion while the card sat In progress with no worker. A tick that dies anywhere after step 1
-is recovered by re-entering this transition against the board as it stands, never by replaying the
-Validate handoff. An open intent outranks everything else the card could be doing: every tick
-finishes it before it reads the mechanical gate, a report marker or a review verdict, and before it
-starts a reviewer. The intent is immutable once written and carries its own reason, so a rollup that
-has turned green between two ticks cannot retract a red round the card is already owed, and the card
-moves once however many ticks it takes to finish the transition. The suspension of the session about to be reused is confirmed from the heartbeat
-immediately before the delivery boundary opens, on recovery as well as on the first attempt, rather
-than trusting the confirmation the reviewer launch made earlier; a session that is no longer
-confirmably suspended is stopped with a confirmed stop and replaced exactly once. The dispatcher then
-updates `TASK.md` with the failure and the round's report identity, persists a pending-delivery
-boundary before SIGCONT, then checkpoints confirmation only after the provider durably records the
-continuation user turn. Terminal activity is a recovery hint for records without that boundary, not
-the delivery proof. A refused `tui-idle` wait carrying `timeout` or `satisfied:false` is explicit
-busy evidence, not a transport failure: the readiness wait runs before SIGCONT, so the retained
-HeadRun, pane binding, workspace and pending continuation remain exactly as recorded. Its durable
-bounded retry delay is not a delivery acknowledgement and never authorizes a stop, replacement or
-new lifecycle attribution. Unavailable transport, malformed evidence and `terminal_handle_stale`
-remain separately typed conservative failures; absent fields on historical evidence are unknown,
-never busy. Recovery after a crash cannot mistake the previous `done` report for a new
-completion, replay an incomplete delivery as if it were confirmed, or overwrite a confirmed
-continuation. A checkpointed delivery is finished on the next tick, so the rework opens its own
-round and the reuse is recorded on the card once and only once. A pending delivery whose head is
-awake again by the next tick is not typed into a second time: it fails the confirmation and takes
-the confirmed stop and the single replacement, and the host keeps its own guard against re-sending
-over a turn already underway. All supported Codex and Claude workers are interactive and accept a
-continuation. Legacy records that name Codex exec are normalized to TUI before launch or rejected
-by registry validation, so no one-shot exec worker can reach this branch. The
-routing record and card comment name the outcome as a reused continuation or a replacement, with
-the worker profile, model, effort, reason and timestamp. A dead session, an unavailable
-continuation transport, or a lost handle is an explicit fallback: the dispatcher confirms the old
-worker has stopped, writes a durable launch intent, and starts exactly one replacement. That intent
-is where the transition changes hands, so it changes hands only once the write succeeds: an intent
-the state plane refuses leaves the red transition on the record, and the next tick finishes it and
-starts that one replacement. Retention
-and stop signal the head's private process group, so its helpers are frozen too. An unconfirmed
-stop never permits a second writer in the workspace.
-
-#### Retained-continuation provider liveness
-
-`worker_continuation_liveness` is version 1 state bound to the exact retained `HeadRun`: its run id
-and a digest of immutable launch facts, first busy observation, last provider observation and last
-fresh provider progress, opaque provider cursor/source fingerprint, persisted source baseline, busy
-count, recovery rung and terminal outcome. It contains no prompt, composer or provider text. A new
-record is created only when that retained delivery boundary is written. Missing, malformed,
-unsupported or HeadRun-mismatched values are durably `unknown`; the sole unbound serialised shape
-is explicit `unknown`. Historical busy counts remain audit data and cannot bind a later run, reset
-the ladder or spend a recovery rung.
-
-Before every retained-continuation retry, one central admission step validates the durable episode
-and exact `HeadRun`, resolves its launch-bound provider source, and persists/uses the v1 baseline
-for that same source. Codex reads only the bound session journal selected from its pre-pane baseline;
-Claude reads only the exactly-one transcript selected from its pre-pane baseline. Neither path uses
-a workspace-wide newest-file mtime. A later changed opaque cursor is fresh provider progress. It
-preserves the same run, workspace, claim, continuation intent and retry owner, resets only the
-no-progress ladder, and makes a `tui-idle` busy result non-destructive. Source absence, ambiguity,
-a foreign source, malformed source or historical episode without a baseline are typed unavailable or
-unknown. Fan-out telemetry and recorder failures never enter that liveness decision. A foreign or
-incomplete retained-liveness source cannot become progress, reset or advance the ladder, or authorise
-recovery or replacement. The worker/reviewer watchdog carries the same typed source result:
-provider-unavailable, stale handle, identity mismatch, confirmed dead and busy are not aliases, and
-only admitted observed progress renews liveness.
-
-Once an exact episode rejects a foreign or changing source, it is sealed as `unknown`: the original
-HeadRun binding, source baseline, cursor and no-progress ladder remain audit-only and cannot be
-re-admitted by a later reply. The shared worker/reviewer status seam independently checks every
-apparently accepted provider observation against the persisted HeadRun before it can renew the
-watchdog clock.
-
-Codex preflight writes its immutable run descriptor: run id, HeadRun fingerprint, resolved
-workspace, role and task reference. Binding selects exactly one journal and retains that descriptor
-verbatim, adding only verified journal identity, range, cursor and bind time. The ingress and the
-shared worker/reviewer provider reader both validate the same descriptor before admitting a cursor.
-A missing, overwritten or foreign field is unavailable or identity mismatch, never evidence for a
-different retained run.
-
-An unchanged cursor records either `completed_turn_residual_composer`, when equal non-empty composer
-and output fingerprints prove the old composer is residual, or `active_or_unknown_turn`; screen text
-is never read as the distinction. Only after three unchanged admitted busy observations does the
-dispatcher persist a single `safe_recovery_pending` rung before asking for an explicit
-provider/terminal-safe capability. There is no raw interrupt, generic key chord or screen-derived
-recovery action. The current host has no such capability and records its typed absence, then takes
-the existing confirmed-stop/HeadRun fence to one replacement. A future capability must return a safe
-receipt bound to that same run; its recorded response window is rechecked for admitted provider
-progress and can return to normal delivery exactly once. No admitted progress after that window or
-an unavailable/refused capability ends in the recorded replacement path. A source identity failure
-remains a typed blocked outcome, not a reason to touch a potentially foreign pane. A stop that cannot
-yet be confirmed remains identity-fenced, never opens a second worker.
-
-Retention is scoped to one round: the report that opened it, the gate and the review that judge it,
-the park the verdict opens, and the decision that hands that round back. Nothing else keeps a worker
-session. A preempt or requeue back to Ready, a `report:blocked`, a move to Blocked and a
-reconciliation onto another card all stop the worker head and clear the retained state, so the next
-round starts from a replacement head. A preempt is an instruction to end the current attempt, not to pause it. A green review ends
-the round too: the merge tears the worktree down, waking the suspended head before it is killed.
+back to rework (red verdict, red gate) opens the next. Respawn, resume after a pause and restart after a
+rejected SHA stay inside their attempt. A return to Ready followed by a new claim adds an attempt; the
+number comes from the journal, so it survives a lost record and a restore. Both an operator retry of a
+blocked card and a preempt or requeue of a live card count as a return to Ready: the dispatcher issues a
+new attempt id then (so the next claim is not answered by the old committed claim) and stops the previous
+attempt's heads.
 
 ```json
 {"kind": "routing", "ref": "PROJECT-N", "payload": {
@@ -2297,86 +1192,475 @@ the round too: the merge tears the worktree down, waking the suspended head befo
 ```
 
 `phase` is `worker` (worker launch), `review` (reviewer launch) or `verdict` (the attempt's outcome,
-carrying both heads), so worker/reviewer pairs group by outcome without a join. A verdict `outcome` is
-`green` or `red` from the reviewer; a mechanical-gate bounce closes the attempt with its own value
-(`gate_red`, `merge-gate_red`, `review-freeze_red`) so a return to rework is not attributed to whoever
-reviewed it. If the reviewer already returned green and the merge gate then bounced the card, both events
-stay in the journal.
+carrying both heads). A verdict `outcome` is `green` or `red` from the reviewer; a mechanical-gate
+bounce closes the attempt with its own value (`gate_red`, `merge-gate_red`, `review-freeze_red`). If
+the reviewer returned green and the merge gate then bounced, both events stay.
 
-The decision is made once, at claim time, and there is no substitution at launch: the head that starts is
-the head the claim decided. That decision reads the card override or `role_defaults` and then resource
-health, and it may end somewhere else than it started. A preferred head whose resource is red or spent is
-replaced by the first launchable head along the fallback chain the registry writes for it, breadth-first,
-cycles read once. Only that chain: nothing is inferred, and a chain entry the registry no longer describes
-is dropped rather than launched, because an unreadable profile has no resource to probe and its readiness
-reads `unknown`, which is launch-allowed. So a record carries one head per role plus `head_source`, saying
-where its id came from: `card`, `role_default`, `fallback` (the claim walked the chain), or `record` (the
-head pinned in the card's dispatcher record when it was claimed earlier).
+Head choice is made once, at claim time, with no substitution at launch. It reads the card override
+or `role_defaults`, then resource health. A preferred head whose resource is red or spent is replaced
+by the first launchable head along the registry's fallback chain for it (breadth-first, cycles read
+once); a chain entry the registry no longer describes is dropped. `head_source` records where the id
+came from: `card`, `role_default`, `fallback`, or `record` (pinned in the dispatcher record at an
+earlier claim).
 
-Two answers end that walk without a claim, and both leave the card in Ready with the reason on the tick,
-naming the dead resource and its probe verdict. Nothing launchable anywhere in the chain is one: a head
-started into a spent subscription costs an attempt, a watchdog respawn and a round, and a card waiting in
-Ready costs nothing. The other is a transfer that would hand the worker and the reviewer the same head.
-A review is worth having because someone other than the worker reads the work, so a failover that removes
-that is refused rather than performed; two roles pointed at one head by the registry itself is an
-installation's own decision and is claimed as before.
+Two answers end the walk without a claim, leaving the card in Ready with the reason (dead resource and
+probe verdict) on the tick: nothing launchable in the chain, or a transfer that would give worker and
+reviewer the same head (a registry that itself points both roles at one head is claimed normally). Both
+are claim-skips about one card: the Ready pass records it and considers the next card. Every claim-skip
+kind is in one set the pass reads; a skip missing from that set ends the pass.
 
-Both are claim-skips, and a claim-skip is a statement about one card. The Ready pass records it and
-considers the next card, so an unclaimable card never stops work that has somewhere to go. Every kind of
-claim-skip is named in one set the pass reads, rather than compared against by hand: a skip missing from
-that set does not degrade the pass, it ends it, and the cards behind the skipped one are not considered
-that tick or any following one while the resource stays dead.
+A failover head writes `resolved_worker_head` / `resolved_review_head` onto the card, adds one comment
+naming the head, the replaced preference and the resource verdict, reports both in the tick, and the
+reviewer's document names the head that wrote the branch when it differs from the card's.
 
-A head reached by failover is never a silent substitution. The claim writes the pair onto the card as
-`resolved_worker_head` / `resolved_review_head`, adds one comment naming the head, the preference it
-replaced and the resource verdict that caused it, reports both in the tick, and the reviewer's document
-says which head wrote the branch when it is not the one the card asks for.
+A dispatcher that lost its record takes the head pair from the card's resolved fields when adopting.
+If the claimed head has left the registry, nothing is launched: the card moves to Blocked with that
+reason, the dispatcher record is dropped, and nothing is appended to the journal.
 
-Because the decision is made once, the attempt keeps it. A dispatcher that lost its record takes the head
-pair from the card's own resolved worker and reviewer fields when adopting, rather than resolving the
-override and `role_defaults` again: otherwise a role default changed mid-attempt would hand the review to a
-different head and the journal would honestly record a head nobody claimed the attempt with. If the head
-pinned at claim time has disappeared from the registry, nothing is launched: the card moves to Blocked with
-the reason that the claimed head is unavailable, the dispatcher record is dropped, and nothing is appended
-to the journal. Substituting the current `role_defaults` would be exactly the launch-time swap the
-installation does not have, so the decision is left to a person.
+Each head carries its full launch configuration, snapshotted at bring-up and written to the journal as
+is; the registry is re-read only for an adopted card launched in a previous dispatcher life.
+`model_source` says where the model came from; `model` is empty only under `cli_default` (the CLI
+picks), and the launch record rejects an empty model under any other source. The snapshot reads the
+role launch environment (after the role-environment wrapper drops `runtime.env` variables outside the
+role allowlist), not the dispatcher's own.
 
-A profile name is not a historical key: several profiles can be one model at different effort levels, a
-profile may pin no model at all, and profiles get repinned. So each head carries its full launch
-configuration, captured at launch and never re-read from the registry. The bring-up itself takes the
-snapshot and the dispatcher writes it to the journal as is. The registry is re-read only for an adopted
-card whose launch happened in a previous life of the dispatcher.
+Each launch record carries the provider's durable `session_id` (Codex rollout or Claude jsonl
+session); if unavailable at bring-up it is `null` with `session_id_reason`. `prompt_path` names the task
+document delivered, and `prompt_version` is its `sha256:` content address at that bring-up.
 
-`model_source` says where the model came from, and `model` is empty only when the source says so
-explicitly. A profile with no model launches its CLI without a model flag and the CLI picks one; at launch
-the same sources are read in the same order the CLI uses. If the model is pinned nowhere, the value stays
-empty under a `cli_default` source, meaning "chosen by the runtime" rather than a silent omission. The
-launch record rejects an empty model under any other source.
+Every launch inside an attempt writes its own event (respawn, restart after a pause, rework). The
+request id includes a configuration digest, so relaunching the same head commits once; a different
+adapter, model, effort or resource adds an event and replaces the attempt's active head. The verdict
+carries the head that earned it.
 
-Each launch record also carries the provider's durable `session_id`: the id in the Codex rollout or the
-Claude jsonl session. If an adapter cannot expose it at bring-up, `session_id` is explicitly `null` and
-`session_id_reason` says why. `prompt_path` names the task document delivered to that role, and
-`prompt_version` is its `sha256:` content address at that same bring-up. These facts let a journal reader
-follow a round directly to its conversation and prompt without reconstructing either from a workspace and
-time window.
+Reader: `secretary.routing_journal.attempts(events, ref)` returns a finished card's attempts with heads
+and outcome. These events travel in the recovery checkpoint with the rest of the event log.
 
-Those sources are read from the environment the head will actually get, not the dispatcher's own. A head
-command goes through the role-environment wrapper, which drops every `runtime.env` variable outside the
-role allowlist, so the snapshot reads the role launch environment. Otherwise the journal would record a
-model that never reached the CLI.
+### Attempt outcome ledger v1
 
-Every launch inside an attempt writes its own event: respawn after silence, restart after a pause, rework.
-The request id includes a digest of the configuration, so relaunching the same head commits once, while a
-launch on a different adapter, model, effort or resource adds a second event and replaces the attempt's
-active head. The verdict always carries the head that earned it.
+`attempt.outcome` version 1 is append-only observational telemetry, written by the dispatcher
+lifecycle owner only after its terminal effect is confirmed. No card move, merge, retry, admission,
+gate, observer decision or recovery decision reads it.
 
-The reading side is `secretary.routing_journal.attempts(events, ref)`: the sequence of attempts for a
-finished card, with heads and outcome. These events go into the recovery checkpoint with the rest of the
-event log and are restored on materialise.
+Dispatcher terminal effects cross one forward-only typed taxonomy before observational fields are
+written. Disposition axis: `release|rework|reslice|blocked|drop|operator_stop`; blocked-reason axis:
+`implementation|review|task_contract|gate|provider|infrastructure|operator|other`. The transition keeps
+the taxonomy's `source_evidence` beside its normalized reason (a worker `wrong_task_definition` report
+maps to `task_contract` with that source token; `external_fact` stays source evidence under `other`).
+Invalid forward values are rejected at that boundary. Events with no taxonomy read as explicit
+`legacy`/`other` evidence, with no rewrite, backfill or inference from request ids, prose, timestamps or
+live state.
+
+The normalizer accepts the terminal cause once and persists a forward record with disposition,
+normalized reason, source evidence and budget class. That immutable record travels with the lifecycle
+effect, supplies its post-effect `attempt.outcome` obligation, and is the only forward input to budget
+reconciliation. Recovery reads the committed record's own disposition (an assessment `reslice` to
+Blocked stays `reslice` while its `blocked` budget class still charges). Only a classified head
+bring-up infrastructure outcome is uncharged `infrastructure_blocked`; worker-result, gate, merge,
+adoption and durable-state mismatch causes keep their charged class, and every other normalized block
+charges `blocked`. An event with no taxonomy keeps its durable action-token budget class. These
+consumers cannot gate, reorder, retry or undo the lifecycle effect; a malformed record yields the
+non-gating `terminal-taxonomy-invalid` budget diagnostic and later budget events continue.
+
+Natural key: exactly `(card_ref, attempt_id, report_generation)`; `attempt` is the observed ordinal and
+not part of the key. The Card subject supplies `card_ref`; `data` carries `version: 1`, non-empty
+`attempt_id`, positive `attempt` and `report_generation`, nullable `sprint_ref` and
+`specification_revision`, `terminal_state` (`done`, `blocked`, or `in_progress` for a rework), `verdict`
+(`green|red|blocked|missing|legacy`), `disposition` and nullable `blocked_reason` (present exactly when
+disposition is `blocked`).
+
+`source_event_ids` always contains nullable `report`, `verdict`, `decision`, `effect`, `worker_usage`
+and `review_usage`. `usage_completeness` always contains `worker` and `review`, each
+`collected|degraded|missing|legacy`; collected or degraded usage has its usage-event ref, missing and
+legacy have none. An unknown report/verdict/decision reference stays null and is never inferred.
+`null`, `missing` (no forward occurrence), `degraded` (occurrence without usable measurement) and
+`legacy` (predates the contract) are distinct; a null field is not zero. Historical events are not
+rewritten or backfilled.
+
+An exact replay returns the staged or committed occurrence. A different payload for the same natural
+key raises `AnalyticsOutcomeConflict`. A crash after stage reuses the pending event; a crash before stage
+remains owed on the confirmed terminal lifecycle event, whose immutable obligation carries round
+identity and disposition, and the lifecycle owner reconstructs the occurrence from that event and other
+typed journal occurrences only. Unreadable, conflicting, staging or append failures are degraded
+analytics diagnostics and leave the lifecycle effect and teardown unchanged. Unknown versions, fields
+and enums are rejected by the typed board-event reader.
+
+Only a dispatcher-owned transition that closes a started round with durable round context carries an
+obligation; waiting, reviewer-launch and pre-claim refusal/retry paths do not. A lost claimed record
+that cannot be adopted still commits its Blocked effect but produces no outcome. Operator stop/drop
+produces an outcome only where the stopping lifecycle record carries a durable attempt id, round and
+generation.
+
+### Offline analytics projection v1
+
+`secretary.board.analytics.project_analytics_checkpoint(directory)` is the offline reader for one
+copied `state/board` checkpoint. It first calls `verify_analytics_checkpoint(directory)`, and only then
+parses `cards.ndjson`, `sprints.ndjson` and `events.ndjson`. `export.json` is verified only as a count
+summary. The reader has no live board, dispatcher, provider session, comment, transcript or lifecycle
+dependency and never mutates a checkpoint. `cards.ndjson` and `sprints.ndjson` are membership sources
+for typed event subjects; repeated references and rows without a usable reference create no analytics
+identity and do not invalidate unrelated evidence.
+
+The versioned result has `checkpoint_id`, `rows`, `incomplete` and `incomplete_reasons`; `ndjson()`
+emits one deterministic object per row. Each row is keyed by `card_ref`, `attempt_id` and
+`report_generation` and carries the outcome's round fields, terminal taxonomy, `source_event_ids`,
+`usage_completeness`, and nullable `worker_usage` and `review_usage` objects (usage event id, typed
+phase identity, collection outcome and all three nullable token accounts; never synthesized or zeroed).
+
+The only usage join is a non-null `source_event_ids.worker_usage` or `.review_usage`. The referred
+event must be a typed `attempt.usage` on the same Card with the same attempt id, attempt and report
+generation; worker requires role/phase `worker`/`worker`, review requires `reviewer`/`review`.
+`collected` requires a collected occurrence; `degraded` a typed non-collected one. No order, timestamp,
+request id, prose, marker, provider state or live Card field participates in a join.
+
+The projection fails closed with `AnalyticsProjectionError` codes `analytics_malformed_row`,
+`analytics_read_failed`, `analytics_invalid_typed_event`, `analytics_conflicting_event_identity`,
+`analytics_conflicting_request_ownership`, `analytics_conflicting_outcome_natural_key`,
+`analytics_dangling_card_ref`, `analytics_dangling_sprint_ref`, `analytics_dangling_source_event_ref`,
+`analytics_incompatible_source_event_ref` and `analytics_incompatible_usage_join`, each naming its file
+and record number. An exact replay of the same typed event and request is one occurrence. A cut with no
+v1 outcome reports no rows and `no_attempt_outcome_v1`; legacy outcome or usage evidence sets explicit
+incompleteness. The checkpoint seal is in [Recovery](RECOVERY.md#analytics-checkpoint-seal-v2).
+
+### What a finished phase cost
+
+Every completed worker phase and review phase leaves one `attempt.usage` event on the card: a typed
+board protocol event (`kind: "attempt.usage"`, Card subject) with no backend mutation, written through
+the append-only audit and carried by board/audit export. There is no backfill; a card without a usage
+record is not a zero.
+
+**When.** On the acceptance path, only for an accepted terminal outcome: a `report:done` or
+`report:blocked` the dispatcher accepts, and a `review:green` or `review:red` it acts on. A done report
+bounced at an already-rejected checkout writes nothing. The write happens while the completed run and
+its provider session are still on the record (a retained worker before its freeze; a reviewer after its
+pane is confirmed closed).
+
+**Fields.** Card ref and subject, numeric attempt and attempt id, the report generation closed, role
+(`worker`/`reviewer`) and phase (`worker`/`review`), head id, adapter, resolved model and
+`model_source`, launch id, provider `session_id` or its typed absence with reason, collection outcome,
+and three token accounts. Identity fields come from the routing journal's launch snapshot.
+
+**Token dimensions.** `input` (uncached input), `cache_input` (cache creation/write input),
+`cache_read_input` (input served from cache), `output` (total generated output, including reasoning)
+and `reasoning` (subset of `output`), each a non-negative integer or `null`. The additive total is
+`input + cache_input + cache_read_input + output`; never add `reasoning` again. Where both are known,
+`reasoning <= output`. `null` means the provider did not report the dimension. Accounts: `tokens` (the
+interval this phase owns), `session_totals` (running provider-session total at phase end) and
+`phase_baseline` (the boundary it started from).
+
+Accounts are nullable per dimension and independently. For every dimension the phase owns,
+`tokens = session_totals - phase_baseline`. An unattributable dimension is `null` in both `tokens` and
+`phase_baseline`, while `session_totals` keeps what the provider reported. A `collected` outcome reports
+at least one `session_totals` dimension (`tokens` and `phase_baseline` may be entirely null). Every
+degraded outcome reports no dimension in any account. There is no price table or monetary conversion.
+
+**Phase-attribution lattice.** One rule for every provider and lifecycle path (first or retained phase,
+live acceptance, staged or replayed obligation):
+
+- **No predecessor occurrence.** Each known dimension starts from a zero boundary; the phase owns its
+  whole value. An unreported dimension is `null` in `tokens` and `phase_baseline`.
+- **Predecessor, both values known and nondecreasing.** The phase owns the difference.
+- **Predecessor, either value unavailable.** `null` in `tokens` and `phase_baseline`; no zero invented.
+  The phase's `session_totals` value is kept, so the next phase subtracts from it normally.
+- **Predecessor, current value below it.** The whole occurrence is `arithmetic_contradiction` and
+  publishes no account.
+
+Containment is validated when accounts are produced and when written: `reasoning` escaping `output` in
+any account degrades the occurrence the same way. (A Claude journal can stream a detail-less record
+before the completed duplicate, so a phase may end with no reasoning detail that the next phase on the
+same session sees in full.)
+
+**Canonical projection.** One repository projection reads the card's committed and staged TaskAudit
+records under the audit lock, validates every `attempt.usage` record through the typed schema, and
+returns each immutable occurrence with a separate `pending` flag. An exact committed-plus-pending copy
+is one occurrence. A request id with another payload, an event id with another request owner, an
+unreadable record, or conflicting phase ownership makes the projection unavailable; readers fail closed.
+The flag affects only export visibility: a successful stage is immediately an accounted occurrence.
+
+One session can serve several phases (a retained worker resumed into the next round). A phase owns the
+usage recorded after the previous authoritative terminal boundary for the same card, role, adapter and
+provider `session_id`, through its own boundary. The predecessor is selected by explicit causal identity
+(attempt, attempt id ownership, report generation, phase), never by iteration or append order. A session
+with no matching prior occurrence starts at zero. A matching predecessor whose degraded occurrence
+carries no `session_totals` at all is an audit failure (no zero baseline is invented); a predecessor that
+recorded some dimensions is handled per dimension by the lattice. An unreadable or conflicting
+projection is an audit failure.
+
+**Order and failure precedence.** First projection integrity and causal identity (a phase slot owned by
+a conflicting attempt id fails closed regardless of the read); second the provider read (a whole-session
+total only); third attribution and cross-account validation, in one place; fourth immutable staging; last
+publication recovery. A degraded provider read needs no interval arithmetic, does not consult the
+predecessor, writes its named outcome and proceeds.
+
+**Codex aggregation.** Codex writes cumulative `token_count` snapshots, and a new user turn can reset
+`total_token_usage` within the same session and rollout file. A decrease in any raw counter starts a new
+segment; the session total is the sum of each segment's final snapshot, and repeated snapshots within a
+segment add nothing. `cached_input_tokens` and `cache_write_input_tokens` are contained in
+`input_tokens`; `reasoning_output_tokens` is contained in `output_tokens`. At each segment endpoint:
+`input = input_tokens - cached_input_tokens - cache_write_input_tokens`, `output = output_tokens`,
+`reasoning = reasoning_output_tokens`. All five raw fields and valid containment are required, otherwise
+the snapshot is malformed.
+
+**Claude aggregation.** One `usage` object per assistant message; `input_tokens` already excludes
+`cache_creation_input_tokens` and `cache_read_input_tokens`, which map directly to `input`,
+`cache_input` and `cache_read_input`. The session total is the sum over distinct message ids, each
+contributing its last usage object once. `output_tokens` maps to `output`. `reasoning` is the sum of
+`output_tokens_details.thinking_tokens` only when every contributing usage object supplies a valid
+detail (explicit zero included); otherwise aggregate `reasoning` is `null` while `output` stays. A
+missing, malformed or out-of-range detail (not an object, or a thinking count that is not a non-negative
+integer within that message's output) costs only reasoning, is counted in `skipped_records`, and keeps
+the message's other counts. A `usage` that is not an object or has no usable count contributes nothing.
+
+**Outcomes.** `collected`; `arithmetic_contradiction` (current total below an immutable earlier
+boundary, or reasoning escaping output); `adapter_unsupported` (adapter has no structured usage
+records); `session_unavailable` (no provider session bound to the run); `source_unavailable` (record
+source never bound, or names no journal); `source_unreadable`; `records_malformed` (a record declaring
+itself usage — a Codex `token_count`, an assistant message with `usage` — with an unpublished schema, or
+a journal where nothing parsed); `usage_absent` (the journal parsed and holds no usage record). A
+truncated tail line is skipped, not a failed read. `skipped_records` counts unparseable lines and
+schema-invalid declared usage records; `records` counts what the aggregation used.
+
+**Idempotency.** One occurrence per completed phase, keyed by attempt id, phase, attempt number and
+report generation. A replayed request or re-entered acceptance commits the event that already owns the
+id, so recovery against a grown session file can neither add nor overwrite an occurrence. A repeated
+done report inside one round (the infrastructure-classified gate retry) returns that round's occurrence.
+
+**Durability order.** On every worker-report and reviewer-verdict path the occurrence is staged under
+its request id and appended *before* the control event and transition. A card may advance past a staged
+obligation (a later tick publishes it), never past nothing.
+
+**Settling staged obligations.** Every production tick, once singleton, pause and mutation guards permit
+work and before observer fencing, `ACTIVE_STATES` selection, active-card reconciliation, phase-boundary
+reads and new claims, publishes every occurrence the projection marks pending. It uses no dispatcher
+record, board lookup or card state. A publication failure keeps the exact staged occurrence pending and
+reports a degraded `attempt-usage-recovery` action naming the cards owed; it is retried on every later
+permitted tick. Publication always finishes the exact staged occurrence and is idempotent; a tick that
+owes nothing reports nothing.
+
+**Non-blocking.** Provider reading never decides anything: degraded outcomes are recorded in the
+occurrence and the report or verdict is accepted normally. Failing to make the occurrence durable is an
+audit failure and is raised: the card's tick ends with the phase unadvanced and the report or verdict
+still on the board, and the next tick retries the same acceptance.
+
+### The report generation
+
+A worker round is identified by a report generation, a counter in the dispatcher record: 1 at claim,
+advanced by one whenever a new report round opens (red mechanical gate, red review, or a done report
+bounced at an already-rejected checkout). It never repeats within an attempt and never goes backwards. A
+respawn inside a round does not advance it. A red transition reserves the round's generation in the
+intent it writes before moving the board, and the completing tick assigns that reservation, so a
+re-entered completion does not spend a second generation.
+
+The generation is the suffix of the `done` and `blocked` request ids in `TASK.md` and of the report body
+paths those commands name; each block classification gets its own id. It is persisted before any
+document names it, `TASK.md` is written from it, and the prompt waking a retained worker names it and
+the suffix the round's commands carry.
+
+A stale command with a new body is refused with `validation` (exit 2); an identical retry is answered
+from its committed event with `replayed: true` and adds no marker. When the next round opens, all round
+body files are deleted, including the new round's, so a replayed command reading one fails on its first
+step. Guarantee: a command from an ended round never records a report of the current round; it can
+still answer its caller with a success belonging to its own round.
+
+The dispatcher ends a round on two facts of its own. First, a report belongs to a round only by the
+request id its command carried (the audit keeps it beside the marker), and that id encodes attempt and
+generation: ids from an ended round, an earlier attempt or an invented id end nothing and leave the card
+where it was. Second, a head that stopped with its round unreported is pointed at the current command
+once and then the card is blocked. Wait mechanics: [Operations](OPERATIONS.md).
+
+Which ids a round issued is read from the checkout first and dispatcher state only as fallback. Only ids
+naming the open generation are taken from the document. When the checkout cannot be read, the ids are
+those the dispatcher would issue from the record's attempt and open generation, so a live worker holding
+older ids is bounced once and re-materialised on the same round.
+
+The document is read through a hidden record, never by scanning for commands: every worker `TASK.md` ends
+with `<!-- report-round generation=N ids=... -->` carrying the round's request ids base64-encoded,
+written after every section a description or decision is rendered into, matched as a whole line, last
+such line taken. The checkout's generation is read from the same record.
+
+Only a committed audit event ends a round; a staged `reported` event does not. A report whose comment
+landed but whose audit append failed leaves the round open until the audit is repaired (retrying the
+same command does that). The report protocol itself is unchanged.
+
+A dispatcher that lost its record recovers the generation from the checkout's `TASK.md` and from the
+count of consumed reports; both are lower bounds and the larger wins, so a recovered generation may
+skip a number but never reuses one. Unconsumed reports are not counted.
+
+The comment index a new report marker is scanned against is a separate comment count.
+`review_baseline` is only the comment index the next verdict is read from and the round key of the
+reviewer's verdict identity.
+
+### The observer decision a rework round is opened on
+
+A round opened by a `rework` decision carries that decision to its worker. The decision text is frozen
+with the generation: written into the red transition's intent before the board moves, assigned to the
+record when the transition completes, and rendered into every `TASK.md` of that round (replacement or
+retained head). It is never looked up again at document-build time, so a later decision does not
+replace the instruction the round runs under.
+
+In the document the decision comes first, under a heading naming it the instruction to follow, with the
+reviewer's red body below it as context; where they disagree the decision wins. The prompt waking a
+retained worker names the decision as the authoritative instruction.
+
+Every round carries only the decision that opened it. The red transition assigns it unconditionally;
+the stale-done bounce clears it in the same mutation that advances the generation. Rounds opened by a
+red gate or bounced done report carry no decision.
+
+A lost record recovers the decision from the checkout: every worker `TASK.md` ends with
+`<!-- observer-decision generation=N body=... -->` carrying it base64-encoded (empty body when none),
+and recovery reads the last such line.
+
+### Revision-bound worker feedback
+
+The description in a worker `TASK.md` is authoritative. A create or description edit has an immutable
+audit event and description digest; its event id is the card's current specification revision.
+Reviewer verdicts and observer decisions record that revision and digest. The task-document feedback
+selector renders a red review, or a rework decision with any supporting red review, only when each
+rendered item is bound to the current revision. A correctly bound rework decision stays the instruction
+that opened the round even when no red review exists or the red review predates the revision. A reslice
+followed by a description edit therefore starts a fresh worker without the prior reviewer's
+instructions. Missing, malformed or ambiguous binding omits historical feedback.
+
+### Head heartbeat identity
+
+Every dispatcher-launched worker, reviewer and observer writes one atomically replaced version-1 JSON
+heartbeat before its shell `exec`s the provider: pid, Linux boot id, process start ticks, durable
+`HeadRun` id, role, card or sprint binding, and the pane leaf once known. Terminal creation and the
+writer are unordered, so pane creation first atomically writes a matching leaf handoff beside the
+heartbeat: a later writer incorporates it in its first record, and an already-written matching record
+gets a guarded second atomic replace. The writer re-checks the handoff after its base replace, and a late
+binder never annotates another process that reused the pid-file path.
+
+Readers classify a matching live record, a dead record, a live identity mismatch, a not-yet-written
+record and an unreadable record separately. Boot, start ticks, run id, role, task and a known leaf must
+all agree. Lifecycle and recovery consumers use one HeadRun classification boundary, which builds the
+expected identity before a stop can persist `finishing` or `stopped_by`, a review launch can become
+`reviewing`, or a pane/workspace can be relocated or closed. A mismatch is an operator-facing degraded
+state: retention, launch recovery, watchdogs, stop paths and observer reconciliation leave the prior run
+unattributed and never open a replacement beside it. The guard is rechecked immediately before every
+destructive pane close, workspace stop and heartbeat signal. Raw command overrides write no heartbeat
+and get no synthetic identity; they keep only the launch grace and pane-output fallbacks.
+
+A head is alive only by its own observation: a live matching heartbeat whose process is running or
+suspended, or an advancing provider cursor bound to the same `HeadRun`. Only the heartbeat may say a
+head is gone. Anything else is `unproven`, including a role with a head identity but no durable
+`HeadRun`. Pane and terminal readings never enter the answer. `secretary head-status` shows the two
+halves apart; see [Head status in a live workspace](OPERATIONS.md#head-status-in-a-live-workspace).
+Stall ageing, rungs and the destructive guard are in [Head vitality](HEAD_VITALITY.md).
+
+### Worker retention through validation and review
+
+After a worker reports `done`, the dispatcher suspends its live, addressable session before moving the
+card to Validate. A head with no pane handle is stopped with a confirmed stop instead. The retained
+state stays on the record through the mechanical gate and the following review, so the worker cannot
+change the checkout while it is judged. Before the reviewer starts, the suspension is confirmed from the
+heartbeat; an unconfirmable session gets a confirmed stop and the round loses its continuation. The
+worker's pane stays the reviewer's split anchor.
+
+While retention is on the record, no vitality path wakes the session: a confirmed retention reduces to
+`Retained`, which earns no recovery rung and is refused by the destructive guard. A head stopped without
+an active retention keeps the ordinary suspension ladder. A retained session that is provably gone still
+reduces to `Dead`, and one running again is caught by the heartbeat confirmation before the delivery
+boundary, which stops and replaces it once. See
+[Head vitality](HEAD_VITALITY.md#retention).
+
+Substantive red verdicts return the card to In progress through one transition that hands the round
+back to the session that wrote the code. (An enumerated infrastructure gate red instead stays in
+Validate; see [Rejected SHAs and gate infrastructure reruns](#rejected-shas-and-gate-infrastructure-reruns).)
+A substantive red mechanical gate opens the rework directly. A red review on a card whose sprint
+declares a concrete observer parks it in Assessment once the reviewer's stop is confirmed, and the
+transition runs on the tick that performs a recorded `rework` decision. A red review on a card with no
+observer opens the rework directly after the confirmed stop, up to the no-observer ceiling. Nothing else
+moves a card to In progress for rework. The transition order:
+
+1. The red intent — phase, baseline of the report it closes, reserved generation, opening observer
+   decision if any, and the reason — goes to disk.
+2. The card moves.
+3. The reserved generation and decision become the record's, and are persisted.
+4. Delivery: a confirmed-suspended session takes the continuation; anything else gets a confirmed stop
+   and exactly one replacement. Either way the head gets a `TASK.md` for the new generation before it is
+   woken or launched.
+
+A round with nothing to reuse opens the same durable intent. A tick dying after step 1 is recovered by
+re-entering this transition against the current board, never by replaying the Validate handoff. An open
+intent outranks everything: every tick finishes it before reading the gate, a report marker or a verdict,
+and before starting a reviewer. The intent is immutable and carries its reason, so a rollup turning green
+cannot retract an owed red round, and the card moves once.
+
+The suspension of the session to reuse is re-confirmed from the heartbeat immediately before the
+delivery boundary, on recovery as on the first attempt; an unconfirmed session is stopped and replaced
+once. The dispatcher updates `TASK.md` with the failure and the round's report identity, persists a
+pending-delivery boundary before SIGCONT, and checkpoints confirmation only after the provider durably
+records the continuation user turn. Terminal activity is only a recovery hint for records without that
+boundary. A refused `tui-idle` wait carrying `timeout` or `satisfied:false` is busy evidence, not a
+transport failure: the wait runs before SIGCONT, so HeadRun, pane binding, workspace and pending
+continuation stay as recorded, and its bounded retry delay authorizes no stop, replacement or new
+attribution. Unavailable transport, malformed evidence and `terminal_handle_stale` remain separately
+typed conservative failures; absent fields on older evidence are unknown, never busy. Recovery cannot
+mistake the previous `done` for a new completion, replay an incomplete delivery as confirmed, or
+overwrite a confirmed continuation. A checkpointed delivery finishes on the next tick, and reuse is
+recorded on the card once. A pending delivery whose head is awake by the next tick fails confirmation
+and takes the confirmed stop and single replacement.
+
+All supported Codex and Claude workers are interactive and accept a continuation. The routing record
+and card comment name the outcome as a reused continuation or a replacement, with worker profile, model,
+effort, reason and timestamp. A dead session, unavailable continuation transport or lost handle falls
+back explicitly: confirm the old worker stopped, write a durable launch intent, start exactly one
+replacement. The transition changes hands only once that intent write succeeds; otherwise the red
+transition stays on the record and the next tick finishes it. Retention and stop signal the head's
+private process group. An unconfirmed stop never permits a second writer in the workspace.
+
+Retention is scoped to one round: the report that opened it, the gate and review that judge it, the park
+the verdict opens, and the decision that hands it back. A preempt or requeue to Ready, a
+`report:blocked`, a move to Blocked and a reconciliation onto another card all stop the worker head and
+clear retained state. A green review ends the round too: the merge tears the worktree down, waking the
+suspended head before it is killed.
+
+#### Retained-continuation provider liveness
+
+`worker_continuation_liveness` is version 1 state bound to the exact retained `HeadRun`: run id and
+digest of immutable launch facts, first busy observation, last provider observation, last fresh provider
+progress, opaque provider cursor/source fingerprint, persisted source baseline, busy count, recovery
+rung and terminal outcome. It holds no prompt, composer or provider text. A record is created only when
+the retained delivery boundary is written. Missing, malformed, unsupported or HeadRun-mismatched values
+are durably `unknown`; the only unbound serialised shape is explicit `unknown`. Older busy counts are
+audit data and cannot bind a later run, reset the ladder or spend a rung.
+
+Before every retained-continuation retry, one admission step validates the durable episode and exact
+`HeadRun`, resolves its launch-bound provider source, and persists/uses the v1 baseline for that source.
+Codex reads only the bound session journal selected from its pre-pane baseline; Claude reads only the
+exactly-one transcript selected from its pre-pane baseline; neither uses a workspace-wide newest-file
+mtime. A changed opaque cursor is fresh progress: it keeps run, workspace, claim, continuation intent
+and retry owner, resets only the no-progress ladder, and makes a `tui-idle` busy result non-destructive.
+Source absence, ambiguity, a foreign or malformed source, or an episode without a baseline is typed
+unavailable or unknown and cannot become progress, reset or advance the ladder, or authorise recovery
+or replacement. Fan-out telemetry and recorder failures never enter this decision. The worker/reviewer
+watchdog carries the same typed source result: provider-unavailable, stale handle, identity mismatch,
+confirmed dead and busy are distinct, and only admitted progress renews liveness.
+
+Once an episode rejects a foreign or changing source it is sealed as `unknown`: its HeadRun binding,
+baseline, cursor and ladder become audit-only and cannot be re-admitted. The shared worker/reviewer
+status seam checks every apparently accepted provider observation against the persisted HeadRun before
+it renews the watchdog clock.
+
+Codex preflight writes the immutable run descriptor: run id, HeadRun fingerprint, resolved workspace,
+role and task reference. Binding selects exactly one journal and keeps that descriptor verbatim, adding
+only verified journal identity, range, cursor and bind time. Ingress and the shared provider reader both
+validate the descriptor before admitting a cursor; a missing, overwritten or foreign field is
+unavailable or identity mismatch.
+
+An unchanged cursor records `completed_turn_residual_composer` (equal non-empty composer and output
+fingerprints prove the composer is residual) or `active_or_unknown_turn`; screen text never decides.
+After three unchanged admitted busy observations the dispatcher persists a single
+`safe_recovery_pending` rung before asking for an explicit provider/terminal-safe capability. There is no
+raw interrupt, generic key chord or screen-derived action. The current host has no such capability: it
+records the typed absence and takes the confirmed-stop/HeadRun fence to one replacement. A capability
+must return a safe receipt bound to the same run; its response window is rechecked for admitted progress
+and may return to normal delivery once; otherwise the recorded replacement path follows. A source
+identity failure is a typed blocked outcome and never touches a potentially foreign pane. A stop that
+cannot yet be confirmed stays identity-fenced and never opens a second worker.
 
 ## Production dispatcher
-
-The production runtime runs as a single tick or a continuous loop:
 
 ```bash
 python3 -P -m secretary dispatcher production-tick --instance INSTANCE
@@ -2384,113 +1668,83 @@ python3 -P -m secretary dispatcher production-observe --instance INSTANCE
 python3 -P -m secretary dispatcher production-run --instance INSTANCE
 ```
 
-The systemd timer uses the one-shot `production-tick`. The runtime handles only supported task
-transitions, persists claim and review state, and checks the live board before recovery. The production
-owner is recorded in dispatcher state; an owner mismatch, a dirty workspace, a missing report or an
-unresolved audit state stops a transition instead of falling back silently.
+The systemd timer runs the one-shot `production-tick`. The runtime handles only supported task
+transitions, persists claim and review state, and checks the live board before recovery. The
+production owner is recorded in dispatcher state; an owner mismatch, a dirty workspace, a missing
+report or an unresolved audit state stops a transition rather than falling back.
 
-Before that systemd unit invokes the `secretary` console entry point, its configured production
-interpreter runs `src/secretary/dispatch/runtime_preflight.py` with `-I`. The preflight is standard
-library code executed by pathname, not a package import. It binds the configured product root and
-production interpreter, then inspects that interpreter's plain editable `.pth` files, executable
-editable finders and `direct_url.json` records for `secretary`. Its one shared provenance result names
-the classification (`valid`, `wrong_root`, `workspace_targeted_editable`, `missing_import` or
-`interpreter_unavailable`), interpreter, product root, observable import origin, metadata source and
-offending target. Resolved paths, not lexical prefixes, decide containment, so a sibling such as
-`secretary-old` and a symlink escape do not pass.
+Before the unit invokes the `secretary` entry point, the configured production interpreter runs
+`src/secretary/dispatch/runtime_preflight.py` with `-I` (standard-library code executed by pathname).
+It binds the configured product root and production interpreter and inspects that interpreter's plain
+editable `.pth` files, executable editable finders and `direct_url.json` records for `secretary`. The
+result names the classification (`valid`, `wrong_root`, `workspace_targeted_editable`,
+`missing_import` or `interpreter_unavailable`), interpreter, product root, observable import origin,
+metadata source and offending target. Containment is decided on resolved paths, so a sibling such as
+`secretary-old` or a symlink escape does not pass.
 
 Only `valid` execs `secretary dispatcher production-tick`. A refusal exits `78` before candidate
-package code, reconciliation or a metadata change; it atomically writes the smallest
-`runtime_provenance` and unhealthy-tick diagnostic in the existing production-state file. The normal
-pipeline health line and steward incident reducer consume that same tick telemetry, so repeated
-minute refusals remain one incident and the first later healthy tick records one recovery. A valid
-preflight supersedes a prior refusal only; it does not falsely claim that the following dispatcher
-tick completed.
+package code, reconciliation or metadata change, and atomically writes the minimal `runtime_provenance`
+and unhealthy-tick diagnostic into the production-state file. The pipeline health line and steward
+incident reducer consume that telemetry, so repeated refusals are one incident and the first later
+healthy tick records one recovery. A valid preflight clears only a prior refusal; it does not claim the
+following tick completed.
 
-`secretary doctor` reports a failed check as the structured
-`production_runtime_provenance` finding and includes the exact target and metadata source. It is
-read-only. Repair the editable installation explicitly, using the product root named by Doctor:
-
-```bash
-PRODUCT_ROOT/.venv/bin/python3 -m pip install --no-deps -e PRODUCT_ROOT
-```
-
-Do not use `uv sync`, delete a workspace, edit a `.pth` file, set `PYTHONPATH`, or automate this
-repair. A vanished task workspace is evidence of the failed installation, not a valid recovery path.
+`secretary doctor` reports a failed check as the read-only `production_runtime_provenance` finding with
+the exact target and metadata source. Repair is manual and never automated; see
+[Operations](OPERATIONS.md#production-interpreter-provenance).
 
 ### Bring-up outcomes
 
-A bring-up is everything between a card being given to a head and that head existing. When one
-produces no head, the outcome is classified in a single place for both paths — the worker's (claim,
-respawn, rework) and the reviewer's (`start_review`) — so what a blocked card says never depends on
-which caller wrote it. There are two classes, and a closed set of causes decides which one an
-outcome has:
+A bring-up is everything between giving a card to a head and that head existing. When one produces no
+head, the outcome is classified in one place for the worker path (claim, respawn, rework) and the
+reviewer path (`start_review`). A closed set of causes decides the class:
 
-- `infrastructure` — `pane_never_ready`, the head's pane was busy or held in a dialog for every
-  attempt this role was given and never took its launch prompt; `launch_aborted`, a launch that may
-  have left a head running and is therefore not turned into a second one; `host_unavailable`,
-  everything else the host could not do, from a pane that would not open or an inventory that would
-  not answer to a registry that cannot supply a usable broad-check contract;
-- `task` — `workspace_contract`, a failure of this card's own bring-up contract: the checkout it was
-  requeued onto is gone, or is not the worktree on the branch its claim recorded;
-  `base_branch_contract`, the card names an integration base this project cannot integrate into, or
-  a seed the project remote does not carry.
+- `infrastructure` — `pane_never_ready` (the pane was busy or held in a dialog for every attempt and
+  never took its launch prompt); `launch_aborted` (a launch that may have left a head running, never
+  turned into a second one); `host_unavailable` (anything else the host could not do: a pane that would
+  not open, an inventory that would not answer, a registry that cannot supply a usable broad-check
+  contract);
+- `task` — `workspace_contract` (the checkout the card was requeued onto is gone, or is not the
+  worktree on the branch its claim recorded); `base_branch_contract` (an integration base the project
+  cannot integrate into, or a seed the project remote does not carry).
 
-The cause decides the class, so no raise site and no caller may pair them freely, and a cause
-nobody recognises is ignored rather than trusted. The rule behind the split is what the failure says
-about the card, and a bring-up says almost nothing, because at that point no line of the card's work
-has been read, let alone judged. So a failure of the host leaves the card carrying no verdict, and
-the one family that is a verdict is the card's own contract, which no healthy host survives and no
-later tick repairs.
+The cause decides the class; no caller pairs them freely, and an unrecognised cause is ignored. A host
+failure carries no verdict about the card; only the card's own contract is a `task` failure.
 
-For a new transition, the immutable taxonomy record is the durable budget classification. A
-classified head bring-up writes `infrastructure_blocked`; every other normalized blocked terminal,
-including a worker-result failure, gate exhaustion, merge failure, unavailable adopted head and
-durable-record mismatch, writes `blocked`. The action token remains durable lifecycle evidence but
-is not used to recast a forward terminal cause. A historical transition without taxonomy alone
-keeps its released action-token accounting, while its taxonomy read stays explicit
-`legacy`/`other` evidence. Deliberately this is not card metadata: a second write that can fail on
-its own would leave a card field silently disagreeing with the audit.
+For a new transition the immutable taxonomy record is the durable budget classification: a classified
+head bring-up writes `infrastructure_blocked`; every other normalized blocked terminal (worker-result
+failure, gate exhaustion, merge failure, unavailable adopted head, durable-record mismatch) writes
+`blocked`. A transition without taxonomy keeps its action-token accounting and reads as `legacy`/`other`.
+The classification is not card metadata.
 
-The card's Blocked reason and the tick's outcome are built from one object, so they say the same
-thing in the same words. The reason ends in a clause naming the class, the cause, the stage
-(`claim`, `respawn`, `rework`, `review`), which head it was and the attempt id, followed by the
-sentence the class entails: for an infrastructure outcome, that the head never came up, so this is
-not a verdict about the card. The tick's outcome carries `failure_class`, `failure_cause`, the same
-`failure_reason` string the card was given, and a `bring_up` object with the same fields plus the
-host's own detail and, where the pane was the cause, its readiness and how many attempts it had.
+The card's Blocked reason and the tick's outcome are built from one object. The reason ends in a clause
+naming class, cause, stage (`claim`, `respawn`, `rework`, `review`), head and attempt id, followed by
+the class sentence (for infrastructure: the head never came up, so this is not a verdict about the
+card). The tick outcome carries `failure_class`, `failure_cause`, the same `failure_reason` string, and
+a `bring_up` object with the same fields plus the host's detail and, where the pane was the cause, its
+readiness and attempt count.
 
-Who decides what happens next is split on purpose. The dispatcher classifies the outcome and
-presents the evidence — what did not come up, at which step, under which `attempt_id` — and stops
-there. After an infrastructure outcome it opens no new attempt, schedules no return and moves the
-card nowhere else. Whether that card is tried again or the sprint is blocked is the observer's
-decision, taken on that evidence and carried out the ordinary way, by moving the card out of
-Blocked; a card that comes back to Ready is claimed again under a fresh attempt id.
+The dispatcher classifies and presents the evidence and stops there: after an infrastructure outcome it
+opens no attempt, schedules no return and moves the card nowhere else. Whether to retry or block the
+sprint is the observer's decision, carried out by moving the card out of Blocked; a card back in Ready
+is claimed under a fresh attempt id.
 
-The bounded retries that exist are all spent before an outcome is written, and none of them ever
-turns into a verdict about the card. A pane that is busy or held in a dialog parks the bring-up
-instead of failing it: `worker-launch-deferred` or `review-launch-deferred`, one attempt per tick up
-to the configured ceiling, each deferral naming which attempt it is, the counter on the record so a
-deferral nobody wrote down cannot become an unbounded retry, and the counter reset when that role's
-head does come up. A probe nobody answered is deliberately not deferred. When the ceiling is spent,
-the outcome is `pane_never_ready` and therefore infrastructure: exhausting the ceiling ends the
-waiting, it does not convert into a judgement of the card. The reviewer's bounded relaunch over a
-green candidate, in [Candidate history](#candidate-history), ends the same way.
+Bounded retries are spent before an outcome is written. A busy or dialog-held pane parks the bring-up
+as `worker-launch-deferred` or `review-launch-deferred`, one attempt per tick up to the configured
+ceiling, each naming its attempt, with the counter on the record and reset when that role's head comes
+up. An unanswered probe is not deferred. When the ceiling is spent the outcome is `pane_never_ready`.
+The reviewer's bounded relaunch over a green candidate
+([Review infrastructure retries](#review-infrastructure-retries)) ends the same way.
 
-An infrastructure outcome charges the sprint nothing. It is still recorded, because an observer has
-to see how often the host failed to bring a card up, and it is recorded apart: as the uncharged
-event type `infrastructure_blocked`, visible as `budget.uncharged` in `sprint show` and `sprint
-status`, entering neither `total` nor the `signal` and `hard` thresholds. Every other block — a
-worker's own report, the gate, a merge or a release failure — charges `blocked` exactly as it always
-did. Both families go through the same budget write and are distinguished by the forward taxonomy
-record. A sprint stored before the field existed reads as zero; there is no migration. New
-transitions use the shared terminal taxonomy for this distinction; historical transitions missing it
-remain legacy/other evidence and retain their durable action-token accounting without a rewrite or
-inference from request ids, prose, timestamps or live state.
+An infrastructure outcome charges nothing. It is recorded as the uncharged event type
+`infrastructure_blocked`, shown as `budget.uncharged` in `sprint show` and `sprint status`, and enters
+neither `total` nor the `signal` and `hard` thresholds. Every other block charges `blocked`. Both go
+through the same budget write, distinguished by the taxonomy record. A sprint row without the field
+reads as zero.
 
 ## Pause
 
-The pause is shared across the pipeline and sits on top of the product dispatcher:
+The pause is pipeline-wide and sits on top of the product dispatcher:
 
 ```bash
 python3 -P -m secretary pause-scope  --instance INSTANCE          # what a pause would reach
@@ -2499,29 +1753,27 @@ python3 -P -m secretary resume --instance INSTANCE
 python3 -P -m secretary pause-status --instance INSTANCE
 ```
 
-`drain` stops claiming new cards and dispatching background roles, but cards already running finish their
-cycle. `freeze` additionally stops live worker and reviewer heads (a stop, never a teardown) and freezes
-the tick entirely: nothing advances and no watchdog fires on a head that was stopped on purpose. `resume`
-brings stopped heads back up in the same workspaces, hands a card whose report already arrived to the next
-tick, and restarts the watchdog windows.
+`drain` stops claiming new cards and dispatching background roles; running cards finish their cycle.
+`freeze` also stops live worker and reviewer heads (a stop, never a teardown) and freezes the tick:
+nothing advances and no watchdog fires on a head stopped on purpose. `resume` brings stopped heads back
+up in the same workspaces, hands a card whose report already arrived to the next tick, and restarts
+watchdog windows.
 
-The flag is `<data_dir>/dispatcher/pause.json`, read by every `production-tick`. Background roles read a
-mirror flag, written and cleared by the same command.
+The flag is `<data_dir>/dispatcher/pause.json`, read by every `production-tick`. Background roles read
+a mirror flag written and cleared by the same command. During a freeze `--exclude-workspace` excludes
+the operator's own workspace (used by the manual archive command to freeze from inside a worker).
 
-During a freeze an operator can exclude their own workspace with `--exclude-workspace`; the manual archive
-command uses this to freeze the pipeline from inside a worker.
-
-A freeze set by an automation on the configured allowlist expires after a configurable TTL (45 minutes by
-default): the tick checks this before skipping on freeze and lifts the pause through the ordinary `resume`
-under the same tick lock. A freeze set by a person holds until an explicit `resume`. A frozen tick moves no
-cards but retains the normal checkpoint cadence and due-push coordination.
+A freeze set by an automation on the configured allowlist expires after a TTL
+(`TA_HARD_PAUSE_AUTO_RESUME_TTL_S`, default 45 minutes): the tick checks this before skipping on freeze
+and lifts the pause through the ordinary `resume` under the same tick lock. A freeze set by a person
+holds until an explicit `resume`. A frozen tick moves no cards but keeps the checkpoint cadence and
+due-push coordination. Runbooks: [Operations](OPERATIONS.md#pause-or-breakage).
 
 ### The pause as protocol operations
 
-The same pause, reachable through the transport-independent layer
-(`secretary.webproto.pause_ops`, `secretary.webproto.pause_reads`) rather than only through a CLI —
-two operations and two reads, with every rule still in `secretary.dispatcher_pause_ops`. The layer
-adds no rule, no second flag, no second lock and no store of its own.
+The same pause through the transport-independent layer (`secretary.webproto.pause_ops`,
+`secretary.webproto.pause_reads`): two operations and two reads. Every rule stays in
+`secretary.dispatcher_pause_ops`; the layer adds no rule, flag, lock or store.
 
 | operation | inputs | answers with | errors |
 | --- | --- | --- | --- |
@@ -2530,110 +1782,64 @@ adds no rule, no second flag, no second lock and no store of its own.
 | `pause_state` | — | a `pause_state` document | `validation` (an installation whose config does not validate, with no data directory to fall back on) |
 | `pause_scope` | — | a `pause_scope` document | `validation` (the same) |
 
-That table is not prose: it is checked against
-`secretary.webproto.pause_ops.PAUSE_ERRORS`, and every code in it is driven out of the real
-operation by `tests/test_web_pause_protocol.py::ErrorContractTests`. A behaviour change that moves a
-code fails here rather than being found in review. Beside those codes, every operation of this
-package can answer `backend_unavailable` for an implementation failure caught by
-`secretary.webproto.boundary`; that is the layer-wide contract and not a decision of a pause
-operation, so it is stated once here rather than in each row.
+The table is checked against `secretary.webproto.pause_ops.PAUSE_ERRORS`. Every operation of the
+package can also answer `backend_unavailable` for an implementation failure caught by
+`secretary.webproto.boundary` (layer-wide, not listed per row).
 
-**Four properties of the pause, preserved and stated on every document.** They are what the read is
-for, and each is a field rather than an assumption a reader has to bring:
+Properties every document states as fields:
 
-1. **The pause is pipeline-wide.** One flag, one file, every `production-tick`. There is no
-   per-sprint pause and no operation that takes a sprint. Every document carries `extent`
-   (`{"scope": "pipeline", "per_sprint": false, …}`), read from no source at all, so it is stated
-   even on a document where every source refused — which is when a reader most needs it. The scope
-   read lists *every* open sprint of the installation for the same reason, and *every* card on the
-   Pipeline board — each with the sprint that holds it, or `null` where none does — because a drain
-   stops the dispatcher claiming a card whether or not a sprint holds it.
-2. **A drain stops no running head.** It stops claiming Ready cards, dispatching background roles
-   and raising an observer for a sprint opened during the pause; a card already in flight rides its
-   cycle to the end. `modes.drain.does_not_stop` says it, and the heads a drain leaves alone are
-   reported under `heads` as `running`. No field of these documents is named as though a drain
-   stopped one: the `stopped_worker`, `stopped_reviewer` and `stopped_observer` lists are what a
-   *freeze* fills, and a drain leaves all three empty.
-3. **A freeze is a different command and is never an implicit upgrade.** This layer exposes no
-   freeze operation; `modes.freeze.operation` is `null` for exactly that reason. `pause_drain` takes
-   no mode, has no default, fallback, retry or convenience flag, and hands the literal `drain` down.
-   The existing refusal to change mode while paused is preserved: asking for a drain while the
-   pipeline is frozen is `owner_conflict` and writes nothing.
-4. **A resume puts back what a freeze stopped**, and says which. `restored` carries `resumed_mode`
-   and the `relaunched`, `parked` and `skipped` lists `resume` itself produced, plus
-   `observers_resumed`. After a drain those lists are empty and the statement says why — a drain
-   stopped nothing, so there was nothing to put back — which is a different fact from a resume that
-   failed to bring a head back. And where a freeze's resume completed but its own report could not
-   be read back, those lists are `null` rather than `[]`: nobody read what it put back, which is not
-   the claim that it put nothing back.
+1. **Pipeline-wide.** One flag, every `production-tick`; no per-sprint pause. Every document carries
+   `extent` (`{"scope": "pipeline", "per_sprint": false, …}`), read from no source, so it is present
+   even when every source refused. The scope read lists every open sprint and every Pipeline card, each
+   with the sprint holding it or `null`.
+2. **A drain stops no running head.** It stops Ready claims, background role dispatch and raising an
+   observer for a sprint opened during the pause. `modes.drain.does_not_stop` says so, and the heads a
+   drain leaves alone are reported under `heads` as `running`. `stopped_worker`, `stopped_reviewer` and
+   `stopped_observer` are filled only by a freeze.
+3. **A freeze is never an implicit upgrade.** The layer has no freeze operation
+   (`modes.freeze.operation` is `null`). `pause_drain` takes no mode and passes the literal `drain`. A
+   drain while frozen is `owner_conflict` and writes nothing.
+4. **A resume says what it put back.** `restored` carries `resumed_mode`, the `relaunched`, `parked`
+   and `skipped` lists, and `observers_resumed`. After a drain the lists are empty with a statement that
+   a drain stopped nothing. Where a freeze's resume completed but its report could not be read back, the
+   lists are `null`, not `[]`.
 
-**The scope read is the new one, and it is a read.** `pause_scope` answers, before any command is
-issued: that the pause is pipeline-wide, which dispatcher and which files a command would write
-(`target.pause_file`, `target.state_file`, `target.legacy_mirror_file`), which sprints are open,
-which cards are on the Pipeline board and which sprint holds each of them, which heads are running
-right now, and — separately — what a drain does not stop and what a freeze would. It sets no flag, takes no tick lock, stops or starts no head,
-wakes nothing and writes nothing; that is pinned by a snapshot of the whole data plane taken around
-the call (`tests/test_web_pause_protocol.py::ReadsWriteNothingTests`), exactly as secretary-1575
-pinned its own read.
+**`pause_scope`** is a read: before any command, it says the pause is pipeline-wide, which dispatcher
+and files a command would write (`target.pause_file`, `target.state_file`,
+`target.legacy_mirror_file`), which sprints are open, which cards are on the Pipeline and which sprint
+holds each, which heads are running, and separately what a drain does not stop and what a freeze would.
+It sets no flag, takes no tick lock, stops or starts no head, and writes nothing. It lists every card
+from the one Pipeline listing, except Product and Issue records (`secretary.tasks._TYPED_RECORD_TYPES`),
+which a pause never reaches.
 
-**The cards it lists are every card, and it costs no extra read.** The Pipeline is listed once for
-the document, and the scope publishes what that listing holds rather than filtering it down to the
-open sprints' cards: a card no sprint holds is inside a pipeline-wide pause exactly as much as one
-that is, and "there are others" would not be the scope. The one thing on that board that is *not*
-listed is a Product or an Issue record — the board's own rule is that such a record never takes a
-claim or a task transition, whatever column it sits in (`secretary.tasks._TYPED_RECORD_TYPES`), so a
-pause reaches none of them and listing one would be the same misdescription in the other direction.
+**Repeat and conflict.** The pause is idempotent in its own mode, so these operations carry no request
+index: a repeated `pause_drain` answers `action: "noop"`, `changed: false`, writes nothing, and the flag
+keeps the original actor and reason. A `pause_resume` of an unpaused pipeline answers the same way. A
+`pause_drain` while frozen is `owner_conflict`; after a `resume` it is admitted. `action` is `paused`,
+`noop` or `resumed`, `changed` its boolean, and a refusal never reaches a document.
 
-**The repeat and conflict contract.** The pause is idempotent in its own mode, by
-`dispatcher_pause_ops`' own rule, so these operations carry no request index: a repeated `pause_drain`
-answers `action: "noop"` with `changed: false` and writes nothing at all, and the flag keeps naming
-the pause that is actually held — including its original actor and reason. A `pause_resume` of a
-pipeline that was not paused answers the same way. A `pause_drain` while the pipeline is *frozen* is
-not a repeat: it is `owner_conflict`, because the request is well formed and refused on the state of
-the world, and the same request after a `resume` is admitted. The three outcomes are therefore always
-distinguishable: `action` is `paused`, `noop` or `resumed`, `changed` is the boolean of that, and a
-refusal is not an action at all and never reaches a document.
+**A command that did something says so even when the state cannot be rendered afterwards.**
+`dispatcher_pause_ops.pause` and `resume` write the flag and then render status through `pause_status`,
+which converts every dispatcher record; a semantically corrupt `production-state.json` can make that
+render refuse after the pause took effect. The caller then gets the ordinary `pause_command` document:
+its `action` and `changed`, the render refusal under `warnings`, and the embedded `state` with the
+failing source marked unavailable.
 
-**A command that did something says so even when the pipeline cannot be described afterwards.**
-`dispatcher_pause_ops.pause` and `resume` write the flag and *then* render the status through
-`pause_status`, which converts every dispatcher record — so a `production-state.json` that is
-semantically corrupt (a record shape this release no longer stores, a non-integer `attempt_round`, a
-partial write) makes that last step refuse over a pause that has already taken. Reported as
-`backend_unavailable` with no action, that tells an operator the safety control did not take while
-it silently did, in exactly the situation the command exists for. So the caller gets the ordinary
-`pause_command` document instead: its `action` and `changed`, the dispatcher's refusal under
-`warnings`, and the embedded `state` read with the source that could not answer marked unavailable —
-the same shape a read of a half-readable installation has.
+That action is the one `dispatcher_pause_ops` decided inside the production tick lock, in the code that
+performed the command, and it travels out with the render failure on
+`dispatcher_pause_ops.PauseCommandCompleted`. It is never inferred from observing the flag: a flag
+observed before and after an unlocked command is not evidence of which command set it (a concurrent
+`resume` and re-drain look identical to a noop). Rendering stays outside the lock.
 
-**Where that action comes from, and why it cannot come from anywhere else.** It is the action
-`dispatcher_pause_ops` **decided inside the production tick lock**, in the code that performed the
-command: `pause` knows there whether it wrote the flag or found the mode already held, and `resume`
-knows which mode it lifted. That decision travels out of the lock with the failure of the render, on
-`dispatcher_pause_ops.PauseCommandCompleted`, and the protocol layer reports it. It is not
-established by observing the flag, at any layer, because **a flag observed before and after an
-unlocked command is not evidence of which command set it**: with the pipeline already drained, a
-second `pause_drain` that sees `drain` before its call and `drain` after it may have found the mode
-held, or may have written its own drain after another command's `resume` cleared the flag in
-between — two different actions behind identical observations. The rendering of the state is
-deliberately left outside the lock, because it walks every dispatcher record and holding the tick
-lock across it would make each corrupt-state read a contention problem on the dispatcher's own lock.
+Nothing is repaired or re-decided: a command that did not complete raises unchanged; a `validation` or
+`pause_conflict` refusal is never turned into an action; a freeze's resume whose own answer never
+arrived has `null` `restored` lists. `PauseCommandCompleted` carries the render failure's code, message
+and exit status, so `secretary pause freeze` and the tick's auto-resume answer as before. The tick's
+auto-resume names a failed recovery by exception class, so it unwraps the completed command and reports
+the render's own class; any wrapper added there must do the same.
 
-Nothing is repaired or re-decided: a command that did not complete raises, and its refusal travels
-unchanged; a `validation` or `pause_conflict` refusal is a decision made before anything was written
-and is never turned into an action; and for a resume of a freeze whose own answer never arrived,
-`restored`'s lists are `null` rather than `[]` — what it put back was in that answer, and an empty
-list would claim it put nothing back. `PauseCommandCompleted` carries the render failure's own code,
-message and exit status, so `secretary pause freeze` and the tick's auto-resume, which never ask what
-the command did, answer exactly as they did before. The tick's auto-resume is the one caller that
-names a failed recovery by its exception class rather than by that code and message, so it unwraps
-the completed command and reports the render's own class; a wrapper added there later must do the
-same, or it renames a field no protocol client reads. All of it is pinned hermetically over a
-production state whose records refuse conversion, including the interleave above
-(`tests/test_web_pause_protocol.py::CompletedCommandTests`,
-`tests/test_web_pause_protocol.py::DecidedUnderTheLockTests`).
-
-**The sources, and the precedence they are consulted in.** Every section goes through
-`SourceSet.decide` or `mark`, and a refused source reaches no claim:
+**Sources and precedence.** Every section goes through `SourceSet.decide` or `mark`; a refused source
+reaches no claim:
 
 | source | what it is | what it alone can settle |
 | --- | --- | --- |
@@ -2652,59 +1858,29 @@ production state whose records refuse conversion, including the interleave above
 | `sprints` | `sprints` | `items: null`, never `[]` — an empty list would claim no sprint is inside a pipeline-wide pause |
 | `cards` | `cards` | `items: null`, never `[]`. It does not need `sprints`: which cards exist is the listing's own answer, so an unreadable sprint board does not take the card list with it |
 
-A pause flag that cannot be read is this source refusing, and the refusal says the consequence the
-product has already decided for that case: **every production tick reads an unreadable flag as a
-freeze** (`ProductionPause.load`) until it is repaired. That is stated in the source's `reason`, not
-as a claim that the pipeline is paused — `paused` stays `null`, because a flag nobody could read
-establishes neither answer. `secretary backup create` reads that document and treats an
-unestablished pause state as paused, because a backup must own the freeze it takes.
+An unreadable pause flag is the `pause` source refusing, and its `reason` states the product's rule:
+every production tick reads an unreadable flag as a freeze (`ProductionPause.load`) until repaired.
+`paused` stays `null`. `secretary backup create` treats an unestablished pause state as paused.
 
-**A durable file that parses can still fail to answer, and that is the same refusal.** A pause flag
-whose `stopped_worker` is the number `1`, or a production record whose `attempt_round` is the string
-`"not-an-integer"`, is readable JSON that cannot be converted into the state these documents report.
-Every such conversion happens *inside the source read*, so it becomes an unavailable source rather
-than an exception past the seam.
+A durable file that parses but cannot be converted (a pause flag whose `stopped_worker` is `1`, a
+production record whose `attempt_round` is `"not-an-integer"`) is also a refused source: conversions
+happen inside the source read. A source read catches everything raised while reading and converting its
+one document and returns a refused `Reading` with the cause's type and message. Assembling sections and
+documents (`PauseSections`) is outside every such span, so a layer defect travels as itself. A
+semantically corrupt flag gets its own reason (the tick still parses and obeys it), not the
+unreadable-flag sentence.
 
-**And what counts as "could not answer" is the span, not a list.** A source read is the one place
-whose entire job is to answer that question, so it catches *everything* raised while reading and
-converting its one durable document and returns a refused `Reading` carrying the cause's type and
-message. It enumerates nothing: a tuple of exception types is what has to be kept in step, and this
-one had already drifted — `DispatcherError`, which `DispatcherRecord.from_json` raises for a record
-shape a release no longer stores, was in no list and escaped the seam as itself. The broad catch is
-kept to exactly that span, which is why the conversions live inside the read: assembling a section or
-a document is this layer's own work, and a failure there is a defect that travels as itself to the
-reader best placed to fix it, never as "a source refused". `PauseSections` and the assembly around it
-are outside every span. The semantically
-corrupt flag gets its own reason and never borrows the unreadable-flag sentence above: that file
-parses, so the tick still reads it and behaves by it, and what could not be established is what the
-flag says here.
-
-The fault matrix — the flag unreadable and the flag unusable, the production state unreadable and
-unconvertible, each alone and in combination, plus an unreadable sprint board — is
-`tests/test_web_pause_protocol.py::SourceIsolationTests`.
-
-**The commands are clients.** `secretary pause drain`, `secretary resume`, `secretary pause-status`
-and the new `secretary pause-scope` call these operations, print the document, and map the typed code
-onto the exit status `secretary web-run` already uses: `validation`/`not_found` → 2,
-`owner_conflict` → 3 (which is what a `pause_conflict` has always exited with), `backend_unavailable`
-→ 1. They hold no rule of their own.
-
-**An installation whose config does not validate is `validation`, and that is a compatibility
-promise.** These commands reached the dispatcher through `runtime_from_args`, whose `invalid_instance`
-is a `DispatcherError` with exit status 2, so that is the status they still answer with — mapping the
-configuration refusal to `backend_unavailable` would have moved a status a script reads today. It is
-also the honest code: the caller named an installation that is not one, and no durable source of this
-installation refused. The one behaviour that did move is in the other direction: with an explicit
-`--data-dir` and a config that does not validate, the two *reads* now answer from the flag and the
-dispatcher state and report `installation` as an unavailable source, where the old path refused. No
-refusal changed its status; a caller that supplied the missing information gains an answer, exactly
-as the sprint reads decided for the same case. `secretary pause freeze` deliberately does **not** go through
-the layer — there is no freeze operation to route it to — and keeps the path it always had, so the
-two spellings reach two implementations and no argument of the soft one can produce a freeze.
+**The commands are clients.** `secretary pause drain`, `secretary resume`, `secretary pause-status` and
+`secretary pause-scope` call these operations, print the document, and map codes to exit status as
+`secretary web-run` does: `validation`/`not_found` → 2, `owner_conflict` → 3 (a `pause_conflict`),
+`backend_unavailable` → 1. An installation whose config does not validate is `validation` (exit 2).
+With an explicit `--data-dir` and an invalid config, the two reads answer from the flag and dispatcher
+state and report `installation` unavailable. `secretary pause freeze` does not go through the layer and
+keeps its own path.
 
 ## Connecting a project
 
-The current low-level onboarding has these stages:
+Low-level onboarding stages:
 
 ```bash
 python3 -P -m secretary project add ...
@@ -2713,77 +1889,104 @@ python3 -P -m secretary project provision-apply ...
 python3 -P -m secretary project gate ...
 ```
 
-A project's identity is set once by the top-level binding: `id`, `repo`, `adapter`, `default_branch`. The
-binding's mutable `plane`, `policy` and `remote` fields are not part of identity and are carried over into
-the rewritten binding by a repeat `project add`, as are `orca_binding` and curator-only `curator_roots`. The scanner and provisioning prepare
-changes but do not enable a binding. Enabling is allowed only through a passing gate tied to verified
-revisions, a provision run and a write set. A higher-level resumable workflow is a roadmap milestone.
+A project's identity is set once by the top-level binding: `id`, `repo`, `adapter`, `default_branch`.
+The mutable `plane`, `policy` and `remote` fields, `orca_binding` and curator-only `curator_roots` are
+not identity and are carried over by a repeat `project add`. Scanner and provisioning prepare changes
+but do not enable a binding; enabling happens only through a passing gate tied to verified revisions, a
+provision run and a write set.
 
-An enabled binding is never rewritten by an ordinary `project add`. Re-onboarding one is an explicit
-operator request, `project add --re-onboard`, which disables the binding and drops its canonical adapter in
-the same transition that publishes the new draft, so the project holds no executable adapter until a new
-gate passes. The binding is the last file the transition writes, because it is what the next run reads to
-decide whether a takedown is still owed: an interrupted re-onboarding stays visible as the enabled binding
-it started from, and a retry carries it through. It does not enable anything and grants the scanner and the
-provision agent nothing.
+An enabled binding is never rewritten by an ordinary `project add`. `project add --re-onboard` disables
+the binding and drops its canonical adapter in the same transition that publishes the new draft, so the
+project has no executable adapter until a new gate passes. The binding is written last, so an
+interrupted re-onboarding stays visible as the enabled binding it started from and a retry completes it.
+It enables nothing and grants the scanner and provision agent nothing.
 
-A disabled binding on another adapter (an inventory binding on `inventory-only`) is moved onto the
-project's own adapter by a plain `project add` and stays disabled; provision and gate state of the previous
-adapter resets to pending, and provision run ids derive from the adapter. An enabled one still refuses.
+A disabled binding on another adapter (e.g. `inventory-only`) is moved onto the project's own adapter by
+a plain `project add` and stays disabled; provision and gate state reset to pending, and provision run
+ids derive from the adapter. An enabled one still refuses.
 
-A takedown opens a new onboarding cycle. The draft records it as `onboarding_cycle` and the provision run
-id derives from it, so provision results and dispatcher-owned exact-SHA gate receipts from an earlier cycle cannot be reused on an
-unchanged scanner head. Evidence is bound to the cycle that produced it.
+A takedown opens a new onboarding cycle, recorded in the draft as `onboarding_cycle`; the provision run
+id derives from it, so provision results and gate receipts from an earlier cycle cannot be reused on an
+unchanged scanner head.
 
-Diagnosing failures, recovering a stale disabled draft, re-onboarding an enabled legacy project and
-verifying a passed result are described in
+Diagnosis, stale draft recovery, re-onboarding and verification:
 [Operations](OPERATIONS.md#connecting-a-project-gate-and-stale-input-recovery).
 
 ## Memory
 
-Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<project-dir>/<slug>.md`. One
-fact is one distilled markdown record. The curator is the writer role; every other agent reads through
+Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<project-dir>/<slug>.md`, one
+distilled markdown record per fact. The curator is the writer role; other agents read through
 `memory_search`, `memory_get` and `memory_list`.
 
-Curator input is a bounded, two-phase batch protocol. Before selection, each source receives a route from the
-selected instance's project registry: a normalized descendant of one registered `repo` is its canonical `id`; a
-safe optional `orca_binding` additionally supplies that binding's Orca workspace tree
-(`<workspaces root>/<orca_binding>/...`). That durable boundary still routes a recorded historical cwd after the
-per-card worktree leaf has been removed. A binding may additionally declare absolute `curator_roots` for named
-ad-hoc historical checkout trees; these roots affect curator input only and grant no execution authority. Exact
-directory boundaries and an unambiguous route are required. Empty, relative, unreadable, malformed, unregistered or ambiguous paths are
-`unknown`; installation-wide sources are `global`. An observer workspace named
-`workspaces/observers/sprint-<token>` restores the `sprint:` prefix removed by the dispatcher's token before it
-consults the board. It has no inferred owner: one registered structured reservation routes to that project; multiple
-distinct registered reservations route to the reserved `review:po` selector, while malformed, duplicate or
-unregistered sets remain `unknown`. Harvest, precheck and advance enter the same cursor-settlement
-transaction: a curator-local advisory flock serializes watermark.json and pending.json without owning the dispatcher
-lifecycle. `harvest --project <canonical-id|review:po>` filters routes before taking the deterministic bounded prefix; omitted
-`--project` explicitly means all backlog. A pending batch records and signs this selector, so a retry or advance
-with a different selected project or all-backlog mode fails closed. `curator backlog [--project <canonical-id|review:po>]
-[--json]` only reports deterministic aggregate route/head metadata (session, signal-turn and memory-file counts plus
-timestamp bounds); selected JSON with no pending batch and baseline-valid cursor state also carries one opaque cutoff
-identity and cursor count. It
-creates no pending record and changes no cursor. A selected batch with turns or memory is written
-as a versioned pending record bound to the current curator workspace/run/session identity and selector; a retry replays it exactly. A fresh scan
-that classified only complete non-emitting records advances those precise cursors atomically instead, and
-never writes pending.json. Advance accepts only the fact-bearing pending form, verifies its identity and each
-source's starting cursor, then moves only the listed cursors. Legacy line-based watermarks remain readable
-until a selected source advances to a byte cursor; unversioned, stale, foreign, corrupt, or cursor-only pending
-data is not guessed, rewritten or advanced. A row-limited scan records complete non-emitting or oversized
-records it has classified, so noise prefixes cannot stall a source. An incomplete trailing JSONL record is
-source-local: its cursor remains at its last complete record, while safe records from that source and later
-sources still settle. The partial source is reported for observability and is retried from that cursor after its
-writer completes the row. Precheck takes
-the transaction nonblocking; contention returns the dedicated 102 defer result, which the gate answers
-successfully without dispatch or cleanup. flock ownership is released by the OS if its holder exits.
+```bash
+python3 -P -m secretary memory verify --instance INSTANCE
+python3 -P -m secretary memory propose --instance INSTANCE --actor ACTOR \
+  --scope SCOPE --slug SLUG --file FACT.md
+python3 -P -m secretary memory commit --instance INSTANCE --actor ACTOR --propose-id ID
+python3 -P -m secretary memory supersede --instance INSTANCE --actor ACTOR \
+  --scope SCOPE --slug SLUG --file FACT.md --supersedes OLD-ID
+python3 -P -m secretary memory reindex --instance INSTANCE
+```
+
+Write authority is split. `propose` stages a fact in the curator inbox
+(`<data_dir>/memory/.staging/<propose-id>`) and touches no canon; `commit` and `supersede` write
+`state/memory` in the instance repository. **Proposer** roles: `curator`, `secretary`, `operator`,
+`butler`. **Canonical writer** roles: `curator`, `secretary`, `operator`. A butler's `commit` or
+`supersede` is refused with a permission error saying butler proposals await curator review. Every actor
+may use only a `source` of its own role, so a butler proposal stays butler-sourced through commit. An
+actor commits its own proposal; a `secretary` or `operator` actor may commit anyone's.
+
+Writer operations require an actor and go through the journal protocol; direct edits bypass the audit
+trail. `reindex` changes only the derived index and must not overlap another index writer. Model and
+dimension come from instance configuration.
+
+Facts whose owner needs product-owner judgment use the `review:po` scope
+(`state/memory/facts/po-review`): a triage basket, not operational truth. Entries carry the
+`pending-review` tag, their source sprint/session and candidate project scopes. Interactive PO, curator
+and retro identities may read it; worker, reviewer, observer and steward grants never do. The PO reads it
+with `scope=review:po` and publishes the resolved fact into `global` or `project:<dir>` with
+`supersede`, atomically removing the review entry.
+
+Curator input is a bounded, two-phase batch protocol. Each source is routed from the selected
+instance's project registry before selection: a normalized descendant of one registered `repo` routes to
+its canonical `id`; an optional safe `orca_binding` adds that binding's Orca workspace tree
+(`<workspaces root>/<orca_binding>/...`), which still routes a recorded cwd after the per-card worktree
+is removed; optional absolute `curator_roots` name ad-hoc historical checkout trees (curator input
+only, no execution authority). Exact directory boundaries and an unambiguous route are required; empty,
+relative, unreadable, malformed, unregistered or ambiguous paths are `unknown`; installation-wide
+sources are `global`. An observer workspace `workspaces/observers/sprint-<token>` restores the
+`sprint:` prefix before consulting the board: one registered reservation routes to that project;
+multiple distinct registered reservations route to `review:po`; malformed, duplicate or unregistered
+sets are `unknown`.
+
+Harvest, precheck and advance share one cursor-settlement transaction: a curator-local advisory flock
+serializes `watermark.json` and `pending.json` (released by the OS if its holder exits).
+`harvest --project <canonical-id|review:po>` filters routes before taking the deterministic bounded
+prefix; omitting `--project` means all backlog. A pending batch records and signs its selector, so a
+retry or advance with a different selector fails closed.
+`curator backlog [--project <canonical-id|review:po>] [--json]` reports only aggregate route/head
+metadata (session, signal-turn and memory-file counts, timestamp bounds); for a selected project with
+no pending batch and baseline-valid cursors, JSON also carries `cutoff.id` and `cutoff.cursor_count`.
+It creates no pending record and moves no cursor.
+
+A selected batch with turns or memory is written as a versioned pending record bound to the current
+curator workspace/run/session identity and selector; a retry replays it exactly. A scan that classified
+only complete non-emitting records advances those cursors atomically without writing `pending.json`.
+Advance accepts only the fact-bearing pending form, verifies its identity and each source's starting
+cursor, then moves only the listed cursors. Line-based watermarks stay readable until a source advances
+to a byte cursor; unversioned, stale, foreign, corrupt or cursor-only pending data is never guessed,
+rewritten or advanced. A row-limited scan records the complete non-emitting or oversized records it
+classified, so noise prefixes cannot stall a source. An incomplete trailing JSONL record is
+source-local: that cursor stays at its last complete record while other safe records settle, and the
+partial source is reported and retried after its writer completes the row. Precheck takes the
+transaction nonblocking; contention returns the dedicated `102` defer result, which the gate answers
+successfully without dispatch or cleanup.
 
 ### Project baseline settlement
 
-`python3 -P -m triggered_agents curator baseline` is the narrow operator path for intentionally settling existing
-curator input without running the curator, changing its schedule, or writing memory facts. It accepts one registered
-canonical project id or the reserved `review:po` selector, an explicit actor, a non-empty one-line reason, and exactly
-one opaque evidence identity:
+`python3 -P -m triggered_agents curator baseline` settles existing curator input without running the
+curator, changing its schedule or writing facts. It takes one registered canonical project id or
+`review:po`, an explicit actor, a non-empty one-line reason, and exactly one evidence identity:
 
 ```bash
 python3 -P -m triggered_agents curator backlog --project PROJECT --json
@@ -2800,124 +2003,71 @@ python3 -P -m triggered_agents curator baseline \
   --project PROJECT --actor OPERATOR --reason 'approved pending batch' --batch-id BATCH_ID
 ```
 
-For a selected project with no pending batch and baseline-valid state, JSON backlog output includes `cutoff.id` and
-`cutoff.cursor_count`.
-The cutoff id binds the project, each selected source's starting watermark and its current complete terminal cursor;
-it is metadata only, never a source path, cursor value, transcript, or personal-memory body. A changed source,
-incomplete JSONL tail, malformed watermark, stale proof, or empty cutoff is refused. A fact-bearing pending batch is
-instead bound by its existing versioned identity, selector and starting cursors; its `batch_id` is the alternative
-evidence identity. A baseline never accepts the all-backlog selector, cannot bypass any pending record, and rejects a
-foreign, ambiguous, mismatched, malformed, or stale source before state changes.
+The cutoff id (from `backlog --json`) binds the project, each selected source's starting watermark and
+its current complete terminal cursor; it is metadata only, never a path, cursor value, transcript or
+memory body. A changed source, incomplete JSONL tail, malformed watermark, stale proof or empty cutoff is
+refused. A fact-bearing pending batch is bound by its versioned identity, selector and starting cursors;
+its `batch_id` is the alternative evidence. A baseline never accepts the all-backlog selector, cannot
+bypass a pending record, and rejects a foreign, ambiguous, mismatched, malformed or stale source before
+state changes.
 
-The callable API is `triggered_agents.agents.curator.cli.baseline_settlement`, with the same required `project`,
-`actor`, `reason` and exactly one of `cutoff_id` or `batch_id`. It runs under the same local cursor-settlement lock as
-harvest and advance. The transition writes the watermark, removes a selected pending record when settling that exact
-batch, and publishes `baseline-audit.ndjson` in the curator state directory together with rollback on a local write
-failure. Each
-audit event records version, time, project, actor, redacted reason, evidence kind/id, outcome, and hashed affected
-cursor identities/count; it contains no transcript text, personal-memory text, fact content, raw source payloads or
-credentials. Command output names only the selected project and cursor count.
+The callable API is `triggered_agents.agents.curator.cli.baseline_settlement` with the same required
+`project`, `actor`, `reason` and exactly one of `cutoff_id` or `batch_id`, under the same
+cursor-settlement lock. The transition writes the watermark, removes the selected pending record when
+settling that batch, and appends to `baseline-audit.ndjson` in the curator state directory, rolling back
+on a local write failure. Each audit event records version, time, project, actor, redacted reason,
+evidence kind/id, outcome, and hashed affected cursor identities/count; no transcript, memory or fact
+text, raw source payload or credential. Output names only the selected project and cursor count.
 
 ### Memory read identity
 
 The Memory MCP endpoint requires FastMCP Bearer authentication. Before a head is opened, its launcher
-writes a digest-only access grant bound to that exact `HeadRun` and puts the opaque bearer capability in
-the launched process, not in `runtime.env`. The service resolves the grant itself and rechecks the
-HeadRun heartbeat on every read. Missing, expired, malformed, foreign or stopped bindings return a typed
-data-free denial. `caller`, `scope`, and a tool's other arguments are never authority.
+writes a digest-only access grant bound to that exact `HeadRun` and puts the opaque bearer in the
+launched process, not in `runtime.env`. The service resolves the grant and rechecks the HeadRun
+heartbeat on every read. Missing, expired, malformed, foreign or stopped bindings return a typed
+data-free denial. `caller`, `scope` and other tool arguments are never authority.
 
-The resolved policy is deliberately small: an interactive PO has installation-wide read; every worker or
-reviewer has exactly its card's `project:<id>` plus `product:secretary`, including when the project id is
-`secretary`; an observer has its sprint reservations plus `product:secretary`. The curator and
-retro standing duties have installation-wide read because canonical deduplication and retro's canon-hygiene
-review compare facts across projects. Steward has only `project:secretary` and `product:secretary` for its
-system watch. Other runtime roles have no memory-read grant. A requested scope only narrows that set.
-Search does not retry at a wider scope, and `memory_get` and `memory_list` use the same guard as search.
+Resolved read policy: an interactive PO has installation-wide read; a worker or reviewer has exactly its
+card's `project:<id>` plus `product:secretary` (also when the project is `secretary`); an observer has
+its sprint reservations plus `product:secretary`; the curator and retro standing duties have
+installation-wide read; steward has `project:secretary` and `product:secretary`. Other runtime roles
+have no grant. A requested scope only narrows the set; search never retries wider, and `memory_get` and
+`memory_list` use the same guard.
 
-An ordinary Claude or Codex session reaches that interactive identity through the installation-owned
-`secretary-memory-po-bridge` stdio MCP server in its user configuration. The bridge creates a PO HeadRun,
-keeps the bearer inside the bridge process, and deletes its heartbeat and grant on exit. Dispatcher-launched
-Claude heads use `--strict-mcp-config`; Codex heads disable `po_memory` with a command-line override. Both
-receive only the direct HTTP `memory` server and their launch-bound bearer, so project authority is selected
-by the server-side grant rather than by a client config or a model-supplied argument.
+An ordinary Claude or Codex session reaches the interactive identity through the installation-owned
+`secretary-memory-po-bridge` stdio MCP server in its user configuration. The bridge creates a PO
+HeadRun, keeps the bearer inside the bridge process, and deletes its heartbeat and grant on exit.
+Dispatcher-launched Claude heads use `--strict-mcp-config`; Codex heads disable `po_memory` with a
+command-line override. Both get only the direct HTTP `memory` server and their launch-bound bearer.
+Client setup: [Operations](OPERATIONS.md#memory-access-from-claude-and-codex).
 
-The memory search log is an authorization audit, not a fact transcript: every record identifies its action
-and records the resolved role, subject, scopes and outcome with result ids/scores, never fact text, queries
-or bearer material. Consumers that need evidence of a search filter for `action == "memory_search"`.
+The memory search log is an authorization audit: every record names its action and the resolved role,
+subject, scopes and outcome with result ids/scores, never fact text, queries or bearer material.
+Consumers wanting search evidence filter `action == "memory_search"`.
+
+Bearer delivery assumes processes of the same host user are mutually trusted: that user can read
+another same-user process's environment or command line. The protocol limits cross-user and stale-head
+access and keeps the capability out of durable output; it is not same-user credential isolation.
 
 ### Restart health contract
 
-Memory restart requested by an upgrade, unit change, product-code/dependency change, or shipped-pack
-reconciliation is not healthy merely because systemd says the service is active. Upgrade creates a
-short-lived steward `HeadRun` and its ordinary launch-bound grant, hands the complete temporary bindings
-tree to the configured runtime account, then uses a narrowly dropped-privilege child of that account to
-publish the versioned heartbeat and perform `initialize` then `tools/call(memory_list)` over the MCP
-endpoint. The service therefore verifies the bearer and the same live heartbeat/read guard used by heads;
-it never has to inspect a root-owned upgrade process. The probe supplies neither `caller` nor `scope`,
-expects a Secretary/product-scoped row, and removes its temporary grant and heartbeat afterwards. An
-unavailable service, stale or denied identity, malformed MCP reply, or absent expected row fails the
-`memory` upgrade step visibly. A returned denial is typed and final, rather than being retried into a
-missing-row timeout. The pinned list tool may serialize one JSON text block per row or use structured
-content; the probe normalizes every supported form to rows, so an ordinary single allowed row is not
-mistaken for a denial.
-
-The portable acceptance fixture in `tests/test_memory_acceptance.py` makes only temporary sentinel rows. It
-uses the production token verifier and read tools to prove the interactive PO, foreign worker, Secretary
-worker, and explicitly reserved observer matrix, including that spoofed `caller`, wider `scope`,
-`memory_get`, and `memory_list` cannot widen it. It inspects only the audit schema and does not put fact
-text or bearer material into the audit assertion. `tests/test_memory_health.py` also starts a local Memory
-MCP daemon with the pinned streamable-HTTP protocol and drives the same initialize/session/list exchange;
-its root-only portability regression additionally verifies the root-parent/runtime-user/daemon-reader
-ownership crossing without touching an installation. CI installs the declared `memory` extra, so the
-streamable-HTTP daemon tests exercise initialize/session handling and both allowed and denied list rows;
-the wire tests cover every supported result form, and the privileged cross-user regression remains an
-explicit root-only check.
-
-Bearer delivery assumes processes running as the same host user are mutually trusted: that user can inspect
-another same-user process's environment or command line and could reuse its live bearer. The protocol limits
-cross-user and stale-head access, keeps the capability out of durable output and redacts it from launch and
-audit output; it is not a generic same-user credential isolation scheme.
-
-Write authority is split in two, because asking for a fact and publishing one are different acts.
-`propose` stages a fact in the curator inbox (`<data_dir>/memory/.staging/<propose-id>`) and touches no
-canon; `commit` and `supersede` write `state/memory` in the instance repository. The **proposer** roles
-are `curator`, `secretary`, `operator` and `butler`; the **canonical writer** roles are `curator`,
-`secretary` and `operator`. A butler may therefore hand the curator a fact it noticed, but its own
-`commit` or `supersede` is refused with a permission error saying butler proposals await curator review,
-not with the generic write refusal an unknown role gets. Every actor may still only use a `source` of its
-own role, so a butler proposal stays visibly butler-sourced through commit. Publication of a proposal
-owned by another actor remains the existing ownership rule: an actor commits its own proposal, and a
-`secretary` or `operator` actor may commit anyone's.
-
-Facts whose current owner cannot be resolved without product-owner judgment use the dedicated
-`review:po` scope (`state/memory/facts/po-review`). This is a triage basket, not operational truth:
-entries should carry the `pending-review` tag, identify their source sprint/session, and state the
-candidate project scopes. Interactive PO, curator, and retro identities may read it; worker, reviewer,
-observer, and steward grants never receive it. The PO can inspect it explicitly with
-`scope=review:po`, then publish the resolved fact into `global` or `project:<dir>` with `supersede`,
-atomically removing the review entry.
-
-```bash
-python3 -P -m secretary memory verify --instance INSTANCE
-python3 -P -m secretary memory propose --instance INSTANCE --actor ACTOR \
-  --scope SCOPE --slug SLUG --file FACT.md
-python3 -P -m secretary memory commit --instance INSTANCE --actor ACTOR --propose-id ID
-python3 -P -m secretary memory supersede --instance INSTANCE --actor ACTOR \
-  --scope SCOPE --slug SLUG --file FACT.md --supersedes OLD-ID
-python3 -P -m secretary memory reindex --instance INSTANCE
-```
-
-Writer operations require an actor and go through the journal protocol; direct edits bypass the audit
-trail. `reindex` changes only the derived index and must not overlap another index writer. Model and
-dimension come from instance configuration.
+A Memory restart requested by an upgrade, unit change, product-code/dependency change or shipped-pack
+reconciliation is not healthy merely because systemd reports it active. Upgrade creates a short-lived
+steward `HeadRun` and its launch-bound grant, hands the temporary bindings tree to the configured runtime
+account, and a dropped-privilege child of that account publishes the versioned heartbeat and performs
+`initialize` then `tools/call(memory_list)` over the MCP endpoint, so the service verifies bearer,
+heartbeat and read guard as for heads. The probe supplies neither `caller` nor `scope`, expects a
+Secretary/product-scoped row, and removes its temporary grant and heartbeat afterwards. An unavailable
+service, stale or denied identity, malformed MCP reply or missing expected row fails the `memory`
+upgrade step visibly; a denial is final, not retried into a timeout. The list tool may return one JSON
+text block per row or structured content; the probe normalizes every supported form to rows.
 
 ## Reading the pipeline
 
-One read layer answers "what is running", "what is this card doing" and "what happened next",
-and every transport reads it: the CLI below today, an operator dashboard and a Telegram head
-later. It is `secretary.webproto`, it knows nothing about HTTP, sockets, rendering or any
-framework, and it writes nothing — no board mutation, no dispatcher state, no repair, no cache.
-Why it is separate from whatever serves it is in [Architecture](ARCHITECTURE.md#the-read-layer).
+`secretary.webproto` is one read layer for "what is running", "what is this card doing" and "what
+happened next", used by every transport. It knows nothing about HTTP, sockets, rendering or frameworks,
+and writes nothing (no board mutation, dispatcher state, repair or cache). Design:
+[Architecture](ARCHITECTURE.md#the-read-layer).
 
 ```bash
 python3 -P -m secretary web-read system --instance INSTANCE [--offline] [--json]
@@ -2925,42 +2075,34 @@ python3 -P -m secretary web-read task --instance INSTANCE --ref REF [--events N]
 python3 -P -m secretary web-read events --instance INSTANCE --ref REF [--cursor C] [--limit N] [--json]
 ```
 
-Every document validates against the packaged `web-read` schema and carries `schema_version`, a
-`kind` of `system`, `task` or `task_events`, and `observed_at`. Identities are the ones the
-pipeline already has: a card is its reference, a project is its registered id. Nothing here
-introduces an identifier of its own.
+Every document validates against the packaged `web-read` schema and carries `schema_version`, a `kind`
+of `system`, `task` or `task_events`, and `observed_at`. Identities are the pipeline's own: a card is its
+reference, a project its registered id.
 
-**`system_snapshot()`** — the dashboard. Installation health (`collect_status`, the same collector
-`secretary status --json` prints), the registered projects from the instance's validated bindings,
-the cards in `ready`, `in_progress`, `validate`, `assessment` and `blocked`, and every head the
-dispatcher holds, each with the card and project it belongs to.
+**`system_snapshot()`** — installation health (`collect_status`, as `secretary status --json`), the
+registered projects from validated bindings, the cards in `ready`, `in_progress`, `validate`,
+`assessment` and `blocked`, and every head the dispatcher holds with its card and project.
 
-**`task_snapshot(ref)`** — the card page. The card as `secretary task show` reads it, its project
-and whether that project is registered here, what the dispatcher durably holds for it (attempt,
-round, gate state, workspace, heads, pause), the heads working it, the tail of its history with a
-cursor to continue from, and its result: the worker's `report:done` / `report:blocked` (with its
-classification), the reviewer's `review:green` / `review:red`, the observer's `decision:*`, and
-whichever of them is the latest, marked `terminal` when the card is Done.
+**`task_snapshot(ref)`** — the card as `secretary task show` reads it, its project and whether that
+project is registered, what the dispatcher durably holds for it (attempt, round, gate state, workspace,
+heads, pause), the heads working it, the tail of its history with a cursor, and its result: the worker's
+`report:done` / `report:blocked` (with classification), the reviewer's `review:green` / `review:red`, the
+observer's `decision:*`, and the latest of them, marked `terminal` when the card is Done.
 
 **`task_events(ref, cursor, limit)`** — the history, one page at a time, with `next_cursor`.
 
 ### Sources fail apart
 
-Each section of each document carries a source record, always, with four fields: `state`
-(`available` or `unavailable`), `reason`, `observed_at` and `data_age_seconds`. A source that
-answered is stamped with the moment of the read and an age of 0; one that refused carries why, and
-dates the newest evidence still on disk behind it, so an unavailable section says how old what it
-is showing instead is. An empty list therefore never has to be read as "and I could not tell":
-"the dispatcher is running nothing" and "nobody could say what the dispatcher is running" are
-different answers, and a dead Kanboard blanks the card list rather than the page.
+Each section of each document always carries a source record: `state` (`available` or `unavailable`),
+`reason`, `observed_at` and `data_age_seconds`. An answering source is stamped with the read time and age
+0; a refusing one carries why and dates the newest evidence still on disk. An empty list therefore always
+means an answer, and an unreachable Kanboard blanks the card list, not the page.
 
 ### The four states of an agent
 
-Liveness is process state and nothing else. A head's own shell publishes a launch-identity
-heartbeat — pid, boot id, process start ticks, run id, role, task — before it `exec`s, and the
-layer classifies that record against the durable `HeadRun` the dispatcher recorded. A terminal,
-pane or window is never consulted: panes are aliased, detached and drawn empty over working heads
-(`secretary head-status`), so a pane is evidence about a window and about nothing else.
+Liveness is process state only. A head's shell publishes a launch-identity heartbeat (pid, boot id,
+process start ticks, run id, role, task) before it `exec`s, and the layer classifies it against the
+durable `HeadRun`. A terminal, pane or window is never consulted.
 
 | state | what it means |
 | --- | --- |
@@ -2970,52 +2112,38 @@ pane or window is never consulted: panes are aliased, detached and drawn empty o
 | `source_unavailable` | the heartbeat itself could not be read; nothing is proven either way |
 | `unknown` | no evidence yet: no durable run, no heartbeat published, or a foreign pid |
 
-Every agent row carries the `evidence` it was decided from (heartbeat state, pid, pid file) and
-the invariant above in words, so a row can be read correctly without knowing this document.
+Every agent row carries the `evidence` it was decided from (heartbeat state, pid, pid file) and states
+the invariant in words.
 
 ### Continuing a read
 
-The cursor is a position in the committed board audit, which is where the order of what happened to
-a card actually lives. **Which store that audit is, is the card client's answer** and never this
-layer's: the reader resolves the installation's card client and asks
-`secretary.tasks.task_audit_for` for its audit owner, so on Kanboard a card's history is
-`<data>/board/events.ndjson` and on `SECRETARY_CARD_BACKEND=postgres` it is the committed `requests`
-traversal (`docs/BOARD_STORE.md` §7.3). The file projection is not consulted beside a PostgreSQL
-client: it holds nothing that backend wrote, so answering from it published an unavailable history
-where the file had been swept and a successful empty or stale one where an old file remained, with
-every committed record — a product run's included — invisible.
+The cursor is a position in the committed board audit. Which store that is, is the card client's
+answer: the reader resolves the installation's card client and asks `secretary.tasks.task_audit_for`
+for its audit owner — on Kanboard `<data>/board/events.ndjson`, on `SECRETARY_CARD_BACKEND=postgres`
+the committed `requests` traversal ([Board store](BOARD_STORE.md), §7.3). The file projection is never
+consulted beside a PostgreSQL client.
 
-The cursor is opaque to the client: a base64 document carrying the card, a position and which of the
-two kinds of position it is — `offset`, a byte in the file journal, or `ordinal`, how many of this
-card's committed records stand before the next one. It carries that because the numbers are not
-interchangeable: byte 4212 of a journal is not the 4212th committed request. A reader handed the
-other kind refuses it (`validation`) rather than seeking to a plausible-looking wrong place, which
-is what a cursor kept by a client across an installation's migration is. A cursor issued before
-this existed carries no kind at all and is read as the byte offset it is, so released Kanboard
-cursors keep working unchanged. What a client does after a refusal is read a fresh task snapshot,
-whose `next_cursor` is the continuation in the store the installation actually has.
+The cursor is opaque: a base64 document carrying the card, a position and its kind — `offset` (a byte
+in the file journal) or `ordinal` (how many of this card's committed records precede the next). A
+cursor of the other kind is refused (`validation`), never reinterpreted. A cursor with no kind is read
+as a byte offset. After a refusal, a client reads a fresh task snapshot, whose `next_cursor` is valid for
+the installation's store.
 
-Three properties follow from a position being a place in an append-only history rather than a
-timestamp or a recomputed index, and they hold in both stores — a committed record's place in claim
-order never changes, as a byte before the end of an append-only file never changes:
+In both stores a committed record's position never changes, so:
 
 * reading with a page's `next_cursor` returns what was appended after that page, exactly once;
 * reading the same cursor twice returns the same page;
 * a cursor issued before new events, read after them, returns exactly those new events.
 
-A page ends with `next_cursor` (always present, even when the page is empty) and `has_more`, which
-is true only when the page was cut short by `limit`. Both record shapes in the audit are
-returned — the typed board protocol events and the released generic audit records beside them,
-told apart by `typed` — because a history with the transitions in it and the creations missing is
-not a history. Staged records that have not committed are not events and no cursor lands inside
-them. Omitting `--cursor` starts at the beginning of the history; the `next_cursor` a task
-snapshot returns is the end of it, so a client that polls a card is never handed an event it was
-just shown.
+A page ends with `next_cursor` (always present, even on an empty page) and `has_more` (true only when
+`limit` cut the page short). Both record shapes are returned — typed board protocol events and generic
+audit records — told apart by `typed`. Uncommitted staged records are not events and no cursor lands
+inside them. Omitting `--cursor` starts at the beginning; the `next_cursor` a task snapshot returns is
+the end, so a polling client is never handed an event it was just shown.
 
 ### Errors
 
-Failures that are not a source outage are typed exceptions with the codes the task protocol
-already uses; the transport is what turns a code into whatever its protocol says. The CLI prints
+Failures other than a source outage are typed exceptions with the task protocol's codes. The CLI prints
 `{"error": {"code", "message"}}` on stderr and exits 2 on `not_found` and `validation`, 1 on
 `backend_unavailable`.
 
@@ -3025,39 +2153,18 @@ already uses; the transport is what turns a code into whatever its protocol says
 | `InvalidCursor` | `validation` | a cursor this layer did not issue, one belonging to another card, or one past the end of the journal — never silently reset to the beginning |
 | `InstallationUnavailable` | `backend_unavailable` | the instance config does not validate, so there is no data plane to read |
 
-**The contract is enforced in one place, for every operation.** A caller of this layer never sees an
-implementation exception -- the run store's `RunStoreError`, an `OSError`, a document that does not
-parse -- because `secretary.webproto.boundary.ProtocolBoundary` wraps every public method of both
-layers at class-creation time and turns those into `backend_unavailable` on the way out. Both layers
-inherit it, so an operation added later is guarded by being public, with no list to keep in step. It
-matters because each transport holds exactly one code table and one containment branch: an untyped
-escape does not become a worse error message, it takes the caller down -- as an unreadable run
-record once took a whole card page down through `run_list`. A defect of the layer itself (a
-`TypeError`, say) is deliberately *not* translated: it travels as what it is.
-`tests/test_web_run_protocol.py:ErrorContractTests` breaks the run store and the journal under every
-operation of both layers, and fails if an operation is added without being covered.
-
-**And a file this layer writes is written in one place, for the same reason.** That promise holds
-only while every failure a durable source can raise is in the boundary's vocabulary, and one was
-not: `secretary._fsutil.write_text_atomic` turns its `OSError` into a `RuntimeError`, which is
-deliberately *outside* that vocabulary because it is what a defect of the layer travels as. A full
-disk under any store therefore escaped raw, past every `except RunStoreError` and past a transport
-that catches `ReadError`. Widening the vocabulary would hide real defects and repairing it at one
-store would leave the next one to rediscover it, so every write in the package goes through
-`secretary.webproto.store_io.write_document`, which is where the writer's `RuntimeError` becomes
-`RunStoreError` and therefore `backend_unavailable`. `write_text_atomic` itself is unchanged: a
-dozen callers outside this layer already catch its `RuntimeError` on purpose.
-`tests/test_web_run_protocol.py:FileWriteSeamTests` scans the package and fails if any module of it
-writes a file another way.
+`secretary.webproto.boundary.ProtocolBoundary` wraps every public method of the read and run layers at
+class creation and turns implementation exceptions (`RunStoreError`, `OSError`, an unparsable document)
+into `backend_unavailable`; a layer defect such as `TypeError` travels as itself. Every file the package
+writes goes through `secretary.webproto.store_io.write_document`, which turns the atomic writer's
+`RuntimeError` into `RunStoreError` and therefore `backend_unavailable`. Both are enforced by
+`tests/test_web_run_protocol.py` (`ErrorContractTests`, `FileWriteSeamTests`).
 
 ## Running the pipeline
 
-The other half of `secretary.webproto`, and the half that produces what the read layer shows: three
-operations that raise a real Codex worker for one card, raise a real Claude reviewer by that
-worker's result, and read a run. They know as little about a transport as the reads do — no HTTP,
-no sockets, no framework — and their failures are typed codes rather than status numbers. Why the
-product runtime does not depend on Orca, and what it reuses instead, is in
-[Architecture](ARCHITECTURE.md#the-product-runtime).
+Three operations of `secretary.webproto` raise a real Codex worker for one card, raise a real Claude
+reviewer on that worker's result, and read a run. No HTTP, sockets or framework; failures are typed
+codes. Design: [Architecture](ARCHITECTURE.md#the-product-runtime).
 
 ```bash
 python3 -P -m secretary web-run start  --instance I --ref REF --request-id ID --profile P [--instruction TEXT]
@@ -3066,134 +2173,88 @@ python3 -P -m secretary web-run state  --instance I --run-id RUN
 python3 -P -m secretary web-run list   --instance I --ref REF
 ```
 
-Every document validates against the packaged `web-run` schema and carries `schema_version`, a
-`kind` of `product_run` or `product_review`, and `observed_at`. Identities are the ones the pipeline
-already has — a card is its reference, a project is its registered id — plus one the runs need of
-their own: a run id, `pr-` prefixed so a product run directory is never mistaken for a pipeline one.
+Every document validates against the packaged `web-run` schema and carries `schema_version`, a `kind`
+of `product_run` or `product_review`, and `observed_at`. A run id is `pr-` prefixed.
 
-`--profile` is not optional and has no default. Which head a product run raises is installation
-configuration read from the head registry, and the profile has to declare the `local-pty` runtime:
-a profile naming Orca's backend is refused rather than quietly run under a backend it does not
-declare. `--heads-registry` (or `TA_HEADS_REGISTRY`) points one run at a registry other than the
-installation's own.
+`--profile` is required, with no default. The profile comes from the head registry and must declare the
+`local-pty` runtime; a profile on Orca's backend is refused. `--heads-registry` (or
+`TA_HEADS_REGISTRY`) points one run at another registry.
 
-**`run_start(ref, request_id, profile)`** cuts a workspace, raises a worker head into it and points
-it at a task document. **`run_review(request_id, profile, worker_run)`** settles the worker run
-first and refuses while it is still open, then raises a reviewer head in the same workspace, handed
-the worker's result. **`run_state(run_id)`** reads one run, and is where a run's ending becomes
-durable. **`run_list(ref)`** lists every product run of one card, each item being the whole
-`product_run` document `run_state` returns -- record and state together, so a reader can tell an
-open run that is `running` from one that reads `unknown` or `source_unavailable` without inventing
-a state of its own.
+**`run_start(ref, request_id, profile)`** cuts a workspace, raises a worker head into it and points it at
+a task document. **`run_review(request_id, profile, worker_run)`** settles the worker run first and
+refuses while it is open, then raises a reviewer head in the same workspace with the worker's result.
+**`run_state(run_id)`** reads one run and is where a run's ending becomes durable.
+**`run_list(ref)`** lists every product run of one card, each item the whole `product_run` document
+`run_state` returns.
 
 ### The lifecycle of a run, and the order it holds
 
-A run passes through `claimed → raising → raised → settled`, and one function moves it between them
-(`secretary.webproto.lifecycle.RunLifecycle.advance`). Every path that can put a process into the
-world and every path that can close a run goes through it; within `secretary.webproto` the
-backend's `start` and `stop` verbs and the run store's `settle` are named in that one module and
-nowhere else, and a test fails if that stops being true.
+A run passes through `claimed → raising → raised → settled`, moved only by
+`secretary.webproto.lifecycle.RunLifecycle.advance`. Within `secretary.webproto`, the backend's `start`
+and `stop` and the run store's `settle` are called only from that module (test-enforced).
 
-The order is the contract:
+1. **Write-ahead.** Before a spawn, the record carries what is needed to find and stop the head: run
+   directory, pid path and a head description addressed by run id (`raising`). A failure to bind the
+   handle after a successful spawn orphans nothing.
+2. **Ownership from disk.** The supervised backend addresses a head from the run id and the run's pid
+   file and confirms an ending from the launch identity on that path; the write-ahead record alone
+   suffices to stop the head.
+3. **A possibly-live process outranks closing the record.** Closing a run ends its head first and
+   settles only on a confirmed ending. An unconfirmed ending puts the run in `unresolved`: state
+   `unknown`, not over, unsettled (so it fences the card). Every later `web-run state` retries the same
+   stop, and the run settles when the ending is confirmed, with the state read off the process at that
+   moment (a head that published its result and ended settles `finished`).
+4. **"Over" and "how it ended" are stored apart.** `ended` (on the record and on `state`) says the
+   process is provably gone — a confirmed stop, a launch identity showing nothing there — or none was
+   spawned. `state.value` is one of the five words, derived from evidence. Only `ended` frees a card.
 
-1. **write-ahead.** Before a spawn can be attempted, the record already carries what is needed to
-   *find and stop* the head that spawn will produce: the run directory, the pid path, and a head
-   description addressed by run id. That is `raising`. A failure to bind the handle after a
-   successful spawn therefore cannot orphan anything — the record already points at it.
-2. **ownership is recovered from disk.** The supervised backend addresses a head from the run id
-   and the run's own pid file, and confirms an ending from the launch identity on that path; it
-   consults nothing the spawning process remembers. So the write-ahead record is sufficient on its
-   own to stop the head, and that is checked against the real backend rather than asserted.
-3. **a possibly-live process outranks closing the record.** Closing a run ends its head *first* and
-   settles only on a confirmed ending. An ending that could not be confirmed puts the run in
-   `unresolved`: it reads as `unknown` — never `finished` or `process_failed` — and as **not
-   over**, and it stays **unsettled**, which is what the admission gate's sixth condition already
-   refuses a second run over. An unresolved run is a fence and not a dead end: every later
-   `web-run state` retries the same stop from the same record, and the run settles the moment the
-   ending is confirmed. What it settles *as* is read off the process at that moment, never off the
-   `unresolved` record — a head that survived one unconfirmed stop may have published its result
-   and ended normally in between, and such a run settles `finished` with its result, exactly as it
-   would have without the detour. A normal ending and a failure stay distinguishable on the
-   recovery path, which is the one place they would otherwise collapse.
-4. **"the run is over" and "how it ended" are two facts, and they are stored apart.** The first is
-   a boolean, `ended`, on the run record and on `state`: the process this run may have held is
-   provably gone — a stop this product confirmed, or a launch identity that says there is nothing
-   there — or none was ever spawned under it. The second is `state.value`, one of the same five
-   words, derived from the evidence. Only the first frees a card, and no branch of the admission
-   gate reads the second.
-
-   They were one value before, and it forced a lie. A card was freed by a run whose value was
-   `finished` or `process_failed`, so a head confirmed gone whose journal could not be read had to
-   be recorded as a failed process before its card could be released — an accusation published into
-   the card's history, where no later read can withdraw it. Such a run now settles
-   `source_unavailable` with the reason: it is over, and how it ended was not established. See
-   [Architecture](ARCHITECTURE.md#the-product-runtime).
-
-`phase`, `ended` and `state` are all on every run document, and they answer three different
-questions: the phase says where the lifecycle is, `ended` says whether the run is over, and the
-state value says what the process did or is doing.
+`phase`, `ended` and `state` are on every run document.
 
 ### What the product owns
 
-The workspace is a detached `git worktree` of the project's own repository, cut by the product at
-the project's declared default branch into `<data>/webproto/workspaces/<run-id>`; it carries no
-branch, and nothing here commits, pushes or opens a pull request. The head's process is held by a
-supervisor of the product's own under `<data>/webproto/heads/<run-id>`, which is also where its pid
-file (`head.pid`), its journal (`journal.jsonl`), its supervisor log (`supervisor.log`), its task
-document and its result file (`result.json`) live. The run record is
-`<data>/webproto/runs/<run-id>.json`. Every one of those paths is on the run document, so an
-operator reads a run from the document rather than from this page.
+The workspace is a detached `git worktree` of the project repository at its declared default branch,
+in `<data>/webproto/workspaces/<run-id>`; it has no branch, and nothing here commits, pushes or opens a
+PR. The head's process is held by the product's supervisor under `<data>/webproto/heads/<run-id>`, with
+`head.pid`, `journal.jsonl`, `supervisor.log`, the task document and `result.json`. The run record is
+`<data>/webproto/runs/<run-id>.json`. All paths are on the run document.
 
-A head is told the path it must write its result to (`SECRETARY_RUN_RESULT`), together with
-`SECRETARY_RUN_ID`, `SECRETARY_RUN_ROLE`, `SECRETARY_RUN_REF` and `SECRETARY_RUN_WORKSPACE`. That
-file is the only place a result may appear, and it is what ends a run: `run_state` that finds it
-ends the head holding it, because the product owns that process. A run that publishes nothing is
-ended at its deadline instead (`--deadline-seconds`, one hour by default).
+A head receives `SECRETARY_RUN_RESULT` (the only place a result may appear), `SECRETARY_RUN_ID`,
+`SECRETARY_RUN_ROLE`, `SECRETARY_RUN_REF` and `SECRETARY_RUN_WORKSPACE`. A `run_state` that finds the
+result file ends the head holding it. A run that publishes nothing is ended at its deadline
+(`--deadline-seconds`, default one hour).
 
 ### One owner of a card
 
-`secretary.webproto.admission.admit` is the single gate, and both start paths go through it before
-they build or spawn anything. It decides in this order, and the order is part of the contract:
+`secretary.webproto.admission.admit` is the single gate for both start paths, before anything is built
+or spawned. Order:
 
 1. the board holds the card — otherwise `not_found`;
-2. the card's project is registered here and enabled — otherwise `validation`;
-3. no open sprint reserves that project, read from the same index (`sprints/active-repositories.json`)
-   the board's own write guard authorises against;
-4. the card is not in the production dispatcher's lane: it claims `ready` and holds `in_progress`,
-   `validate`, `assessment` and `blocked`, so a product run takes a card only from `issues`;
-5. the dispatcher's durable production state holds no record for the card — and a state file that
-   cannot be read refuses too, because "I could not tell" is not "nobody owns it";
-6. this layer holds no run for the card that is not over — decided by the run's `ended` fact and
-   never by what it ended as, so a run that is genuinely over frees its card whatever value it
-   carries. A run whose cleanup could not be confirmed is not over, and fences the card.
+2. the card's project is registered and enabled — otherwise `validation`;
+3. no open sprint reserves that project (read from `sprints/active-repositories.json`, the index the
+   board's write guard uses);
+4. the card is not in the production dispatcher's lane (`ready`, `in_progress`, `validate`,
+   `assessment`, `blocked`), so a product run takes a card only from `issues`;
+5. the dispatcher's durable production state holds no record for the card; an unreadable state file
+   refuses too;
+6. this layer holds no run for the card that is not over (decided by `ended` only). A run whose cleanup
+   could not be confirmed is not over.
 
-Nothing there is a scheduler, a store or an audit of its own: the reservations and the card's state
-are rules that already exist, and the dispatcher's state is read and never written.
+Refusals in 3–6 are `owner_conflict`. The dispatcher state is read, never written.
 
 ### Idempotency
 
-`start` and `review` are idempotent on `--request-id`. The request id is claimed under the run
-store's lock with the run id and every path already decided, before anything is provisioned or
-spawned, so a repeat — a retried command, a reconnected client, a transport that lost its answer —
-finds that record and returns the same run. It never raises a second head and never cuts a second
-workspace. There is no distributed lock: one operator's retry is what this defends against, not a
-cluster.
+`start` and `review` are idempotent on `--request-id`. The id is claimed under the run store's lock with
+the run id and every decided path before anything is provisioned or spawned, so a repeat returns the
+same run and never raises a second head or cuts a second workspace. There is no distributed lock.
 
-A request id is the idempotency key of **one operation made with one set of inputs**, and not a
-name for whatever that caller asked for last. The record the id owns carries the operation
-(`run_start` or `run_review`) and a digest of the request's own inputs — the card reference, the
-profile and the instruction for a start; the card reference, the worker run and the profile for a
-review — and a repeat that disagrees with either is refused with `validation` rather than answered.
-Reusing a worker's start id on `review` therefore says so, instead of returning a `product_review`
-document whose run is the worker's own while no reviewer was ever raised; and a start repeated for
-a different card is refused instead of silently answering about the first one. The digest is what
-is stored, so nothing a caller supplies becomes a path or a readable field of the installation.
+The record owned by the id carries the operation (`run_start` or `run_review`) and a digest of its
+inputs — card reference, profile and instruction for a start; card reference, worker run and profile for
+a review. A repeat disagreeing with either is refused with `validation`. Only the digest is stored.
 
 ### What a run ended as
 
-A run's `state.value` is the same five-word vocabulary the read layer uses for an agent, and the
-process's own exit status rides beside it in `state.exit` rather than as a sixth word. `state.ended`
-is the other fact and is never derived from the value: it says whether the run is over.
+`state.value` uses the agent vocabulary; the process exit status is `state.exit`; `state.ended` says
+whether the run is over and is never derived from the value.
 
 | state | exit | ended | what it means |
 | --- | --- | --- | --- |
@@ -3207,44 +2268,29 @@ is the other fact and is never derived from the value: it says whether the run i
 | `source_unavailable` | — | no | the launch identity itself could not be read; nothing is proven about the process either way |
 | `unknown` | — | no | no evidence yet: no head raised, or no heartbeat published, or a foreign pid; or a run whose cleanup could not be confirmed (`phase: unresolved`), where nothing establishes what the process is doing |
 
-The two `source_unavailable` rows are why the facts are two. The word is the same because the
-missing thing is the same — a source that could not say — and what differs is whether the run is
-over, which the value cannot carry and `ended` does. A settled run is over by definition, whatever
-value it carries.
+A settled run is over whatever value it carries.
 
-The evidence is the launch-identity heartbeat, the supervisor's journal and the result file. A
-window, pane or panel is never consulted and is not evidence that a run is alive. The first
-observation of a run that is over settles it — recording the state, the reason, the exit status
-and the result together — and a settled run says the same thing forever, exit status and result
-included, even after its run directory is swept. A bring-up that failed is the one ending recorded
-from something other than process evidence: the product tried to raise a head and the attempt
-failed with a named cause, so it settles `process_failed` with that cause.
+Evidence is the launch-identity heartbeat, the supervisor journal and the result file; a window or pane
+is never evidence. The first observation of an ended run settles it, recording state, reason, exit
+status and result together, and a settled run answers the same forever, even after its run directory is
+swept. A failed bring-up settles `process_failed` with its named cause.
 
 ### Where a run is read back
 
-Nowhere new. A run publishes exactly two events, `product_run.started` and `product_run.finished`,
-into the board's own append-only journal, so `secretary web-read events --ref REF` and
-`secretary web-read task --ref REF` show them with their cursors intact. There is no run history and
-no run outcome store to read instead. Both events are idempotent through the audit's own request-id
-ownership, so an ending observed ten times is published once. They are generic audit records rather
-than typed Card events, because a product run moves no card and must not wake a sprint observer.
+A run publishes exactly two events, `product_run.started` and `product_run.finished`, into the board's
+append-only journal, so `secretary web-read events --ref REF` and `web-read task` show them. There is no
+separate run history store. Both are idempotent through the audit's request-id ownership. They are
+generic audit records, not typed Card events: a product run moves no card and wakes no observer.
 
-Publication is a property every path restores, not a step of the path that created the run. Raising
-a head and publishing its start are two durable writes, and so are settling an ending and
-publishing it: a journal that is briefly unavailable between them would otherwise lose the event
-forever, because the retry idempotency invites finds the run record and returns it. So a `start` or
-`review` that hands back an existing run, and every `run_state` of a settled run, republish what
-that run owes before answering — and a failure to publish is reported rather than swallowed, so a
-caller never reads a success for a launch or an ending that is not on the history. It costs nothing
-when the events are already there: both are pure functions of the run record, `occurred_at`
-included, so a replay rebuilds the record the journal already holds and it is recognised rather
-than refused. That is also why the ending records the exit status and the result it was read off,
-in the run record beside the state and the reason: a terminal event re-derived from a run directory
-would differ once that directory was swept, which is exactly when the recovery is needed.
+Every path restores publication: a `start` or `review` returning an existing run, and every `run_state`
+of a settled run, republish what that run owes before answering, and a publication failure is reported,
+not swallowed. Both events are pure functions of the run record (including `occurred_at`), so a replay
+matches the journal's record. The run record keeps the exit status and result so the terminal event can
+be rebuilt after the run directory is swept.
 
 ### Errors
 
-The same typed exceptions the reads use, plus the two only a mutation can make. The CLI prints
+The read layer's exceptions plus two only a mutation can raise. The CLI prints
 `{"error": {"code", "message"}}` on stderr and exits 2 on `not_found` and `validation`, 3 on
 `owner_conflict`, 1 on `backend_unavailable`.
 
@@ -3257,38 +2303,29 @@ The same typed exceptions the reads use, plus the two only a mutation can make. 
 
 ## Opening and watching a sprint
 
-The third part of `secretary.webproto`, and the one that decides what the other two have to work
-on: a run is one head on one card, and the cards come from a sprint. Three operations open a sprint,
-comment on one and close one, five reads answer what a sprint can be built from, what one sprint is
-doing, what every sprint of the installation is doing, what happened to one comment, and what one
-close decided. They hold the same
-properties as the halves above — no HTTP, no sockets, no framework, no rendering, typed codes
-instead of status numbers, and every section of every document carrying its own availability — and
-they are the contract the web transport, the CLI and a future Telegram head all call.
+Three operations open, comment on and close a sprint; five reads answer what a sprint can be built from,
+what one sprint is doing, what every sprint is doing, what happened to one comment, and what one close
+decided. Same properties as the layers above: no transport knowledge, typed codes, per-section
+availability.
 
 Every document validates against the packaged `web-sprint` schema and carries `schema_version`, a
 `kind` of `sprint_options`, `sprint`, `sprint_list`, `sprint_created`, `sprint_comment`,
-`sprint_comment_delivery`, `sprint_closed` or `sprint_close_result`, and `observed_at`. The identities are the
-ones this pipeline already has: a sprint is its `sprint:N` reference, a product its id, an issue its
-`issue:*` reference, a project its registered id, a head profile its registry id.
+`sprint_comment_delivery`, `sprint_closed` or `sprint_close_result`, and `observed_at`. Identities: a
+sprint is `sprint:N`, a product its id, an issue `issue:*`, a project its registered id, a head profile
+its registry id.
 
-**Every rule stays with the writer that owns it.** `SprintWriter.create` decides what a sprint may
-be — an existing product, at least one *open* issue of that product, registered projects, no
-project another open sprint reserves, an observer that is a profile of this installation's head
-registry or the word `none`, and executor pins held to that same registry — and the operation calls
-it. There is no second admission gate here, no second audit, no second reservation index and no
-second copy of any of those rules; the audit event, the guard index write and the staged-intent
-transaction are the ones [Sprints](#sprints) already describes.
+Every rule stays with its writer. `SprintWriter.create` decides what a sprint may be (existing product,
+at least one open issue of it, registered projects, no project another open sprint reserves, an observer
+that is a registry profile or `none`, executor pins from the same registry); the operation calls it. No
+second admission gate, audit, reservation index or transaction; see [Sprints](#sprints).
 
-**There is no "start", because there is no start action.** A sprint observer is raised by the
-production tick, which reconciles open sprints against the observer records it holds and brings up
-one head per sprint that has none. So opening a sprint *with* an observer is the whole of starting
-it, and a scheduler of this layer's own would be a second thing racing the tick for the same head.
-What the operation returns instead is where the sprint actually is — see the launch states below.
+There is no "start" operation: the production tick raises one observer per open sprint that has none, so
+opening a sprint with an observer starts it. The operation returns where the sprint is (launch states
+below).
 
 ### What a sprint can be built from
 
-**`sprint_options()`** answers four sections, each from the source that owns the rule it feeds:
+**`sprint_options()`** answers four sections:
 
 | section | source | what is in it |
 | --- | --- | --- |
@@ -3297,60 +2334,38 @@ What the operation returns instead is where the sprint actually is — see the l
 | `projects` | `registered_projects` plus `sprints/active-repositories.json` | id, label, and `reserved_by`: the open sprints holding it |
 | `heads` | the installation's `heads/heads.yaml` | every profile with its model, effort, adapter and resource |
 
-The issues are the admissible ones and not the whole board: a closed issue is refused by
-`_check_ownership`, so it is never offered, and a client that filters by the product it picked
-cannot assemble a request that will be refused for that reason. `reserved_by` is `null` — never an
-empty list — when the reservation index itself could not be established, because "held by nobody"
-and "nobody could say" are opposite answers.
+Only open (admissible) issues are offered. `reserved_by` is `null`, never `[]`, when the reservation
+index could not be read.
 
-The head profiles are read from the installed registry and never from a constant in the product:
-what an installation runs off is its own, and a list written into this product would offer heads the
-host does not have and hide the ones it does. Each entry carries `id`, a `label` composed from what
-the registry actually holds (`codex · gpt-5.6-sol · medium effort`), `model`, `effort`, `adapter`,
-`resource`, the roles it is the registry's default for, and `observer`: whether a sprint may declare
-it as its observer. That flag is not a restatement of the rule — `check_observer_profile` is asked
-about each profile, the same call a create makes — so a profile the registry does not have is
-absent from the list *and* refused by the create, and the two cannot disagree. Beside the list,
-`heads.observer` carries the one answer that is not a profile id (`none`, for a sprint that runs
-without an observer) and the registry's own observer default.
+Head profiles are read from the installed registry. Each entry carries `id`, a `label` built from the
+registry (`codex · gpt-5.6-sol · medium effort`), `model`, `effort`, `adapter`, `resource`, the roles it
+is the registry default for, and `observer`: whether a sprint may declare it as observer, decided by
+calling `check_observer_profile` (the same call create makes). `heads.observer` carries `none` and the
+registry's observer default.
 
 ### Opening one
 
-**`sprint_create(request_id, actor, product, goal, issues, projects, observer, …)`** opens a sprint
-and answers with `kind: sprint_created`: the request id, whether *this* call claimed it, and the
-whole `sprint` document the read below returns.
+**`sprint_create(request_id, actor, product, goal, issues, projects, observer, …)`** opens a sprint and
+answers `kind: sprint_created`: the request id, whether this call claimed it, and the full `sprint`
+document.
 
-`observer` is the one word an operator must say — a profile id, or `none` — exactly as
-`--observer` is required on the CLI, and for the same reason: neither answer is more of a default
-than the other.
-
-`worker` and `reviewer` are optional in the full sense. `None` is the caller saying nothing about
-that role; it travels as `None` into `SprintWriter._executor_intent`, and the row is written with
-**no field at all** for it, which is what keeps an unpinned role readable as unpinned rather than as
-pinned to the empty string or to a `role_defaults` value nobody chose. There is deliberately no
-spelling that means "unpin": `""` and `none` are refused rather than folded into absence. See
-[The optional executor pins](#the-optional-executor-pins).
+`observer` is required: a profile id or `none`. `worker` and `reviewer` are optional; `None` travels
+into `SprintWriter._executor_intent` and the row gets no field for that role. `""` and `none` are
+refused. See [The optional executor pins](#the-optional-executor-pins).
 
 ### Idempotency
 
-`sprint_create` is idempotent on `request_id`, by the mechanism `run_start` already uses and not by
-a second one. The id is claimed in this layer's own request index
-(`<data>/webproto/sprint-requests/<digest>.json`, the id digested so nothing a caller supplies
-becomes a path) **before** the writer is called; the same id is handed down to
-`SprintWriter.create`; and the reference of the sprint it produced is recorded under the id
-afterwards. A repeat that finds a recorded reference answers from it and calls no writer at all, so
-it can raise no second entity and no second observer. A request id is the key of *one* request:
-the record carries the operation and a digest of the inputs, so a repeat naming a different
-product, goal or pin is refused with `validation` rather than answered with somebody else's sprint.
-There is no distributed lock; what this defends against is one operator's retry.
+`sprint_create` is idempotent on `request_id`. The id is claimed in the layer's request index
+(`<data>/webproto/sprint-requests/<digest>.json`, id digested) **before** the writer is called, passed
+down to `SprintWriter.create`, and the produced sprint reference is recorded under the id afterwards. A
+repeat finding a recorded reference answers from it without calling the writer. The record carries the
+operation and an input digest; a repeat with different product, goal or pin is `validation`. No
+distributed lock.
 
-**A partial failure is repeated, not restarted.** Between the claim and the recorded reference
-there is a window in which a sprint may exist while nothing here names it — and the same window
-exists one level down, between the writer's board row and the reference that publishes it. Both
-close the same way: the repeat carries the same request id, so `SprintWriter.create` resumes its
-own staged transaction and returns the sprint it already began instead of opening a second one.
-Such a create is refused with `backend_unavailable` and an `OperationPending`, whose `data` says so
-in a shape a client acts on rather than parses:
+**A partial failure is repeated, not restarted.** Between claim and recorded reference (and, one level
+down, between the writer's board row and its publishing reference) a sprint may exist unnamed. The
+repeat with the same request id resumes the writer's staged transaction. Such a create is refused with
+`backend_unavailable` and an `OperationPending` whose `data` says so:
 
 ```json
 {"code": "backend_unavailable",
@@ -3360,39 +2375,25 @@ in a shape a client acts on rather than parses:
                      "request_id": "…", "reference": null}}}
 ```
 
-`repeat_request` is the safe available action, and it is the *only* one: a new request id would
-open a second sprint beside the half-written one. `reference` is filled in when this layer knows
-which sprint the unfinished request already holds.
+`repeat_request` is the only safe action (a new request id would open a second sprint). `reference` is
+filled in when the layer knows which sprint the request holds.
 
-**That answer does not depend on what failed.** Once `SprintWriter.create` has returned, a sprint
-row exists, and every remaining step of the operation — recording the reference under the request
-id, and reading the sprint back for the document — runs inside one region that answers this way
-whatever raises: the atomic writer, the lock file's `mkdir`/`open`/`flock`, the board read, or a
-defect of the layer itself. The region catches broadly on purpose rather than listing the
-vocabularies it knows, because a list is what has to be kept in step and a step added tomorrow
-would otherwise be the next hole; the cause is chained rather than swallowed, so a traceback still
-names the primitive that failed.
-
-The order inside the message is part of the contract too: the durable fact comes before the cause.
-A caller is told which sprint exists and that repeating the same request is safe, and only then
-what went wrong — because a caller that reads the cause first and acts on it opens a second sprint.
+Once `SprintWriter.create` has returned, every remaining step (recording the reference, reading the
+sprint back) runs in one region that answers this way whatever raises, with the cause chained. The
+message states the durable fact (which sprint exists, that repeating is safe) before the cause.
 
 ### Watching one
 
-**`sprint_state(ref)`** is the page somebody watches a sprint on: the goal and definition of done it
-was opened with, its product, issues and reserved projects, its repositories, its status, its
-current card, the state of each executor pin, its last observer resume entry — and, separately,
-whether its observer is up and what the sprint is actually doing (`work`, below).
+**`sprint_state(ref)`**: the goal and Definition of Done, product, issues, reserved projects,
+repositories, status, current card, each executor pin's state, the last observer resume entry, whether
+its observer is up, and what the sprint is doing (`work`, below).
 
-The sprint's own fields and the observer's liveness are two sources and fail apart: a dispatcher
-state nobody can read leaves the goal, the reservations and the pins on the page and says that the
-liveness is what could not be established. The sprint is read through `SprintReader.list`, never
-`show`, because `show` would create the sprint board it reads from and a read of this layer creates
-nothing.
+The sprint's fields and the observer's liveness fail apart: an unreadable dispatcher state leaves the
+sprint's fields and marks liveness unavailable. The sprint is read through `SprintReader.list`, never
+`show` (which would create the sprint board).
 
-Liveness comes from the dispatcher's durable production state, classified by the same
-`observer_snapshot` rows `secretary sprint status` shows. A terminal, pane or window is never
-consulted and is never evidence. `observer.launch.state` is one of:
+Liveness comes from the dispatcher's production state, classified by the same `observer_snapshot` rows
+`secretary sprint status` shows; no pane is evidence. `observer.launch.state` is one of:
 
 | state | what it means |
 | --- | --- |
@@ -3403,30 +2404,14 @@ consulted and is never evidence. `observer.launch.state` is one of:
 | `not_declared` | the sprint declared `--observer none`, so the tick raises none for it |
 | `ended` | the sprint is closed or stopped: the tick stopped its observer and holds no record |
 
-The first three are the three a watching page has to tell apart, and the last three are distinctions
-the same source already makes: folding a head that was raised and is now gone into "not started",
-a sprint that chose to run without an observer into "waiting for one", or a sprint that finished
-months ago into "its observer has not come up yet", would each be a lie in the one field an operator
-opens the page for. The last of those was a live defect until secretary-1573: roughly sixty closed
-sprints of this installation reported `not_started` with the reason "the sprint is saved and the
-production tick holds no observer for it yet". Beside the state, `observer.declared` carries what the row
-itself declares, in its own three states (`declared`, `absent`, `malformed`), because an absent
-observer field and a corrupt one are repaired differently.
-
-**The launch needs the sprint row as well as the production state, and says so when it has neither.**
-What "the dispatcher holds no observer record" means depends on whether the sprint is saved and open,
-finished, or declared none — all facts of the row. With the sprint board unavailable the dispatcher's
-silence establishes nothing at all, so `launch` is `unavailable` sourced from the *sprint board* and
-`declared` is a fourth state, `unknown`. Reporting `absent` and `not_started` there was an
-affirmative claim manufactured from a file that proves only that it holds no row for the reference
-(secretary-1574).
+`observer.declared` carries what the row declares: `declared`, `absent` or `malformed`. With the sprint
+board unavailable, `launch` is `unavailable` sourced from the sprint board and `declared` is `unknown`.
 
 ### Commenting on a running sprint
 
-**`sprint_comment(request_id, actor, reference, body, role="po")`** puts one comment on a sprint
-entity and answers with `kind: sprint_comment`. It is the one way a PO intervenes in a sprint that
-is running: a comment on the *entity*, never an edit of the sprint's executor cards, and there is no
-operation here that opens such a path.
+**`sprint_comment(request_id, actor, reference, body, role="po")`** puts one comment on a sprint entity
+and answers `kind: sprint_comment`. It is the PO's intervention in a running sprint; no operation edits
+the sprint's executor cards.
 
 | field | what it carries |
 | --- | --- |
@@ -3436,50 +2421,34 @@ operation here that opens such a path.
 | `saved` | whether *this* call saved the comment. `false` is a repeat that found it already saved and wrote nothing |
 | `delivery` | the whole `sprint_comment_delivery` document below, embedded exactly as a create embeds the sprint |
 
-Every rule about what a comment may be stays with `SprintWriter.comment`: which roles may write one
-(`po`, `dispatcher`, `worker`, `reviewer`, `steward`, `retro`) and that a body may not be empty. The
-operation restates none of them and calls it. A closed or stopped sprint accepts one — see
-[A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended) for what it does and
-does not do, and `not_deliverable` below for how the delivery read answers it.
+`SprintWriter.comment` owns the rules: allowed roles (`po`, `dispatcher`, `worker`, `reviewer`,
+`steward`, `retro`) and a non-empty body. A closed or stopped sprint accepts a comment; see
+[A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended).
 
-**Idempotency is the audit's own claim, and there is no second index.** `SprintWriter._write`
-claims `request_id` in the committed audit before the board is touched, and a repeat is answered
-from the committed event *without the mutation being called at all*. So a repeat writes no second
-comment, appends no second audit event, and — because a wake is driven by a new significant event
-and there is none — causes no second observer wake and no second head launch. A second request store
-beside `<data>/webproto/sprint-requests/` would be a second answer to a question already answered,
-so there is not one.
+**Idempotency** is the audit's own claim: `SprintWriter._write` claims `request_id` in the committed
+audit before the board is touched, and a repeat is answered from the committed event without calling
+the mutation — no second comment, audit event, observer wake or head launch. There is no second request
+index. `sprint_comment` compares the event the id already owns (kind, sprint, actor, body digest) with
+the request and refuses a mismatch with `validation`.
 
-**A repeat over different inputs is refused, not answered.** The one thing the audit's claim does
-not do is compare what the request said, so `sprint_comment` compares the committed (or pending)
-event this id already owns — its kind, its sprint, its actor and the body digest the event carries —
-against the request being made, and refuses a mismatch with `validation`. That is exactly how
-`sprint_create` refuses a repeat over different inputs, and for the same reason: a request id is the
-idempotency key of *one* request, and answering a different one with the first one's result would
-tell a caller their new comment was saved when it was not.
-
-**A half-written comment is repeated, never restarted.** `audit_pending` from the writer reaches the
-caller as an `OperationPending` carrying `backend_unavailable` and a `data` action naming
-`sprint_comment` and *this* request id, because that id is the one whose repeat resumes the write.
+**A half-written comment is repeated.** `audit_pending` from the writer reaches the caller as an
+`OperationPending` (`backend_unavailable`) with a `data` action naming `sprint_comment` and this request
+id.
 
 ### What happened to a comment
 
-**`sprint_comment_delivery(ref, comment_id)`** is the read half, and it answers three things that
-must never stand in for one another:
+**`sprint_comment_delivery(ref, comment_id)`** answers three separate things:
 
-* **`comment`** — whether the committed audit holds this comment on this sprint (`saved`), holds no
-  such event (`absent`), or could not be read at all (`unknown`). Sourced `journal`;
-* **`delivery`** — where the dispatcher's own observer delivery machinery has got it to. Sourced
-  `liveness`, needing `journal`, because placing a comment against a cursor needs both;
-* **`acceptance`** — read from no source at all, and always `established: false`. It is this
-  contract saying, in the answer itself, that neither of the two above is the observer having read,
-  accepted or taken the comment into account, and naming `issue:cf5c9f03ee0f92d3d347` as the
-  deferred mechanism that would establish it.
+* **`comment`** — whether the committed audit holds this comment on this sprint (`saved`), holds no such
+  event (`absent`), or could not be read (`unknown`). Sourced `journal`;
+* **`delivery`** — where the dispatcher's observer delivery has got it. Sourced `liveness`, needing
+  `journal`;
+* **`acceptance`** — read from no source, always `established: false`: neither of the above means the
+  observer read or accepted the comment. The answer names `issue:cf5c9f03ee0f92d3d347` as the mechanism
+  that would establish it.
 
-**Delivery is a batch fact, not a per-comment one.** The dispatcher's cursor is `through_event` over
-this installation's committed event stream and no cursor is per comment, so the honest answer is the
-*relation* between this comment's event and those cursors. That relation, and the whole mapping from
-the five `DeliveryStage` values plus the cases that are not a stage at all:
+Delivery is a batch fact: the dispatcher cursor is `through_event` over the installation's committed
+event stream, so the answer is the relation between this comment's event and the cursors:
 
 | what the record says | answer | why |
 | --- | --- | --- |
@@ -3494,38 +2463,28 @@ the five `DeliveryStage` values plus the cases that are not a stage at all:
 | stage `idle`, or an active batch fixed *before* this comment arrived | `saved` | no batch carries it yet; an event appended after a delivery intent is deliberately left for the next batch |
 | the sprint is closed or stopped | `not_deliverable` | no batch will *ever* carry it: the tick stops the observer of a sprint that is no longer open and drops its record. Answered before the dispatcher is consulted at all, because a dropped record would otherwise read as `unknown` for something that is exactly known |
 
-`unknown` is never folded into any of the other four. "Nobody could say where this comment is" and
-"it is still waiting" are repaired by different people, and the read has to be able to tell an
-operator which of the two they have.
+`unknown` is never folded into another answer.
 
-Beside the state, `batch` carries the part of the delivery record the answer stands on — the stage,
-the delivery and cursor ids, the wake and launch failure counts, the last recorded failure reason,
-and the one `delivery_evidence_summary` line the head that reports its own delivery history is given
-— and is `null` when there is no record to stand on. Nothing else of the dispatcher's internals is
-published.
+`batch` carries the delivery record the answer stands on — stage, delivery and cursor ids, wake and
+launch failure counts, last failure reason, and the `delivery_evidence_summary` line — or `null` when
+there is no record.
 
-**The honest limits, stated rather than implied.**
+Limits:
 
-* `handed_over` says a batch carrying this comment was acknowledged. It does not say the observer
-  read this comment, agreed with it, changed anything because of it, or even that this comment was
-  the reason the batch existed;
-* a comment written by a role other than `po` is not on its own a semantic wake
-  (`is_significant_observer_event`), so no batch is opened *for* it; it is carried when a later
-  significant event moves the cursor past it, and this read reports that relation truthfully rather
-  than pretending a batch was raised for it;
-* the answer is only as fresh as the durable state it reads. It consults no terminal, no pane and no
-  head.
+* `handed_over` means a batch carrying the comment was acknowledged, not that the observer read or acted
+  on it, or that the comment caused the batch;
+* a comment by a role other than `po` is not a semantic wake (`is_significant_observer_event`); it is
+  carried when a later significant event moves the cursor past it;
+* the answer is as fresh as the durable state; it consults no terminal, pane or head.
 
-**The read performs no delivery.** No wake, no nudge, no retry, no head launch and no write to the
-dispatcher's state — redelivery is the production tick's, and this reports what that tick recorded.
+The read performs no delivery: no wake, nudge, retry, head launch or dispatcher-state write.
 
 ### Closing one
 
 **`sprint_close(request_id, actor, reference, reason, closeout, decisions, role="po")`** closes a sprint
-and answers with `kind: sprint_closed`. It takes the owner's reason, the decisions file
-([The decisions a close carries](#the-decisions-a-close-carries)) and the closeout body, and it is a
-client of `SprintWriter.close` in exactly the sense the two operations above are clients of their
-writers.
+and answers `kind: sprint_closed`. It takes the owner's reason, the decisions file
+([The decisions a close carries](#the-decisions-a-close-carries)) and the closeout body, and calls
+`SprintWriter.close`.
 
 | field | what it carries |
 | --- | --- |
@@ -3535,99 +2494,60 @@ writers.
 | `definition_of_done` | `satisfied: false`, always, with the sentence saying why the question is not what a close answers |
 | `result` | the whole `sprint_close_result` document below, embedded exactly as a comment embeds its delivery |
 
-**Every rule stays where it already is.** What a close *is* — the decision every declared issue and
-every card in a working state needs, the refusal before anything is written, the terminal phase and its
-order, the admission lock, the per-step request ids, `live_work`, `close_conflict`, the
-`already_closed`/`already_moved` confirmations, the `audit_pending` retry with the staged plan retained,
-and the knowledge closeout — belongs to `SprintWriter.close` and `secretary.sprint_close`. The operation
-re-decides none of it and adds no second store, lock or scheduler.
+Every close rule (decisions, pre-write refusal, terminal phase order, admission lock, per-step request
+ids, `live_work`, `close_conflict`, confirmations, `audit_pending` with the staged plan retained, the
+knowledge closeout) belongs to `SprintWriter.close` and `secretary.sprint_close`; the operation adds no
+store, lock or scheduler.
 
-**The closeout is required here and nowhere below.** A close made through this operation states what
-became of the work, because the caller is the closing PO. What the operation owns is the document's path,
-its link to the sprint and the fact that it is written exactly once; what is *in* it is the caller's, and
-nothing here generates it.
+The closeout is required by this operation; its content is the caller's, verbatim.
 
-**Idempotency is the staged close's own, and there is no second index.** `SprintWriter.close` stages the
-whole close under its request id: a repeat resumes it, repeats no step whose derived id already carries a
-committed event, and is refused with `validation` when it states other decisions, another reason or
-another closeout. A request index of this layer's own would be a second answer to that, and it could not
-carry the one amendment a `close_conflict` retry is allowed to make.
+**Idempotency** is the staged close's own: a repeat resumes it, repeats no step whose derived id carries
+a committed event, and is refused with `validation` when it states other decisions, reason or closeout.
 
-**A half-finished close is repeated, never restarted.** `audit_pending` reaches the caller as an
-`OperationPending` carrying `backend_unavailable` and a `data` action naming `sprint_close` and *this*
-request id. `live_work` and `close_conflict` are `owner_conflict`: the request is well formed and refused
-on the state of the world — a card whose head is still running, or an object somebody else moved — and
-both are answered by settling that thing and repeating the close.
+**A half-finished close is repeated.** `audit_pending` reaches the caller as an `OperationPending`
+(`backend_unavailable`) with a `data` action naming `sprint_close` and this request id. `live_work` and
+`close_conflict` are `owner_conflict`: settle the running head or the moved object, then repeat.
 
-**The close ends no head.** It releases the reservations, and the observer is ended by the lifecycle that
-already ends it: the production tick reconciles its observer records against the sprint board and stops
-the head of a sprint that is no longer open. There is no second teardown here and the close stops nothing
-itself.
+**The close ends no head.** It releases reservations; the production tick stops the observer of a sprint
+that is no longer open.
 
 ### What a close decided
 
-**`sprint_close_result(ref, event_id)`** is the read half, and the document a close answers with:
+**`sprint_close_result(ref, event_id)`** is the read half:
 
-* **`close`** — what the committed audit records this close decided: the verdict on each declared issue
-  and which of them were closed, the disposition of each card and which were archived, who closed the
-  sprint and the reason they gave, and the closeout's path and commit. `absent` is the journal's own
-  answer that it holds no such close; `unknown` is a journal nobody could read. Sourced `journal`;
-* **`reservations`** — which of the sprint's declared projects the installation still holds for it,
-  read from `sprints/active-repositories.json`, the index the board's own write guard authorises
-  against. Sourced `reservations`, needing `sprints`. An index nobody could read answers `null` and
-  never "released": reporting a project as free on the strength of a file nobody has seen is what would
-  admit a successor over a live reservation;
-* **`sprint`** — the sprint's own record, including its new status. Sourced `sprints`;
-* **`definition_of_done`** — read from no source at all, and always `satisfied: false`. It is this
-  contract saying, in the answer itself, that closing a sprint states what became of the work and never
-  that the goal was reached.
+* **`close`** — what the committed audit records: verdict per declared issue and which were closed,
+  disposition per card and which were archived, who closed and why, the closeout's path and commit.
+  `absent`: the journal holds no such close; `unknown`: unreadable. Sourced `journal`;
+* **`reservations`** — which declared projects the installation still holds for the sprint, from
+  `sprints/active-repositories.json`. Sourced `reservations`, needing `sprints`. An unreadable index
+  answers `null`, never "released";
+* **`sprint`** — the sprint's record with its new status. Sourced `sprints`;
+* **`definition_of_done`** — from no source, always `satisfied: false`.
 
 ### One place says which source answered
-
-Every document of this layer is assembled from sources that fail apart, and the whole reason it
-carries availability at all is one rule:
 
 > A source that refused, or that was never read, may not delete, shadow or fabricate an answer
 > another source already gave. Every section says which source answered it, and an answer is
 > attributed to the source that actually produced it.
 
-**The place that enforces it is `secretary.webproto.section`**, and every section of every sprint
-document is assembled there — nowhere else in the layer decides an attribution. `sources.py` gives a
-refusal its shape; this gives the rule a seam:
+`secretary.webproto.section` enforces this; every section of every sprint document is assembled there:
 
-* a **source is read once** for the document, as a `Reading`, and its payload cannot be read at all
-  when it did not answer;
-* a **section is decided by rules**, each naming the source it answers from and every source it
-  needs. A rule *is not executed* unless all of them answered, so the value of a refused source
-  cannot reach a claim — not because a branch remembered to check, but because the code that would
-  have used it never runs. The section carries the `Source` of the rule that answered, and names it;
-* **what a refusal may say is declared once per section**, as the field values that claim nothing.
-  When no rule can answer, the section is that blank, attributed to the first source of the
-  precedence order below that was consulted and refused, and carrying its reason. A branch that
-  tries to answer under a source that refused fails there instead of shipping;
-* a section that **cannot answer when every source answered** is a hole in its own rules, and is
-  raised as a defect of the layer rather than reported as an unavailable installation;
-* and **a section carries where it came from**, which is what the two places that consume one check.
-  `render` refuses a plain mapping wearing a source, *and* refuses a section this module did not
-  decide; `SectionSet` closes the other side — every public method of `SprintSections` is wrapped at
-  class creation and must answer with a section `decide` or `mark` produced, exactly as
-  `ProtocolBoundary` wraps every public operation. Being of the right type is deliberately not the
-  credential: a builder returning a directly constructed section under an unavailable source was
-  accepted by both for being one, and published the claim this seam exists to prevent.
+* a **source is read once** per document, as a `Reading`, whose payload is unreadable when it did not
+  answer;
+* a **section is decided by rules**, each naming the source it answers from and every source it needs; a
+  rule does not run unless all of them answered. The section carries and names the `Source` of the rule
+  that answered;
+* **what a refusal may say is declared once per section** as the field values that claim nothing. When no
+  rule can answer, the section is that blank, attributed to the first refused source in the precedence
+  order below, with its reason. Answering under a refused source fails;
+* a section that **cannot answer when every source answered** is raised as a layer defect;
+* **a section carries its provenance**: `render` refuses a plain mapping or a section this module did not
+  decide, and `SectionSet` wraps every public method of `SprintSections` so each must return a section
+  produced by `decide` or `mark`. A directly constructed section cannot reach a document.
 
-So a section added next month is covered by the act of being a section, and there is no list to keep
-in step. **The promise, stated exactly:** a section built by calling the constructor cannot be
-returned from a builder and cannot reach a document. An author who reaches into the module for its
-private provenance sentinel can still mint one — that is forging rather than forgetting, and no seam
-in this language prevents it; what is prevented is the section written the ordinary way that claims
-more than its source gave. `tests/test_web_sprint_protocol.py::SectionSeamTests` pins all of it,
-including a section that tries to claim under a refusal, one assembled outside the seam, and the
-directly constructed one — that last case fails if either provenance check is removed. The
-per-section behaviour is `SourceIsolationMatrixTests`, which asserts every source refusing alone and
-in combination.
+Pinned by `tests/test_web_sprint_protocol.py` (`SectionSeamTests`, `SourceIsolationMatrixTests`).
 
-**The sources, and the precedence they are consulted in.** The order is what a refusal is attributed
-in, because it is the order in which the chain needs them:
+**Sources, in precedence order** (the order a refusal is attributed in):
 
 | source | what it is | what it alone can settle |
 | --- | --- | --- |
@@ -3637,23 +2557,14 @@ in, because it is the order in which the chain needs them:
 | `journal` | `board/events.ndjson`, the committed audit | when the last significant event on an open sprint's cards happened |
 | `liveness` | `dispatcher/production-state.json` | whether a head is really behind a card, and behind a sprint |
 
-The journal is a source of its own and not a corner of the sprint board, even though
-`SprintReader.status_views` is what consumes it: it is a different file that fails for different
-reasons, and sharing a `try` with the board pass made an unreadable `board/events.ndjson` blank the
-sprint rows of a board that had answered. It is read once here and handed to `status_views`, which
-then opens nothing. Both documents carry `cards`, `journal`, `liveness` and `installation` beside
-their items, so a reader can tell an installation with no sprints from a board that would not
-answer.
+The journal is its own source, read once and handed to `SprintReader.status_views`. Both documents carry
+`cards`, `journal`, `liveness` and `installation` beside their items.
 
 ### What a sprint is doing
 
-Both reads carry the same `work` object for a sprint — one item of the listing and the watched
-sprint's `work` are built by the same call over the same sources — so the two surfaces cannot
-answer "what is this sprint doing" differently. Every section names the source that answered it:
+A listing item and the watched sprint's `work` are built by the same call over the same sources.
 
-**The per-section source contract.** Every section of both documents, which sources may answer it,
-and what it says when each of its inputs is missing. This is the whole table, and it is exhaustive
-because the sections are exactly the builders of `SprintSections`:
+**Per-section source contract** (exhaustive: the builders of `SprintSections`):
 
 | section | may be answered by | what it says with an input missing |
 | --- | --- | --- |
@@ -3670,15 +2581,10 @@ because the sections are exactly the builders of `SprintSections`:
 | `comment` (delivery document) | `journal` | `unknown`, sourced `journal`; `id` still names which comment the answer would have been about |
 | `delivery` (delivery document) | `journal` when it holds no such comment; `liveness` otherwise, which also needs `journal` | `unknown` with `batch: null`, sourced by whichever of `journal`, `liveness` was missing first |
 
-An unreadable `journal` therefore marks `decision.freshness` and nothing else: the sprint row, the
-current card, the cards grouping, the checks, the observer declaration and its launch all stand.
-An unavailable `sprints` yields no affirmative observer claim: the dispatcher's production state
-proves only that it holds no observer row for the reference, never that the sprint exists, was
-saved, or declared none.
+An unreadable `journal` marks only `decision.freshness`. An unavailable `sprints` yields no affirmative
+observer claim.
 
-**Which source may answer `waiting`, and in what order.** A source that refused never shadows an
-answer another source has already given, so the sections are decided in the order the sources can
-settle them, and each answer carries the one that decided it:
+**`waiting`**, in decision order:
 
 | answer | source | when |
 | --- | --- | --- |
@@ -3694,81 +2600,54 @@ settle them, and each answer carries the one that decided it:
 | `unknown` | the Pipeline listing | neither the listing nor the production state could be read: the listing is the first input the chain was missing, so it is what the section names |
 | `unknown` | the sprint row | the sprint board could not be read, so there is no sprint here to be waiting |
 
-A column is deliberately not evidence that a head is behind it (`docs/OPERATIONS.md`, "A card
-sitting in In progress is not on its own evidence that anything is running"), which is why the board
-settles Blocked, Ready, Issues and Done and nothing else. `checks` follows the same rule at its own
-two board-settled answers: a sprint that has ended and one with no current card are
-`not_applicable` from the sprint row, and never `not_applicable` under an unavailable production
-state's source.
+A column is not evidence that a head is behind it, so the board alone settles only Blocked, Ready,
+Issues and Done. `checks` is `not_applicable` from the sprint row for an ended sprint or one with no
+current card, never under an unavailable production state.
 
-`current_task.live` is the fix for the second half of the same defect above: a finished sprint's
-current card is a fact worth keeping — it is where the sprint got to — so it is kept and it is
-qualified, and the reason says in words that the card is the record of a sprint that ended rather
-than work in progress. Nothing is inferred from emptiness anywhere here: `cards.states` and
-`degraded_cards.items` are `null`, never `{}`, when the source behind them could not be read.
+`current_task.live` qualifies a finished sprint's current card as the record of an ended sprint rather
+than work in progress. `cards.states` and `degraded_cards.items` are `null`, never `{}`, when their
+source is unreadable.
 
-`checks` is the mechanical gate as the dispatcher's own record holds it, and nothing is re-run: no
-CI backend is called, no gate is minted, and `gate` beside the state carries only the recorded
-`state`, the attested SHA, whether a run is pending, the last transport error and the record's own
-state. `unknown` is a card no dispatcher record names — nobody has claimed it, or nobody could read
-the state that would say — and it is deliberately never folded into `not_green`, because "the gate
-has not passed" and "nothing here says whether it passed" are repaired by different people.
-`not_applicable` is a sprint with no current card, or one that has ended.
+`checks` is the mechanical gate as the dispatcher record holds it; nothing is re-run and no CI backend is
+called. `gate` carries only the recorded `state`, attested SHA, whether a run is pending, last transport
+error and the record's state. `unknown` means no dispatcher record names the card (or the state is
+unreadable) and is never folded into `not_green`. `not_applicable` is a sprint with no current card, or
+one that has ended.
 
 ### Listing them all
 
-**`sprint_list(statuses=…)`** answers the same question for every sprint of the installation at
-once: `sprints.items` is one entry per sprint, each carrying which sprint it is (`ref`, `goal`,
-`status`, product, issues, reservations, repositories, executor pins, budget), its `observer`
-section exactly as `sprint_state` gives it, and the `work` sections above.
+**`sprint_list(statuses=…)`**: `sprints.items` has one entry per sprint with `ref`, `goal`, `status`,
+product, issues, reservations, repositories, executor pins, budget, its `observer` section as
+`sprint_state` gives it, and the `work` sections above.
 
-`statuses` filters on `open`, `closed` and `stopped`, and on nothing the listing would have to read
-more to know. The filter is applied after the one board pass, so a filtered listing costs what an
-unfiltered one does, and a status this product does not have is a `validation` refusal rather than
-an empty answer — a filter that matched nothing and a filter that was wrong are different facts.
+`statuses` filters on `open`, `closed` and `stopped` after the single board pass; an unknown status is
+`validation`.
 
-**What it costs, and what it deliberately does not read.** One pass over the sprint board with its
-metadata batched, one listing of the Pipeline with its metadata batched, one read of the
-dispatcher's production state, and at most one traversal of the committed audit — for the whole
-document, whatever the number of sprints. It reads no sprint's comments, opens no card, calls no
-CI backend and consults no terminal or pane. Beside the items, `cards.source`, `journal.source`,
-`liveness.source` and `installation.source` carry the availability of every source of the document
-as a whole, because a board that will not answer leaves no items to say it in.
+Cost per document regardless of sprint count: one sprint-board pass with batched metadata, one Pipeline
+listing with batched metadata, one read of production state, at most one committed-audit traversal. No
+sprint comments, card opens, CI calls, terminals or panes. `cards.source`, `journal.source`,
+`liveness.source` and `installation.source` carry document-level availability.
 
-`secretary sprint list` and `secretary sprint status` are clients of these two operations and hold
-no rule about what a sprint's state is; their exit statuses are the ones `web-read` maps the typed
-codes to (`not_found`/`validation` → 2, `backend_unavailable` → 1). `secretary sprint comment` and
-`secretary sprint comment-delivery` are clients of the two comment operations in exactly the same
-sense: argument parsing, the document on stdout, and that same table -- with `sprint comment`, which
-mutates, using `web-run`'s table instead, so `owner_conflict` keeps the exit status `3` it has always
-answered with. What it no longer answers `3` for is a terminal sprint: `sprint comment` on a `closed` or
+`secretary sprint list` and `secretary sprint status` are clients of these two reads and map codes as
+`web-read` does (`not_found`/`validation` → 2, `backend_unavailable` → 1). `secretary sprint comment`
+and `secretary sprint comment-delivery` are clients of the comment operations the same way, with
+`sprint comment` using `web-run`'s table so `owner_conflict` exits `3`. `sprint comment` on a `closed` or
 `stopped` sprint succeeds with exit status `0` and the saved comment on stdout
-([A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended)), and the delivery of that
-comment reads `not_deliverable`. `owner_conflict` and its `3` are left for the refusals that remain —
-`sprint resume` and `sprint current-task` on a sprint that has ended, and the conflicts a create or a close
-answers. The comment command mints a
-`--request-id` when the operator gave none, which is a convenience of the command and not a rule —
-a person retrying a comment types the same one to get the same comment back.
+([A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended)); its delivery reads
+`not_deliverable`. `owner_conflict` (exit `3`) remains for `sprint resume` and `sprint current-task` on
+an ended sprint and for create and close conflicts. The comment command mints a `--request-id` when none
+is given; retry with the same id to get the same comment back.
 
-**The installation config is one more source, including at the edge of the operation.** A config
-that does not validate takes away only what it owns — where the data plane is, and this
-installation's own budget thresholds, which fall back to the product's defaults. With an explicit
-`--data-dir` and a usable board transport, `sprint list` and `sprint status` still answer from the
-board and report the config as an unavailable `installation` source. Only a caller that gave no data
-directory is refused with `backend_unavailable`, because then there is nothing left to locate the
-data plane with. Treating it as a stricter precondition instead was wrong: it lost a caller an
-answer it had, which is the same collapse the rule above exists to prevent, one source further out.
+The installation config is one more source. An invalid config removes only the data-plane location and
+the installation's budget thresholds (which fall back to defaults). With an explicit `--data-dir` and a
+usable board transport, `sprint list` and `sprint status` still answer and report `installation`
+unavailable; without a data directory the caller is refused with `backend_unavailable`.
 
-The reads create nothing: the
-sprint is read through `SprintReader.list(create=False)` and the cards through `TaskReader`, which
-has no create at all, so an installation with no sprint board still gets an answer instead of a
-board.
+The reads create nothing: sprints via `SprintReader.list(create=False)`, cards via `TaskReader`.
 
 ### Errors
 
-The same typed exceptions the rest of the layer uses, with no code of its own added. The writer's
-`TaskError` codes are mapped once, in `secretary.webproto.sprint_ops`, and the mapping never
-re-decides a refusal:
+No new codes. The writer's `TaskError` codes are mapped once, in `secretary.webproto.sprint_ops`:
 
 | writer code | exception | code | when |
 | --- | --- | --- | --- |
@@ -3780,32 +2659,22 @@ re-decides a refusal:
 
 ## What has been commanded, and what became of a request
 
-An operator standing in front of a running installation asks two questions the reads above could not
-answer. *What were the last commands, who ran them, on what, and how did they end?* -- `task_events`
-is one card's slice, and there was no cross-entity answer short of opening the journal. *What became
-of the request id I sent?* -- the only answer was to re-send the operation and read the repeat's
-reply, which is safe but is a mutation performed to satisfy a question, and is unavailable to anyone
-who is not the original caller.
-
-So `secretary.webproto.command_reads` adds exactly two reads, and no machinery:
+`secretary.webproto.command_reads` adds two reads over the committed audit:
 
 ```bash
 python3 -P -m secretary web-read commands --instance INSTANCE [--cursor C] [--limit N] [--json]
 python3 -P -m secretary web-read request  --instance INSTANCE --request-id ID [--json]
 ```
 
-Both documents validate against the packaged `web-command` schema and carry `schema_version`, a
-`kind` of `command_history` or `command_request`, and `observed_at`.
+Both documents validate against the packaged `web-command` schema and carry `schema_version`, a `kind`
+of `command_history` or `command_request`, and `observed_at`.
 
-**`command_history(cursor, limit)`** -- a page of the last commands across every entity of the
-installation, newest first. Each row is the four fields a history is made of, and every one of them
-is already on the committed audit: `actor` (who initiated it), `action` (what was done), `entity`
-(the reference it was done to, with the entity kind where the record carries one), and `result` (the
-`reason` a typed protocol event's writer gave, or the `outcome` of a released generic audit record --
-never one renamed into the other). It is the committed cross-entity traversal of this installation's
-own audit, paged; there is no second store, index, cache or scheduler behind it.
+**`command_history(cursor, limit)`** — a page of the last commands across every entity, newest first.
+Each row has `actor`, `action`, `entity` (reference, plus entity kind where the record carries one) and
+`result` (the `reason` of a typed protocol event, or the `outcome` of a generic audit record; never
+renamed into each other). No second store, index, cache or scheduler.
 
-**`command_request(request_id)`** -- what became of one request id, in four states and no fewer:
+**`command_request(request_id)`** — what became of one request id:
 
 | state | what it means |
 | --- | --- |
@@ -3814,48 +2683,31 @@ own audit, paged; there is no second store, index, cache or scheduler behind it.
 | `not_found` | the audit answered and holds neither a committed nor a staged record under this id |
 | `unknown` | the audit could not be read, so nothing is established. Never folded into `not_found`: "this installation never saw that request" and "nobody could say" are opposite answers |
 
-It reads the audit's own `committed_event` and `pending_event` -- the pair `SprintWriter._write`
-itself consults to decide that a repeat is a no-op -- and re-decides nothing with them. **It never
-performs, retries, resumes or repairs the operation it reports on.** A read that repairs is not a
-read: a pending answer describes the continuation and leaves it to whoever owns the operation.
-
-Both reads write nothing at all, which is pinned by a byte snapshot of the whole data plane taken
-around each call, exactly as the pause reads are.
+It reads the audit's `committed_event` and `pending_event` (the pair `SprintWriter._write` consults) and
+never performs, retries, resumes or repairs the operation. Both reads write nothing.
 
 ### Paging and honesty
 
-The cursor is this layer's own (`secretary.webproto.cursor`), with one difference from a card's: it
-is a position in the traversal's append-ordered sequence rather than a byte offset into the file, and
-it is bound to no entity, so a card's cursor and a history cursor can never be honoured by the other's
-reader. `next_cursor` continues into older commands, and `has_more` is true **only** when the limit
-cut the page short -- so a page that reached the beginning of the history is distinguishable from one
-that was truncated. `DEFAULT_LIMIT` is 50 and `MAX_LIMIT` 500, as everywhere else in this layer.
+The cursor (`secretary.webproto.cursor`) is a position in the traversal's append-ordered sequence, bound
+to no entity; a card cursor and a history cursor are not interchangeable. `next_cursor` continues into
+older commands; `has_more` is true only when the limit cut the page. `DEFAULT_LIMIT` is 50 and
+`MAX_LIMIT` 500. Newest first is reversed append order, not a sort by `occurred_at`.
 
-Newest first means the journal's append order reversed and deliberately not a sort by `occurred_at`:
-the writer stamps that field, two commands can share a second, and a clock can go backwards, so the
-append order is the only order that is a fact.
+Both reads go through `secretary.tasks.task_audit_for`: on `SECRETARY_CARD_BACKEND=postgres` the canon is
+the `requests` table, on Kanboard `board/events.ndjson` ([Board store](BOARD_STORE.md), §7.3). Documents
+are identical either way, and the file journal is never consulted beside a PostgreSQL client.
 
-**Which store the audit is, is the card client's answer.** Both reads go through
-`secretary.tasks.task_audit_for`, so on `SECRETARY_CARD_BACKEND=postgres` the canon is the
-`requests` table and on Kanboard it is `board/events.ndjson` (`docs/BOARD_STORE.md` §7.3). The
-documents are identical either way, and the file journal is not consulted beside a PostgreSQL client:
-it holds nothing that backend wrote, so answering from it published an empty history, and a
-`not_found` for request ids the installation was holding, for the whole of an installation's life
-after cutover.
-
-An audit nobody could read is an unavailable source and never an empty history: `items` is `null`,
-the section names the reason, and that includes the case the released traversal answers `[]` for -- a
-journal file that is not there at all, which this read refuses rather than publishes. On PostgreSQL
-that case is a store that will not answer rather than a missing file; an empty `requests` table is a
-read that happened and an honestly empty history. A record's
-entity kind is `null` when the record does not carry one, and is never inferred.
+An unreadable audit is an unavailable source, never an empty history: `items` is `null` with a reason,
+including when the journal file is missing (on PostgreSQL: a store that will not answer). An empty
+`requests` table is an honestly empty history. A record's entity kind is `null` when not carried, never
+inferred.
 
 ### Operation identity, in one place
 
-Every mutation of this layer either takes a `request_id` or deliberately takes none. The table is
-published as a value (`secretary.webproto.command_reads.OPERATION_IDENTITY`), travels on every
-`command_request` answer, and is derived from the operation layers' own signatures by
-`tests/test_web_command_protocol.py`, which also holds this table to it.
+Every mutation of the layer either takes a `request_id` or deliberately takes none. The table is
+published as `secretary.webproto.command_reads.OPERATION_IDENTITY`, travels on every `command_request`
+answer, and is derived from the operation signatures by `tests/test_web_command_protocol.py`, which holds
+this table to it.
 
 | operation | identity | what a repeat means, or why there is no key |
 | --- | --- | --- |
@@ -3864,29 +2716,25 @@ published as a value (`secretary.webproto.command_reads.OPERATION_IDENTITY`), tr
 | `sprint_create` | `request_id` | resumes the sprint this request already opened, finishing whatever step was owed; a new id would open a second sprint beside the half-written one |
 | `sprint_comment` | `request_id` | returns the comment this request already saved, and never writes a second one |
 | `sprint_close` | `request_id` | resumes the staged close, keeps its plan and repeats no committed step; a new id would open a second close beside a half-finished one |
-| `pause_drain` | none | the pause is idempotent in its own mode by its own rule: a drain over a draining pipeline changes nothing and says so, and a drain over a freeze is refused as a conflict. A repeat needs no key, and adding one would put an operation-id ceremony on a command that completes in one call |
+| `pause_drain` | none | the pause is idempotent in its own mode: a drain over a draining pipeline changes nothing and says so, and a drain over a freeze is refused as a conflict |
 | `pause_resume` | none | a resume over a pipeline that is not paused is a no-op that reports itself as one; its idempotence is the state of the flag, not a recorded request |
 
-And what the part-done failures promise about what is already done:
+Part-done and related failures:
 
-* **`OperationPending`** (code `backend_unavailable`) -- the operation is durably part-done and
-  repairable. "It did not finish" is not "it did not happen": what it already did is staged, and the
-  safe move is to repeat *this* request id, which `data.action` carries beside `repeat_request`, the
-  operation's name and the reference where this layer knows it.
-* **`audit_pending`** (exit status `4`) -- the writer's own spelling of the same fact. The staged
-  record is kept, never discarded, and a repeat with the same request id resumes it.
-* **`close_conflict`** (exit status `3`) -- refused on the state of the world rather than on its
-  arguments; nothing was written, and this is not a part-done operation.
-* **`PauseCommandCompleted`** -- the pause or resume itself completed and only the report of it could
-  not be rendered, so the command answers with what it did rather than failing: a failure would
-  invite a retry of a command that already succeeded.
+* **`OperationPending`** (code `backend_unavailable`) — durably part-done and repairable; repeat *this*
+  request id, which `data.action` carries with `repeat_request`, the operation name and the reference
+  where known.
+* **`audit_pending`** (exit status `4`) — the writer's spelling of the same fact; the staged record is
+  kept and a repeat with the same request id resumes it.
+* **`close_conflict`** (exit status `3`) — refused on the state of the world; nothing was written; not
+  part-done.
+* **`PauseCommandCompleted`** — the pause or resume completed and only its report could not be rendered;
+  the command answers with what it did.
 
 ### Errors
 
-Neither read has a code of its own. Both refuse a caller that names an installation which is not one,
-or that hands them an argument this layer did not issue, and everything else a durable source can do
-reaches the caller as `backend_unavailable` through `secretary.webproto.boundary`, as it does for
-every operation of this package.
+Neither read has a code of its own; any other durable-source failure is `backend_unavailable` through
+`secretary.webproto.boundary`.
 
 | read | code | when |
 | --- | --- | --- |
@@ -3895,11 +2743,9 @@ every operation of this package.
 
 ## Serving the pipeline locally
 
-The web transport is the second caller of the two halves above, beside `web-read` and `web-run`,
-and it is a transport in the literal sense: one route is one operation of `secretary.webproto`, and
-it has no snapshot, no state derivation, no liveness rule and no mutation of its own. Why it is a
-second transport and not a second source of truth is in
-[Architecture](ARCHITECTURE.md#the-web-transport); how to run and stop it is in
+The web transport is a caller of `secretary.webproto` beside `web-read` and `web-run`: one route is one
+operation, with no snapshot, state derivation, liveness rule or mutation of its own. Design:
+[Architecture](ARCHITECTURE.md#the-web-transport); running it:
 [Operations](OPERATIONS.md#the-local-web-transport).
 
 ```bash
@@ -3907,26 +2753,17 @@ python3 -P -m secretary web-serve --instance INSTANCE [--data-dir DIR] \
   [--host 127.0.0.1] [--port 8787] [--heads-registry REGISTRY] [--offline]
 ```
 
-**Loopback only, and this is not a preference.** The service has no password, no TLS and no
-authorisation of any kind, and two of its routes start real heads on this installation, so anybody
-who can reach the port owns the pipeline. `--host` is resolved before a socket exists and is refused
-unless every address it resolves to is loopback -- a name is not an address, so `localhost` on a
-host whose `/etc/hosts` maps it elsewhere is refused like any other routable address, and what is
-bound is the literal address that resolution produced rather than the name.
-
-**And it stayed loopback only after DoD 5.** External access is published by a separate front
-(`secretary web-front`, below), not by relaxing this bind. The refusal above is what makes that
-front the only way in: there is no address this process will answer on that something off this host
-could reach directly, so a request that arrived from outside passed TLS and a password before it
-became a call here. The pages call operations in this process rather than over HTTP, so there is no
-second, internal HTTP surface for a request to arrive on either.
+**Loopback only.** The service has no password, TLS or authorisation, and two routes start real heads.
+`--host` is resolved before a socket exists and refused unless every resolved address is loopback;
+the literal resolved address is bound. External access goes only through the guarded front
+([below](#publishing-the-pipeline-the-guarded-front)). Pages call operations in-process, so there is no
+second internal HTTP surface.
 
 ### Routes
 
-The table below is the whole externally reachable surface. There is no route that takes a command,
-a script, a path or a module to run, there is no catch-all, and `tests/test_web_transport.py` fails
-if the table grows one. An unrouted path is 404 and an unrouted method on a routed path is 405;
-neither reaches a handler.
+The table is the whole externally reachable surface. No route takes a command, script, path or module
+to run, and there is no catch-all (`tests/test_web_transport.py`). An unrouted path is 404 and an
+unrouted method on a routed path is 405; neither reaches a handler.
 
 | method | route | operation | answers |
 | --- | --- | --- | --- |
@@ -3958,28 +2795,21 @@ neither reaches a handler.
 | POST | `/api/tasks/{ref}/comment` | `card_ops.task_comment` | one comment on a card, under role `po` and actor `web`; body `{request_id, body}` |
 | POST | `/api/tasks/{ref}/move` | `card_ops.task_move` | move a card, the owner's intervention; body `{request_id, target, reason, sprint_override?, sprint_override_reason?}` |
 
-The dashboard (`GET /`) reads four documents beside each other -- the system snapshot, the pause
-state, the open sprints and the last commands -- and one of them refusing marks its own section
-with the reason rather than taking the page down; the snapshot is the route's operation and the
-only one whose refusal is the page's. The card and sprint pages carry the owner's actions as forms
-that post to the routes above from the browser: a comment, a move with its reason, and on an open
-sprint a close. There is no `decide` route on purpose: `TaskWriter.decide` is the observer's and
-refuses every other role, so the owner's intervention on a parked card is a move, and the audit
-says so.
+The dashboard (`GET /`) reads four documents — system snapshot, pause state, open sprints, last commands
+— and a refusing one marks only its own section; only the snapshot's refusal fails the page. Card and
+sprint pages carry the owner's actions as forms posting to the routes above: a comment, a move with its
+reason, and on an open sprint a close. There is no `decide` route: `TaskWriter.decide` is observer-only,
+so the owner's intervention on a parked card is a move.
 
-A POST body is a JSON object and carries only the fields listed, except on `/sprints`, which takes
-the submitted form (`application/x-www-form-urlencoded`) whose fields are `request_id`, `product`,
-`goal`, `definition_of_done`, `issues`, `projects`, `observer`, `worker` and `reviewer`. Either way
-an unknown field is refused rather than ignored: a client sending one believes this endpoint does
-something it does not.
+A POST body is a JSON object with only the listed fields, except `/sprints`, which takes the submitted
+form (`application/x-www-form-urlencoded`) with `request_id`, `product`, `goal`, `definition_of_done`,
+`issues`, `projects`, `observer`, `worker` and `reviewer`. An unknown field is refused.
 
 ### Opening a sprint from a browser
 
-The two sprint pages are a client of the contract above and decide nothing of their own. Every
-choice on the form is an entry of `sprint_options`, so a board or a registry holding something else
-offers something else, and no product, issue, project or profile is written into the transport.
-Nothing is typed from memory: the observer and the two optional pins are selects over the registry's
-own profiles, each showing the label, model and effort the registry holds.
+The sprint pages are a client of the contract above. Every form choice is an entry of `sprint_options`;
+the observer and the two optional pins are selects over the registry's profiles showing label, model and
+effort.
 
 | field | what it carries |
 | --- | --- |
@@ -3989,74 +2819,43 @@ own profiles, each showing the label, model and effort the registry holds.
 | `observer` | required, and always a profile the layer marked eligible: the `none` spelling `heads.observer.none` publishes is **not** offered on this route and a crafted one is refused before the layer |
 | `worker`, `reviewer` | two independent optional selects whose default option is empty; an empty one reaches the layer as `None`, and never as the empty string |
 
-**Two kinds of refusal, and they are different kinds of thing.** A field the form itself requires is
-answered by the transport, named field by field, because the person is looking at the form. What a
-sprint may *be* — an unknown profile, a closed issue, an unregistered project, a project another
-open sprint holds — stays a judgement of `SprintWriter.create` reached through the layer, and the
-transport only shows what it was told. Either way the form comes back with every value that was
-submitted still in it — including a value the catalogue no longer offers, which is kept as a marked
-choice rather than dropped, because a form that quietly changed a submitted answer would be asking
-for a repeat of something nobody sent.
+A field the form requires is refused by the transport, named field by field. What a sprint may be is
+judged by `SprintWriter.create` through the layer, and the transport shows the refusal. Either way the
+form returns with every submitted value, including a value the catalogue no longer offers (kept as a
+marked choice).
 
-**A submission is idempotent because the id is the form's.** It is minted once, when the form is
-served, and travels in the markup the browser holds; a double click, a retried POST and a
-reconnected client therefore all carry the same one and reach the sprint the layer already opened.
-A success is a **303** to `/sprints/{ref}`, so the address bar ends on the sprint and a refresh
-re-reads it rather than re-posting. No lock is introduced anywhere.
+The request id is minted when the form is served, so a double click, retried POST or reconnect reaches
+the same sprint. Success is a **303** to `/sprints/{ref}`.
 
-**A refusal decides what happens to that id, and the two answers are opposite.** `sprint_create`
-claims the id together with a digest of the inputs *before* the writer judges them (see
-[Idempotency](#idempotency) above), so a refusal has spent it: a corrected resubmission under the
-same id is answered `validation` for different inputs, and a form that handed that id back would be
-a dead end with no sprint and no way forward.
+`sprint_create` claims the id with an input digest before the writer judges the inputs
+([Idempotency](#idempotency-1)), so a refusal spends the id:
 
 | what the layer answered | what the form comes back with | why |
 | --- | --- | --- |
 | `OperationPending` | the same id and the same values, and the words "this sprint exists, submitting this form again is safe" | a sprint exists and only that id resumes it; a new form would open a second beside it |
 | any other refusal | a **new** id, every submitted value, and the words "nothing was created" | the id was claimed and refused while nothing durable was created, so the corrected submission is a new request |
 
-**The browser client is narrower than the sprint contract, deliberately.** `observer` here is always
-a profile: `none` opens a sprint the production tick raises no observer for, which on a page whose
-button says "start this sprint" would start nothing. `secretary sprint create --observer none`
-remains the way to open one, rows that already carry it keep working, and `sprint_state` renders
-such a sprint on its page unchanged (`not_declared`).
-
-**There is no "start" button, because there is no start action.** Opening a sprint with an observer
-is the whole of starting it; the sprint page reads where it got to from `observer.launch.state`,
-whose five states it renders in words — not in colour alone — so that "saved and no observer yet",
-"an observer is up" and "this could not be read at all" cannot be confused on the page an operator
-opens to tell them apart.
+The browser form never offers `observer` `none`; use `secretary sprint create --observer none`, and
+such sprints render normally (`not_declared`). The sprint page renders `observer.launch.state` in words,
+not colour alone.
 
 ### Who may make a mutation
 
-Every POST is checked once, in `WebApp.handle`, before a handler is chosen and therefore before any
-operation of the layer can run. A rule written per route is a rule the next route forgets, so there
-is exactly one and it covers `/api/runs/start` and `/api/runs/review` as much as `/sprints`.
+Every POST is checked once, in `WebApp.handle`, before a handler is chosen, covering every POST route.
+A POST whose `Origin` names an authority other than the `Host` it was addressed to is refused **403**
+before any operation runs.
 
-The rule is the one a browser makes checkable. A browser sends `Origin` on every request whose
-method is not GET or HEAD — on its own pages' requests as much as on somebody else's — so a POST
-whose `Origin` names an authority other than the `Host` it was addressed to came from a page this
-service did not serve, and is refused **403** before any operation runs. Two properties of the shape
-are load-bearing:
+* No `Origin` header is not a browser and is allowed (`secretary web-run`, `curl`, the diagnostics in
+  [Operations](OPERATIONS.md#the-local-web-transport)). `Origin: null` is refused.
+* The comparison is authority, never scheme (the front terminates TLS and proxies plain HTTP to
+  `127.0.0.1`).
 
-* **no `Origin` at all is not a browser**, and it keeps working: `secretary web-run`, `curl` and the
-  diagnostics in [Operations](OPERATIONS.md#the-local-web-transport) send none, and cross-origin is
-  a browser's problem precisely because a browser is what attaches somebody's credentials to a
-  request they did not make. `Origin: null` is refused, because that *is* a browser saying its page
-  came from somewhere opaque;
-* **the comparison is authority, never scheme**: the front terminates TLS and proxies to
-  `127.0.0.1` over plain HTTP, so a genuine `https://host` origin arrives at a process that would
-  call itself `http`. Comparing schemes would refuse every real request through the published front.
-
-Reads are not asked: a GET is a read of this service whoever linked to it, and the password at the
-front is what decides whether it may be read at all. `Content-Security-Policy` carries the same
-rule from the other side — `form-action 'self'`, so a page served here may submit to this service
-and to nowhere else.
+GETs are not checked; the front's password decides read access. `Content-Security-Policy` carries
+`form-action 'self'`.
 
 ### Protocol code to HTTP status
 
-One table, in `secretary.web.statuses`, and no status number anywhere else in the transport. The
-layer below still knows nothing about HTTP; this is the only place its vocabulary becomes one.
+One table, in `secretary.web.statuses`; no status number elsewhere in the transport.
 
 | code | status | when |
 | --- | --- | --- |
@@ -4066,54 +2865,37 @@ layer below still knows nothing about HTTP; this is the only place its vocabular
 | `backend_unavailable` | 503 | a source this request needs could not be reached at all |
 | anything else | 500 | a code this transport has never heard of — a defect of the transport, not of the client |
 
-Two refusals belong to the transport itself and never reach the layer: 404 for an unrouted path and
-405 for an unrouted method. A refusal on a page route is rendered as a page with the same status,
-so a browser shows the reason rather than a blank body.
+The transport's own refusals are 404 (unrouted path) and 405 (unrouted method). A refusal on a page
+route is rendered as a page with the same status.
 
 ### Watching a card over HTTP
 
-The cursor is the client's, and the server keeps no session state at all. A card page renders the
-event tail the snapshot carries and hands the browser that page's `next_cursor`; the browser stores
-its own position and polls `/api/tasks/{ref}/events?cursor=...` from it. So a reload, a second tab
-and a reconnected client resume where that client was — no run is started again, and no recorded
-event is skipped. A cursor this installation will not honour is a 400 (`validation`), exactly as it
-is in the layer: watching stops with the reason on the page, and is never silently reset to the
-beginning of the journal.
+The server keeps no session state. A card page renders the snapshot's event tail and gives the browser
+that page's `next_cursor`; the browser polls `/api/tasks/{ref}/events?cursor=...` from its own position,
+so a reload, second tab or reconnect resumes without re-running anything or skipping events. A cursor
+the installation will not honour is 400 (`validation`): watching stops with the reason, never reset.
 
-Idempotency is the layer's and the transport does not get to weaken it: the request id in a POST is
-the client's, kept across a reload, and `ops.run_start` / `ops.run_review` answer a repeat with the
-run that already exists. A repeated POST therefore raises no second head — which is a test, not a
-description.
+The request id in a POST is the client's and kept across a reload; `ops.run_start` / `ops.run_review`
+answer a repeat with the existing run, so a repeated POST raises no second head.
 
 ### What a card page says about a product run
 
-One row per run, and two of its columns answer two different questions that a single word would
-collapse.
+One row per run:
 
 | column | what it is |
 | --- | --- |
 | `state` | what the run's *process* did: one of `running`, `finished`, `process_failed`, `source_unavailable`, `unknown`, with the reason the evidence gave and `(open)` or `(over)` beside it |
 | `outcome` | what the run *produced*: the verdict when the result carries one (`state.result.verdict`), the head's own result summary, and the exit status or signal the supervisor recorded |
 
-Neither is derived from the other, and neither is derived by the page: both come straight out of the
-`product_run` document, which is the same document `/api/runs/{run_id}` returns. Three readings that
-must stay distinguishable, and are:
-
-* a run that **finished** and published a result shows the result, and a review shows its verdict —
-  `green` and `red` are two normal endings and differ nowhere else;
-* a run that **failed** shows `process_failed`, the exit status it carried, and that the head
-  published no result;
-* a run that is still **open** has produced nothing *yet*, which is said in its own words rather
-  than in the words of a run that finished empty.
-
+Both come straight from the `product_run` document (as `/api/runs/{run_id}` returns). A finished run
+shows its result (a review its `green` or `red` verdict); a failed run shows `process_failed`, its exit
+status and that no result was published; an open run says it has produced nothing yet.
 
 ## Publishing the pipeline: the guarded front
 
-The transport above is loopback-only by construction. What makes it reachable from outside the host
-is a ready-made front -- Caddy, from the Ubuntu archive -- that terminates TLS, checks a password
-and proxies to `127.0.0.1`. No authentication is implemented in this product: `basicauth` checks the
-owner's password against a bcrypt hash, and the hash comes out of the installation's secret store at
-render time.
+External access goes through Caddy (from the Ubuntu archive), which terminates TLS, checks a password and
+proxies to `127.0.0.1`. The product implements no authentication: `basicauth` checks the owner's password
+against a bcrypt hash taken from the installation's secret store at render time.
 
 ```bash
 python3 -P -m secretary web-front set-password --instance INSTANCE (--stdin | --generate)
@@ -4127,35 +2909,22 @@ python3 -P -m secretary web-front check --instance INSTANCE [--config FILE]
 | `render` | reads the *hash* from the store and writes the Caddyfile, mode 0600, under `<data-dir>/webfront/`. Refuses a non-https site address, a hash that is not bcrypt, an upstream that is not loopback, and any configuration it would then have to report as leaving a route unguarded. |
 | `check` | parses a rendered file and reports every published route it would answer without a password check, and every address it proxies to. Exit 3 when there is a finding. |
 
-**Why nothing can go round the guard.** The front is the only listener on a public interface; the
-application behind it refuses every address that is not loopback, in code, before a socket exists.
-A page is not a second client either: `/` and `/tasks/{ref}` call `reads.system_snapshot` and
-`reads.task_snapshot` in this process, so there is no browser-visible internal endpoint and no
-server-side request that could arrive unauthenticated. The upstream in the rendered file is checked
-against the same loopback predicate `--host` is checked against, so a front that forwarded off the
-host is refused rather than rendered.
+The front is the only listener on a public interface; the application refuses non-loopback addresses
+before a socket exists. The rendered upstream is checked with the same loopback predicate as `--host`.
+`basicauth *` covers every path. `secretary.webfront.guard` parses the rendered file and asks, for every
+entry of `secretary.web.app.ROUTES`, whether anything answers that path before a password check;
+`tests/test_web_front.py` runs it over the shipped renderer and over counter-examples that must be
+reported.
 
-**Why one guard and not one per route.** `basicauth *` covers every path, so a route added to the
-table above is protected the moment it exists and forgetting to protect one is not an available
-mistake. `secretary.webfront.guard` proves it the other way round as well: it parses the rendered
-file and asks, for every entry of `secretary.web.app.ROUTES`, whether anything answers that path
-before a password is checked. `tests/test_web_front.py` runs that predicate over the shipped
-renderer and over hand-written counter-examples that must be reported, so a green result means the
-predicate can fail and did not.
-
-**TLS without a domain.** This installation has no domain name, so no publicly trusted certificate
-is obtainable for it. `tls internal` issues from Caddy's own CA; what a browser shows the first time
-and how to trust the root are in [Operations](OPERATIONS.md#the-published-web-front). Plain HTTP is
-a redirect Caddy derives from the `https://` site addresses and never a second way in; the guard
-reader treats an `http://` block that serves anything but a redirect as a finding.
+TLS uses `tls internal` (Caddy's own CA), since the installation has no domain name; trusting the root:
+[Operations](OPERATIONS.md#the-published-web-front). Plain HTTP is only the redirect Caddy derives from
+the `https://` sites; an `http://` block serving anything but a redirect is a `check` finding.
 
 ## Knowledge
 
-Long recoverable documents (brainstorms, decision logs, incident write-ups) live in
-`state/knowledge/<section>/<document>.md` for the installation itself, and in
-`state/knowledge/projects/<project id>/<section>/<document>.md` for a connected project. How this
-differs from curated memory and the board is described in
-[Architecture](ARCHITECTURE.md#knowledge-planes).
+Long recoverable documents live in `state/knowledge/<section>/<document>.md` for the installation and
+`state/knowledge/projects/<project id>/<section>/<document>.md` for a connected project. Relation to
+memory and the board: [Architecture](ARCHITECTURE.md#knowledge-planes).
 
 ```bash
 python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
@@ -4165,13 +2934,10 @@ python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
 python3 -P -m secretary knowledge list --instance INSTANCE
 ```
 
-Path segments are ASCII: letters, digits, `.`, `_` and `-`. A document imported from elsewhere under
-a non-ASCII filename is renamed on the way in.
-
-`write` replaces a document wholesale and commits only `state/knowledge` under the shared writer lock, so
-no manual `git commit` is needed and it does not race the tick writer. A document containing a secret is
-rejected with code 2 and nothing reaches disk. Rewriting identical content reports `changed: false` and
-makes no commit.
+Path segments are ASCII letters, digits, `.`, `_` and `-`; an imported non-ASCII filename is renamed.
+`write` replaces a document wholesale and commits only `state/knowledge` under the shared writer lock (no
+manual `git commit`). A document containing a secret is rejected with code 2 and nothing reaches disk.
+Rewriting identical content reports `changed: false` and makes no commit.
 
 ## Secrets
 
@@ -4186,148 +2952,106 @@ python3 -P -m secretary secret remove --instance INSTANCE --id ID
 python3 -P -m secretary secret materialize --instance INSTANCE [--target runtime-env|file]
 ```
 
-A secret value never travels through argv: `set` reads it from stdin or `--file`, and `import` takes a
-`KEY=VALUE` env file (LF-separated, no comments or blank lines, one secret per variable). No command prints
-a value: `list` returns catalog metadata only, and `import` and `materialize` print ids and variable names.
-Reading a value stays an internal API until there is a safe consumer for it.
+A secret value never travels through argv: `set` reads stdin or `--file`; `import` takes a `KEY=VALUE`
+env file (LF-separated, no comments or blank lines, one secret per variable). No command prints a value:
+`list` returns catalog metadata only; `import` and `materialize` print ids and variable names. Reading a
+value is internal API only.
 
-`secret init` is interactive by design. It refuses to run when stdin or stderr is not a terminal, and makes
-that check before generating the recovery phrase rather than only before printing it, so the phrase cannot
-reach a pipe, a file or a log. The phrase is printed once to stderr, the operator confirms they wrote it
-down, screen and scrollback are cleared, and only then does `init` ask for a few words of the phrase back
-before creating the store.
+`secret init` is interactive: it refuses when stdin or stderr is not a terminal, checked before the
+recovery phrase is generated. The phrase is printed once to stderr, the operator confirms, screen and
+scrollback are cleared, and `init` asks for a few words back before creating the store.
 
-Layout of `secrets/` in the instance repository:
+`init`, `set`, `import` and `remove` take the instance repository lock and commit their own pathspec in
+one commit. `list` takes no lock and commits nothing. `materialize` takes the lock, writes only the
+materialisation targets outside `secrets/`, and commits nothing. Catalog metadata passes the same
+redaction gate as `state/`; a secret pasted into `purpose` stops the write.
 
-```text
-secrets/
-  catalog.yaml            open metadata: id, scope, purpose, materialize — tracked in Git
-  installation-key.json   open KDF parameters and verifier for the installation key — tracked in Git
-  values/<id>.enc.json    one encrypted envelope per secret — tracked in Git
-  installation.key        the raw installation key, 0600, outside Git (.gitignore)
-```
-
-The store is the fourth writer of the instance repository, next to board/runs, memory and knowledge:
-`init`, `set`, `import` and `remove` take the same repository lock and commit their own pathspec in a
-single commit, so the catalog and the values it names cannot diverge in history. `list` takes no lock and
-commits nothing. `materialize` takes the lock too, so it does not cross a writer mid-read, but it writes
-only the materialised files outside `secrets/` and makes no commit: materialisation targets are not part of
-the instance repository. The open part passes the same redaction gate as `state/`: a secret accidentally
-pasted into a `purpose` field stops the write instead of reaching a commit. The encrypted envelope does not
-go through that scan, because its body is ciphertext plus open decryption parameters.
-
-Recovery is described in [Recovery](RECOVERY.md#secrets). With the recovery phrase the installation key is
-rebuilt and materialisation targets are rewritten from the catalog. Without the phrase everything
-non-secret is restored, and `recover` prints a `locked`/`missing` report and writes nothing: `locked` means
-the value is encrypted but the key is absent, `missing` means the catalog names a secret whose envelope is
-not in the repository.
-
-The installation key belongs to the installation user, the same user that owns the host and the
-installation, not to a narrower role. The store does not promise worker isolation: it has no broker and no
-grants, and the installation key opens every secret at once, with the same rights that previously read
-`runtime.env`.
-
-Data-plane, archive-restore and unit runbooks are in [Operations](OPERATIONS.md).
+The installation key belongs to the installation user. The store does not isolate workers: no broker or
+grants, and the key opens every secret. Store layout and recovery (`locked`/`missing` report):
+[Recovery](RECOVERY.md#secrets). Runbooks: [Operations](OPERATIONS.md#runtime-secrets).
 
 ## Audit journal import protocol
 
 The committed `board/events.ndjson` journal owns the installation-wide request namespace during
-migration. Each accepted row becomes one committed `requests` claim under its original
-`request_id`, with the complete row frozen in `intent`. Generic operations remain visible through
-`TaskAudit.events`, request lookup and event-id ownership, but do not enter the typed occurrence
-stream. A declared `board.protocol_event` crosses `Event.from_record`; its `EventKind`, subject,
-actor, transition, related references, data and occurrence time become exactly one `board_events`
-row. A malformed declared protocol row is a refusal, never a generic fallback or a new event kind.
+migration. Each accepted row becomes one committed `requests` claim under its original `request_id`,
+with the full row frozen in `intent`. A declared `board.protocol_event` crosses `Event.from_record` and
+becomes exactly one `board_events` row; a malformed declared protocol row is a refusal, never a generic
+fallback. `budget_recorded` keeps the same request owner in `sprint_budget_events`. A replay with the
+exact request and intent observes the committed claim; a different operation or payload under that id is
+refused. Import only records history and launches, resumes or notifies nothing. The report and its read
+fence: [Board store](BOARD_STORE.md).
 
-`budget_recorded` retains the same journal request owner when projected into
-`sprint_budget_events`. A replay with the exact request and intent observes the committed claim; a
-different operation or payload under that id is refused. Importing claims only records history. It
-does not launch, resume or notify a dispatcher, worker, reviewer or observer.
+## `secretary cutover`
 
-The import report accounts for total journal records, generic and typed records, request and board
-event rows, budget-linked requests, refusals and reasons. Its before/after source identities are a
-read fence over the complete source, not a control-plane pause protocol. A mismatch has no admitted
-snapshot and no apply phase.
-# `secretary cutover`
+Four machine-readable JSON commands:
 
-The lifecycle has four machine-readable JSON commands:
-
-* `plan --instance PATH --expected-revision SHA` performs only reads and returns `plan_id` and
-  `confirmation`.
-* `status --instance PATH` reads backend, canonical durable phases, immutable recovered history and
-  the recovery confirmation token when a canonical identity exists.
-* `apply --instance PATH --expected-revision SHA --actor ACTOR --reason REASON --confirm TOKEN`
+* `plan --instance PATH --expected-revision SHA` — reads only; returns `plan_id` and `confirmation`.
+* `status --instance PATH` — backend, canonical durable phases, immutable recovered history and, when a
+  canonical identity exists, the recovery confirmation token.
+* `apply --instance PATH --expected-revision SHA --actor ACTOR --reason REASON --confirm TOKEN` —
   creates or resumes exactly one identity.
-* `recover` takes the same mutation arguments and the `RECOVER-...` token printed by status.
+* `recover` — the same mutation arguments and the `RECOVER-...` token printed by `status`.
 
 Mutations reject the default instance guess, unsafe configuration/state, concurrent control,
 revision/provenance disagreement, stale identity, backend disagreement and out-of-order continuation.
-Every phase has `running`, `failed` or `complete` evidence. A failed phase cannot be relabelled; the
-same command retries it. `resume_ready` means probes and SQL-sourced recovery artifacts passed, not
-that work resumed.
+Every phase has `running`, `failed` or `complete` evidence. A failed phase cannot be relabelled; the same
+command retries it. `resume_ready` means probes and SQL-sourced recovery artifacts passed, not that work
+resumed.
 
-A successful pre-import `recover` (`no-cutover-effects`, `kanboard-before-fingerprint`) releases
-the canonical state slot in the successor route's order and through its code. It publishes its exact
-`recovered-frozen` JSON under the installation's cutover history with
-`successor.canonical_slot: release-intent`, fsyncs that archive, verifies the canonical file is
-unchanged, unlinks it and fsyncs its directory. Only then does it link the immutable
-`successor-release-<plan-id>.json` receipt: `kind: postgres-preimport-release`, plan ID,
-`released_at`, history path and checksum, and recovery branch. It has no database OID or dump,
-because this route created neither. Neither the canonical file nor the archive ever says the slot
-was released. The shared resolver projects `successor.canonical_slot: released-after-receipt` only
-from a matching pair and reports an archive without its receipt as `successor_release.status:
-pending`. It refuses a mismatched or orphan receipt, and an archive whose `successor` record says
-more than that intent.
+A successful pre-import `recover` (`no-cutover-effects`, `kanboard-before-fingerprint`) releases the
+canonical state slot. It publishes its `recovered-frozen` JSON under the installation's cutover history
+with `successor.canonical_slot: release-intent`, fsyncs the archive, verifies the canonical file is
+unchanged, unlinks it and fsyncs its directory. Then it links the immutable
+`successor-release-<plan-id>.json` receipt: `kind: postgres-preimport-release`, plan ID, `released_at`,
+history path and checksum, and recovery branch (no database OID or dump). The shared resolver projects
+`successor.canonical_slot: released-after-receipt` only from a matching archive/receipt pair, reports an
+archive without receipt as `successor_release.status: pending`, and refuses a mismatched or orphan
+receipt and an archive whose `successor` record says more than the intent.
 
-Pre-import archives published before receipts existed are the one legacy exception. They carry
-`canonical_slot: released-after-archive` inside the archive and have no receipt. They stay readable
-as terminal history, passed through unchanged, and a receipt beside one is refused as an orphan.
-No new archive of that form is created: a canonical file an older version left with that marker
-finishes as that legacy archive only if the archive is already linked; otherwise it restarts on the
-receipt route.
+Archives carrying `canonical_slot: released-after-archive` with no receipt are read as terminal history
+unchanged; a receipt beside one is refused as an orphan. No new archive of that form is created: a
+canonical file left with that marker finishes as that archive only if the archive is already linked,
+otherwise it restarts on the receipt route.
 
-Repeating recovery after an interrupted publication verifies the same archive and completes the
-release without replaying service recovery. After an interruption between the canonical unlink and
-the receipt, the identical `recover` finds the pending archive by its `RECOVER-...` token and
-revision and publishes only the receipt. `status` renders that command, and `plan` refuses while
-any release receipt is pending. The next `plan` includes predecessor identities and
-archive digests in its input, so its confirmation and identity differ and the recovered token cannot
-be reused. A completed final import also keeps its canonical identity because its target is occupied,
-regardless of whether a later application write exists. Completed cutovers, PostgreSQL-only recovery,
-a first SQL write and audit uncertainty remain terminal as well. Public planning refuses whenever a
-canonical identity exists; `status.successor_eligibility` supplies the shared phase-based reason.
-An entered but failed/running final import is conservatively terminal with uncertain occupancy; only
-absence of that phase admits the two pre-import successor branches.
+Repeating recovery after an interrupted publication verifies the same archive and completes the release
+without replaying service recovery. After an interruption between canonical unlink and receipt, the
+identical `recover` finds the pending archive by its `RECOVER-...` token and revision and publishes only
+the receipt. `status` renders that command, and `plan` refuses while any release receipt is pending. The
+next `plan` includes predecessor identities and archive digests in its input, so the recovered token
+cannot be reused. A completed final import keeps its canonical identity (its target is occupied).
+Completed cutovers, PostgreSQL-only recovery, a first SQL write and audit uncertainty are terminal.
+Public planning refuses whenever a canonical identity exists; `status.successor_eligibility` gives the
+phase-based reason. An entered but failed or running final import is terminal with uncertain occupancy;
+only absence of that phase admits the two pre-import successor branches.
 
-`secretary cutover prepare-successor` accepts only the exact terminal identity whose final import
-and full parity completed, recovery branch is `kanboard-before-first-write`, selector activation is
-either absent or completed with the SQL audit baseline `recover` compared against, `first_sql_write`
-is null, backend remains Kanboard, and matching import evidence is readable.
-It requires an absolute explicit instance, exact installed revision, non-empty actor/reason and a
-confirmation derived from plan ID, configured database name and current database OID. Status renders
-the token, phase evidence and exact next command without credentials. At
-`0006_sprint_transport_key` that command is the external owner/operator upgrade; preparation is a
-read-only refusal until the configured preserved database is verified at `0007_card_transport_key`.
+`secretary cutover prepare-successor` accepts only the exact terminal identity whose final import and
+full parity completed, recovery branch is `kanboard-before-first-write`, selector activation is absent or
+completed with the SQL audit baseline `recover` compared against, `first_sql_write` is null, backend is
+Kanboard, and matching import evidence is readable. It requires an absolute explicit instance, the exact
+installed revision, non-empty actor and reason, and a confirmation derived from plan ID, configured
+database name and current database OID. `status` renders the token, phase evidence and exact next command
+without credentials. At `0006_sprint_transport_key` that command is the external owner/operator upgrade;
+preparation is a read-only refusal until the preserved database is verified at
+`0007_card_transport_key`.
 
-The subprotocol records `eligibility`, `occupied_verification`, `dump_publication`,
-`connection_fence`, `database_rename`, `database_create`, `migration`, `role_verification`,
-`empty_verification`, `history_publication`, `canonical_release` and `release_receipt`. Migration here
-applies only to the new empty canonical database. Every effect has a durable intent record and
-OID-based replay. History is fsynced before canonical unlink and directory fsync; only a matching
-immutable receipt then proves terminal release. The shared resolver makes status, replay and planning
-consume that pair monotonically. Old cutover, recovery and successor tokens do not authorize a new
-plan or apply. A completed `PREPARE-SUCCESSOR-...` token replays its completed history read-only only
-while the canonical slot is free. Once any canonical identity holds the slot, that replay refuses
-before any database probe, names both plan IDs and points at `cutover status`, which renders the
-same history without a token.
+Its phases: `eligibility`, `occupied_verification`, `dump_publication`, `connection_fence`,
+`database_rename`, `database_create`, `migration`, `role_verification`, `empty_verification`,
+`history_publication`, `canonical_release` and `release_receipt`. Migration applies only to the new
+empty canonical database. Every effect has a durable intent record and OID-based replay. History is
+fsynced before canonical unlink and directory fsync; only a matching immutable receipt proves terminal
+release. Old cutover, recovery and successor tokens do not authorize a new plan or apply. A completed
+`PREPARE-SUCCESSOR-...` token replays its history read-only only while the canonical slot is free; once
+any canonical identity holds the slot the replay refuses before any database probe, names both plan IDs
+and points at `cutover status`. Runbook: [Operations](OPERATIONS.md#postgresql-board-store-cutover);
+failure recovery: [Recovery](RECOVERY.md#cutover-controller-state).
 
-Each product subprocess must exit successfully and return a nonempty JSON object or array. Empty,
-non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public
-writers read the durable state and admit only a child carrying
-`SECRETARY_CUTOVER_CONTROLLER_ID=<state identity>` or the immediate controller child identified by
-parent pid. Terminal controller states are never re-armed by later pause state.
+Each product subprocess must exit successfully and return a nonempty JSON object or array; empty,
+non-JSON, scalar or error documents cannot complete a phase. During an in-flight cutover, public writers
+read the durable state and admit only a child carrying `SECRETARY_CUTOVER_CONTROLLER_ID=<state identity>`
+or the immediate controller child identified by parent pid. Terminal controller states are never
+re-armed by later pause state.
 
-On PostgreSQL, a Card row's integer protocol address is its database-backed `board_key`, not the
-numeric suffix in its public reference. Public refs and `(project_id, task_number)` remain stable and
-project-local. Card keys occupy `[1,2000000000)`; Sprint, Product and Issue dispatch retains the
-disjoint ranges above it. Reference updates preserve the Card key.
+On PostgreSQL a Card row's integer protocol address is its database-backed `board_key`, not the numeric
+suffix of its public reference. Public refs and `(project_id, task_number)` stay stable and
+project-local. Card keys occupy `[1,2000000000)`; Sprint, Product and Issue dispatch keep the disjoint
+ranges above it. Reference updates preserve the Card key.

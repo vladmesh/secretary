@@ -444,10 +444,9 @@ class ProductIssueRecords:
             raise self._error("a Product's project set must be a JSON array of ids")
         self.client._execute("DELETE FROM product_projects WHERE product_id = %s", (product_id,))
         for project in sorted(set(projects)):
-            # §3.1: `projects` is a projection of the file registry with a named writer, and the
-            # mutation that references an id projects it inside its own transaction.  Only the id
-            # is projected here: everything else in the row is the registry's, and the card that
-            # ships `sync_project_registry` owns reading the files.
+            # §3.1: `projects` is derived from the file registry, which stays canonical.  The
+            # mutation that references an id inserts a missing row inside its own transaction,
+            # with the id only: everything else in the row is the registry's.
             self.client._execute(
                 "INSERT INTO projects (project_id) VALUES (%s) ON CONFLICT (project_id) DO NOTHING",
                 (project,),

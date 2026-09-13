@@ -2,8 +2,8 @@
 
 ``tests/test_board_import_mapping.py`` argues about §8's mapping without a database.  This file
 is the other half, and it exists because a plan that satisfies every assertion there can still be
-refused by a `CHECK`, a foreign key or a privilege — which is exactly the class of defect §10 of
-``docs/BOARD_STORE.md`` says only execution finds.
+refused by a `CHECK`, a foreign key or a privilege — a class of defect only execution against a
+real database finds.
 
 Three things it proves that nothing else can:
 
@@ -220,7 +220,7 @@ def synthetic_board() -> BoardSource:
         # A row since 0002: the reference is the primary key, so an unnumbered one is storable.
         _row(102, "sprint:canary-20260813", meta={"sprint_goal": "a canary"}),
         # The shape of `sprint:1037` on the live board: one reference, a live row and an archived
-        # one.  §9 option 1 stores the archived row under a distinguishing reference.
+        # one.  The importer stores the archived row under a distinguishing reference (§8.8).
         _row(
             103,
             "sprint:101",
@@ -338,7 +338,7 @@ class BoardImportIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         for module, why in (
-            ("psycopg", "the driver docs/BOARD_STORE.md §5.8 chose"),
+            ("psycopg", "the board store driver, docs/BOARD_STORE.md §5.8"),
             ("sqlalchemy", "the schema's source of truth"),
             ("alembic", "the migration tool"),
         ):
@@ -490,7 +490,7 @@ class BoardImportIntegrationTests(unittest.TestCase):
         self.assertEqual(sprints["sprint:100"]["sprint_number"], 100)
 
     def test_the_archived_twin_of_a_reference_keeps_its_record_and_its_provenance(self) -> None:
-        """§9 option 1, executed: two rows, two references, one original spelling kept."""
+        """§8.8, executed: two rows, two references, one original spelling kept."""
         _, stored = self.imported()
         sprints = {row["ref"]: row for row in stored["sprints"]}
         twin = sprints["sprint:101-archived-103"]

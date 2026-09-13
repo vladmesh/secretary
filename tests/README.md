@@ -1,6 +1,6 @@
 # Hermetic test contract
 
-The default unit-test run (`python3 -m unittest`, the suite CI runs) must produce the
+Every test run (a CI suite, `python3 -m tests.broad`, a named module) must produce the
 same result whether or not the host running it has Orca installed. Nothing in the
 default run may discover a real host Orca executable.
 
@@ -54,8 +54,7 @@ fixture and once explicitly opted into via the real resolver.
 
 Do not add a new blanket class-level or per-test patch that just re-establishes the
 default fixture path (`tests/fixtures/legacy-orca`) — that duplicates
-`tests/__init__.py` and is exactly the pattern secretary-705/secretary-738/secretary-748
-kept re-fixing piecemeal. Only patch locally when the scenario needs a *different*
+`tests/__init__.py`. Only patch locally when the scenario needs a *different*
 value than the default.
 
 ## If a test fails with "Orca executable for `<user>` is unavailable"
@@ -79,8 +78,7 @@ default that file is the live `<workspaces>/secretary/pipeline/state/pipeline/pa
 of the machine running the suite: an operator holding `secretary pause --mode freeze`
 while the suite runs makes `runtime/dispatch._pipeline_paused()` true, and every dispatch
 test takes the "pipeline paused — no dispatch" branch instead of the lifecycle branch it
-asserts about. The same binding also had the suite appending its own `runs.jsonl` records
-into that live directory.
+asserts about, and the suite appends its own `runs.jsonl` records into that live directory.
 
 `tests/__init__.py` therefore claims one throwaway `TA_PIPELINE_STATE_DIR` for the whole
 run and removes it at exit, set before any `test_*` module is imported and set
@@ -101,15 +99,15 @@ a resolved path, as `test_pipeline_paths.py:LegacyMirrorPathTests` does.
 
 ## The suite must have imported the checkout it lives in
 
-Every seam above keeps a *host* fact out of the run. One fact was never checked at all: which
-sources the run imported. A head's shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src`
+Every seam above keeps a *host* fact out of the run. This one checks which sources the run
+imported. A head's shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src`
 (`src/triggered_agents/runtime/launch_prefix.py`), and every worktree on the pipeline host runs on
 one shared venv whose editable install points at the production checkout's `src`. Both outrank a
 worktree's own sources for a src-layout project, which has nothing importable at its root -- so a
-worker could run this suite inside a candidate worktree, watch it pass, and have exercised
-production's `secretary` with the candidate's test files (issue:8b39e60e4df361c6138e).
+suite run inside a candidate worktree can pass while exercising production's `secretary` with
+the candidate's test files.
 
-`tests/test_hermetic_source_tree.py` is the assertion nobody had written: `secretary.__file__` and
+`tests/test_hermetic_source_tree.py` asserts it: `secretary.__file__` and
 `triggered_agents.__file__` must resolve inside the checkout that contains `tests/`. It installs no
 seam and shadows nothing -- there is no default to patch here, only a fact about the process.
 
@@ -123,16 +121,12 @@ PYTHONPATH=$PWD/src python3 -m unittest ...
 
 ## Board reads are hermetic by construction, not by a patch
 
-There is no default Kanboard fake to install any more, because there is nothing left to
-shadow. A board client cannot be built from ambient environment variables at all: every
+There is no default Kanboard fake to install, because there is nothing to shadow. A board client cannot be built from ambient environment variables at all: every
 client comes from `KanboardClient.for_instance(<instance dir>)`, which resolves the local
 `board-transport.env` of that instance and raises `backend_unavailable` when it is absent.
 A worker, reviewer or operator shell that inherits a live installation's `KANBOARD_*`
 variables therefore cannot turn the unit suite into a client of that board — the variables
-are simply not a source of transport configuration. This replaced the earlier defence, a
-process-wide `tests/__init__.py` patch of `secretary.status.KanboardClient`, which was put
-in after `test_status.py` spent ~231s against a live Kanboard and an exploratory CLI command
-migrated the production board (secretary-1026).
+are simply not a source of transport configuration.
 
 `tests/test_hermetic_kanboard.py` is the proof, and it asserts both halves: with live-looking
 `KANBOARD_*` in the environment and a temporary instance that has no transport file, the

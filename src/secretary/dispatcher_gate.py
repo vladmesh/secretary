@@ -1259,7 +1259,7 @@ def _retarget_pr(host, workspace: str, number: int, observed: str, base: str) ->
     — where a pull request is a release pull request for that card by construction, and a gate that
     refused to repair the base because its record was lost to a restore would reproduce the very
     incident this exists to prevent. Only the base is touched, only for that namespace, only when it
-    is wrong, and the pull request is left open. `docs/PROTOCOLS.md` carries the same argument.
+    is wrong, and the pull request is left open. `docs/PROTOCOLS.md` states the same scope.
     """
     if observed == base:
         return

@@ -543,7 +543,7 @@ def _apply_memory_write(
 ) -> MemoryWriteResult:
     """Write one fact and commit it into `state/memory` of the private repo.
 
-    Contract: docs/RECOVERY.md, "Writer". The commit is scoped to the memory
+    Contract: docs/RECOVERY.md, "Writers". The commit is scoped to the memory
     pathspec and taken under the state lock, so a dispatcher tick committing
     `state/board`/`state/runs` at the same moment neither blocks this write nor
     picks up half of it.

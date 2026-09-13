@@ -41,9 +41,8 @@ first of them let a reviewer change a stored sprint comment's body and still be 
 sprint-scoped row this module builds carries ``sprint_ref``; ``issue_comments`` is the third table
 of §3.7 and the 479 comments land in it; ``issues.extensions`` takes an Issue's leftover metadata
 keys; ``tasks.project_id`` may be NULL; and ``task_dependencies`` keeps the reference and its
-resolution apart.  §9's ``sprint:1037`` is on the board twice and the owner's answer is
-outstanding, so this module runs §9's **option 1**: the live row keeps the spelling, the archived
-row is stored under a distinguishing reference, its original spelling goes to
+resolution apart.  ``sprint:1037`` is on the board twice (§8.8): the live row keeps the
+spelling, the archived row is stored under a distinguishing reference, its original spelling goes to
 ``sprints.source_audit``, and the report names the row on a line of its own so a different answer
 is cheap to apply (:func:`sprint_references`).
 """
@@ -570,7 +569,7 @@ class ImportReport:
     #: it, so parity has nothing missing to find.  It is listed because a reader who counts board
     #: rows and store rows will otherwise see a gap and have to guess what closed it.
     duplicate_board_rows: list[dict[str, Any]] = field(default_factory=list)
-    #: §9 option 1: an archived sprint row whose reference a live row already holds, stored under a
+    #: §8.8: an archived sprint row whose reference a live row already holds, stored under a
     #: distinguishing reference with its original spelling in `sprints.source_audit`.  One line per
     #: row, so the owner's other choice can be applied to exactly these rows and no others.
     disambiguated_references: list[dict[str, Any]] = field(default_factory=list)
@@ -1298,12 +1297,11 @@ SOURCE_AUDIT_ORIGINAL_REF = "imported_original_ref"
 
 
 def sprint_references(rows: tuple[SourceRow, ...]) -> dict[int, str]:
-    """The reference each sprint row is stored under, keyed by Kanboard task id (§9, option 1).
+    """The reference each sprint row is stored under, keyed by Kanboard task id (§8.8).
 
     A sprint reference is a primary key and this board carries one of them twice: `sprint:1037` is
-    a live row (Kanboard task 748) and an archived row (task 1037).  The owner has been asked and
-    has not answered, so the card runs §9's option 1: the live row keeps the spelling, the
-    archived row is stored under a distinguishing reference, and its original spelling is kept in
+    a live row (Kanboard task 748) and an archived row (task 1037).  The live row keeps the
+    spelling, the archived row is stored under a distinguishing reference, and its original spelling is kept in
     ``sprints.source_audit``.  Both *records* survive whole — every field, every comment, every
     card link — and the only thing one archived row loses is its spelling.
 
@@ -2077,7 +2075,7 @@ def _plan_comments(
                     "foreign key into sprints; the refusal of the sprint names the reason",
                 )
             continue
-        # Since §9's option 1 gives the archived duplicate a reference of its own, its journal is
+        # Since the archived duplicate gets a reference of its own (§8.8), its journal is
         # its own too: nothing merges one sprint's record into another's, and nothing is refused.
         for comment in row.comments:
             rows["sprint_comments"].append(

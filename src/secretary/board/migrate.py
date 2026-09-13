@@ -1,9 +1,7 @@
 """Applying the board store's schema: Alembic, under the §7.4 advisory lock.
 
-The owner decided on 2026-09-07 that the schema is SQLAlchemy models and the migrations are
-Alembic's, replacing the in-product runner the earlier draft of ``docs/BOARD_STORE.md`` §7.4
-described.  What this module keeps from that decision is everything §7.4 asked for that Alembic
-does not do by itself:
+The schema is SQLAlchemy models and the migrations are Alembic's (``docs/BOARD_STORE.md`` §7.4).
+This module adds what Alembic does not do by itself:
 
 * **the lock.**  ``pg_advisory_lock`` on a fixed key, taken on the *same session* the migrations
   run on and released once at the end, so two upgrades racing on one installation serialize
@@ -51,7 +49,7 @@ ADVISORY_LOCK_KEY = 0x2C5B1F4A6E9D0713
 
 
 def sqlalchemy_url(credentials: Any) -> Any:
-    """A SQLAlchemy URL for one §5.5 role, over the `psycopg` driver §5.8 chose.
+    """A SQLAlchemy URL for one §5.5 role, over the `psycopg` driver (§5.8).
 
     Built with ``URL.create`` rather than by formatting a string, so a generated password
     containing ``@``, ``/`` or ``:`` produces one URL and not a truncated one.

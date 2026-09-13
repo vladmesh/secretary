@@ -11,8 +11,9 @@ the plan demands, including *when* the ladder reaches SuspectedStall/ConfirmedSt
 "working" costs an idle hour, but a false kill loses a live round, so a verdict that can
 stop a head must be earned by strong, admitted evidence only.
 
-The tests are named after their incident refs so the plan's regression table
-(``docs/HEAD_VITALITY.md``, section "Regression table") can point at one test per incident.
+The tests are named after the incident refs that motivated them; each class docstring records
+its incident. The invariants they pin are listed in ``docs/HEAD_VITALITY.md``, section
+"Regression invariants".
 """
 
 from __future__ import annotations

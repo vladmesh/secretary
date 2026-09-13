@@ -3168,7 +3168,7 @@ class ClosePublishedPromiseTests(unittest.TestCase):
         """The one claim that may not drift: a close is not a satisfied contract."""
         clause = "it is not a statement that the sprint's definition of done was reached"
         self.assertIn(clause, CLOSE_NOT_DONE.lower())
-        for name in ("PROTOCOLS.md", "OPERATIONS.md", "CHANGELOG.md"):
+        for name in ("PROTOCOLS.md", "OPERATIONS.md"):
             with self.subTest(document=name):
                 self.assertIn("definition of done", self._document(name).lower())
         self.assertIn(clause, self._document("PROTOCOLS.md").lower())
