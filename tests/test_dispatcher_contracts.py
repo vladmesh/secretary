@@ -824,6 +824,22 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                     str(self.root / "product"),
                 )
 
+    def test_rendered_gate_units_name_the_same_checkout_the_gate_resolves(self) -> None:
+        """A materialized alternate checkout cannot bind a role unit to one root and its gate to another."""
+        for name in (
+            "secretary-curator.service",
+            "secretary-retro.service",
+            "secretary-steward.service",
+            "secretary-steward-deep-sweep.service",
+        ):
+            with self.subTest(unit=name):
+                rendered = render_systemd_unit(
+                    (SHIPPED_PACKAGING_ROOT / name).read_bytes(), self.layout
+                ).decode()
+                self.assertIn(f"Environment=TA_RUNTIME_PYTHONPATH={self.root / 'product'}", rendered)
+                self.assertIn(f"Environment=TA_SECRETARY_REPO={self.root / 'product'}", rendered)
+                self.assertIn(f"ExecStart={self.root / 'product'}/scripts/secretary-agent-gate.sh", rendered)
+
     def test_the_launched_head_command_names_that_checkout_rather_than_a_home(self) -> None:
         with mock.patch.dict(
             os.environ,

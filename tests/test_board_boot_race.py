@@ -16,9 +16,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
+import venv
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -230,7 +232,7 @@ class HealthTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
-    """The shipped gate, run for real against a stub interpreter.
+    """The shipped gate, run for real against isolated product roots and venvs.
 
     The waiting has to live in this script: systemd refuses `RestartForceExitStatus=` on a
     `Type=oneshot` service, and these units are oneshot (`secretary/host.py` also reads that Type to
@@ -238,49 +240,159 @@ class GateTests(unittest.TestCase):
     oneshot has no start timeout by default, so the gate is free to wait.
     """
 
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.product = self.make_product(self.root / "runtime")
+        self.ambient_bin = self.root / "ambient-bin"
+        self.ambient_bin.mkdir()
+        self.ambient_python = self.ambient_bin / "python3"
+        self.ambient_python.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "used ambient python" > "$AMBIENT_SENTINEL"\nexit 86\n',
+            encoding="utf-8",
+        )
+        self.ambient_python.chmod(0o755)
+        self.run_number = 0
+
+    def make_product(self, root: Path) -> Path:
+        """Build a fake checkout whose required dependency exists only in its venv."""
+        source = root / "src"
+        for package in (
+            source / "triggered_agents" / "runtime",
+            source / "secretary" / "dispatch",
+        ):
+            package.mkdir(parents=True)
+            current = package
+            while current != source:
+                (current / "__init__.py").touch()
+                current = current.parent
+
+        (source / "secretary" / "config.py").write_text(
+            "import referencing\nDEPENDENCY = referencing.MARKER\n",
+            encoding="utf-8",
+        )
+        (source / "triggered_agents" / "runtime" / "role_env.py").write_text(
+            "from secretary.config import DEPENDENCY\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "\n"
+            "def main():\n"
+            "    with open(os.environ['STUB_RECORDS'], 'a', encoding='utf-8') as handle:\n"
+            "        handle.write(json.dumps({'kind': 'role_env', 'executable': sys.executable, "
+            "'prefix': sys.prefix}) + '\\n')\n"
+            "    marker = sys.argv.index('--')\n"
+            "    command = sys.argv[marker + 1:]\n"
+            "    os.execvpe(command[0], command, os.environ)\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n",
+            encoding="utf-8",
+        )
+        target = (
+            "from secretary.config import DEPENDENCY\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "\n"
+            "def main(module):\n"
+            "    agent, command, *rest = sys.argv[1:]\n"
+            "    with open(os.environ['STUB_RECORDS'], 'a', encoding='utf-8') as handle:\n"
+            "        handle.write(json.dumps({'kind': 'role', 'executable': sys.executable, "
+            "'prefix': sys.prefix, 'module': module, 'agent': agent, 'command': command, "
+            "'rest': rest}) + '\\n')\n"
+            "    if command == 'precheck':\n"
+            "        codes = os.environ['STUB_CODES']\n"
+            "        with open(codes, encoding='utf-8') as handle:\n"
+            "            remaining = handle.read().splitlines()\n"
+            "        code = int(remaining.pop(0)) if remaining else 0\n"
+            "        with open(codes, 'w', encoding='utf-8') as handle:\n"
+            "            handle.write('\\n'.join(remaining) + ('\\n' if remaining else ''))\n"
+            "        with open(codes + '.log', 'a', encoding='utf-8') as handle:\n"
+            "            handle.write('precheck\\n')\n"
+            "        raise SystemExit(code)\n"
+            "    print('ran: -m ' + module + ' ' + ' '.join([agent, command, *rest]))\n"
+            "\n"
+        )
+        (source / "triggered_agents" / "__main__.py").write_text(
+            target + "if __name__ == '__main__':\n    main('triggered_agents')\n", encoding="utf-8"
+        )
+        (source / "secretary" / "dispatch" / "standing_agent.py").write_text(
+            target + "if __name__ == '__main__':\n    main('secretary.dispatch.standing_agent')\n",
+            encoding="utf-8",
+        )
+
+        venv.EnvBuilder(with_pip=False).create(root / ".venv")
+        python = root / ".venv" / "bin" / "python3"
+        site_packages = Path(
+            subprocess.run(
+                [str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+        (site_packages / "referencing.py").write_text("MARKER = 'venv-only'\n", encoding="utf-8")
+        return root
+
     def run_gate(
-        self, codes: list[int], attempts: int = 3, *, agent: str = "retro", variant: str | None = None
+        self,
+        codes: list[int],
+        attempts: int = 3,
+        *,
+        agent: str = "retro",
+        variant: str | None = None,
+        env_overrides: dict[str, str | None] | None = None,
+        home: Path | None = None,
     ) -> subprocess.CompletedProcess:
-        with tempfile.TemporaryDirectory() as tmp:
-            bin_dir = Path(tmp)
-            codes_file = bin_dir / "codes"
-            codes_file.write_text("\n".join(str(c) for c in codes) + "\n", encoding="utf-8")
-            shim = bin_dir / "python3"
-            # Stands in for `python3 -P -m ... role_env exec --role X -- python3 -P -m ... <cmd>`:
-            # drops the role_env wrapper, answers each successive precheck with the next queued
-            # code, and records anything else the gate decided to run.
-            shim.write_text(
-                "#!/usr/bin/env bash\n"
-                'args=("$@")\n'
-                'for i in "${!args[@]}"; do\n'
-                '  if [ "${args[$i]}" = "--" ]; then args=("${args[@]:$((i+1))}"); break; fi\n'
-                "done\n"
-                'if [ "${args[-1]}" = precheck ]; then\n'
-                '  code=$(head -n1 "$STUB_CODES")\n'
-                '  tail -n +2 "$STUB_CODES" > "$STUB_CODES.rest"\n'
-                '  mv "$STUB_CODES.rest" "$STUB_CODES"\n'
-                '  echo precheck >> "$STUB_CODES.log"\n'
-                '  exit "${code:-0}"\n'
-                "fi\n"
-                'echo "ran: ${args[*]}"\n',
-                encoding="utf-8",
-            )
-            shim.chmod(0o755)
-            env = dict(
-                os.environ,
-                PATH=f"{bin_dir}:{os.environ['PATH']}",
-                HOME=tmp,
-                STUB_CODES=str(codes_file),
-                TA_GATE_BOARD_ATTEMPTS=str(attempts),
-                TA_GATE_BOARD_WAIT="0",
-            )
-            command = [str(GATE), agent]
-            if variant is not None:
-                command.append(variant)
-            result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=120)
-            log = Path(str(codes_file) + ".log")
-            result.attempts = len(log.read_text(encoding="utf-8").splitlines()) if log.is_file() else 0
-            return result
+        self.run_number += 1
+        run_dir = self.root / f"run-{self.run_number}"
+        run_dir.mkdir()
+        codes_file = run_dir / "codes"
+        codes_file.write_text("\n".join(str(c) for c in codes) + "\n", encoding="utf-8")
+        records = run_dir / "records.jsonl"
+        ambient_sentinel = run_dir / "ambient-python-used"
+        env = dict(
+            os.environ,
+            PATH=f"{self.ambient_bin}:{os.environ['PATH']}",
+            HOME=str(home or self.root / "home"),
+            STUB_CODES=str(codes_file),
+            STUB_RECORDS=str(records),
+            AMBIENT_SENTINEL=str(ambient_sentinel),
+            TA_GATE_BOARD_ATTEMPTS=str(attempts),
+            TA_GATE_BOARD_WAIT="0",
+            TA_RUNTIME_PYTHONPATH=str(self.product),
+            TA_SECRETARY_REPO=str(self.root / "configured-but-not-selected"),
+            VIRTUAL_ENV=str(self.root / "activated-candidate-venv"),
+        )
+        for name, value in (env_overrides or {}).items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+        command = [str(GATE), agent]
+        if variant is not None:
+            command.append(variant)
+        result = subprocess.run(command, check=False, capture_output=True, text=True, env=env, timeout=120)
+        log = Path(str(codes_file) + ".log")
+        result.attempts = len(log.read_text(encoding="utf-8").splitlines()) if log.is_file() else 0
+        result.records = records
+        self.assertFalse(ambient_sentinel.exists(), result.stderr)
+        return result
+
+    def records(self, result: subprocess.CompletedProcess) -> list[dict]:
+        if not result.records.is_file():
+            return []
+        return [json.loads(line) for line in result.records.read_text(encoding="utf-8").splitlines() if line]
+
+    def assert_selected_venv(self, result: subprocess.CompletedProcess, root: Path) -> None:
+        records = self.records(result)
+        self.assertTrue(records)
+        expected_python = str(root / ".venv" / "bin" / "python3")
+        expected_prefix = str(root / ".venv")
+        self.assertEqual({record["executable"] for record in records}, {expected_python})
+        self.assertEqual({record["prefix"] for record in records}, {expected_prefix})
 
     def test_a_board_that_comes_up_during_the_wait_still_gets_its_run(self):
         """The whole point: the run happens instead of being spent on the boot race."""
@@ -301,12 +413,15 @@ class GateTests(unittest.TestCase):
         work = self.run_gate([0])
         self.assertEqual(work.returncode, 0)
         self.assertIn("dispatch", work.stdout)
+        self.assert_selected_venv(work, self.product)
         skip = self.run_gate([100])
         self.assertEqual(skip.returncode, 0)
         self.assertIn("--cleanup-only", skip.stdout)
+        self.assert_selected_venv(skip, self.product)
         broke = self.run_gate([2])
         self.assertEqual(broke.returncode, 2)
         self.assertIn("ERROR (rc=2)", broke.stderr)
+        self.assert_selected_venv(broke, self.product)
         # Only the board's own code is waited on; a broken precheck is not re-run.
         self.assertEqual(broke.attempts, 1)
 
@@ -323,17 +438,101 @@ class GateTests(unittest.TestCase):
                 result = self.run_gate([0], agent=agent)
                 self.assertEqual(result.returncode, 0)
                 self.assertIn(f"-m secretary.dispatch.standing_agent {agent} dispatch", result.stdout)
+                self.assert_selected_venv(result, self.product)
 
         curator = self.run_gate([0], agent="curator")
         self.assertEqual(curator.returncode, 0)
         self.assertIn("-m triggered_agents curator dispatch", curator.stdout)
         self.assertNotIn("secretary.dispatch.standing_agent", curator.stdout)
+        self.assert_selected_venv(curator, self.product)
 
     def test_deep_sweep_keeps_its_ungated_variant_through_the_standing_root(self):
         result = self.run_gate([], agent="steward", variant="deep-sweep")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.attempts, 0)
         self.assertIn("-m secretary.dispatch.standing_agent steward dispatch deep-sweep", result.stdout)
+        self.assert_selected_venv(result, self.product)
+
+    def test_curator_enters_and_leaves_role_env_with_the_selected_venv_not_ambient_python(self):
+        """Reproduce the live split without consulting the host's system site-packages."""
+        ambient = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-P",
+                "-m",
+                "triggered_agents.runtime.role_env",
+                "exec",
+                "--role",
+                "curator",
+                "--",
+                "true",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PYTHONPATH": str(self.product / "src")},
+            timeout=120,
+        )
+        self.assertNotEqual(ambient.returncode, 0)
+        self.assertIn("ModuleNotFoundError", ambient.stderr)
+        self.assertIn("referencing", ambient.stderr)
+
+        result = self.run_gate([100], agent="curator")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.attempts, 1)
+        self.assertIn("--cleanup-only", result.stdout)
+        self.assert_selected_venv(result, self.product)
+        self.assertEqual(
+            [record["kind"] for record in self.records(result)], ["role_env", "role", "role_env", "role"]
+        )
+
+    def test_every_supported_root_precedence_selects_its_own_venv(self):
+        runtime = self.make_product(self.root / "runtime-wins")
+        configured = self.make_product(self.root / "configured")
+        home = self.root / "home-default"
+        fallback = self.make_product(home / "secretary")
+
+        cases = (
+            (
+                "runtime",
+                {"TA_RUNTIME_PYTHONPATH": str(runtime), "TA_SECRETARY_REPO": str(configured)},
+                runtime,
+            ),
+            ("configured", {"TA_RUNTIME_PYTHONPATH": None, "TA_SECRETARY_REPO": str(configured)}, configured),
+            ("home", {"TA_RUNTIME_PYTHONPATH": None, "TA_SECRETARY_REPO": None}, fallback),
+        )
+        for name, overrides, expected in cases:
+            with self.subTest(name):
+                result = self.run_gate([100], agent="curator", env_overrides=overrides, home=home)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_selected_venv(result, expected)
+
+    def test_missing_non_executable_and_wrong_venv_interpreters_fail_before_precheck(self):
+        missing = self.root / "missing"
+        non_executable = self.root / "non-executable"
+        (non_executable / "src").mkdir(parents=True)
+        interpreter = non_executable / ".venv" / "bin" / "python3"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.write_text("not executable\n", encoding="utf-8")
+        wrong = self.root / "wrong"
+        (wrong / "src").mkdir(parents=True)
+        wrong_interpreter = wrong / ".venv" / "bin" / "python3"
+        wrong_interpreter.parent.mkdir(parents=True)
+        wrong_interpreter.symlink_to(sys.executable)
+
+        for name, root in (("missing", missing), ("non-executable", non_executable), ("wrong", wrong)):
+            with self.subTest(name):
+                result = self.run_gate(
+                    [0], agent="curator", env_overrides={"TA_RUNTIME_PYTHONPATH": str(root)}
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.attempts, 0)
+                self.assertEqual(self.records(result), [])
+                self.assertIn(str(root), result.stderr)
+                self.assertIn("secretary upgrade --no-pull --product-root", result.stderr)
+                self.assertIn("Do not use system-wide pip", result.stderr)
 
 
 class UnitSpecTests(unittest.TestCase):
