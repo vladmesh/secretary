@@ -48,7 +48,44 @@ export PATH="$HOME/.local/bin:$HOME/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/
 # materialized from an alternate checkout sets TA_SECRETARY_REPO in the unit it renders, and
 # skipping that name here would start the role out of ~/secretary — a checkout the operator may
 # never have upgraded, or may not have at all.
-export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary}}/src${PYTHONPATH:+:$PYTHONPATH}"
+product_root="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary}}"
+selected_product_root="$product_root"
+
+# Resolve the root once, before starting a Python process, so the source tree, managed interpreter
+# and nested role command cannot come from different checkouts.  The interpreter's resolved binary
+# may legitimately be the base Python (normal venvs often use a symlink), so verify its runtime
+# prefix instead of requiring the binary's symlink target to sit below .venv.
+if [ ! -d "$product_root" ] || ! product_root="$(cd -P -- "$product_root" && pwd)"; then
+    echo "[ta-gate] configuration error: selected product checkout '$selected_product_root' is missing or not a directory; repair it through the supported install/upgrade path: secretary upgrade --no-pull --product-root '$selected_product_root'. Do not use system-wide pip." >&2
+    exit 1
+fi
+if [ ! -d "$product_root/src" ]; then
+    echo "[ta-gate] configuration error: selected product checkout '$product_root' has no source tree; repair it through the supported install/upgrade path: secretary upgrade --no-pull --product-root '$product_root'. Do not use system-wide pip." >&2
+    exit 1
+fi
+
+managed_venv="$product_root/.venv"
+managed_python="$managed_venv/bin/python3"
+if [ ! -f "$managed_python" ] || [ ! -x "$managed_python" ]; then
+    echo "[ta-gate] configuration error: selected product checkout '$product_root' has no executable managed interpreter at '$managed_python'; repair it through the supported install/upgrade path: secretary upgrade --no-pull --product-root '$product_root'. Do not use system-wide pip." >&2
+    exit 1
+fi
+if ! "$managed_python" -I -c '
+import os
+import sys
+
+expected = os.path.normcase(os.path.realpath(sys.argv[1]))
+actual = os.path.normcase(os.path.realpath(sys.prefix))
+exec_prefix = os.path.normcase(os.path.realpath(sys.exec_prefix))
+expected_executable = os.path.normcase(os.path.realpath(sys.argv[2]))
+actual_executable = os.path.normcase(os.path.realpath(sys.executable))
+raise SystemExit(0 if actual == expected and exec_prefix == expected and actual_executable == expected_executable else 1)
+' "$managed_venv" "$managed_python"; then
+    echo "[ta-gate] configuration error: selected product checkout '$product_root' has an interpreter at '$managed_python' that is not its managed venv; repair it through the supported install/upgrade path: secretary upgrade --no-pull --product-root '$product_root'. Do not use system-wide pip." >&2
+    exit 1
+fi
+
+export PYTHONPATH="$product_root/src${PYTHONPATH:+:$PYTHONPATH}"
 
 agent="${1:?usage: ta-gate.sh <agent> [variant]}"
 variant="${2:-}"
@@ -64,15 +101,15 @@ case "$agent" in
 esac
 
 run_role_env() {
-    python3 -P -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
+    "$managed_python" -P -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
 }
 
 exec_role_env() {
-    exec python3 -P -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
+    exec "$managed_python" -P -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
 }
 
 if [ -n "$variant" ]; then
-    exec_role_env python3 -P -m "$role_module" "$agent" dispatch "$variant"
+    exec_role_env "$managed_python" -P -m "$role_module" "$agent" dispatch "$variant"
 fi
 
 # How long the gate keeps re-attempting a precheck that could not reach the board: attempts spaced
@@ -84,7 +121,7 @@ board_wait="${TA_GATE_BOARD_WAIT:-120}"
 
 attempt=1
 while : ; do
-    run_role_env python3 -P -m "$role_module" "$agent" precheck
+    run_role_env "$managed_python" -P -m "$role_module" "$agent" precheck
     rc=$?
     if [ "$rc" -ne 101 ] || [ "$attempt" -ge "$board_attempts" ]; then
         break
@@ -95,10 +132,10 @@ while : ; do
 done
 
 if [ "$rc" -eq 0 ]; then
-    exec_role_env python3 -P -m "$role_module" "$agent" dispatch
+    exec_role_env "$managed_python" -P -m "$role_module" "$agent" dispatch
 elif [ "$rc" -eq 100 ]; then
     echo "[ta-$agent] precheck: no change, skill dispatch skipped"
-    exec_role_env python3 -P -m "$role_module" "$agent" dispatch --cleanup-only
+    exec_role_env "$managed_python" -P -m "$role_module" "$agent" dispatch --cleanup-only
 elif [ "$rc" -eq 101 ]; then
     # No dispatch and no cleanup: both talk to the same board none of the attempts could reach.
     echo "[ta-$agent] precheck: board unreachable after $board_attempts attempts; run not taken" >&2

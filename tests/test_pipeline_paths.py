@@ -68,13 +68,16 @@ class LauncherCheckoutTests(unittest.TestCase):
 
     def script_pythonpath(self, script: str, env: dict[str, str]) -> str:
         """Run the shipped PYTHONPATH assignment itself, in a shell with only this environment."""
-        line = next(
-            line
-            for line in (self.SCRIPTS / script).read_text(encoding="utf-8").splitlines()
-            if line.startswith("export PYTHONPATH=")
-        )
+        lines = (self.SCRIPTS / script).read_text(encoding="utf-8").splitlines()
+        line = next(line for line in lines if line.startswith("export PYTHONPATH="))
+        setup = ""
+        if script == "secretary-agent-gate.sh":
+            # The gate resolves this once, then derives both PYTHONPATH and its managed interpreter
+            # from that same root.
+            setup = next(line for line in lines if line.startswith("product_root=")) + "\n"
         result = subprocess.run(
-            ["/bin/sh", "-c", f'set -u\n{line}\nprintf "%s" "$PYTHONPATH"'],
+            ["/bin/sh", "-c", f'set -u\n{setup}{line}\nprintf "%s" "$PYTHONPATH"'],
+            check=False,
             capture_output=True,
             text=True,
             env=env,

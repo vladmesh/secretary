@@ -2383,6 +2383,26 @@ The sources are the live data plane, not a checkout:
   same Secretary root; cleanup-only and terminal finalizers retain their existing zero-side-effect
   and lifecycle paths.
 
+  Before it imports either role root, the gate resolves its checkout as
+  `TA_RUNTIME_PYTHONPATH`, then `TA_SECRETARY_REPO`, then `$HOME/secretary`. It starts both the
+  outer `triggered_agents.runtime.role_env` command and the Python command inside it with that
+  checkout's exact `.venv/bin/python3`; an activated venv, a `python3` on `PATH`, and another
+  checkout cannot supply either interpreter. The gate verifies that the executable is a venv whose
+  prefix is that checkout's `.venv`, so normal venv symlinks to a base Python remain supported.
+
+  A `configuration error` naming the selected checkout means its source tree or managed
+  interpreter is missing, non-executable, or belongs to another venv. It fails before precheck and
+  does not turn into the normal skip/defer outcomes. Repair the installation as its owner through
+  the supported materialization path, from a healthy installed Secretary command:
+
+  ```bash
+  secretary upgrade --no-pull --product-root /absolute/path/to/selected/checkout
+  ```
+
+  Inspect the rendered role units or `secretary doctor` first if the selected root is unexpected.
+  Do not install packages with system-wide `pip`, copy site-packages, or point `PYTHONPATH` at a
+  different checkout as a repair.
+
 - curator, steward and retro write a run log through their shared agent state, that is, under `$TA_STATE/<agent>/`
   or, when that variable is unset (as it is in the packaged units), under the data directory. Healthy means the last
   event that answered, that is, one whose result is neither `error` nor `board-unreachable` (the record of a tick the
