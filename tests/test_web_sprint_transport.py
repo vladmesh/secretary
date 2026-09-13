@@ -443,7 +443,7 @@ class SprintRouteTests(SprintTransportFixture):
         self.assertEqual(self.sprint_ops.calls, [])
 
     def test_an_unrouted_method_on_a_sprint_path_is_405(self) -> None:
-        self.assertEqual(self.get("/sprints").status, 405)
+        self.assertEqual(self.app.handle("PUT", "/sprints").status, 405)
         self.assertEqual(self.submit({}, path="/sprints/new").status, 405)
         self.assertEqual(self.sprint_ops.calls, [])
 

@@ -464,6 +464,7 @@ class RouteTableTests(TransportFixture):
     PUBLISHED: ClassVar[set[tuple[str, str]]] = {
         ("GET", "/"),
         ("GET", "/tasks/{ref}"),
+        ("GET", "/sprints"),
         ("GET", "/sprints/new"),
         ("POST", "/sprints"),
         ("GET", "/sprints/{ref}"),

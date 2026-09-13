@@ -3932,6 +3932,7 @@ neither reaches a handler.
 | --- | --- | --- | --- |
 | GET | `/` | `reads.system_snapshot` | the dashboard: health with its reason and age, projects, current cards, running agents |
 | GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`) | one card: state, attempt, heads, product runs, worker and reviewer output, result, event tail |
+| GET | `/sprints` | `sprint_reads.sprint_list` | every sprint as a table; `?status=open` (repeatable) filters |
 | GET | `/sprints/new` | `sprint_reads.sprint_options` | the "new sprint" form, on this installation's own products, open issues, projects and head profiles |
 | POST | `/sprints` | `sprint_ops.sprint_create` | open one sprint from that form; 303 to its page, or the form again with what was refused |
 | GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: what it was opened with, its pins, its current card, its last resume, and whether its observer is up |

@@ -85,6 +85,7 @@ class Route:
 ROUTES: tuple[Route, ...] = (
     Route("GET", "/", "dashboard", "reads.system_snapshot", page=True),
     Route("GET", "/tasks/{ref}", "task_page", "reads.task_snapshot", page=True),
+    Route("GET", "/sprints", "sprints_page", "sprint_reads.sprint_list", page=True),
     Route("GET", "/sprints/new", "sprint_form", "sprint_reads.sprint_options", page=True),
     Route("POST", "/sprints", "sprint_create", "sprint_ops.sprint_create", body=FORM_BODY, page=True),
     Route("GET", "/sprints/{ref}", "sprint_page", "sprint_reads.sprint_state", page=True),
@@ -414,6 +415,15 @@ class WebApp:
         ref = params["ref"]
         snapshot = self.reads.task_snapshot(ref, events=_events_count(query))
         return _html(200, pages.task(snapshot, runs=self._runs_or_reason(ref)))
+
+    def _sprints_page(self, _params, query, _body) -> Response:
+        statuses = [value for value in query.get("status") or [] if value]
+        return _html(
+            200,
+            pages.sprints_page(
+                self.sprint_reads.sprint_list(statuses=statuses or None), statuses=statuses
+            ),
+        )
 
     def _commands_page(self, _params, query, _body) -> Response:
         return _html(
