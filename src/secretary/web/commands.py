@@ -20,7 +20,8 @@ from secretary.webproto.command_reads import CommandReadLayer
 from secretary.webproto.ops import OperationLayer
 from secretary.webproto.pause_ops import PauseOperationLayer
 from secretary.webproto.pause_reads import PauseReadLayer
-from secretary.webproto.po_recovery import recover_po_turns
+from secretary.webproto.po_auth import PoTokenLayer
+from secretary.webproto.po_ops import PoLayer
 from secretary.webproto.reads import ReadLayer
 from secretary.webproto.sprint_ops import SprintOperationLayer
 from secretary.webproto.sprint_reads import SprintReadLayer
@@ -62,6 +63,8 @@ def add_web_serve_subcommands(subparsers) -> None:
 
 
 def run_web_serve(args: argparse.Namespace) -> int:
+    # The one PO runner of this process: built here, recovering what a previous run left running.
+    po = PoLayer(args.instance, data_dir=args.data_dir)
     app = WebApp(
         ReadLayer(args.instance, data_dir=args.data_dir, offline=bool(args.offline)),
         OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
@@ -74,8 +77,10 @@ def run_web_serve(args: argparse.Namespace) -> int:
         CommandReadLayer(args.instance, data_dir=args.data_dir),
         CardOperationLayer(args.instance, data_dir=args.data_dir),
         ProviderUsageLayer(),
+        po_auth=PoTokenLayer(args.instance, data_dir=args.data_dir),
+        po=po,
     )
-    for line in recover_po_turns(args.instance, args.data_dir):
+    for line in po.start_service():
         print(line, file=sys.stderr)
     try:
         return serve(app, host=args.host, port=args.port)

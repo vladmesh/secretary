@@ -125,3 +125,18 @@ class OperationPending(ReadError):
     """
 
     code = "backend_unavailable"
+
+
+# -- the PO head half (secretary-1631) ----------------------------------------------------------
+
+
+class PoSessionNotFound(ReadError):
+    """The board store answered and holds no PO session under this id."""
+
+    code = "not_found"
+
+
+class PoTurnInProgress(ReadError):
+    """A turn is already running in this PO session; nothing was written."""
+
+    code = "owner_conflict"

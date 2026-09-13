@@ -293,6 +293,53 @@ journalctl -u secretary-web.service | grep 'PO turn'
 psql "$SECRETARY_DB_READ_URL" -c "SELECT session_id, seq, state, reason FROM po_turns WHERE state <> 'completed' ORDER BY started_at DESC LIMIT 10"
 ```
 
+### The PO head in the dashboard
+
+`secretary web-serve` builds one `PoRunner` when it starts (and recovers turns with it); `/po` talks to
+the PO head through it. A PO head is a shell on this host, so `/po` has its own token on top of the
+front's password.
+
+**The token** is `DATA_DIR/po-web-token`: one line, mode 0600, owned by the runtime user, outside
+`DATA_DIR/po`. The `po-token` step of install and upgrade creates it from `secrets` (256 bits) when it
+is absent and never rewrites an existing one. Read it on the host:
+
+```bash
+sudo -u RUNTIME_USER cat DATA_DIR/po-web-token
+```
+
+**Rotate** by deleting the file and running the step again (`secretary upgrade`, or install). Every
+browser cookie issued under the old token stops working on the next request; nothing needs a restart.
+
+**Logging in.** Open `/po`, enter the token. The form posts to `/po/login`, which compares it with
+`hmac.compare_digest` and sets cookie `secretary_po`: `HttpOnly; SameSite=Strict; Path=/po`, 30 days,
+plus `Secure` when the request came through the TLS front (the front sets `X-Forwarded-Proto: https`).
+The cookie value is an HMAC keyed by the token, never the token. Without a valid cookie every `/po`
+route answers 401 (a page with the login form, or JSON `po_token_required`) before the runner or the
+board store is touched; a missing token file answers 503. Routes: [Protocols](PROTOCOLS.md#routes).
+
+**The page.** `/po` lists sessions (CLI, model, created, state, whether a turn runs) and opens a new
+one with a CLI and a model from the list below. A session page shows the owner's messages, the PO
+head's final answers and each turn's state (`running`, `completed`, `failed` or `interrupted` with its
+reason), a message box, and `stop turn` while a turn runs; while it runs the page polls
+`/po/api/sessions/ID` every 3 seconds and reloads when the turn ends. A message sent while a turn runs
+is refused on the page (409) and nothing is written. Each form carries a request id minted when the
+page was served, recorded under `DATA_DIR/webproto/po-requests/`, so a double click creates one session
+or starts one turn. The dashboard's `Product owner` panel shows only the number of running PO turns
+with a link to `/po`; it needs no token, and a PO store that does not answer hides the number.
+
+**Models.** `instance.yaml`:
+
+```yaml
+po:
+  models:
+    claude: [opus, sonnet]
+    codex: [gpt-5.6-sol, gpt-5.6-terra]
+```
+
+Without `po.models` the product default is exactly that list. A CLI left out keeps its default; an
+empty list offers that CLI nothing. Creating a session with a CLI or model outside the list is refused
+(400). The list is read on every request, so an edit needs no restart.
+
 ### Read-only checkpoint and quiet-tick check
 
 Observe an ordinary, already-authorized board transition; do not create a card change, invoke

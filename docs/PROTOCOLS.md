@@ -2767,7 +2767,7 @@ unrouted method on a routed path is 405; neither reaches a handler.
 
 | method | route | operation | answers |
 | --- | --- | --- | --- |
-| GET | `/` | `reads.system_snapshot` | the compact dashboard: active sprints, pipeline controls, provider limits, doctor and server summary |
+| GET | `/` | `reads.system_snapshot` (+ `po.po_running_count`) | the compact dashboard: active sprints, pipeline controls, provider limits, doctor and server summary, running PO turns |
 | GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`) | one card: state, attempt, heads, product runs, worker and reviewer output, result, event tail |
 | GET | `/sprints` | `sprint_reads.sprint_list` | active sprints or the searchable `?view=archive`, optionally filtered by `q` and `project` |
 | GET | `/projects` | `reads.system_snapshot` | registered projects |
@@ -2794,6 +2794,13 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | GET | `/api/history/{request_id}` | `command_reads.command_request` | what became of one request id |
 | POST | `/api/tasks/{ref}/comment` | `card_ops.task_comment` | one comment on a card, under role `po` and actor `web`; body `{request_id, body}` |
 | POST | `/api/tasks/{ref}/move` | `card_ops.task_move` | move a card, the owner's intervention; body `{request_id, target, reason, sprint_override?, sprint_override_reason?}` |
+| POST | `/po/login` | `po_auth.po_login` | the PO token form; body `token`; 303 to `/po` with cookie `secretary_po`, or 401. The one `/po` route without the token |
+| GET | `/po` | `po.po_overview` | PO sessions and the new-session form (CLI and model from `po.models`) |
+| POST | `/po/sessions` | `po.po_create_session` | open a PO session; form `request_id, cli, model`; 303 to it, or the page with the refusal |
+| GET | `/po/sessions/{session}` | `po.po_session` | one PO session: feed, turn states, message box, stop while a turn runs |
+| POST | `/po/sessions/{session}/messages` | `po.po_send` | start one turn; form `request_id, text`; a running turn is refused (409) and nothing is written |
+| POST | `/po/sessions/{session}/stop` | `po.po_stop` | stop turn `seq` if it is the running one; form `seq` |
+| GET | `/po/api/sessions/{session}` | `po.po_session` | the session page's document, polled while a turn runs |
 
 The dashboard (`GET /`) reads four documents — system snapshot, pause state, open sprints, last commands
 — and a refusing one marks only its own section; only the snapshot's refusal fails the page. Card and
@@ -2803,7 +2810,15 @@ so the owner's intervention on a parked card is a move.
 
 A POST body is a JSON object with only the listed fields, except `/sprints`, which takes the submitted
 form (`application/x-www-form-urlencoded`) with `request_id`, `product`, `goal`, `definition_of_done`,
-`issues`, `projects`, `observer`, `worker` and `reviewer`. An unknown field is refused.
+`issues`, `projects`, `observer`, `worker` and `reviewer`, and the `/po` POSTs, which take forms too. An
+unknown field is refused.
+
+**`/po` is behind the PO token.** Every route whose path is `/po` or starts with `/po/` requires cookie
+`secretary_po` whose value matches the HMAC of `DATA_DIR/po-web-token`, checked once in
+`WebApp.handle` after the cross-origin check and before any handler; the only exception is `POST
+/po/login`. Without it a page route answers 401 with the login form and a JSON route 401
+`po_token_required`; neither reaches the PO runner or the board store. Token and cookie:
+[Operations](OPERATIONS.md#the-po-head-in-the-dashboard).
 
 ### Opening a sprint from a browser
 

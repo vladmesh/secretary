@@ -77,6 +77,7 @@ from secretary.host_apply import (
 from secretary.memory.client_config import ClientConfigError, reconcile_clients
 from secretary.memory.health import MemoryProbeError, probe_memory
 from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
+from secretary.po import token as po_token
 from secretary.po import workspace as po_workspace
 from secretary.projects.availability import ProjectAvailability
 from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
@@ -513,6 +514,27 @@ def step_po_workspace_owner(context: UpgradeContext) -> StepResult:
     except GitError as exc:
         return StepResult("po-workspace-owner", "failed", str(exc))
     return StepResult("po-workspace-owner", "unchanged", f"{workspace} owned by {context.runtime_user}")
+
+
+def step_po_token(context: UpgradeContext) -> StepResult:
+    """Create `DATA_DIR/po-web-token` (0600, runtime user) if absent; an existing token is never rewritten.
+
+    Rotation is deleting the file and running this step again.
+    """
+    data_dir = _data_dir(context)
+    if data_dir is None:
+        return StepResult("po-token", "skipped", "instance data directory is unresolved")
+    path = po_token.token_path(data_dir)
+    try:
+        created = po_token.ensure_token(data_dir, dry_run=context.dry_run)
+        if not context.dry_run:
+            _set_runtime_owner(path, context.runtime_user)
+    except (po_token.TokenError, GitError) as exc:
+        return StepResult("po-token", "failed", str(exc))
+    if created:
+        action = "would create" if context.dry_run else "created"
+        return StepResult("po-token", "changed", f"{action} {path} (mode 0600)")
+    return StepResult("po-token", "unchanged", f"{path} exists; never rewritten")
 
 
 def _data_dir(context: UpgradeContext) -> Path | None:
@@ -1597,6 +1619,7 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_worktrees,
     step_role_skills,
     step_po_workspace_owner,
+    step_po_token,
     step_host,
     step_automations,
     step_memory,

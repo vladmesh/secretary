@@ -241,9 +241,7 @@ class PoRunner:
         if not text.strip():
             raise RunnerError("an empty message starts no turn")
         with self._lock:
-            turn = self.store.begin_turn(
-                session_id, text, lambda seq: self.files(session_id, seq).stdout
-            )
+            turn = self.store.begin_turn(session_id, text, lambda seq: self.files(session_id, seq).stdout)
             files = self.files(session_id, turn.seq)
             try:
                 # Read after the claim: the previous turn may have recorded Codex's thread id.
@@ -259,7 +257,9 @@ class PoRunner:
                 files.directory.mkdir(parents=True, exist_ok=True)
                 files.prompt.write_text(text, encoding="utf-8")
             except Exception as exc:
-                self._abandon(session_id, turn.seq, None, f"could not prepare the turn: {type(exc).__name__}: {exc}")
+                self._abandon(
+                    session_id, turn.seq, None, f"could not prepare the turn: {type(exc).__name__}: {exc}"
+                )
                 raise
             process = self._launch(session, turn.seq, argv, files)
             try:
@@ -274,12 +274,17 @@ class PoRunner:
             except BaseException as exc:
                 self._live.pop((session_id, turn.seq), None)
                 self._abandon(
-                    session_id, turn.seq, process, f"the turn's waiter did not start: {type(exc).__name__}: {exc}"
+                    session_id,
+                    turn.seq,
+                    process,
+                    f"the turn's waiter did not start: {type(exc).__name__}: {exc}",
                 )
                 raise
         return self.store.turn(session_id, turn.seq)
 
-    def _launch(self, session: Session, seq: int, argv: list[str], files: TurnFiles) -> subprocess.Popen[bytes]:
+    def _launch(
+        self, session: Session, seq: int, argv: list[str], files: TurnFiles
+    ) -> subprocess.Popen[bytes]:
         """Start one CLI process for a turn and record it, or leave no live process group behind.
 
         Output is appended, so a turn relaunched by `_resume_instead` keeps both attempts' raw output.
@@ -304,8 +309,12 @@ class PoRunner:
             self._abandon(session.session_id, seq, None, reason)
             raise RunnerError(reason) from None
         try:
-            if not self.store.record_process(session.session_id, seq, process.pid, process_identity(process.pid)):
-                raise RunnerError(f"turn {seq} of PO session {session.session_id} was settled while it started")
+            if not self.store.record_process(
+                session.session_id, seq, process.pid, process_identity(process.pid)
+            ):
+                raise RunnerError(
+                    f"turn {seq} of PO session {session.session_id} was settled while it started"
+                )
         except BaseException as exc:
             self._abandon(
                 session.session_id,
@@ -341,10 +350,20 @@ class PoRunner:
 
     def stop(self, session_id: str) -> Turn | None:
         """Kill the running turn's process group; the turn is `interrupted`, the session goes on."""
+        return self._interrupt(session_id, None)
+
+    def stop_turn(self, session_id: str, seq: int) -> Turn | None:
+        """`stop`, but only when turn `seq` is the one running: a stop form left open stops nothing newer.
+
+        The check and the kill happen under the same lock, so a turn started in between is never hit.
+        """
+        return self._interrupt(session_id, seq)
+
+    def _interrupt(self, session_id: str, seq: int | None) -> Turn | None:
         session = self.store.session(session_id)
         with self._lock:
             running = self.store.running_turns(session_id)
-            if not running:
+            if not running or (seq is not None and running[0].seq != seq):
                 return None
             turn = running[0]
             # Mark first, so the waiter sees a settled turn and does not call the kill a failure.
@@ -368,9 +387,7 @@ class PoRunner:
                 if (turn.session_id, turn.seq) in self._live:
                     continue
                 killed = bool(
-                    turn.pid
-                    and turn.process_identity
-                    and process_identity(turn.pid) == turn.process_identity
+                    turn.pid and turn.process_identity and process_identity(turn.pid) == turn.process_identity
                 )
                 reason = RECOVERED_REASON + ("; its process was killed" if killed else "")
                 settled = self.store.finish_turn(turn.session_id, turn.seq, INTERRUPTED, reason)

@@ -378,7 +378,10 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn("sprint:7", page)
         self.assertIn("attention required", page)
         self.assertIn("Usage limits", page)
-        self.assertIn("Chat — coming later", page)
+        # The chat placeholder became the PO indicator (secretary-1631); an app built without the PO
+        # layers draws no PO panel at all.
+        self.assertNotIn("Chat — coming later", page)
+        self.assertNotIn('href="/po"', page.split("<main>", 1)[1])
         self.assertNotIn("Recent commands", page)
         self.assertNotIn("Start a run by hand", page)
         self.assertEqual([name for name, _ in self.sprint_reads.calls], ["sprint_list"])
