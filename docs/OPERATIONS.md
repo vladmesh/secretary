@@ -256,6 +256,17 @@ is one CLI process with full permissions (`--dangerously-skip-permissions`,
 | Claude | `claude -p --output-format json --session-id UUID` (UUID chosen at session creation) | `--resume UUID` once a turn completed; before that `--session-id UUID` again | `result` of the JSON result object |
 | Codex | `codex exec --json -C DATA_DIR/po -` | `codex exec resume THREAD_ID -` (`thread_id` from turn 1's event stream) | the `-o` file |
 
+**Environment.** A turn gets the `web-serve` environment (HOME, auth, `SECRETARY_*`, `TA_*` kept) with
+the directory of the interpreter running `web-serve` (the product runtime, `/home/dev/secretary/.venv/bin`
+on prod) first on `PATH` and the product source it imports first on `PYTHONPATH`. So `python3 -P -m
+secretary ...` and `secretary ...` from the PO workspace run the product, not the system Python.
+`PoRunner.turn_environment()` computes it for both `/po` and recovery; an explicit `env=` replaces it.
+Check, as the runtime user from `DATA_DIR/po` (prints the service interpreter, then `ok`):
+
+```bash
+BIN=$(dirname "$(tr '\0' '\n' </proc/$(systemctl show -p MainPID --value secretary-web.service)/cmdline | head -1)"); echo "$BIN"; env PATH="$BIN:$PATH" sh -c 'python3 -P -m secretary --help >/dev/null && secretary --help >/dev/null && echo ok'
+```
+
 Board store tables (revisions `0008_po_sessions`, `0009_po_requests`):
 
 | Table | Holds |
