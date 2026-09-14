@@ -348,11 +348,13 @@ with a link to `/po`; it needs no token, and a PO store that does not answer hid
 ```yaml
 po:
   models:
-    claude: [opus, sonnet]
-    codex: [gpt-5.6-sol, gpt-5.6-terra]
+    claude: [fable, opus, sonnet]
+    codex: [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna]
 ```
 
-Without `po.models` the product default is exactly that list. A CLI left out keeps its default; an
+Without `po.models` the product default is exactly that list; the form's first model is the first one
+listed. `gpt-5.6-astra` is not offered: Codex signed in with a ChatGPT account refuses it (400 "not
+supported when using Codex with a ChatGPT account"). A CLI left out keeps its default; an
 empty list offers that CLI nothing. Creating a session with a CLI or model outside the list is refused
 (400). The list is read on every request, so an edit needs no restart.
 

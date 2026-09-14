@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 
 from secretary.po import store as po_store
 from secretary.po import token as po_token
+from secretary.po.models import DEFAULT_MODELS
 from secretary.po.runner import PoRunner
 from secretary.po.store import PoStore
 from secretary.web.app import WebApp
@@ -154,6 +155,28 @@ class PoWebOperationTests(unittest.TestCase):
                 self.assertIn("refused (validation)", response.body.decode())
         with self.assertRaises(ValidationRefused):
             self.layer.po_create_session(request_id="direct", cli="codex", model="gpt-4")
+        self.assertEqual([item.session_id for item in self.store.sessions()], [session_id])
+
+    def test_the_default_list_opens_a_claude_fable_session_and_still_refuses_astra(self) -> None:
+        self.layer = PoLayer(self.root, data_dir=self.data, runner=self.runner, models=DEFAULT_MODELS)
+        self.app = WebApp(
+            *(Recording() for _ in range(8)),
+            po_auth=PoTokenLayer(self.root, data_dir=self.data),
+            po=self.layer,
+        )
+        form = self.get("/po").body.decode()
+        self.assertLess(form.index('value="fable"'), form.index('value="opus"'))
+
+        session_id = self.create("claude", "fable", request_id="create-fable")
+        session = self.store.session(session_id)
+        self.assertEqual((session.cli, session.model), ("claude", "fable"))
+
+        for cli, model in (("codex", "gpt-5.6-astra"), ("claude", "haiku")):
+            with self.subTest(cli=cli, model=model):
+                response = self.post(
+                    "/po/sessions", [("request_id", f"bad-{cli}-{model}"), ("cli", cli), ("model", model)]
+                )
+                self.assertEqual(response.status, 400)
         self.assertEqual([item.session_id for item in self.store.sessions()], [session_id])
 
     def test_the_same_session_form_submitted_twice_is_one_session(self) -> None:
