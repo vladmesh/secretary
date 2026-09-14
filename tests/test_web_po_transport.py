@@ -318,6 +318,15 @@ class PoModelListTests(unittest.TestCase):
         "offsite": {"instance_remote": "git@x:y.git"},
     }
 
+    def test_the_default_offers_the_frontier_models_first(self) -> None:
+        self.assertEqual(
+            DEFAULT_MODELS,
+            {
+                "claude": ("fable", "opus", "sonnet"),
+                "codex": ("gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"),
+            },
+        )
+
     def test_without_a_po_section_the_product_default_applies(self) -> None:
         self.assertEqual(models_from_instance(self.INSTANCE), DEFAULT_MODELS)
         self.assertEqual(models_from_instance({**self.INSTANCE, "po": {}}), DEFAULT_MODELS)

@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 
 from secretary.po import store as po_store
 from secretary.po import token as po_token
+from secretary.po.models import DEFAULT_MODELS
 from secretary.po.runner import PoRunner
 from secretary.po.store import PoStore
 from secretary.web.app import WebApp
@@ -155,6 +156,53 @@ class PoWebOperationTests(unittest.TestCase):
         with self.assertRaises(ValidationRefused):
             self.layer.po_create_session(request_id="direct", cli="codex", model="gpt-4")
         self.assertEqual([item.session_id for item in self.store.sessions()], [session_id])
+
+    def test_the_default_list_opens_fable_and_gpt_6_astra_sessions_and_refuses_an_off_list_model(self) -> None:
+        self.layer = PoLayer(self.root, data_dir=self.data, runner=self.runner, models=DEFAULT_MODELS)
+        self.app = WebApp(
+            *(Recording() for _ in range(8)),
+            po_auth=PoTokenLayer(self.root, data_dir=self.data),
+            po=self.layer,
+        )
+        form = self.get("/po").body.decode()
+        self.assertIn('<option value="fable" data-cli="claude" selected>', form)
+        self.assertEqual(form.count(" selected>"), 2, "only the CLI and its first model are preselected")
+
+        created = []
+        for cli, model in (("claude", "fable"), ("codex", "gpt-6-astra")):
+            session_id = self.create(cli, model, request_id=f"create-{model}")
+            session = self.store.session(session_id)
+            self.assertEqual((session.cli, session.model), (cli, model))
+            created.append(session_id)
+
+        for cli, model in (("claude", "haiku"), ("codex", "gpt-5.6-astra")):
+            with self.subTest(cli=cli, model=model):
+                response = self.post(
+                    "/po/sessions", [("request_id", f"bad-{cli}-{model}"), ("cli", cli), ("model", model)]
+                )
+                self.assertEqual(response.status, 400)
+        self.assertEqual(sorted(item.session_id for item in self.store.sessions()), sorted(created))
+
+    def test_the_new_session_form_preselects_the_first_model_of_the_chosen_cli(self) -> None:
+        from secretary.web.pages import _PO_FORM_SCRIPT, _po_new_session_form
+
+        models = {cli: list(values) for cli, values in DEFAULT_MODELS.items()}
+        for submitted, expected in (
+            ({}, ("claude", "fable")),
+            ({"cli": "claude"}, ("claude", "fable")),
+            ({"cli": "codex"}, ("codex", "gpt-6-astra")),
+            ({"cli": "codex", "model": "fable"}, ("codex", "gpt-6-astra")),
+            ({"cli": "codex", "model": "gpt-5.6-sol"}, ("codex", "gpt-5.6-sol")),
+        ):
+            with self.subTest(submitted=submitted):
+                form = _po_new_session_form(models, request_id="r", submitted=submitted)
+                cli, model = expected
+                self.assertIn(f'<option value="{cli}" selected>', form)
+                self.assertIn(f'<option value="{model}" data-cli="{cli}" selected>', form)
+                self.assertEqual(form.count(" selected>"), 2)
+        # Changing the CLI in the browser selects that CLI's first listed model.
+        self.assertIn("if (owned && first === null) first = option;", _PO_FORM_SCRIPT)
+        self.assertIn("if ((!current || current.disabled) && first) first.selected = true;", _PO_FORM_SCRIPT)
 
     def test_the_same_session_form_submitted_twice_is_one_session(self) -> None:
         first = self.create(request_id="create-twice")

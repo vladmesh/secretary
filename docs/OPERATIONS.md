@@ -348,11 +348,12 @@ with a link to `/po`; it needs no token, and a PO store that does not answer hid
 ```yaml
 po:
   models:
-    claude: [opus, sonnet]
-    codex: [gpt-5.6-sol, gpt-5.6-terra]
+    claude: [fable, opus, sonnet]
+    codex: [gpt-6-astra, gpt-5.6-terra, gpt-5.6-sol, gpt-5.6-luna]
 ```
 
-Without `po.models` the product default is exactly that list. A CLI left out keeps its default; an
+Without `po.models` the product default is exactly that list. The first entry per CLI is preselected in
+the new-session form: `fable` when Claude is chosen, `gpt-6-astra` when Codex is. A CLI left out keeps its default; an
 empty list offers that CLI nothing. Creating a session with a CLI or model outside the list is refused
 (400). The list is read on every request, so an edit needs no restart.
 
