@@ -267,17 +267,29 @@ Check, as the runtime user from `DATA_DIR/po` (prints the service interpreter, t
 BIN=$(dirname "$(tr '\0' '\n' </proc/$(systemctl show -p MainPID --value secretary-web.service)/cmdline | head -1)"); echo "$BIN"; env PATH="$BIN:$PATH" sh -c 'python3 -P -m secretary --help >/dev/null && secretary --help >/dev/null && echo ok'
 ```
 
-Board store tables (revisions `0008_po_sessions`, `0009_po_requests`):
+Board store tables (revisions `0008_po_sessions`, `0009_po_requests`, `0010_po_session_close`):
 
 | Table | Holds |
 | --- | --- |
-| `po_sessions` | id, cli, model, cwd, created_at, state, the CLI's session id |
+| `po_sessions` | id, cli, model, cwd, created_at, state (`open`/`closed`), the CLI's session id, `closed_at` and `closed_by` (set exactly when closed) |
 | `po_turns` | session, seq, started/finished, `running`/`completed`/`failed`/`interrupted`, stdout path, pid, process identity, failure reason |
 | `po_feed` | the owner's messages and the agent's final answers only; no tool calls, no reasoning |
 | `po_requests` | each /po form request id: operation (`po_session_create`, `po_send`), fingerprint of its inputs, the session and, for a send, the turn it made |
 
 A partial unique index allows at most one `running` turn per session: a second send is refused and
 writes nothing. Different sessions run turns in parallel.
+
+**Close.** `PoStore.close_session(session, actor)` locks the session row and, in one transaction, sets
+`state = 'closed'`, `closed_at = now()` and `closed_by`; the CHECK `po_session_closed_iff_audited`
+refuses a closed row without both. A running turn refuses the close (`TurnInProgress`) and writes nothing;
+closing a closed session answers it unchanged with its first `closed_at`/`closed_by`. A send into a closed
+session is refused in the transaction that would create the turn (`SessionClosed`): no turn, feed entry,
+request row or process. A replay of a send made before the close still answers its turn. Nothing is
+deleted and a closed session is not reopened; its feed and raw output stay. Check:
+
+```bash
+psql "$SECRETARY_DB_READ_URL" -c "SELECT session_id, state, closed_at, closed_by FROM po_sessions ORDER BY created_at DESC LIMIT 10"
+```
 
 Raw output of a turn is in `DATA_DIR/po-runs/SESSION/turn-NNNN.{prompt,stdout,stderr,last-message}`,
 outside the workspace. A non-zero exit, or no final answer, makes the turn `failed`; `reason` names the
@@ -329,14 +341,20 @@ The cookie value is an HMAC keyed by the token, never the token. Without a valid
 route answers 401 (a page with the login form, or JSON `po_token_required`) before the runner or the
 board store is touched; a missing token file answers 503. Routes: [Protocols](PROTOCOLS.md#routes).
 
-**The page.** `/po` lists sessions, newest activity first, and opens a new one with a CLI and a model
+**The page.** `/po` lists open sessions, newest activity first, and opens a new one with a CLI and a model
 from the list below. A row's link is the start of the session's first owner message (whitespace
 collapsed, at most 80 characters with `…` when cut, plain text; `no message yet` before the first
 message), then its last activity (the latest of creation, any turn's start or finish, and any feed
-entry), CLI, model, state, whether a turn runs, and the short session id. A session page shows the owner's messages, the PO
+entry), CLI, model, state, whether a turn runs, the short session id and a `close` button. The panel
+links to `closed sessions (N)`, `/po?closed=1`, which lists closed sessions the same way with their
+`closed_at` instead of state and turn, and links back to the open ones. A session page shows the owner's messages, the PO
 head's final answers and each turn's state (`running`, `completed`, `failed` or `interrupted` with its
 reason), a message box (Enter sends, Shift+Enter inserts a newline; the form goes out once until the
-page reloads), and `stop turn` while a turn runs. The PO head's answers are rendered
+page reloads), `stop turn` while a turn runs and `close` while none does. `close` posts to
+`/po/sessions/ID/close` as actor `owner` and returns to `/po`; pressed while a turn runs (from a list row)
+it renders the session refused (409) and closes nothing. A closed session's page stays readable, says
+`closed AT by owner`, and has no message box and no close; a message posted to it anyway is refused (409
+`session_closed`). The running-turn count counts turns, whatever their session's state. The PO head's answers are rendered
 server-side as a safe Markdown subset (headings, emphasis, code, lists, quotes, rules, `http(s)`/`mailto`
 links; the text is escaped first, so raw HTML shows as text); the owner's messages are shown as typed.
 While a turn runs the page polls

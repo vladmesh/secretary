@@ -38,8 +38,9 @@ SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 
 #: The revision this build of the product expects a store to be at.  It is Alembic's head, and
 #: `head_revision()` reads it from the script directory rather than trusting this literal.
-#: `0009_po_requests` is the head: PO sessions, turns and feed, and the one record of /po request ids.
-EXPECTED_SCHEMA_REVISION = "0009_po_requests"
+#: `0010_po_session_close` is the head: PO sessions, turns and feed, the one record of /po request ids,
+#: and who closed a session and when.
+EXPECTED_SCHEMA_REVISION = "0010_po_session_close"
 
 #: A fixed 64-bit key, so every runner of every checkout contends on the same lock.  Any constant
 #: would do; this one is the first 63 bits of sha256("secretary.board.migrations"), recorded here

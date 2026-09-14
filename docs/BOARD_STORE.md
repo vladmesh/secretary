@@ -700,16 +700,18 @@ Revisions (`src/secretary/board/migrations/versions/`):
 | `0006_sprint_transport_key` | `sprints.board_key` |
 | `0007_card_transport_key` | `tasks.board_key` from `card_board_key_seq` |
 | `0008_po_sessions` | PO head `po_sessions`, `po_turns` (one running turn per session), `po_feed` |
-| `0009_po_requests` | `po_requests`: each /po form request id, its operation and input fingerprint, and the session or turn it made (head) |
+| `0009_po_requests` | `po_requests`: each /po form request id, its operation and input fingerprint, and the session or turn it made |
+| `0010_po_session_close` | `po_sessions.closed_at`, `closed_by`, set exactly when `state = 'closed'` (`po_session_closed_iff_audited`) (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
 non-null, unique and range-checked. Refs, numbers, relations, comments and audit rows are untouched.
 
-`0008` and `0009` only add tables; their use is in [Operations](OPERATIONS.md#po-head-sessions-and-turns).
+`0008` and `0009` only add tables, and `0010` two nullable columns and one `CHECK` that every existing
+(open) row satisfies; their use is in [Operations](OPERATIONS.md#po-head-sessions-and-turns).
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 28 tables, 47 `CHECK`, 44 foreign keys, 28 primary keys, 17 `UNIQUE`,
+(including `alembic_version`): 28 tables, 48 `CHECK`, 44 foreign keys, 28 primary keys, 17 `UNIQUE`,
 5 partial unique indexes.
 
 ---

@@ -1,4 +1,4 @@
-"""The PO head's sessions for the dashboard: list, read, create, send, stop.
+"""The PO head's sessions for the dashboard: list, read, create, send, stop, close.
 
 One `PoRunner` per web process, built when the layers are assembled (:meth:`PoLayer.start_service`)
 and kept: its waiter threads own the turns it started, and a second runner in the same process would
@@ -19,11 +19,15 @@ from secretary.config import ConfigError, DataDirError, instance_data_dir, load_
 from secretary.po.models import models_from_instance
 from secretary.po.runner import PoRunner, RunnerError
 from secretary.po.store import (
+    OWNER,
     RUNNING,
+    SESSION_CLOSED,
+    SESSION_OPEN,
     FeedEntry,
     PoStoreError,
     RequestConflict,
     Session,
+    SessionClosed,
     SessionNotFound,
     Turn,
     TurnInProgress,
@@ -32,6 +36,7 @@ from secretary.webproto.boundary import ProtocolBoundary
 from secretary.webproto.errors import (
     InstallationUnavailable,
     PoRequestConflict,
+    PoSessionClosed,
     PoSessionNotFound,
     PoTurnInProgress,
     RuntimeUnavailable,
@@ -88,9 +93,11 @@ class PoLayer(ProtocolBoundary):
         store = self._runner_or_refuse().store
         return {"kind": "po_running", "running": len(self._store(store.running_turns))}
 
-    def po_overview(self) -> dict[str, Any]:
+    def po_overview(self, closed: bool = False) -> dict[str, Any]:
+        """Open sessions, or with `closed` the closed ones; either way the closed count and running turns."""
         store = self._runner_or_refuse().store
-        sessions = self._store(store.sessions)
+        sessions = self._store(lambda: store.sessions(SESSION_CLOSED if closed else SESSION_OPEN))
+        closed_count = len(sessions) if closed else self._store(lambda: store.session_count(SESSION_CLOSED))
         running = self._store(store.running_turns)
         busy = {turn.session_id for turn in running}
         items = [
@@ -103,6 +110,8 @@ class PoLayer(ProtocolBoundary):
         ]
         return {
             "kind": "po_overview",
+            "closed": closed,
+            "closed_count": closed_count,
             "sessions": items,
             "running": len(running),
             "models": self.po_models()["models"],
@@ -179,6 +188,16 @@ class PoLayer(ProtocolBoundary):
             "turn": _turn(turn) if turn is not None else None,
         }
 
+    def po_close(self, *, session_id: str) -> dict[str, Any]:
+        """Close a session as the owner (`PoStore.close_session`); already closed answers it unchanged.
+
+        A running turn is `owner_conflict` and nothing is written. No request id: a close repeated is the
+        same close.
+        """
+        store = self._runner_or_refuse().store
+        session = self._store(lambda: store.close_session(session_id, OWNER))
+        return {"kind": "po_session_closed", "session": _session(session, running=False)}
+
     # --- inside the boundary ----------------------------------------------------------------
 
     def _runner_or_refuse(self) -> PoRunner:
@@ -220,6 +239,8 @@ class PoLayer(ProtocolBoundary):
             raise PoTurnInProgress(str(exc)) from None
         except RequestConflict as exc:
             raise PoRequestConflict(str(exc)) from None
+        except SessionClosed as exc:
+            raise PoSessionClosed(str(exc)) from None
         except (PoStoreError, RunnerError) as exc:
             raise RuntimeUnavailable(str(exc)) from None
         except ImportError as exc:  # no PostgreSQL driver in this interpreter: the store is unavailable
@@ -244,6 +265,8 @@ def _session(session: Session, *, running: bool) -> dict[str, Any]:
         "model": session.model,
         "created_at": _time(session.created_at),
         "state": session.state,
+        "closed_at": _time(session.closed_at),
+        "closed_by": session.closed_by,
         "running": running,
     }
 

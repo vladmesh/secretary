@@ -150,3 +150,12 @@ class PoRequestConflict(ReadError):
     """
 
     code = "request_conflict"
+
+
+class PoSessionClosed(ReadError):
+    """The owner closed this PO session; a message into it starts no turn and nothing was written.
+
+    Its own code: unlike `owner_conflict` it never clears by waiting, since a closed session is not reopened.
+    """
+
+    code = "session_closed"

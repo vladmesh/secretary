@@ -15,6 +15,7 @@ So handlers here raise nothing and return no numbers. They call the layer, let a
 | `validation` | 400 | the request itself is wrong: a missing field, a cursor this layer did not issue |
 | `owner_conflict` | 409 | the request is well formed and refused on the state of the world |
 | `request_conflict` | 409 | a /po request id reused for another operation or other inputs; repeating it never succeeds |
+| `session_closed` | 409 | a message into a PO session the owner closed; nothing was written |
 | `backend_unavailable` | 503 | a source this request needs could not be reached at all |
 
 An unmapped code is 500 and not a guess: a code this transport has never heard of is a defect of
@@ -31,6 +32,7 @@ HTTP_STATUS_BY_CODE: dict[str, int] = {
     "validation": 400,
     "owner_conflict": 409,
     "request_conflict": 409,
+    "session_closed": 409,
     "backend_unavailable": 503,
 }
 

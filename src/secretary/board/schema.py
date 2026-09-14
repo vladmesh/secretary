@@ -747,10 +747,17 @@ class PoSession(Base):
     state = sa.Column(sa.Text, nullable=False)
     # Claude's is chosen by the secretary at creation; Codex's is its thread_id, known after turn 1.
     cli_session_id = sa.Column(sa.Text)
+    # The owner's close (0010): both set exactly when the session is closed, never cleared.
+    closed_at = sa.Column(TIMESTAMPTZ)
+    closed_by = sa.Column(sa.Text)
 
     __table_args__ = (
         sa.CheckConstraint("cli IN ('claude','codex')", name="po_session_cli_in_vocabulary"),
         sa.CheckConstraint("state IN ('open','closed')", name="po_session_state_in_vocabulary"),
+        sa.CheckConstraint(
+            "(state = 'closed') = (closed_at IS NOT NULL) AND (state = 'closed') = (closed_by IS NOT NULL)",
+            name="po_session_closed_iff_audited",
+        ),
     )
 
 

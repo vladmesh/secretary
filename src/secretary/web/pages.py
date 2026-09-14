@@ -2454,15 +2454,27 @@ def po_login(message: str) -> str:
     return _page("Product owner", body, nav="po")
 
 
-def _po_refusal(refusal: dict[str, Any] | None) -> str:
+def _po_refusal(refusal: dict[str, Any] | None, refused: str = "send") -> str:
     if not refusal:
         return ""
     code = str(refusal.get("code") or "")
     message = str(refusal.get("message") or "")
+    if code == "owner_conflict" and refused == "close":
+        return (
+            '<p class="refused"><b>not closed: a turn is still running in this session.</b> '
+            "Wait for its answer or stop it, then close; nothing was written. "
+            f'<span class="reason">{escape(message)}</span></p>'
+        )
     if code == "owner_conflict":
         return (
             '<p class="refused"><b>not sent: a turn is still running in this session.</b> '
             "Wait for its answer or stop it, then send again; nothing was written. "
+            f'<span class="reason">{escape(message)}</span></p>'
+        )
+    if code == "session_closed":
+        return (
+            '<p class="refused"><b>not sent: this session is closed.</b> '
+            "Open a new session to continue; nothing was written. "
             f'<span class="reason">{escape(message)}</span></p>'
         )
     return f'<p class="refused"><b>refused ({escape(code)}).</b> {escape(message)}</p>'
@@ -2475,30 +2487,48 @@ def po_page(
     refusal: dict[str, Any] | None = None,
     submitted: dict[str, Any] | None = None,
 ) -> str:
-    """The PO head: every session, and the form that opens a new one."""
+    """The PO head: open sessions (or, with `closed`, the closed ones), and the form that opens a new one."""
     sessions = overview.get("sessions") or []
     models = overview.get("models") or {}
     submitted = submitted or {}
-    rows = [
-        [
+    closed = bool(overview.get("closed"))
+    rows = []
+    for item in sessions:
+        session_id = str(item.get("session_id") or "")
+        row = [
             (
-                f'<a class="ref" href="/po/sessions/{quote(str(item.get("session_id") or ""))}">'
+                f'<a class="ref" href="/po/sessions/{quote(session_id)}">'
                 f"{_po_first_message(item.get('first_message'))}</a>"
             ),
             _or_dash(item.get("last_activity_at")),
             _or_dash(item.get("cli")),
             _or_dash(item.get("model")),
-            _or_dash(item.get("state")),
-            _chip("turn running", "accent") if item.get("running") else '<span class="empty">idle</span>',
-            f'<span class="age">{escape(str(item.get("session_id") or "")[:8])}</span>',
         ]
-        for item in sessions
-    ]
-    table = (
-        _rows(["session", "last activity", "cli", "model", "state", "turn", "id"], rows)
-        if rows
-        else '<p class="empty">no PO session yet</p>'
-    )
+        if closed:
+            row.append(_or_dash(item.get("closed_at")))
+        else:
+            row.append(_or_dash(item.get("state")))
+            row.append(
+                _chip("turn running", "accent") if item.get("running") else '<span class="empty">idle</span>'
+            )
+        row.append(f'<span class="age">{escape(session_id[:8])}</span>')
+        if not closed:
+            row.append(_po_close_form(session_id))
+        rows.append(row)
+    if closed:
+        headers = ["session", "last activity", "cli", "model", "closed at", "id"]
+        empty = '<p class="empty">no closed PO session</p>'
+        title = "Closed sessions"
+        more = '<a class="more" href="/po">open sessions</a>'
+    else:
+        headers = ["session", "last activity", "cli", "model", "state", "turn", "id", ""]
+        empty = '<p class="empty">no PO session yet</p>'
+        title = "Sessions"
+        more = (
+            f'<a class="more" href="/po?closed=1">closed sessions '
+            f"({escape(str(overview.get('closed_count') or 0))})</a>"
+        )
+    table = _rows(headers, rows) if rows else empty
     body = "\n".join(
         [
             '<div class="lead"><h1>Product owner</h1>',
@@ -2506,7 +2536,7 @@ def po_page(
             _po_refusal(refusal),
             '<div class="grid">',
             '<div class="col">',
-            _panel("Sessions", table, count=len(sessions) if sessions else None),
+            _panel(title, table, count=len(sessions) if sessions else None, more=more),
             "</div>",
             '<div class="col">',
             _panel("New session", _po_new_session_form(models, request_id=request_id, submitted=submitted)),
@@ -2515,6 +2545,14 @@ def po_page(
         ]
     )
     return _page("Product owner", body, script=_PO_FORM_SCRIPT, nav="po")
+
+
+def _po_close_form(session_id: str) -> str:
+    """The owner's close: a plain form POST, no script."""
+    return (
+        f'<form class="po-close" method="post" action="/po/sessions/{quote(session_id)}/close">'
+        '<button class="quiet" type="submit">close</button></form>'
+    )
 
 
 #: How many characters of a session's first owner message its row on `/po` shows, ellipsis included.
@@ -2573,10 +2611,15 @@ def po_session(
     request_id: str,
     draft: str = "",
     refusal: dict[str, Any] | None = None,
+    refused: str = "send",
 ) -> str:
-    """One session: its feed, the state of each turn, the message box and, while a turn runs, stop."""
+    """One session: its feed, the state of each turn, the message box, stop while a turn runs, close otherwise.
+
+    A closed session stays readable: its feed and who closed it when, with no message box and no close.
+    """
     session = document.get("session") or {}
     session_id = str(session.get("session_id") or "")
+    closed = session.get("state") == "closed"
     turns = document.get("turns") or []
     by_turn: dict[Any, list[dict[str, Any]]] = {}
     for entry in document.get("feed") or []:
@@ -2599,6 +2642,7 @@ def po_session(
         if running
         else ""
     )
+    close = _po_close_form(session_id) if not running and not closed else ""
     message = "\n".join(
         [
             f'<form class="sprint" id="po-send" method="post" action="{base}/messages">',
@@ -2623,9 +2667,15 @@ def po_session(
     body = "\n".join(
         [
             f'<div class="lead"><h1>PO session {escape(session_id[:8])}</h1><span class="age">{head}</span></div>',
-            _po_refusal(refusal),
-            _panel("Feed", feed + stop, more='<a class="more" href="/po">all sessions</a>'),
-            _panel("Send", message + '<p class="feedback" id="po-status"></p>'),
+            _po_refusal(refusal, refused),
+            (
+                f'<p class="po-closed">closed {escape(str(session.get("closed_at") or ""))} '
+                f"by {escape(str(session.get('closed_by') or ''))}</p>"
+                if closed
+                else ""
+            ),
+            _panel("Feed", feed + stop + close, more='<a class="more" href="/po">all sessions</a>'),
+            "" if closed else _panel("Send", message + '<p class="feedback" id="po-status"></p>'),
             f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
         ]
     )
