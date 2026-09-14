@@ -71,6 +71,9 @@ class Session:
     created_at: datetime
     state: str
     cli_session_id: str | None
+    # Only :meth:`PoStore.sessions` fills these two; a single-session read leaves them None.
+    first_message: str | None = None
+    last_activity_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -236,9 +239,25 @@ class PoStore:
         return Session(*row)
 
     def sessions(self) -> list[Session]:
+        """Every session with its first owner message and last activity, newest activity first.
+
+        One statement for the whole list: the first message is the earliest owner feed entry by
+        `entry_id`; the last activity is the latest of the session's creation, any turn's start or
+        finish, and any feed entry. Ties fall back to the newest creation, then the session id.
+        """
+        columns = ", ".join(f"s.{column}" for column in _SESSION_COLUMNS.split(", "))
         with self._transaction() as connection:
             rows = connection.execute(
-                f"SELECT {_SESSION_COLUMNS} FROM po_sessions ORDER BY created_at, session_id"
+                f"SELECT {columns}, o.text, GREATEST(s.created_at, t.at, f.at) AS last_activity_at "
+                "FROM po_sessions s "
+                "LEFT JOIN (SELECT session_id, max(GREATEST(started_at, finished_at)) AS at "
+                "FROM po_turns GROUP BY session_id) t ON t.session_id = s.session_id "
+                "LEFT JOIN (SELECT session_id, max(created_at) AS at "
+                "FROM po_feed GROUP BY session_id) f ON f.session_id = s.session_id "
+                "LEFT JOIN (SELECT DISTINCT ON (session_id) session_id, text FROM po_feed "
+                "WHERE role = %s ORDER BY session_id, entry_id) o ON o.session_id = s.session_id "
+                "ORDER BY last_activity_at DESC, s.created_at DESC, s.session_id",
+                (OWNER,),
             ).fetchall()
         return [Session(*row) for row in rows]
 

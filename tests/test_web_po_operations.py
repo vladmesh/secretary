@@ -157,7 +157,9 @@ class PoWebOperationTests(unittest.TestCase):
             self.layer.po_create_session(request_id="direct", cli="codex", model="gpt-4")
         self.assertEqual([item.session_id for item in self.store.sessions()], [session_id])
 
-    def test_the_default_list_opens_fable_and_gpt_6_astra_sessions_and_refuses_an_off_list_model(self) -> None:
+    def test_the_default_list_opens_fable_and_gpt_6_astra_sessions_and_refuses_an_off_list_model(
+        self,
+    ) -> None:
         self.layer = PoLayer(self.root, data_dir=self.data, runner=self.runner, models=DEFAULT_MODELS)
         self.app = WebApp(
             *(Recording() for _ in range(8)),
@@ -463,6 +465,140 @@ class PoWebOperationTests(unittest.TestCase):
             [index % 2 for index, turn in enumerate(turns) if turn is not None],
             [1 if entry.text == "same" else 0] * (workers // 2),
         )
+
+    # --- the session list -------------------------------------------------------------------
+
+    def seed(self, session_id: str, created: str, turns=(), feed=()) -> None:
+        """A session at fixed times: `turns` are (seq, started, finished), `feed` is (seq, role, text, at)."""
+        import psycopg
+
+        self.store.create_session(
+            session_id=session_id, cli="claude", model="opus", cwd="/", cli_session_id=None
+        )
+        with psycopg.connect(self.store.credentials.conninfo()) as connection:
+            connection.execute(
+                "UPDATE po_sessions SET created_at = %s WHERE session_id = %s", (created, session_id)
+            )
+            for seq, started, finished in turns:
+                connection.execute(
+                    "INSERT INTO po_turns (session_id, seq, started_at, finished_at, state, stdout_path) "
+                    "VALUES (%s, %s, %s, %s, 'completed', '/dev/null')",
+                    (session_id, seq, started, finished),
+                )
+            for seq, role, text, at in feed:
+                connection.execute(
+                    "INSERT INTO po_feed (session_id, turn_seq, role, text, created_at) VALUES (%s, %s, %s, %s, %s)",
+                    (session_id, seq, role, text, at),
+                )
+
+    def test_the_session_list_carries_the_first_owner_message_and_is_newest_activity_first(self) -> None:
+        # a: created first, but its turn finished last, after its newest feed entry.
+        self.seed(
+            "a",
+            "2026-09-01T10:00:00Z",
+            turns=[(1, "2026-09-01T10:01:00Z", "2026-09-05T10:00:00Z")],
+            feed=[
+                (1, "agent", "an agent spoke first", "2026-09-01T10:00:30Z"),
+                (1, "owner", "the owner's first", "2026-09-01T12:00:00Z"),
+                (1, "owner", "earlier time, later entry", "2026-09-01T10:00:10Z"),
+            ],
+        )
+        # b: its feed entry is newer than its turn.
+        self.seed(
+            "b",
+            "2026-09-02T10:00:00Z",
+            turns=[(1, "2026-09-02T10:01:00Z", "2026-09-02T10:02:00Z")],
+            feed=[(1, "owner", "hello b", "2026-09-03T10:00:00Z")],
+        )
+        # c: no turns, no feed, created after b's last activity.
+        self.seed("c", "2026-09-04T10:00:00Z")
+        # d: only an agent entry and the same last activity as c, created earlier; ties go to newer creation.
+        self.seed(
+            "d",
+            "2026-09-01T09:00:00Z",
+            turns=[(1, "2026-09-01T09:01:00Z", "2026-09-04T10:00:00Z")],
+            feed=[(1, "agent", "only the agent", "2026-09-01T09:02:00Z")],
+        )
+
+        sessions = self.store.sessions()
+        self.assertEqual([item.session_id for item in sessions], ["a", "c", "d", "b"])
+        by_id = {item.session_id: item for item in sessions}
+        self.assertEqual(by_id["a"].first_message, "the owner's first")
+        self.assertEqual(by_id["b"].first_message, "hello b")
+        self.assertIsNone(by_id["c"].first_message)
+        self.assertIsNone(by_id["d"].first_message)
+        self.assertEqual(
+            {key: item.last_activity_at.isoformat() for key, item in by_id.items()},
+            {
+                "a": "2026-09-05T10:00:00+00:00",
+                "b": "2026-09-03T10:00:00+00:00",
+                "c": "2026-09-04T10:00:00+00:00",
+                "d": "2026-09-04T10:00:00+00:00",
+            },
+        )
+
+        document = self.layer.po_overview()
+        self.assertEqual([item["session_id"] for item in document["sessions"]], ["a", "c", "d", "b"])
+        first = document["sessions"][0]
+        self.assertEqual(first["first_message"], "the owner's first")
+        self.assertEqual(first["last_activity_at"], by_id["a"].last_activity_at.isoformat())
+        self.assertEqual(first["created_at"], by_id["a"].created_at.isoformat())
+        self.assertEqual(
+            set(first),
+            {
+                "session_id",
+                "cli",
+                "model",
+                "created_at",
+                "state",
+                "running",
+                "first_message",
+                "last_activity_at",
+            },
+        )
+
+    def test_a_row_shows_the_escaped_collapsed_start_of_the_first_message_or_no_message_yet(self) -> None:
+        cyrillic = "Глянь  по обоим\n\tспринтам что происходит и какие действия требуются, " + "я" * 40
+        self.seed(
+            "long",
+            "2026-09-04T10:00:00Z",
+            turns=[(1, "2026-09-04T10:00:00Z", "2026-09-04T10:00:00Z")],
+            feed=[(1, "owner", cyrillic, "2026-09-04T10:00:00Z")],
+        )
+        self.seed(
+            "html",
+            "2026-09-03T10:00:00Z",
+            turns=[(1, "2026-09-03T10:00:00Z", "2026-09-03T10:00:00Z")],
+            feed=[(1, "owner", "<b>bold</b> & **not markdown**", "2026-09-03T10:00:00Z")],
+        )
+        self.seed(
+            "short",
+            "2026-09-02T10:00:00Z",
+            turns=[(1, "2026-09-02T10:00:00Z", "2026-09-02T10:00:00Z")],
+            feed=[(1, "owner", "exactly  fits", "2026-09-02T10:00:00Z")],
+        )
+        self.seed("none", "2026-09-01T10:00:00Z")
+
+        response = self.get("/po")
+        self.assertEqual(response.status, 200)
+        page = response.body.decode()
+        collapsed = " ".join(cyrillic.split())
+        shown = collapsed[:79] + "…"
+        self.assertEqual(len(shown), 80)
+        self.assertIn(f'<a class="ref" href="/po/sessions/long">{shown}</a>', page)
+        self.assertNotIn(collapsed[:80], page)
+        self.assertIn(
+            '<a class="ref" href="/po/sessions/html">&lt;b&gt;bold&lt;/b&gt; &amp; **not markdown**</a>', page
+        )
+        self.assertNotIn("<b>bold</b>", page)
+        self.assertIn('<a class="ref" href="/po/sessions/short">exactly fits</a>', page)
+        self.assertIn(
+            '<a class="ref" href="/po/sessions/none"><span class="empty">no message yet</span></a>', page
+        )
+        self.assertIn("2026-09-04T10:00:00+00:00", page)
+        self.assertIn('<span class="age">long</span>', page)
+        order = [page.index(f"/po/sessions/{key}") for key in ("long", "html", "short", "none")]
+        self.assertEqual(order, sorted(order))
 
 
 if __name__ == "__main__":

@@ -2795,7 +2795,7 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/api/tasks/{ref}/comment` | `card_ops.task_comment` | one comment on a card, under role `po` and actor `web`; body `{request_id, body}` |
 | POST | `/api/tasks/{ref}/move` | `card_ops.task_move` | move a card, the owner's intervention; body `{request_id, target, reason, sprint_override?, sprint_override_reason?}` |
 | POST | `/po/login` | `po_auth.po_login` | the PO token form; body `token`; 303 to `/po` with cookie `secretary_po`, or 401. The one `/po` route without the token |
-| GET | `/po` | `po.po_overview` | PO sessions and the new-session form (CLI and model from `po.models`) |
+| GET | `/po` | `po.po_overview` | PO sessions, newest `last_activity_at` first (latest of creation, turn start/finish, feed entry), each row linked by the start of its `first_message` (earliest owner entry, 80 characters, `no message yet` without one) with last activity, CLI, model, state, running turn and short id; and the new-session form (CLI and model from `po.models`) |
 | POST | `/po/sessions` | `po.po_create_session` | open a PO session; form `request_id, cli, model`; 303 to it, or the page with the refusal |
 | GET | `/po/sessions/{session}` | `po.po_session` | one PO session: feed, turn states, message box, stop while a turn runs |
 | POST | `/po/sessions/{session}/messages` | `po.po_send` | start one turn; form `request_id, text`; a running turn is refused (409) and nothing is written |

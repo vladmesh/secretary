@@ -93,7 +93,14 @@ class PoLayer(ProtocolBoundary):
         sessions = self._store(store.sessions)
         running = self._store(store.running_turns)
         busy = {turn.session_id for turn in running}
-        items = [_session(session, running=session.session_id in busy) for session in reversed(sessions)]
+        items = [
+            {
+                **_session(session, running=session.session_id in busy),
+                "first_message": session.first_message,
+                "last_activity_at": _time(session.last_activity_at),
+            }
+            for session in sessions
+        ]
         return {
             "kind": "po_overview",
             "sessions": items,
