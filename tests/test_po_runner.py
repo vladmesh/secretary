@@ -12,6 +12,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,21 @@ from tests.sql_backend_fixtures import PostgresBoard
 BOARD: PostgresBoard
 
 SECRETS = ("THINKING-SECRET", "TOOL-CALL-SECRET")
+
+# A Claude stand-in that records how the PO workspace's `secretary` commands resolve inside a turn.
+RECORDING_CLAUDE = """#!/bin/sh
+cat >/dev/null
+{
+  echo "python3=$(command -v python3)"
+  echo "secretary=$(command -v secretary)"
+  python3 -P -m secretary --help >/dev/null 2>&1; echo "module=$?"
+  secretary --help >/dev/null 2>&1; echo "script=$?"
+  echo "cwd=$(pwd)"
+  echo "home=$HOME"
+  echo "mark=$SECRETARY_PO_MARK/$TA_PO_MARK"
+} > "$FAKE_LOG"
+printf '%s\\n' '{"type": "result", "subtype": "success", "is_error": false, "result": "recorded"}'
+"""
 
 
 def setUpModule() -> None:
@@ -419,6 +435,53 @@ class PoRunnerTests(unittest.TestCase):
         self.assertEqual(turn.state, po_store.FAILED)
         self.assertIn("could not start", turn.reason)
         self.assertEqual(self.feed(session.session_id), [(1, "owner", "hello")])
+
+    # --- environment ------------------------------------------------------------------------
+
+    def test_a_turn_runs_the_secretary_cli_from_the_product_runtime_unless_env_is_given(self) -> None:
+        # A host whose system `python3` and `secretary` cannot import the product.
+        system = self.root / "system-bin"
+        system.mkdir()
+        for name in ("python3", "secretary"):
+            path = system / name
+            path.write_text(
+                "#!/bin/sh\necho \"No module named 'referencing'\" >&2\nexit 1\n", encoding="utf-8"
+            )
+            path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        recorder = self.root / "bin" / "recording-claude"
+        recorder.write_text(RECORDING_CLAUDE, encoding="utf-8")
+        recorder.chmod(recorder.stat().st_mode | stat.S_IXUSR)
+        service = {
+            **os.environ,
+            "PATH": f"{system}{os.pathsep}{os.environ.get('PATH', '')}",
+            "SECRETARY_PO_MARK": "kept",
+            "TA_PO_MARK": "kept",
+            "FAKE_LOG": str(self.log),
+        }
+        service.pop("PYTHONPATH", None)
+
+        def turn(runner: PoRunner) -> dict[str, str]:
+            session = runner.create_session("claude", "m")
+            settled = runner.wait(
+                session.session_id, runner.send(session.session_id, "hi").seq, SETTLE_SECONDS
+            )
+            self.assertEqual(settled.state, po_store.COMPLETED, settled.reason)
+            return dict(line.split("=", 1) for line in self.log.read_text(encoding="utf-8").splitlines())
+
+        with mock.patch.dict(os.environ, service, clear=True):
+            built = PoRunner(self.store, self.data, executables={"claude": str(recorder)})
+        seen = turn(built)
+        runtime = Path(sys.executable).parent
+        self.assertEqual(Path(seen["python3"]), runtime / "python3")
+        self.assertEqual(Path(seen["secretary"]), runtime / "secretary")
+        self.assertEqual((seen["module"], seen["script"]), ("0", "0"))
+        self.assertEqual(Path(seen["cwd"]).resolve(), (self.data / "po").resolve())
+        self.assertEqual((seen["home"], seen["mark"]), (os.environ.get("HOME", ""), "kept/kept"))
+
+        explicit = PoRunner(self.store, self.data, executables={"claude": str(recorder)}, env=service)
+        seen = turn(explicit)
+        self.assertEqual(Path(seen["python3"]), system / "python3")
+        self.assertEqual(seen["module"], "1")
 
 
 class CodexThreadIdTests(unittest.TestCase):

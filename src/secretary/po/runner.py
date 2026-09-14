@@ -77,6 +77,27 @@ def process_identity(pid: int) -> str | None:
     return f"{boot_id}:{fields[19]}"
 
 
+def turn_environment(
+    environ: Mapping[str, str] | None = None, *, interpreter: str | None = None
+) -> dict[str, str]:
+    """The environment of a turn: the service's own, with the product runtime first on ``PATH``.
+
+    The PO workspace tells the head to run ``python3 -P -m secretary``; with the service's ``PATH``
+    that is the system Python, which lacks the product's dependencies. The directory of the
+    interpreter running this process (the production runtime) goes first, so ``python3`` and the
+    ``secretary`` console script resolve there, and the source this process imports goes first on
+    ``PYTHONPATH``, as the control-plane commands keep it importable. Everything else is kept.
+    """
+    env = dict(os.environ if environ is None else environ)
+    bin_dir = str(Path(interpreter or sys.executable).parent)
+    path = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry and entry != bin_dir]
+    env["PATH"] = os.pathsep.join([bin_dir, *path])
+    source = str(Path(__file__).resolve().parents[2])
+    pythonpath = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep) if entry and entry != source]
+    env["PYTHONPATH"] = os.pathsep.join([source, *pythonpath])
+    return env
+
+
 def _kill_group(pid: int) -> None:
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -169,7 +190,8 @@ class PoRunner:
         self.workspace = workspace_dir(self.data_dir)
         self.runs = runs_dir(self.data_dir)
         self.executables = {"claude": "claude", "codex": "codex", **dict(executables or {})}
-        self.env = dict(env) if env is not None else None
+        # A turn gets `turn_environment()` unless the caller passes its own.
+        self.env = dict(env) if env is not None else turn_environment()
         # Held only while a turn is started, stopped or recovered, never while one runs.
         self._lock = threading.Lock()
         self._live: dict[tuple[str, int], _Live] = {}
@@ -544,4 +566,5 @@ __all__ = [
     "codex_thread_id",
     "process_identity",
     "runs_dir",
+    "turn_environment",
 ]
