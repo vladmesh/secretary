@@ -2505,6 +2505,10 @@ def _po_new_session_form(models: dict[str, Any], *, request_id: str, submitted: 
         return '<p class="empty">this installation offers no model for a PO session</p>'
     chosen_cli = str(submitted.get("cli") or offered[0][0])
     chosen_model = str(submitted.get("model") or "")
+    listed = dict(offered).get(chosen_cli) or []
+    if chosen_model not in listed and listed:
+        # The first model a CLI lists is its preselected one; the script does the same on a CLI change.
+        chosen_model = listed[0]
     cli_options = "".join(
         f'<option value="{escape(cli)}"{_selected(cli == chosen_cli)}>{escape(cli)}</option>'
         for cli, _ in offered

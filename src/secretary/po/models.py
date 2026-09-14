@@ -13,8 +13,7 @@ from secretary.po.store import CLIS
 
 DEFAULT_MODELS: dict[str, tuple[str, ...]] = {
     "claude": ("fable", "opus", "sonnet"),
-    # No gpt-5.6-astra: Codex signed in with a ChatGPT account refuses it (400).
-    "codex": ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+    "codex": ("gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"),
 }
 
 
