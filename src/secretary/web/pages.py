@@ -28,6 +28,8 @@ from html import escape
 from typing import Any
 from urllib.parse import quote
 
+from secretary.web import markdown
+
 TITLE = "secretary"
 
 #: Said on every page. This application still has no authentication of any kind of its own, so
@@ -112,6 +114,20 @@ main { max-width: 1280px; margin: 0 auto; padding-block: 1.25rem 4rem; padding-i
 .po-entry.po-agent { border-left-color: var(--accent); background: var(--raised); }
 .po-entry .who { font-size:.8rem; color:var(--muted); }
 .po-entry .text { white-space: pre-wrap; overflow-wrap:anywhere; }
+.po-entry .md { overflow-wrap:anywhere; }
+.po-entry .md > :first-child { margin-top:0; }
+.po-entry .md > :last-child { margin-bottom:0; }
+.po-entry .md p, .po-entry .md ul, .po-entry .md ol, .po-entry .md blockquote, .po-entry .md pre { margin:.4rem 0; }
+.po-entry .md h3, .po-entry .md h4, .po-entry .md h5, .po-entry .md h6 { margin:.6rem 0 .25rem; font-weight:600; }
+.po-entry .md h3 { font-size:1rem; } .po-entry .md h4 { font-size:.95rem; }
+.po-entry .md h5, .po-entry .md h6 { font-size:.9rem; color:var(--muted); }
+.po-entry .md ul, .po-entry .md ol { padding-left:1.4rem; }
+.po-entry .md li > ul, .po-entry .md li > ol { margin:.15rem 0; }
+.po-entry .md blockquote { border-left:3px solid var(--line-strong); padding-left:.7rem; color:var(--muted); margin-inline:0; }
+.po-entry .md hr { border:0; border-top:1px solid var(--line); margin:.6rem 0; }
+.po-entry .md code { background:var(--surface); border:1px solid var(--line); border-radius:3px; padding:0 .25em; }
+.po-entry .md pre { white-space:pre; overflow-x:auto; overflow-wrap:normal; background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:.5rem .7rem; }
+.po-entry .md pre code { background:none; border:0; padding:0; font-size:inherit; }
 .po-mark { font-size:.85rem; color:var(--muted); }
 @media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 
@@ -2613,12 +2629,18 @@ def po_session(
 
 
 def _po_entry(entry: dict[str, Any]) -> str:
+    """One feed item: the PO head's answer as the safe Markdown subset, the owner's text as typed."""
     role = "agent" if entry.get("role") == "agent" else "owner"
     who = "PO head" if role == "agent" else "owner"
+    text = str(entry.get("text") or "")
+    shown = (
+        f'<div class="md">{markdown.render(text)}</div>'
+        if role == "agent"
+        else f'<div class="text">{escape(text)}</div>'
+    )
     return (
         f'<li class="po-entry po-{role}"><div class="who">{who} · turn {escape(str(entry.get("turn_seq")))}'
-        f" · {escape(str(entry.get('created_at') or ''))}</div>"
-        f'<div class="text">{escape(str(entry.get("text") or ""))}</div></li>'
+        f" · {escape(str(entry.get('created_at') or ''))}</div>{shown}</li>"
     )
 
 
