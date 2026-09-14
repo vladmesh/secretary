@@ -2795,11 +2795,12 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/api/tasks/{ref}/comment` | `card_ops.task_comment` | one comment on a card, under role `po` and actor `web`; body `{request_id, body}` |
 | POST | `/api/tasks/{ref}/move` | `card_ops.task_move` | move a card, the owner's intervention; body `{request_id, target, reason, sprint_override?, sprint_override_reason?}` |
 | POST | `/po/login` | `po_auth.po_login` | the PO token form; body `token`; 303 to `/po` with cookie `secretary_po`, or 401. The one `/po` route without the token |
-| GET | `/po` | `po.po_overview` | PO sessions, newest `last_activity_at` first (latest of creation, turn start/finish, feed entry), each row linked by the start of its `first_message` (earliest owner entry, 80 characters, `no message yet` without one) with last activity, CLI, model, state, running turn and short id; and the new-session form (CLI and model from `po.models`) |
+| GET | `/po` | `po.po_overview` | open PO sessions (with `?closed=1` the closed ones, with `closed_at` and a link back; the open list links to them with `closed_count`), newest `last_activity_at` first (latest of creation, turn start/finish, feed entry), each row linked by the start of its `first_message` (earliest owner entry, 80 characters, `no message yet` without one) with last activity, CLI, model, state, running turn, short id and a `close` form; and the new-session form (CLI and model from `po.models`) |
 | POST | `/po/sessions` | `po.po_create_session` | open a PO session; form `request_id, cli, model`; 303 to it, or the page with the refusal |
-| GET | `/po/sessions/{session}` | `po.po_session` | one PO session: feed, turn states, message box, stop while a turn runs |
-| POST | `/po/sessions/{session}/messages` | `po.po_send` | start one turn; form `request_id, text`; a running turn is refused (409) and nothing is written |
+| GET | `/po/sessions/{session}` | `po.po_session` | one PO session: feed, turn states, message box, stop while a turn runs, close while none does; a closed one shows `closed_at`/`closed_by` and no message box or close |
+| POST | `/po/sessions/{session}/messages` | `po.po_send` | start one turn; form `request_id, text`; a running turn is refused (409 `owner_conflict`), a closed session (409 `session_closed`), and nothing is written |
 | POST | `/po/sessions/{session}/stop` | `po.po_stop` | stop turn `seq` if it is the running one; form `seq` |
+| POST | `/po/sessions/{session}/close` | `po.po_close` | close the session as actor `owner`; empty form, no request id; 303 to `/po`, also when already closed (first `closed_at`/`closed_by` kept); a running turn renders the session refused (409 `owner_conflict`), nothing written; unknown session 404 |
 | GET | `/po/api/sessions/{session}` | `po.po_session` | the session page's document, polled while a turn runs |
 
 The dashboard (`GET /`) reads four documents — system snapshot, pause state, open sprints, last commands
@@ -2879,6 +2880,8 @@ One table, in `secretary.web.statuses`; no status number elsewhere in the transp
 | `not_found` | 404 | the board or the run store answered and holds nothing under that name |
 | `validation` | 400 | the request is wrong: a missing field, an unknown field, a bad page size, a cursor this layer did not issue |
 | `owner_conflict` | 409 | the request is well formed and refused on the state of the world |
+| `request_conflict` | 409 | a `/po` request id reused for another operation or other inputs |
+| `session_closed` | 409 | a message into a PO session the owner closed; no turn, feed entry, request row or process. It never clears by waiting |
 | `backend_unavailable` | 503 | a source this request needs could not be reached at all |
 | anything else | 500 | a code this transport has never heard of — a defect of the transport, not of the client |
 

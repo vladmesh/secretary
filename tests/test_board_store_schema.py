@@ -67,8 +67,9 @@ SELECT
 #: beside `0001`'s own numbers. A disagreement here is a defect of the transcription into models,
 #: not of the document. Unchanged by `0003`, which trades one `CHECK` for one `CHECK`. `0008` adds
 #: the three PO tables: six `CHECK`, two foreign keys, three primary keys, one partial unique index.
-#: `0009` adds `po_requests`: two `CHECK`, two foreign keys, one primary key.
-DOCUMENTED_COUNTS = (28, 47, 44, 28, 17, 5)
+#: `0009` adds `po_requests`: two `CHECK`, two foreign keys, one primary key. `0010` adds one `CHECK`
+#: on `po_sessions` (closed exactly when audited).
+DOCUMENTED_COUNTS = (28, 48, 44, 28, 17, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (
@@ -81,6 +82,7 @@ REVISIONS = (
     "0007_card_transport_key",
     "0008_po_sessions",
     "0009_po_requests",
+    "0010_po_session_close",
 )
 
 
@@ -445,7 +447,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0007_card_transport_key", "0008_po_sessions", "0009_po_requests"),
+            ("0007_card_transport_key", "0008_po_sessions", "0009_po_requests", "0010_po_session_close"),
         )
         rows = connection.exec_driver_sql(
             "SELECT task_ref, project_id, task_number, board_key FROM tasks ORDER BY task_ref"

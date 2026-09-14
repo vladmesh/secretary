@@ -962,7 +962,10 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
 
         applied_upgrade = migrate.migrate_instance(instance, reuse_existing_roles=True)
         provision.verify_roles(instance)
-        self.assertEqual(applied_upgrade, ("0007_card_transport_key", "0008_po_sessions", "0009_po_requests"))
+        self.assertEqual(
+            applied_upgrade,
+            ("0007_card_transport_key", "0008_po_sessions", "0009_po_requests", "0010_po_session_close"),
+        )
         before_content = content_snapshot(original)
         injected = {
             name: True

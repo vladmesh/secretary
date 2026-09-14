@@ -1,4 +1,5 @@
-"""PO head sessions, turns, feed and request ids in the board store (revisions `0008_po_sessions`, `0009_po_requests`).
+"""PO head sessions, turns, feed and request ids in the board store (revisions `0008_po_sessions`, `0009_po_requests`,
+`0010_po_session_close`).
 
 One short connection per operation: the runner's waiter threads settle turns concurrently, and a
 connection shared between them would serialize exactly what must not be serialized. Every state
@@ -28,6 +29,7 @@ from typing import Any
 
 CLIS = ("claude", "codex")
 SESSION_OPEN = "open"
+SESSION_CLOSED = "closed"
 
 RUNNING = "running"
 COMPLETED = "completed"
@@ -58,6 +60,10 @@ class TurnInProgress(PoStoreError):
     """A turn is already running in this session; nothing was written."""
 
 
+class SessionClosed(PoStoreError):
+    """The session is closed and takes no new turn; nothing was written."""
+
+
 class RequestConflict(PoStoreError):
     """The request id already belongs to another operation or other inputs; nothing was written."""
 
@@ -71,6 +77,9 @@ class Session:
     created_at: datetime
     state: str
     cli_session_id: str | None
+    # Set together by :meth:`PoStore.close_session`, exactly when `state` is closed.
+    closed_at: datetime | None = None
+    closed_by: str | None = None
     # Only :meth:`PoStore.sessions` fills these two; a single-session read leaves them None.
     first_message: str | None = None
     last_activity_at: datetime | None = None
@@ -109,7 +118,7 @@ class PoRequest:
     created_at: datetime
 
 
-_SESSION_COLUMNS = "session_id, cli, model, cwd, created_at, state, cli_session_id"
+_SESSION_COLUMNS = "session_id, cli, model, cwd, created_at, state, cli_session_id, closed_at, closed_by"
 _TURN_COLUMNS = "session_id, seq, started_at, finished_at, state, stdout_path, pid, process_identity, reason"
 _FEED_COLUMNS = "entry_id, session_id, turn_seq, role, text, created_at"
 _REQUEST_COLUMNS = "request_id, operation, fingerprint, session_id, seq, created_at"
@@ -221,7 +230,7 @@ class PoStore:
                     ).fetchone()
                     return Session(*row), False
             row = connection.execute(
-                f"INSERT INTO po_sessions ({_SESSION_COLUMNS}) "
+                "INSERT INTO po_sessions (session_id, cli, model, cwd, created_at, state, cli_session_id) "
                 f"VALUES (%s, %s, %s, %s, now(), %s, %s) RETURNING {_SESSION_COLUMNS}",
                 (session_id, cli, model, cwd, SESSION_OPEN, cli_session_id),
             ).fetchone()
@@ -238,13 +247,16 @@ class PoStore:
             raise SessionNotFound(f"there is no PO session {session_id}")
         return Session(*row)
 
-    def sessions(self) -> list[Session]:
-        """Every session with its first owner message and last activity, newest activity first.
+    def sessions(self, state: str = SESSION_OPEN) -> list[Session]:
+        """Every session in `state` (open by default) with its first owner message and last activity.
 
         One statement for the whole list: the first message is the earliest owner feed entry by
         `entry_id`; the last activity is the latest of the session's creation, any turn's start or
-        finish, and any feed entry. Ties fall back to the newest creation, then the session id.
+        finish, and any feed entry. Newest activity first; ties fall back to the newest creation, then
+        the session id.
         """
+        if state not in (SESSION_OPEN, SESSION_CLOSED):
+            raise ValueError(f"a PO session is open or closed, not {state}")
         columns = ", ".join(f"s.{column}" for column in _SESSION_COLUMNS.split(", "))
         with self._transaction() as connection:
             rows = connection.execute(
@@ -256,10 +268,48 @@ class PoStore:
                 "FROM po_feed GROUP BY session_id) f ON f.session_id = s.session_id "
                 "LEFT JOIN (SELECT DISTINCT ON (session_id) session_id, text FROM po_feed "
                 "WHERE role = %s ORDER BY session_id, entry_id) o ON o.session_id = s.session_id "
+                "WHERE s.state = %s "
                 "ORDER BY last_activity_at DESC, s.created_at DESC, s.session_id",
-                (OWNER,),
+                (OWNER, state),
             ).fetchall()
         return [Session(*row) for row in rows]
+
+    def session_count(self, state: str) -> int:
+        with self._transaction() as connection:
+            return connection.execute(
+                "SELECT count(*) FROM po_sessions WHERE state = %s", (state,)
+            ).fetchone()[0]
+
+    def close_session(self, session_id: str, actor: str) -> Session:
+        """The owner's close, in one transaction holding the session row.
+
+        Already closed answers the session unchanged, with its original `closed_at` and `closed_by`. A
+        running turn refuses with :class:`TurnInProgress` and writes nothing; a send holds the same row
+        lock while it creates its turn (:meth:`claim_turn`), so a close and a send never interleave.
+        """
+        with self._transaction() as connection:
+            row = connection.execute(
+                f"SELECT {_SESSION_COLUMNS} FROM po_sessions WHERE session_id = %s FOR UPDATE", (session_id,)
+            ).fetchone()
+            if row is None:
+                raise SessionNotFound(f"there is no PO session {session_id}")
+            session = Session(*row)
+            if session.state == SESSION_CLOSED:
+                return session
+            busy = connection.execute(
+                "SELECT seq FROM po_turns WHERE session_id = %s AND state = %s", (session_id, RUNNING)
+            ).fetchone()
+            if busy is not None:
+                raise TurnInProgress(
+                    f"turn {busy[0]} is still running in PO session {session_id}; "
+                    "wait for its answer or stop it, then close"
+                )
+            row = connection.execute(
+                "UPDATE po_sessions SET state = %s, closed_at = now(), closed_by = %s "
+                f"WHERE session_id = %s RETURNING {_SESSION_COLUMNS}",
+                (SESSION_CLOSED, actor, session_id),
+            ).fetchone()
+        return Session(*row)
 
     def set_cli_session_id(self, session_id: str, cli_session_id: str) -> bool:
         """Record the CLI's own id once; an id already recorded is never replaced."""
@@ -287,7 +337,9 @@ class PoStore:
         """The new turn, or the one `request_id` already started; the flag is True when this call did.
 
         A replay answers with that turn in its current state — running, completed, failed or
-        interrupted — before "a turn is running" is asked, so a replay during its own turn is that turn.
+        interrupted — before "a turn is running" is asked, so a replay during its own turn is that turn,
+        and a replay of a send made before the session was closed is still its turn. Any other send
+        into a closed session is :class:`SessionClosed` and writes nothing.
         """
         fingerprint = send_fingerprint(session_id, text)
         with self._transaction() as connection:
@@ -299,10 +351,12 @@ class PoStore:
                     ).fetchone()
                     return Turn(*row), False
             found = connection.execute(
-                "SELECT 1 FROM po_sessions WHERE session_id = %s FOR UPDATE", (session_id,)
+                "SELECT state FROM po_sessions WHERE session_id = %s FOR UPDATE", (session_id,)
             ).fetchone()
             if found is None:
                 raise SessionNotFound(f"there is no PO session {session_id}")
+            if found[0] == SESSION_CLOSED:
+                raise SessionClosed(f"PO session {session_id} is closed; open a new session to continue")
             busy = connection.execute(
                 "SELECT seq FROM po_turns WHERE session_id = %s AND state = %s",
                 (session_id, RUNNING),
@@ -414,13 +468,16 @@ __all__ = [
     "OWNER",
     "RUNNING",
     "SEND",
+    "SESSION_CLOSED",
     "SESSION_CREATE",
+    "SESSION_OPEN",
     "FeedEntry",
     "PoRequest",
     "PoStore",
     "PoStoreError",
     "RequestConflict",
     "Session",
+    "SessionClosed",
     "SessionNotFound",
     "Turn",
     "TurnInProgress",

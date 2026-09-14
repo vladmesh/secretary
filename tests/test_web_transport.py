@@ -504,6 +504,7 @@ class RouteTableTests(TransportFixture):
         ("GET", "/po/sessions/{session}"),
         ("POST", "/po/sessions/{session}/messages"),
         ("POST", "/po/sessions/{session}/stop"),
+        ("POST", "/po/sessions/{session}/close"),
         ("GET", "/po/api/sessions/{session}"),
     }
 

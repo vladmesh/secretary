@@ -551,6 +551,8 @@ class PoWebOperationTests(unittest.TestCase):
                 "model",
                 "created_at",
                 "state",
+                "closed_at",
+                "closed_by",
                 "running",
                 "first_message",
                 "last_activity_at",
@@ -599,6 +601,157 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertIn('<span class="age">long</span>', page)
         order = [page.index(f"/po/sessions/{key}") for key in ("long", "html", "short", "none")]
         self.assertEqual(order, sorted(order))
+
+    # --- closing a session ------------------------------------------------------------------
+
+    def close(self, session_id: str):
+        return self.post(f"/po/sessions/{session_id}/close", [])
+
+    def requests_rows(self) -> int:
+        import psycopg
+
+        with psycopg.connect(self.store.credentials.conninfo()) as connection:
+            return connection.execute("SELECT count(*) FROM po_requests").fetchone()[0]
+
+    def test_closing_an_open_session_moves_it_from_the_default_list_to_the_closed_one(self) -> None:
+        kept = self.create(request_id="create-kept")
+        session_id = self.create(request_id="create-closed")
+        self.assertEqual(self.send(session_id, "hello", "message-1").status, 303)
+        self.settle(session_id)
+        overview = self.get("/po").body.decode()
+        self.assertIn(f'action="/po/sessions/{session_id}/close"', overview)
+        self.assertIn(f'action="/po/sessions/{kept}/close"', overview)
+        self.assertIn('href="/po?closed=1">closed sessions (0)</a>', overview)
+        self.assertIn(f'action="/po/sessions/{session_id}/close"', self.page(session_id))
+
+        response = self.close(session_id)
+
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.headers["Location"], "/po")
+        session = self.store.session(session_id)
+        self.assertEqual((session.state, session.closed_by), (po_store.SESSION_CLOSED, "owner"))
+        self.assertIsNotNone(session.closed_at)
+        self.assertEqual([item.session_id for item in self.store.sessions()], [kept])
+        closed = self.store.sessions(po_store.SESSION_CLOSED)
+        self.assertEqual([item.session_id for item in closed], [session_id])
+        self.assertEqual(closed[0].first_message, "hello")
+        self.assertEqual(closed[0].closed_at, session.closed_at)
+
+        overview = self.get("/po").body.decode()
+        self.assertNotIn(f"/po/sessions/{session_id}", overview)
+        self.assertIn(f"/po/sessions/{kept}", overview)
+        self.assertIn('href="/po?closed=1">closed sessions (1)</a>', overview)
+        self.assertIn('id="po-new"', overview)
+        listed = self.app.handle("GET", "/po", query="closed=1", headers=self.headers())
+        self.assertEqual(listed.status, 200)
+        listed_page = listed.body.decode()
+        self.assertIn(f'<a class="ref" href="/po/sessions/{session_id}">hello</a>', listed_page)
+        self.assertNotIn(f"/po/sessions/{kept}", listed_page)
+        self.assertIn(session.closed_at.isoformat(), listed_page)
+        self.assertIn('<a class="more" href="/po">open sessions</a>', listed_page)
+        self.assertNotIn("/close", listed_page)
+        self.assertEqual(self.layer.po_overview(closed=True)["closed_count"], 1)
+
+        page = self.page(session_id)
+        self.assertIn("hello", page)
+        self.assertIn(f"closed {session.closed_at.isoformat()} by owner", page)
+        self.assertNotIn('id="po-send"', page)
+        self.assertNotIn("/close", page)
+        self.assertEqual(self.document(session_id)["session"]["closed_by"], "owner")
+
+    def test_closing_while_a_turn_runs_is_refused_and_writes_nothing(self) -> None:
+        session_id = self.create()
+        self.assertEqual(self.send(session_id, "SLEEP please", "message-1").status, 303)
+        self.spawned(1)
+        self.assertNotIn("/close", self.page(session_id))
+
+        refused = self.close(session_id)
+
+        self.assertEqual(refused.status, 409)
+        body = refused.body.decode()
+        self.assertIn("not closed: a turn is still running in this session", body)
+        self.assertIn('id="po-send"', body)
+        session = self.store.session(session_id)
+        self.assertEqual(
+            (session.state, session.closed_at, session.closed_by), (po_store.SESSION_OPEN, None, None)
+        )
+        with self.assertRaises(po_store.TurnInProgress):
+            self.store.close_session(session_id, "owner")
+        self.assertEqual(self.store.session(session_id), session)
+        self.assertEqual(self.store.turn(session_id, 1).state, po_store.RUNNING)
+        self.assertEqual(self.layer.po_running_count()["running"], 1)
+        self.assertIn("1 PO turn running", self.app.handle("GET", "/").body.decode())
+
+    def test_closing_twice_keeps_the_first_close(self) -> None:
+        session_id = self.create()
+        first = self.store.close_session(session_id, "owner")
+
+        self.assertEqual(self.close(session_id).status, 303)
+        again = self.store.close_session(session_id, "someone-else")
+
+        self.assertEqual(again, first)
+        self.assertEqual(self.store.session(session_id), first)
+        self.assertEqual(self.store.session_count(po_store.SESSION_CLOSED), 1)
+
+    def test_closing_an_unknown_session_is_404(self) -> None:
+        response = self.close("no-such-session")
+
+        self.assertEqual(response.status, 404)
+        with self.assertRaises(po_store.SessionNotFound):
+            self.store.close_session("no-such-session", "owner")
+        self.assertEqual(self.store.session_count(po_store.SESSION_CLOSED), 0)
+
+    def test_a_close_form_with_a_field_is_refused(self) -> None:
+        session_id = self.create()
+        self.assertEqual(self.post(f"/po/sessions/{session_id}/close", [("seq", "1")]).status, 400)
+        self.assertEqual(self.store.session(session_id).state, po_store.SESSION_OPEN)
+
+    def test_a_message_into_a_closed_session_is_refused_with_nothing_written(self) -> None:
+        session_id = self.create()
+        self.assertEqual(self.send(session_id, "hello", "message-1").status, 303)
+        self.settle(session_id)
+        self.assertEqual(self.close(session_id).status, 303)
+        feed, calls, requests = self.feed(session_id), self.calls(), self.requests_rows()
+
+        refused = self.send(session_id, "again", "message-2")
+
+        self.assertEqual(refused.status, 409)
+        body = refused.body.decode()
+        self.assertIn("not sent: this session is closed", body)
+        self.assertNotIn('id="po-send"', body)
+        with self.assertRaises(po_store.SessionClosed):
+            self.store.claim_turn(session_id, "again", lambda seq: self.root / f"turn-{seq}")
+        self.assertEqual([turn.seq for turn in self.store.turns(session_id)], [1])
+        self.assertEqual(self.feed(session_id), feed)
+        self.assertEqual(self.requests_rows(), requests)
+        self.assertIsNone(self.store.request("message-2"))
+        self.assertEqual(self.calls(), calls)
+
+        # The send made before the close is still answered by its recorded turn, and launches nothing.
+        replay = self.send(session_id, "hello", "message-1")
+        self.assertEqual(replay.status, 303)
+        self.assertEqual([turn.seq for turn in self.store.turns(session_id)], [1])
+        self.assertEqual(self.calls(), calls)
+
+    def test_the_audit_check_holds_closed_exactly_when_who_and_when_are_set(self) -> None:
+        import psycopg
+
+        session_id = self.create()
+        statements = (
+            "UPDATE po_sessions SET state = 'closed' WHERE session_id = %s",
+            "UPDATE po_sessions SET state = 'closed', closed_at = now() WHERE session_id = %s",
+            "UPDATE po_sessions SET state = 'closed', closed_by = 'owner' WHERE session_id = %s",
+            "UPDATE po_sessions SET closed_at = now(), closed_by = 'owner' WHERE session_id = %s",
+        )
+        for statement in statements:
+            with self.subTest(statement=statement):
+                with (
+                    psycopg.connect(self.store.credentials.conninfo()) as connection,
+                    self.assertRaises(psycopg.errors.CheckViolation) as raised,
+                ):
+                    connection.execute(statement, (session_id,))
+                self.assertEqual(raised.exception.diag.constraint_name, "po_session_closed_iff_audited")
+        self.assertEqual(self.store.session(session_id).state, po_store.SESSION_OPEN)
 
 
 if __name__ == "__main__":

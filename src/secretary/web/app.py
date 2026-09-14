@@ -124,6 +124,7 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/po/sessions/{session}", "po_session_page", "po.po_session", page=True),
     Route("POST", "/po/sessions/{session}/messages", "po_send", "po.po_send", body=FORM_BODY, page=True),
     Route("POST", "/po/sessions/{session}/stop", "po_stop", "po.po_stop", body=FORM_BODY, page=True),
+    Route("POST", "/po/sessions/{session}/close", "po_close", "po.po_close", body=FORM_BODY, page=True),
     Route("GET", "/po/api/sessions/{session}", "po_session_json", "po.po_session"),
 )
 
@@ -135,6 +136,7 @@ PO_LOGIN_FIELDS = frozenset({"token"})
 PO_CREATE_FIELDS = frozenset({"request_id", "cli", "model"})
 PO_SEND_FIELDS = frozenset({"request_id", "text"})
 PO_STOP_FIELDS = frozenset({"seq"})
+PO_CLOSE_FIELDS: frozenset[str] = frozenset()
 #: The form fields of every /po POST, by handler. A field set with `request_id` marks a route whose
 #: operation takes the id into `PoStore`'s request transaction; `tests.test_web_po_transport` holds
 #: the route table to this.
@@ -143,6 +145,7 @@ PO_FORM_FIELDS = {
     "po_create": PO_CREATE_FIELDS,
     "po_send": PO_SEND_FIELDS,
     "po_stop": PO_STOP_FIELDS,
+    "po_close": PO_CLOSE_FIELDS,
 }
 #: How long a browser keeps the PO cookie. Replacing the token file ends it sooner.
 PO_COOKIE_MAX_AGE = 30 * 24 * 3600
@@ -688,8 +691,9 @@ class WebApp:
             {"Location": "/po", "Set-Cookie": cookie},
         )
 
-    def _po_page(self, _params, _query, _body) -> Response:
-        return _html(200, pages.po_page(self.po.po_overview(), request_id=_po_request_id()))
+    def _po_page(self, _params, query, _body) -> Response:
+        closed = _first(query, "closed") == "1"
+        return _html(200, pages.po_page(self.po.po_overview(closed=closed), request_id=_po_request_id()))
 
     def _po_create(self, _params, _query, body) -> Response:
         _fields(body, PO_CREATE_FIELDS, "PO session create")
@@ -747,6 +751,26 @@ class WebApp:
             raise ValidationRefused("seq names the running turn to stop, as a whole number")
         self.po.po_stop(session_id=params["session"], seq=int(raw))
         return _redirect(f"/po/sessions/{quote(params['session'])}", what="the turn is stopped")
+
+    def _po_close(self, params, _query, body) -> Response:
+        """Close as the owner; closed already is the same answer. A running turn renders the session refused."""
+        _fields(body, PO_CLOSE_FIELDS, "PO close")
+        session_id = params["session"]
+        try:
+            self.po.po_close(session_id=session_id)
+        except ReadError as exc:
+            if exc.code == "not_found":
+                raise
+            return _html(
+                status_for(exc.code),
+                pages.po_session(
+                    self.po.po_session(session_id),
+                    request_id=_po_request_id(),
+                    refusal=exc.to_json(),
+                    refused="close",
+                ),
+            )
+        return _redirect("/po", what="the session is closed")
 
     # -- failures --------------------------------------------------------------------------
 
