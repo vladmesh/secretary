@@ -332,7 +332,8 @@ board store is touched; a missing token file answers 503. Routes: [Protocols](PR
 **The page.** `/po` lists sessions (CLI, model, created, state, whether a turn runs) and opens a new
 one with a CLI and a model from the list below. A session page shows the owner's messages, the PO
 head's final answers and each turn's state (`running`, `completed`, `failed` or `interrupted` with its
-reason), a message box, and `stop turn` while a turn runs. The PO head's answers are rendered
+reason), a message box (Enter sends, Shift+Enter inserts a newline; the form goes out once until the
+page reloads), and `stop turn` while a turn runs. The PO head's answers are rendered
 server-side as a safe Markdown subset (headings, emphasis, code, lists, quotes, rules, `http(s)`/`mailto`
 links; the text is escaped first, so raw HTML shows as text); the owner's messages are shown as typed.
 While a turn runs the page polls

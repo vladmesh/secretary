@@ -2413,6 +2413,7 @@ PO_NOTICE = (
     "the PO head runs Claude or Codex with full permissions on this host: what is sent here is carried "
     "out as if it were typed into a shell"
 )
+PO_SEND_HINT = "Enter to send, Shift+Enter for a new line"
 #: The words a turn's state is shown in, and their tone.
 TURN_MARKS: dict[str, tuple[str, str]] = {
     "running": ("running", "accent"),
@@ -2588,7 +2589,8 @@ def po_session(
             f'<form class="sprint" id="po-send" method="post" action="{base}/messages">',
             f'<input type="hidden" name="request_id" value="{escape(request_id)}">',
             '<div class="field"><label for="po-text">message</label>',
-            f'<textarea id="po-text" name="text" required>{escape(draft)}</textarea></div>',
+            f'<textarea id="po-text" name="text" required>{escape(draft)}</textarea>',
+            f'<p class="hint">{escape(PO_SEND_HINT)}</p></div>',
             '<button type="submit">send</button>',
             "</form>",
         ]
@@ -2680,6 +2682,27 @@ const TURNS = __TURNS__;
 const LAST = '__LAST__';
 const status = document.getElementById('po-status');
 const draft = document.getElementById('po-text');
+// Enter sends through the form's own submit path, Shift+Enter keeps the newline. A form goes out once:
+// a refusal renders a fresh page, where sending works again.
+const form = document.getElementById('po-send');
+const button = form ? form.querySelector('button[type="submit"]') : null;
+let submitted = false;
+if (form) {
+  form.addEventListener('submit', (event) => {
+    if (submitted) { event.preventDefault(); return; }
+    submitted = true;
+    if (button) button.disabled = true;
+  });
+}
+if (form && draft) {
+  draft.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+    if (event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    if (submitted || !draft.value.trim()) return;
+    form.requestSubmit();
+  });
+}
 if (__RUNNING__) {
   if (status) status.textContent = 'the turn is running; this page updates when it ends';
   const timer = window.setInterval(async () => {

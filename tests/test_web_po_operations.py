@@ -204,6 +204,28 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertIn("if (owned && first === null) first = option;", _PO_FORM_SCRIPT)
         self.assertIn("if ((!current || current.disabled) && first) first.selected = true;", _PO_FORM_SCRIPT)
 
+    def test_enter_sends_the_message_once_and_shift_enter_keeps_a_newline(self) -> None:
+        from secretary.web.pages import _PO_SESSION_SCRIPT
+
+        page = self.page(self.create())
+        self.assertIn("Enter to send, Shift+Enter for a new line", page)
+        # The key handler is installed outside the running-turn branch.
+        self.assertLess(
+            _PO_SESSION_SCRIPT.index("addEventListener('keydown'"),
+            _PO_SESSION_SCRIPT.index("if (__RUNNING__)"),
+        )
+        self.assertIn("draft.addEventListener('keydown'", page)
+        for line in (
+            "if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;",
+            "if (event.isComposing || event.keyCode === 229) return;",
+            "if (submitted || !draft.value.trim()) return;",
+            "form.requestSubmit();",
+            "if (submitted) { event.preventDefault(); return; }",
+            "if (button) button.disabled = true;",
+        ):
+            with self.subTest(line=line):
+                self.assertIn(line, _PO_SESSION_SCRIPT)
+
     def test_the_same_session_form_submitted_twice_is_one_session(self) -> None:
         first = self.create(request_id="create-twice")
         second = self.create(request_id="create-twice")
