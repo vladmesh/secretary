@@ -329,8 +329,11 @@ The cookie value is an HMAC keyed by the token, never the token. Without a valid
 route answers 401 (a page with the login form, or JSON `po_token_required`) before the runner or the
 board store is touched; a missing token file answers 503. Routes: [Protocols](PROTOCOLS.md#routes).
 
-**The page.** `/po` lists sessions (CLI, model, created, state, whether a turn runs) and opens a new
-one with a CLI and a model from the list below. A session page shows the owner's messages, the PO
+**The page.** `/po` lists sessions, newest activity first, and opens a new one with a CLI and a model
+from the list below. A row's link is the start of the session's first owner message (whitespace
+collapsed, at most 80 characters with `…` when cut, plain text; `no message yet` before the first
+message), then its last activity (the latest of creation, any turn's start or finish, and any feed
+entry), CLI, model, state, whether a turn runs, and the short session id. A session page shows the owner's messages, the PO
 head's final answers and each turn's state (`running`, `completed`, `failed` or `interrupted` with its
 reason), a message box (Enter sends, Shift+Enter inserts a newline; the form goes out once until the
 page reloads), and `stop turn` while a turn runs. The PO head's answers are rendered

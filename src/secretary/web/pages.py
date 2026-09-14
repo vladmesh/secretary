@@ -2483,18 +2483,19 @@ def po_page(
         [
             (
                 f'<a class="ref" href="/po/sessions/{quote(str(item.get("session_id") or ""))}">'
-                f"{escape(str(item.get('session_id') or '')[:8])}</a>"
+                f"{_po_first_message(item.get('first_message'))}</a>"
             ),
+            _or_dash(item.get("last_activity_at")),
             _or_dash(item.get("cli")),
             _or_dash(item.get("model")),
-            _or_dash(item.get("created_at")),
             _or_dash(item.get("state")),
             _chip("turn running", "accent") if item.get("running") else '<span class="empty">idle</span>',
+            f'<span class="age">{escape(str(item.get("session_id") or "")[:8])}</span>',
         ]
         for item in sessions
     ]
     table = (
-        _rows(["session", "cli", "model", "created", "state", "turn"], rows)
+        _rows(["session", "last activity", "cli", "model", "state", "turn", "id"], rows)
         if rows
         else '<p class="empty">no PO session yet</p>'
     )
@@ -2514,6 +2515,20 @@ def po_page(
         ]
     )
     return _page("Product owner", body, script=_PO_FORM_SCRIPT, nav="po")
+
+
+#: How many characters of a session's first owner message its row on `/po` shows, ellipsis included.
+PO_FIRST_MESSAGE_CHARS = 80
+
+
+def _po_first_message(text: Any) -> str:
+    """The start of a session's first owner message as escaped plain text, or a muted placeholder."""
+    words = " ".join(str(text or "").split())
+    if not words:
+        return '<span class="empty">no message yet</span>'
+    if len(words) > PO_FIRST_MESSAGE_CHARS:
+        words = words[: PO_FIRST_MESSAGE_CHARS - 1].rstrip() + "…"
+    return escape(words)
 
 
 def _po_new_session_form(models: dict[str, Any], *, request_id: str, submitted: dict[str, Any]) -> str:
