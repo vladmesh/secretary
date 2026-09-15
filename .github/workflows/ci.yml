@@ -72,6 +72,20 @@ jobs:
           --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
           > /dev/null
 
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --upgrade pip
+      - run: python3 -m pip install -e '.[typecheck]'
+      - run: python3 -m mypy
+
   test:
     name: test
     if: ${{ always() }}
