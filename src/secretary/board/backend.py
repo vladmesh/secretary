@@ -25,7 +25,10 @@ import hashlib
 import os
 import re
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
+
+from secretary.board_transport import BoardTransport
 
 #: The one named place.  A card backend is chosen here or it is `kanboard`.
 CARD_BACKEND_ENV = "SECRETARY_CARD_BACKEND"
@@ -191,7 +194,7 @@ def record_key(kind: str, identifier: str) -> int:
 def record_key_kind(value: object) -> str | None:
     """Return the normalized non-Card kind for a transport key, or None for a Card key."""
     try:
-        number = int(value)  # type: ignore[arg-type]
+        number = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return None
     for kind in RECORD_KINDS:
@@ -204,18 +207,18 @@ def record_key_kind(value: object) -> str | None:
 def card_transport_key(value: object) -> int | None:
     """Return a valid Card transport key, or ``None`` outside the Card namespace."""
     try:
-        number = int(value)  # type: ignore[arg-type]
+        number = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return None
     return number if CARD_KEY_BASE <= number < CARD_KEY_LIMIT else None
 
 
 def board_client(
-    instance_dir: object,
+    instance_dir: str | Path,
     *,
     serves: tuple[BoardCapability, ...] = (CARD,),
     role: str = "app",
-    transport: object | None = None,
+    transport: BoardTransport | None = None,
 ) -> Any:
     """The board client this process's switch names, built for one installation.
 
@@ -243,7 +246,7 @@ def board_client(
         raise TaskError("backend_error", str(exc), 1) from None
     if backend == KANBOARD:
         if transport is not None:
-            return KanboardClient(transport, instance_dir)
+            return KanboardClient(transport, Path(instance_dir))
         return KanboardClient.for_instance(instance_dir)
     unknown = tuple(entity for entity in serves if entity not in POSTGRES_SERVES)
     if unknown:
@@ -263,7 +266,7 @@ def board_client(
     return SqlCardClient(credentials, instance_dir)
 
 
-def card_client(instance_dir: object, *, role: str = "app") -> Any:
+def card_client(instance_dir: str | Path, *, role: str = "app") -> Any:
     """`board_client` for the one entity the PostgreSQL implementation serves."""
     return board_client(instance_dir, serves=(CARD,), role=role)
 
