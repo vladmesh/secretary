@@ -59,6 +59,7 @@ mypy_path = "src"
 files = [
     "src/secretary/board/models.py",
     "src/secretary/board/host.py",
+    "src/secretary/board/backend.py",
     "src/secretary/dispatch/runtime_provenance.py",
     "src/secretary/po/models.py",
 ]
