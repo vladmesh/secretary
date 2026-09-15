@@ -53,8 +53,10 @@ STYLE = """
   --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
   --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
+:root[data-theme="light"] { color-scheme: light; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --ground: #11161d; --surface: #1a2028; --raised: #222a34; --line: #2c3541; --line-strong: #40495a;
     --ink: #e7ebf0; --muted: #a0abb8; --faint: #6f7b89;
     --accent: #8db1f0; --accent-ink: #0f1a2e; --accent-soft: #223252;
@@ -62,6 +64,7 @@ STYLE = """
   }
 }
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --ground: #11161d; --surface: #1a2028; --raised: #222a34; --line: #2c3541; --line-strong: #40495a;
   --ink: #e7ebf0; --muted: #a0abb8; --faint: #6f7b89;
   --accent: #8db1f0; --accent-ink: #0f1a2e; --accent-soft: #223252;
@@ -95,6 +98,10 @@ nav.primary a[aria-current="page"] { color: var(--ink); border-bottom-color: var
 .crumbs .sep { color: var(--faint); }
 .crumbs .here { color: var(--ink); font-family: var(--mono); }
 .top .notice { margin-left: auto; color: var(--faint); font-size: .72rem; max-width: 22rem; text-align: right; line-height: 1.25; }
+.top .theme-toggle { display:inline-flex; align-items:center; gap:.25rem; padding:.3rem .45rem; border:1px solid var(--line-strong); border-radius:999px; background:transparent; color:var(--muted); line-height:1; }
+.top .theme-toggle:hover { background:var(--raised); color:var(--ink); filter:none; }
+.top .theme-toggle .sun, .top .theme-toggle .moon { opacity:.35; }
+.top .theme-toggle[data-theme="light"] .sun, .top .theme-toggle[data-theme="dark"] .moon { opacity:1; color:var(--ink); }
 
 /* the page */
 main { max-width: 1280px; margin: 0 auto; padding-block: 1.25rem 4rem; padding-inline: 20px; }
@@ -109,12 +116,12 @@ main { max-width: 1280px; margin: 0 auto; padding-block: 1.25rem 4rem; padding-i
 .compact-sprint:last-child { border-bottom: 0; padding-bottom: 0; }
 .compact-sprint header { display:flex; gap:.45rem; align-items:center; flex-wrap:wrap; }
 .compact-sprint .goal { margin:.25rem 0; color:var(--muted); }
-.po-feed { list-style:none; padding:0; margin:0; display:grid; gap:.6rem; }
-.po-entry { border-left: 3px solid var(--line-strong); padding:.35rem .7rem; }
+.po-feed { list-style:none; padding:0; margin:0; display:grid; gap:.6rem; min-width:0; max-width:100%; }
+.po-entry { border-left: 3px solid var(--line-strong); padding:.35rem .7rem; min-width:0; max-width:100%; }
 .po-entry.po-agent { border-left-color: var(--accent); background: var(--raised); }
 .po-entry .who { font-size:.8rem; color:var(--muted); }
-.po-entry .text { white-space: pre-wrap; overflow-wrap:anywhere; }
-.po-entry .md { overflow-wrap:anywhere; }
+.po-entry .text { white-space: pre-wrap; overflow-wrap:anywhere; word-break:break-word; min-width:0; max-width:100%; }
+.po-entry .md { overflow-wrap:anywhere; word-break:break-word; min-width:0; max-width:100%; }
 .po-entry .md > :first-child { margin-top:0; }
 .po-entry .md > :last-child { margin-bottom:0; }
 .po-entry .md p, .po-entry .md ul, .po-entry .md ol, .po-entry .md blockquote, .po-entry .md pre { margin:.4rem 0; }
@@ -125,9 +132,9 @@ main { max-width: 1280px; margin: 0 auto; padding-block: 1.25rem 4rem; padding-i
 .po-entry .md li > ul, .po-entry .md li > ol { margin:.15rem 0; }
 .po-entry .md blockquote { border-left:3px solid var(--line-strong); padding-left:.7rem; color:var(--muted); margin-inline:0; }
 .po-entry .md hr { border:0; border-top:1px solid var(--line); margin:.6rem 0; }
-.po-entry .md code { background:var(--surface); border:1px solid var(--line); border-radius:3px; padding:0 .25em; }
-.po-entry .md pre { white-space:pre; overflow-x:auto; overflow-wrap:normal; background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:.5rem .7rem; }
-.po-entry .md pre code { background:none; border:0; padding:0; font-size:inherit; }
+.po-entry .md code { background:var(--surface); border:1px solid var(--line); border-radius:3px; padding:0 .25em; overflow-wrap:anywhere; word-break:break-word; }
+.po-entry .md pre { white-space:pre; max-width:100%; min-width:0; overflow-x:auto; overflow-wrap:normal; word-break:normal; background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:.5rem .7rem; }
+.po-entry .md pre code { background:none; border:0; padding:0; font-size:inherit; overflow-wrap:normal; word-break:normal; }
 .po-mark { font-size:.85rem; color:var(--muted); }
 @media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 
@@ -136,7 +143,7 @@ main { max-width: 1280px; margin: 0 auto; padding-block: 1.25rem 4rem; padding-i
 .panel > header { display: flex; align-items: center; gap: .6rem; padding: .6rem .9rem; border-bottom: 1px solid var(--line); }
 .panel > header .count { font-family: var(--mono); font-size: .8rem; color: var(--muted); }
 .panel > header .more { margin-left: auto; font-size: .85rem; }
-.panel > .body { padding: .75rem .9rem; }
+.panel > .body { padding: .75rem .9rem; min-width:0; max-width:100%; }
 .panel > .body > * + * { margin-top: .6rem; }
 .panel table { margin: -.25rem 0; }
 .stack > * + * { margin-top: .6rem; }
@@ -327,17 +334,42 @@ def _page(
             '<link rel="preconnect" href="https://fonts.googleapis.com">',
             f'<link rel="stylesheet" href="{FONTS}">',
             f"<style>{STYLE}</style>",
+            "<script>try{const theme=localStorage.getItem('secretary.web.theme');if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme;}catch(error){}</script>",
             "</head><body>",
             '<header class="top"><div class="row">',
             f'<a class="brand" href="/">{escape(TITLE)}</a>',
             f'<nav class="primary" aria-label="primary">{links}</nav>',
             trail,
             f'<p class="notice" title="{escape(LOOPBACK_NOTICE)}">local only</p>',
+            '<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle color theme" title="Toggle color theme"><span class="sun" aria-hidden="true">☀</span><span class="moon" aria-hidden="true">☾</span></button>',
             '<a class="top-action" href="/sprints/new">New sprint</a>',
             "</div></header>",
             "<main>",
             body,
             "</main>",
+            """<script>(() => {
+  const button = document.getElementById('theme-toggle');
+  function currentTheme() {
+    const selected = document.documentElement.dataset.theme;
+    if (selected === 'light' || selected === 'dark') return selected;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  function showTheme() {
+    if (!button) return;
+    const theme = currentTheme();
+    button.dataset.theme = theme;
+    const next = theme === 'dark' ? 'light' : 'dark';
+    button.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+    button.title = 'Switch to ' + next + ' theme';
+  }
+  if (button) button.addEventListener('click', () => {
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('secretary.web.theme', next); } catch (error) {}
+    showTheme();
+  });
+  showTheme();
+})();</script>""",
             f"<script>{script}</script>" if script else "",
             "</body></html>",
         ]
@@ -2613,7 +2645,7 @@ def po_session(
     refusal: dict[str, Any] | None = None,
     refused: str = "send",
 ) -> str:
-    """One session: its feed, the state of each turn, the message box, stop while a turn runs, close otherwise.
+    """One session: its newest-first feed, the message box, turn state, stop while running, close otherwise.
 
     A closed session stays readable: its feed and who closed it when, with no message box and no close.
     """
@@ -2625,8 +2657,8 @@ def po_session(
     for entry in document.get("feed") or []:
         by_turn.setdefault(entry.get("turn_seq"), []).append(entry)
     items: list[str] = []
-    for turn in turns:
-        items.extend(_po_entry(entry) for entry in by_turn.get(turn.get("seq"), []))
+    for turn in reversed(turns):
+        items.extend(_po_entry(entry) for entry in reversed(by_turn.get(turn.get("seq"), [])))
         items.append(_po_turn_mark(turn))
     feed = (
         f'<ol class="po-feed" id="po-feed">{"".join(items)}</ol>'
@@ -2674,8 +2706,8 @@ def po_session(
                 if closed
                 else ""
             ),
-            _panel("Feed", feed + stop + close, more='<a class="more" href="/po">all sessions</a>'),
             "" if closed else _panel("Send", message + '<p class="feedback" id="po-status"></p>'),
+            _panel("Feed", feed + stop + close, more='<a class="more" href="/po">all sessions</a>'),
             f'<p class="hint empty">{escape(PO_NOTICE)}</p>',
         ]
     )
