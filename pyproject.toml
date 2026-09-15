@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 managed = false
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 # The linter is part of the contract, so its version is too: a rule set that means one thing
 # on the author's machine and another in a gate is not a gate. `required-version` makes any
 # other ruff refuse to run instead of silently reporting a different set of findings; install
@@ -63,7 +63,7 @@ description = "Portable secretary appliance CLI skeleton."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "PyYAML>=6.0",
     # 4.18 is the first release whose validators take a `referencing` registry (its own
