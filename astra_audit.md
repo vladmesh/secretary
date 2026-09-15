@@ -41,8 +41,9 @@ Most technical debt is caused by data crossing between those generations through
 
 - ✅ **A01 completed in PR #434:** removed the dead `secretary._env` compatibility shim, its compatibility-only architecture assertion, and `_env.py` from `LEGACY_FLAT_MODULES`.
 - ✅ **A02 completed in PR #434:** aligned the declared/tooling Python contract with the runtime by raising `requires-python` from `>=3.11` to `>=3.12` and Ruff's target from `py311` to `py312`. We intentionally did **not** add a redundant 3.11 CI run; the product now explicitly supports the Python version its CI and runtime already use.
+- ✅ **A03 completed in PR #435:** added pinned `mypy==1.18.2`, a dedicated `typecheck` dependency/CI job, and an intentionally narrow first gate over already-typed leaves (`secretary.board.models`, `secretary.board.host`, `secretary.dispatch.runtime_provenance`, and `secretary.po.models`). Imported legacy modules remain outside the enforced error surface so the gate can expand incrementally instead of turning into a repository-wide migration.
 
-PR #434 passed the full CI workflow and was merged into `main` on 2026-09-15.
+PR #434 and PR #435 both passed the full CI workflow and were merged into `main` on 2026-09-15.
 
 ## Findings
 
@@ -50,7 +51,7 @@ PR #434 passed the full CI workflow and was merged into `main` on 2026-09-15.
 |---|---|---:|
 | A01 | ✅ Remove the dead private `_env.py` compatibility shim — **completed in #434** | **1** |
 | A02 | ✅ Align declared Python support with the actual 3.12 runtime/CI — **completed in #434** | **1** |
-| A03 | Add a real static type checker, initially on typed packages only | **2** |
+| A03 | ✅ Add a real static type checker, initially on typed packages only — **completed in #435** | **2** |
 | A04 | Replace board-backend string literals with `StrEnum` | **2** |
 | A05 | Type pause mode and pause-state documents | **2** |
 | A06 | Type Product/Issue kind, priority and close-reason vocabularies | **2** |
@@ -96,17 +97,15 @@ The original audit offered two valid fixes: add 3.11 coverage to CI, or stop dec
 
 **Implemented in PR #434:** raised `requires-python` to `>=3.12` and Ruff's `target-version` to `py312`. CI remains on Python 3.12, so package metadata, lint semantics, CI, and the intended runtime now agree.
 
-### A03. Add a real static type checker — complexity 2
+### A03. Add a real static type checker — complexity 2 — completed
 
-The repository has extensive annotations but no mypy/pyright gate. Ruff catches syntax/style classes of problems, not type mismatches between the many dict-shaped protocols.
+At audit time, the repository had extensive annotations but no mypy/pyright gate. Ruff catches syntax/style classes of problems, not type mismatches between the many dict-shaped protocols.
 
-**Fix:** add pyright or mypy and introduce it incrementally:
+The intended approach was incremental rather than strict checking over the whole repository at once.
 
-1. start with already-typed leaves such as `secretary.board.models`, `secretary.board.host`, `secretary.dispatch.head_vitality*`, `secretary.po.models`, and `triggered_agents.runtime.head`;
-2. disallow new untyped functions in those packages;
-3. expand package by package as legacy dict surfaces are converted.
+**Implemented in PR #435:** added pinned `mypy==1.18.2` as a dedicated `typecheck` optional dependency, configured it for Python 3.12, and added a separate GitHub Actions `typecheck` job. The initial enforced set is deliberately small and already typed: `secretary.board.models`, `secretary.board.host`, `secretary.dispatch.runtime_provenance`, and `secretary.po.models`. Imported legacy modules are followed for type information but their pre-existing errors are not made part of this first gate.
 
-Do **not** enable strict checking over the entire repository in one PR; that would turn this from complexity 2 into complexity 5.
+The new typecheck passed on the first CI run, the ordinary test shards and aggregate gate also passed, and PR #435 was merged into `main`. The next step for this finding is not another one-off cleanup: grow the checked set package by package as A04–A13 remove legacy string/dict surfaces.
 
 ### A04. Replace board-backend string literals with `StrEnum` — complexity 2
 
@@ -337,9 +336,9 @@ This is likely the single biggest long-term simplification after the board-store
 
 ### Phase 1 — low-risk cleanup and guardrails
 
-~~A01~~, ~~A02~~, A03, A04, A05, A06, A16.
+~~A01~~, ~~A02~~, ~~A03~~, A04, A05, A06, A16.
 
-A01 and A02 are complete via PR #434. The remaining items improve safety immediately and make later migrations easier without changing major architecture.
+A01 and A02 are complete via PR #434; A03 is complete via PR #435. The remaining items improve safety immediately and make later migrations easier without changing major architecture, except A16 which should wait for explicit confirmation that every installed service supplies the backend setting.
 
 ### Phase 2 — collapse string/dict protocols
 
@@ -369,4 +368,4 @@ The repository already has the right target architecture written down. The next 
 - let `tests/test_architecture.py` keep ratcheting the old layout smaller;
 - treat `triggered_agents`, Kanboard and Orca-legacy as migrations with explicit end conditions, not permanent second implementations.
 
-With A01 and A02 complete, the highest-value near-term sequence is: **A03 → A07/A08 → A09 → A13**, while A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
+With A01–A03 complete, the highest-value near-term sequence is: **A04/A06 → A07/A08 → A09 → A13**. A05 is an independent low-risk typing cleanup that can be taken at any point in that sequence; A16 should be gated on production configuration confirmation. A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
