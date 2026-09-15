@@ -4,13 +4,8 @@ from __future__ import annotations
 
 import ast
 import inspect
-import os
 import unittest
 from pathlib import Path
-from unittest import mock
-
-from secretary import _env
-from secretary.infra import env
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # feature packages documented in ARCHITECTURE.md instead of making the root wider again.
 LEGACY_FLAT_MODULES = frozenset(
     """
-    __init__.py __main__.py _env.py _fsutil.py _proc.py automations.py backup.py
+    __init__.py __main__.py _fsutil.py _proc.py automations.py backup.py
     backup_policy.py backup_retention.py backup_verify.py board_transport.py bootstrap.py
     broad_check.py candidate_history.py check_commands.py checkpoint.py cli.py cli_output.py
     codex_provider_events.py config.py data.py dispatcher.py dispatcher_commands.py
@@ -84,11 +79,6 @@ class SourceLayoutTests(unittest.TestCase):
                 ):
                     imports.add((path.relative_to(package).as_posix(), node.module))
         self.assertEqual(imports, LEGACY_TRIGGERED_AGENTS_IMPORTS)
-
-    def test_old_environment_import_is_the_same_implementation(self) -> None:
-        self.assertIs(_env.positive_int, env.positive_int)
-        with mock.patch.dict(os.environ, {"COUNT": "7"}):
-            self.assertEqual(env.positive_int("COUNT", 3), 7)
 
 
 # Every place in `secretary` that builds a board client, other than the switch itself, and the
