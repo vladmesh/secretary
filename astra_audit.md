@@ -43,9 +43,10 @@ Most technical debt is caused by data crossing between those generations through
 - ✅ **A02 completed in PR #434:** aligned the declared/tooling Python contract with the runtime by raising `requires-python` from `>=3.11` to `>=3.12` and Ruff's target from `py311` to `py312`. We intentionally did **not** add a redundant 3.11 CI run; the product now explicitly supports the Python version its CI and runtime already use.
 - ✅ **A03 completed in PR #435:** added pinned `mypy==1.18.2`, a dedicated `typecheck` dependency/CI job, and an intentionally narrow first gate over already-typed leaves (`secretary.board.models`, `secretary.board.host`, `secretary.dispatch.runtime_provenance`, and `secretary.po.models`). Imported legacy modules remain outside the enforced error surface so the gate can expand incrementally instead of turning into a repository-wide migration.
 - ✅ **A04 completed in PR #436:** introduced typed `BoardBackend(StrEnum)` and `BoardCapability(StrEnum)` vocabularies, kept the old public constants as string-compatible enum-member aliases, typed the backend parser/cache and capability set, and added `secretary.board.backend` to the incremental mypy gate without changing the environment/storage/serialized string contract.
+- ✅ **A05 completed in PR #438:** introduced canonical `PauseMode(StrEnum)` plus typed `PauseState`, `AutoResumeStatus`, and `LegacyPauseMirror` document contracts around the dispatcher pause state. The `soft`/`hard` boundary aliases, persisted JSON keys/values, corrupt-file freeze behavior, and auto-resume semantics remain unchanged; `secretary.dispatcher_pause` is now part of the incremental mypy gate.
 - ✅ **A06 completed in PR #437:** added canonical `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s to the normalized board model. `Issue` now stores typed optional vocabulary values while accepting the existing string spellings at construction boundaries; persisted/CLI/Kanboard/PostgreSQL values remain unchanged. The staged Kanboard `pending/pending` recovery shape normalizes to absent typed metadata instead of expanding the durable vocabulary.
 
-PR #434, PR #435, PR #436, and PR #437 all passed the full CI workflow and were merged into `main` on 2026-09-15. PR #437 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate before merge.
+PR #434, PR #435, PR #436, PR #437, and PR #438 all passed the full CI workflow and were merged into `main` on 2026-09-15. PR #438 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate before merge.
 
 ## Findings
 
@@ -55,7 +56,7 @@ PR #434, PR #435, PR #436, and PR #437 all passed the full CI workflow and were 
 | A02 | ✅ Align declared Python support with the actual 3.12 runtime/CI — **completed in #434** | **1** |
 | A03 | ✅ Add a real static type checker, initially on typed packages only — **completed in #435** | **2** |
 | A04 | ✅ Replace board-backend string literals with `StrEnum` — **completed in #436** | **2** |
-| A05 | Type pause mode and pause-state documents | **2** |
+| A05 | ✅ Type pause mode and pause-state documents — **completed in #438** | **2** |
 | A06 | ✅ Type Product/Issue kind, priority and close-reason vocabularies — **completed in #437** | **2** |
 | A07 | Centralize the role vocabulary in one `Role(StrEnum)` | **3** |
 | A08 | Type task routing metadata (`task_type`, complexity, family preference, phases, decisions) | **3** |
@@ -107,7 +108,7 @@ The intended approach was incremental rather than strict checking over the whole
 
 **Implemented in PR #435:** added pinned `mypy==1.18.2` as a dedicated `typecheck` optional dependency, configured it for Python 3.12, and added a separate GitHub Actions `typecheck` job. The initial enforced set is deliberately small and already typed: `secretary.board.models`, `secretary.board.host`, `secretary.dispatch.runtime_provenance`, and `secretary.po.models`. Imported legacy modules are followed for type information but their pre-existing errors are not made part of this first gate.
 
-The new typecheck passed on the first CI run, the ordinary test shards and aggregate gate also passed, and PR #435 was merged into `main`. The next step for this finding is not another one-off cleanup: grow the checked set package by package as A04–A13 remove legacy string/dict surfaces.
+The new typecheck passed on the first CI run, the ordinary test shards and aggregate gate also passed, and PR #435 was merged into `main`. The checked set has since grown with A04 and A05; it should continue expanding package by package as A07–A13 remove legacy string/dict surfaces.
 
 ### A04. Replace board-backend string literals with `StrEnum` — complexity 2 — completed
 
@@ -119,9 +120,9 @@ This was a textbook closed vocabulary and a good candidate for a small typed ref
 
 The environment values, backend selection behavior, identity strings, storage shape, CLI spellings, and serialized values are unchanged. The final CI run passed typecheck, all seven test shards, and the aggregate gate before merge.
 
-### A05. Type pause mode and pause-state documents — complexity 2
+### A05. Type pause mode and pause-state documents — complexity 2 — completed
 
-`dispatcher_pause.py` has a small, stable domain model represented by dictionaries and strings:
+At audit time, `dispatcher_pause.py` had a small, stable domain model represented by dictionaries and strings:
 
 - `PAUSE_MODES = ("drain", "freeze")`;
 - alias maps for `soft/hard`;
@@ -130,9 +131,9 @@ The environment values, backend selection behavior, identity strings, storage sh
 - `pause_payload() -> dict[str, Any]`;
 - legacy mirror receipts as dicts.
 
-**Fix:** add `PauseMode(StrEnum)`, `PauseState`, `AutoResumeStatus`, and `LegacyPauseMirror` typed values. Keep JSON serialization/deserialization in `ProductionPause`.
+**Implemented in PR #438:** added `PauseMode(StrEnum)` for the durable `drain` / `freeze` vocabulary and `TypedDict` contracts for `PauseState`, `AutoResumeStatus`, and `LegacyPauseMirror`. `ProductionPause` remains the JSON adapter boundary; it exposes the typed state internally while persisting the same JSON object shape. The existing `soft` / `hard` aliases still normalize at the input boundary, and the legacy mirror keeps its old spelling.
 
-This removes a cluster of repeated `str(state.get(...))`, magic keys, and invalid combinations while preserving the same on-disk JSON shape.
+The PR deliberately did not turn loading into a new strict runtime validator: corrupt-file handling and the existing semantic checks stay where they were, so unreadable pause files still fail closed as a freeze and auto-resume behavior is unchanged. `secretary.dispatcher_pause` was also added to the incremental mypy gate. Full CI passed before merge, including typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate.
 
 ### A06. Type Product/Issue vocabularies — complexity 2 — completed
 
@@ -340,9 +341,9 @@ This is likely the single biggest long-term simplification after the board-store
 
 ### Phase 1 — low-risk cleanup and guardrails
 
-~~A01~~, ~~A02~~, ~~A03~~, ~~A04~~, A05, ~~A06~~, A16.
+~~A01~~, ~~A02~~, ~~A03~~, ~~A04~~, ~~A05~~, ~~A06~~, A16.
 
-A01 and A02 are complete via PR #434; A03 is complete via PR #435; A04 is complete via PR #436; A06 is complete via PR #437. The remaining items improve safety immediately and make later migrations easier without changing major architecture, except A16 which should wait for explicit confirmation that every installed service supplies the backend setting.
+A01 and A02 are complete via PR #434; A03 is complete via PR #435; A04 is complete via PR #436; A05 is complete via PR #438; A06 is complete via PR #437. The only remaining Phase 1 item is A16, which should wait for explicit confirmation that every installed service supplies the backend setting before changing the fallback behavior.
 
 ### Phase 2 — collapse string/dict protocols
 
@@ -372,4 +373,4 @@ The repository already has the right target architecture written down. The next 
 - let `tests/test_architecture.py` keep ratcheting the old layout smaller;
 - treat `triggered_agents`, Kanboard and Orca-legacy as migrations with explicit end conditions, not permanent second implementations.
 
-With A01–A04 and A06 complete, the highest-value near-term sequence is: **A07/A08 → A09 → A13**. A05 is an independent low-risk typing cleanup that can be taken at any point in that sequence; A16 should be gated on production configuration confirmation. A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
+With A01–A06 complete, the highest-value near-term sequence is: **A07/A08 → A09 → A13**. A16 should be gated on production configuration confirmation. A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
