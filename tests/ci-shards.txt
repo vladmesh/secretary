@@ -74,6 +74,7 @@ component tests/test_github_credential.py
 component tests/test_project_git_access.py
 packaging tests/test_host.py
 packaging tests/test_installation.py
+unit tests/test_issue_vocabularies.py
 unit tests/test_knowledge_write.py
 integration-board tests/test_live_telemetry.py
 runtime-component tests/test_local_pty_head_runtime.py
