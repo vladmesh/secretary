@@ -4,8 +4,9 @@ Technical reference for the board store: schema, backend selection, transactions
 migrations, import mechanics, identifiers and store configuration.
 
 The production installation serves Products, Issues, Sprints and Cards from PostgreSQL
-(`SECRETARY_CARD_BACKEND=postgres`). The Kanboard implementation stays in the code and is the
-default when the selector is absent; the old Kanboard store is kept as a read-only archive.
+(`SECRETARY_CARD_BACKEND=postgres`). The Kanboard implementation stays in the code for explicit
+rollback (`SECRETARY_CARD_BACKEND=kanboard`); the old Kanboard store is kept as a read-only archive.
+A missing or empty selector is a configuration error rather than an implicit rollback.
 
 Related documents:
 
@@ -55,7 +56,7 @@ outside it (§3.11).
 Kanboard JSON-RPC implementation and a PostgreSQL one. The process chooses between them with
 `SECRETARY_CARD_BACKEND`:
 
-- values `kanboard` (default when unset or empty) or `postgres`; any other value refuses;
+- values `kanboard` or `postgres`; missing, empty and unknown values refuse;
 - read once per process (`card_backend()` caches it);
 - set in protected `<instance>/runtime.env`; the CLI loads it from there, the dispatcher and web
   units read the same file, and the role environment allowlist passes it to observer, worker,
