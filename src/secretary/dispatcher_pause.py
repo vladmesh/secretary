@@ -24,21 +24,76 @@ import json
 import os
 import time
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypedDict, cast
 
 from secretary._fsutil import write_json
 
-PAUSE_MODES = ("drain", "freeze")
+
+class PauseMode(StrEnum):
+    """The two durable production-pause modes."""
+
+    DRAIN = "drain"
+    FREEZE = "freeze"
+
+
+class LegacyPauseMirror(TypedDict, total=False):
+    """Receipt for the best-effort legacy pause mirror."""
+
+    path: str
+    written: bool
+    cleared: bool
+    reason: str
+
+
+class PauseState(TypedDict, total=False):
+    """The durable ``dispatcher/pause.json`` document.
+
+    The type describes the stable in-process contract while the persisted representation stays the
+    same JSON object. ``corrupt`` is synthetic and is returned only when the file cannot be read.
+    """
+
+    version: int
+    mode: PauseMode
+    since: str
+    actor: str
+    reason: str
+    stopped_worker: list[str]
+    stopped_reviewer: list[str]
+    stopped_observer: list[str]
+    excluded_worker: list[str]
+    legacy_mirror: LegacyPauseMirror
+    corrupt: bool
+
+
+class AutoResumeStatus(TypedDict, total=False):
+    """Decision document describing whether an automation freeze has expired."""
+
+    eligible: bool
+    ttl_seconds: int
+    reason: str
+    actor: str
+    age_seconds: int
+
+
+PAUSE_MODES: tuple[PauseMode, ...] = tuple(PauseMode)
 AUTO_RESUME_TTL_DEFAULT = 2700
 AUTO_RESUME_ACTORS_DEFAULT = "pipeline,secretary-backup,secretary,steward,curator,retro"
-_PAUSE_MODE_ALIASES = {"drain": "drain", "soft": "drain", "freeze": "freeze", "hard": "freeze"}
-_LEGACY_MODES = {"drain": "soft", "freeze": "hard"}
+_PAUSE_MODE_ALIASES: dict[str, PauseMode] = {
+    "drain": PauseMode.DRAIN,
+    "soft": PauseMode.DRAIN,
+    "freeze": PauseMode.FREEZE,
+    "hard": PauseMode.FREEZE,
+}
+_LEGACY_MODES: dict[PauseMode, str] = {PauseMode.DRAIN: "soft", PauseMode.FREEZE: "hard"}
 
 
-def normalize_pause_mode(mode: str | None) -> str:
-    """Public mode for a requested one, "" when it is not a pause mode. The legacy `soft`/`hard`
-    spellings keep parsing: operators and runbooks still carry them."""
+def normalize_pause_mode(mode: str | None) -> PauseMode | Literal[""]:
+    """Public mode for a requested one, ``""`` when it is not a pause mode.
+
+    The legacy ``soft``/``hard`` spellings keep parsing: operators and runbooks still carry them.
+    """
     return _PAUSE_MODE_ALIASES.get(str(mode or "").strip().lower(), "")
 
 
@@ -57,15 +112,15 @@ def auto_resume_actors() -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
-def auto_resume_status(state: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+def auto_resume_status(state: PauseState, *, now: float | None = None) -> AutoResumeStatus:
     """Whether this pause state is an automation-owned freeze that has outlived its TTL.
 
     A freeze without a readable `since` counts as expired rather than eternal: the failure mode being
     fixed here is a freeze nobody lifts.
     """
     ttl = auto_resume_ttl_seconds()
-    out: dict[str, Any] = {"eligible": False, "ttl_seconds": ttl, "reason": "not-freeze"}
-    if normalize_pause_mode(state.get("mode")) != "freeze":
+    out: AutoResumeStatus = {"eligible": False, "ttl_seconds": ttl, "reason": "not-freeze"}
+    if normalize_pause_mode(state.get("mode")) != PauseMode.FREEZE:
         return out
     if ttl <= 0:
         out["reason"] = "disabled"
@@ -90,7 +145,7 @@ def auto_resume_status(state: dict[str, Any], *, now: float | None = None) -> di
     return out
 
 
-def _parse_since(value: Any) -> float | None:
+def _parse_since(value: str | None) -> float | None:
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
@@ -112,8 +167,8 @@ class ProductionPause:
         self.root = data_dir / "dispatcher"
         self.path = self.root / "pause.json"
 
-    def load(self) -> dict[str, Any]:
-        """State, or {} when the pause is not set.
+    def load(self) -> PauseState:
+        """State, or ``{}`` when the pause is not set.
 
         A corrupt file is read as a freeze: continuing a dispatch while an operator's stop state cannot
         be read is worse than deferring it. `summary()` and `status()` carry an explicit warning.
@@ -123,15 +178,17 @@ class ProductionPause:
         except FileNotFoundError:
             return {}
         except (OSError, ValueError, UnicodeError):
-            return {"corrupt": True, "mode": "freeze"}
+            return {"corrupt": True, "mode": PauseMode.FREEZE}
         if not isinstance(payload, dict):
-            return {"corrupt": True, "mode": "freeze"}
-        return payload
+            return {"corrupt": True, "mode": PauseMode.FREEZE}
+        # JSON is the adapter boundary. Consumers see the typed contract, while semantic validation
+        # remains where it already lives so this refactor does not change corrupt-file behaviour.
+        return cast(PauseState, payload)
 
-    def mode(self) -> str:
+    def mode(self) -> PauseMode | Literal[""]:
         return normalize_pause_mode(self.load().get("mode"))
 
-    def save(self, payload: dict[str, Any]) -> None:
+    def save(self, payload: PauseState) -> None:
         write_json(self.path, payload)
 
     def clear(self) -> None:
@@ -170,16 +227,16 @@ class ProductionPause:
 
 def pause_payload(
     *,
-    mode: str,
+    mode: PauseMode,
     actor: str,
     reason: str,
     since: str,
     stopped_worker: list[str],
     stopped_reviewer: list[str],
     excluded_worker: list[str],
-    legacy_mirror: dict[str, Any],
+    legacy_mirror: LegacyPauseMirror,
     stopped_observer: list[str] | None = None,
-) -> dict[str, Any]:
+) -> PauseState:
     return {
         "version": 1,
         "mode": mode,
@@ -195,14 +252,14 @@ def pause_payload(
 
 
 def on_resume_text(mode: str, stopped_worker: list[str], stopped_reviewer: list[str]) -> str:
-    if mode == "freeze":
+    if mode == PauseMode.FREEZE:
         return (
             f"resume clears the freeze, relaunches {len(stopped_worker)} stopped worker head(s) and "
             f"{len(stopped_reviewer)} stopped reviewer head(s) in their existing workspaces, gives "
             "every wait watchdog a fresh window, and lets the next tick bring the stopped sprint "
             "observers back"
         )
-    if mode == "drain":
+    if mode == PauseMode.DRAIN:
         return (
             "resume clears the drain and lets the tick claim Ready cards again; cards already in "
             "flight kept running through the pause"
@@ -227,7 +284,7 @@ def legacy_mirror_path() -> Path:
     return workspaces_root / "secretary" / "pipeline" / "state" / "pipeline" / "pause.json"
 
 
-def write_legacy_mirror(*, mode: str, actor: str, reason: str, since: str) -> dict[str, Any]:
+def write_legacy_mirror(*, mode: PauseMode, actor: str, reason: str, since: str) -> LegacyPauseMirror:
     """Mirror the pause into the legacy flag so steward/curator/retro keep shedding.
 
     Best effort by design: a legacy path that cannot be written must not fail the pause. An existing
@@ -235,7 +292,7 @@ def write_legacy_mirror(*, mode: str, actor: str, reason: str, since: str) -> di
     pause this command did not set.
     """
     path = legacy_mirror_path()
-    out: dict[str, Any] = {"path": str(path), "written": False}
+    out: LegacyPauseMirror = {"path": str(path), "written": False}
     if path.exists():
         out["reason"] = "a legacy pause file already exists and is left untouched"
         return out
@@ -258,10 +315,9 @@ def write_legacy_mirror(*, mode: str, actor: str, reason: str, since: str) -> di
     return out
 
 
-def clear_legacy_mirror(state: dict[str, Any]) -> dict[str, Any]:
+def clear_legacy_mirror(state: PauseState) -> LegacyPauseMirror:
     """Remove a mirror this pause wrote. A mirror it did not write is left where it is."""
-    mirror = state.get("legacy_mirror")
-    mirror = mirror if isinstance(mirror, dict) else {}
+    mirror = state.get("legacy_mirror") or {}
     path = str(mirror.get("path") or "")
     if not mirror.get("written") or not path:
         return {"path": path, "cleared": False, "reason": "no legacy mirror was written by this pause"}
