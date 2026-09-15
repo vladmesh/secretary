@@ -79,8 +79,8 @@ logs, raw dumps, transcripts and artifacts. The SQLite and vector index, worktre
 generated host resources are derived and are not checkpointed.
 
 The live board has two implementations of `TaskReader`/`TaskWriter`: Kanboard over JSON-RPC and the
-PostgreSQL board store. A process picks one from `SECRETARY_CARD_BACKEND` (`kanboard` when unset,
-unknown values refused), once per process. The PostgreSQL schema, transactions and migrations are in
+PostgreSQL board store. A process must pick one explicitly from `SECRETARY_CARD_BACKEND`
+(`kanboard` or `postgres`; missing, empty and unknown values refuse), once per process. The PostgreSQL schema, transactions and migrations are in
 [Board store](BOARD_STORE.md). Backup components follow the same backend: normalised board and
 process state is common, plus `raw_board` for Kanboard or `postgres_dump` for PostgreSQL. Backup code
 does not read ORM rows. It asks the board client for normalised state and the `board-store.env`

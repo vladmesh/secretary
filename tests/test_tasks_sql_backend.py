@@ -66,10 +66,21 @@ class SqlBackendSwitchTests(unittest.TestCase):
             else os.environ.pop(backend.CARD_BACKEND_ENV, None)
         )
 
-    def test_the_default_is_kanboard_and_no_file_is_consulted(self) -> None:
+    def test_a_missing_selector_refuses_instead_of_falling_back(self) -> None:
         self._with(None)
+        with self.assertRaises(backend.BoardBackendError) as raised:
+            backend.card_backend()
+        self.assertIn("SECRETARY_CARD_BACKEND must be set", str(raised.exception))
+        report = backend.card_backend_status()
+        self.assertIsNone(report["backend"])
+        self.assertEqual(report["source"], backend.CARD_BACKEND_ENV)
+        self.assertIsNone(report["default"])
+        self.assertTrue(report["findings"])
+
+    def test_kanboard_is_chosen_only_when_named_explicitly(self) -> None:
+        self._with("kanboard")
         self.assertEqual(backend.card_backend(), "kanboard")
-        self.assertEqual(backend.card_backend_status()["source"], "default")
+        self.assertEqual(backend.card_backend_status()["source"], backend.CARD_BACKEND_ENV)
 
     def test_postgres_is_chosen_by_the_name_and_not_by_a_present_store_file(self) -> None:
         self._with("postgres")

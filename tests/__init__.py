@@ -17,11 +17,11 @@ that board (secretary-1026). ``tests/test_hermetic_kanboard.py`` proves it.
 
 *Which* backend a client is built for does need one, and it is a variable
 rather than a patch: ``SECRETARY_CARD_BACKEND`` is the one named place the
-card backend is chosen in, and the live installation exports ``postgres``
-there. Inherited, it points every construction through the switch at a store
-the suite has not got. It is cleared below, before any test module is
-imported, and a case that means PostgreSQL opts in explicitly.
-``tests/test_hermetic_card_backend.py`` proves it.
+card backend is chosen in, and production requires it explicitly. The live
+installation exports ``postgres`` there. Inherited, it points every
+construction through the switch at a store the suite has not got. The suite
+therefore pins its own explicit ``kanboard`` selector before any test module
+is imported. ``tests/test_hermetic_card_backend.py`` proves it.
 
 Codex runtime state needs one more default, for the same reason and in the
 same shape. Since secretary-1173 every Codex head is an interactive TUI, so
@@ -86,7 +86,7 @@ _FIXTURE_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
 # that a bring-up reached from anywhere in the suite -- including one whose
 # fixture registry names no `codex_home` and which never thought about trust at
 # all -- writes into a directory this run owns and removes. Set unconditionally:
-# an ambient TA_CODEX_HOME inherited from a worker/reviewer shell names that
+# an ambient TA_CODEX_HOME inherited from a worker/reviewer/operator shell names that
 # installation's real home, which is exactly what must not be written.
 _SUITE_CODEX_HOME = Path(tempfile.mkdtemp(prefix="secretary-tests-codex-home."))
 os.environ["TA_CODEX_HOME"] = str(_SUITE_CODEX_HOME)
@@ -104,21 +104,12 @@ _SUITE_PIPELINE_STATE_DIR = Path(tempfile.mkdtemp(prefix="secretary-tests-pipeli
 os.environ["TA_PIPELINE_STATE_DIR"] = str(_SUITE_PIPELINE_STATE_DIR)
 atexit.register(shutil.rmtree, _SUITE_PIPELINE_STATE_DIR, ignore_errors=True)
 
-# The card backend the suite runs on is `kanboard`, the product default, and it is decided here
-# rather than left to whatever shell started the run. A worker, reviewer or operator pane on this
-# installation exports `SECRETARY_CARD_BACKEND=postgres` -- the live selector -- and
-# `secretary.board.backend.card_backend()` reads exactly that name, decides once per process and
-# remembers. Inherited into the suite it silently moves every case that builds a client through the
-# switch onto a backend it has no store for: about twenty-eight broad failures on the same content
-# that is green from a clean shell, and, worse, it hides the CLI cases that are not hermetic by
-# making them fail for an unrelated reason (sprint:1437, secretary-1617).
-#
-# Cleared rather than set: absence *is* `kanboard` (`DEFAULT_CARD_BACKEND`), so this states the
-# default without putting a second spelling of it in the environment. A case that means PostgreSQL
-# opts in explicitly, for its own duration, the way `tests/test_tasks_sql_backend.py` does -- with
-# `backend.reset_card_backend()` around it, because the decision is cached per process.
-# `tests/test_hermetic_card_backend.py` proves both halves.
-os.environ.pop("SECRETARY_CARD_BACKEND", None)
+# The suite is deliberately a Kanboard run, but there is no product default any more: a missing
+# selector is a configuration error. Pin the test backend explicitly before any module is imported.
+# Set it unconditionally so an operator shell exporting the live PostgreSQL selector cannot redirect
+# the suite to a store its fixtures do not own. Individual PostgreSQL cases override it for their own
+# duration and reset the process cache around the change.
+os.environ["SECRETARY_CARD_BACKEND"] = "kanboard"
 
 _find_orca_patcher = mock.patch("secretary.host_apply.find_orca_executable", return_value=_FIXTURE_ORCA)
 _find_orca_patcher.start()
