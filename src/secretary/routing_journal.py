@@ -19,7 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from triggered_agents.runtime.head import CODEX_TUI_MODE
+from triggered_agents.runtime.head import CODEX_TUI_MODE, HeadRun as LifecycleHeadRun
 
 ROUTING_KIND = "routing"
 WORKER = "worker"
@@ -42,12 +42,16 @@ RUNTIME_MODEL_SOURCES = (MODEL_FROM_CLI_DEFAULT, MODEL_UNKNOWN)
 
 
 @dataclass(frozen=True)
-class HeadRun:
-    """One head as it was actually launched.
+class RoutingHeadSnapshot:
+    """Immutable routing/telemetry snapshot of one head as it was launched.
 
-    There is one head per role per bring-up and no substitution between the decision and the launch.
-    `head_source` says where that id came from: the card's own override, the role default, the
-    dispatcher record of a card claimed earlier, or the canon's fallback chain.
+    This is deliberately not the lifecycle ``HeadRun``.  The lifecycle value owns the durable run
+    identity, pane/process state and stop semantics; this value records the resolved routing facts
+    that are appended to the task journal and must never change afterwards.
+
+    There is one snapshot per role per bring-up and no substitution between the decision and the
+    launch. `head_source` says where that id came from: the card's own override, the role default,
+    the dispatcher record of a card claimed earlier, or the canon's fallback chain.
 
     `model` may be empty only under a `model_source` that says the CLI resolved it at startup, so a
     profile that pins no model can never be recorded as a silent blank.
@@ -67,7 +71,7 @@ class HeadRun:
     # Old records remain readable with a null value; new launch records say why it was unavailable.
     session_id: str | None = None
     session_id_reason: str = ""
-    # The dispatcher's durable identity for this exact pane bring-up. It fences two real launches
+    # The lifecycle HeadRun identity for this exact pane bring-up. It fences two real launches
     # before an asynchronous provider has created its own session journal.
     launch_id: str = ""
     # The exact document delivered to the role and its content address at bring-up.
@@ -103,7 +107,7 @@ class HeadRun:
         }
 
     @classmethod
-    def from_json(cls, payload: dict[str, Any]) -> HeadRun:
+    def from_json(cls, payload: dict[str, Any]) -> RoutingHeadSnapshot:
         model = str(payload.get("model") or "")
         source = str(payload.get("model_source") or "")
         if not source or (not model and source not in RUNTIME_MODEL_SOURCES):
@@ -129,7 +133,12 @@ class HeadRun:
         )
 
 
-def head_run_from_profile(
+# Compatibility for callers migrated in later package-boundary work. There is only one routing
+# snapshot class now; its real class name is no longer confused with the lifecycle HeadRun.
+HeadRun = RoutingHeadSnapshot
+
+
+def routing_head_snapshot_from_profile(
     *,
     role: str,
     head: str,
@@ -138,17 +147,8 @@ def head_run_from_profile(
     resources: dict[str, Any],
     model: str | None = None,
     model_source: str = "",
-) -> HeadRun:
-    """Snapshot the profile that was launched.
-
-    A Codex head is recorded under the one launch mode the product has, written here rather than
-    copied from the profile or the card, since a legacy `exec` in either place would put a mode in
-    the journal that no head of this bring-up could have run in.
-
-    `model` overrides the profile's own field for a head whose model the profile does not decide, with
-    `model_source` naming where it was read; a profile that pins nothing is recorded as resolved by
-    the CLI rather than as an empty field.
-    """
+) -> RoutingHeadSnapshot:
+    """Snapshot the resolved routing profile that was launched."""
     adapter = str(profile.get("adapter") or "")
     resource = str(profile.get("resource") or "")
     account = ""
@@ -165,7 +165,7 @@ def head_run_from_profile(
     if model is None:
         model = str(profile.get("model") or "")
         model_source = model_source or (MODEL_FROM_PROFILE if model else MODEL_FROM_CLI_DEFAULT)
-    return HeadRun(
+    return RoutingHeadSnapshot(
         role=role,
         head=head,
         head_source=head_source,
@@ -179,21 +179,41 @@ def head_run_from_profile(
     )
 
 
-def launched_head_run_snapshot(
-    run: HeadRun | dict[str, Any], *, lifecycle_run: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Add the provider session and delivered-prompt facts to one launch snapshot.
+# Compatibility spelling retained for the existing dispatcher/host surface. New code should use the
+# snapshot name so it cannot be mistaken for triggered_agents.runtime.head.HeadRun.
+head_run_from_profile = routing_head_snapshot_from_profile
 
-    The routing shape is deliberately separate from the lifecycle ``HeadRun``: the former is an
-    immutable description of the resolved configuration, while the latter receives pane and
-    provider-source updates as the head runs.  At bring-up the dispatcher has both, so this is the
-    one boundary that copies their stable, externally useful facts into the journal event.
+
+def routing_head_snapshot_from_launch(
+    run: RoutingHeadSnapshot, *, lifecycle_run: LifecycleHeadRun
+) -> RoutingHeadSnapshot:
+    """Bind resolved routing facts to the typed lifecycle run that was actually launched.
+
+    This is the canonical A10 boundary: routing decisions arrive as a ``RoutingHeadSnapshot`` and
+    lifecycle evidence arrives as the real runtime ``HeadRun``. Serialization is kept outside that
+    boundary so the two domain concepts cannot be accidentally substituted for one another.
     """
-    snapshot = run.to_json() if isinstance(run, HeadRun) else dict(run)
-    lifecycle = dict(lifecycle_run or {})
+    return _enrich_routing_head_snapshot(run.to_json(), lifecycle_run.to_json())
+
+
+def launched_head_run_snapshot(
+    run: RoutingHeadSnapshot | dict[str, Any], *, lifecycle_run: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Compatibility wrapper for the historical dict-based dispatcher boundary.
+
+    The persisted dispatcher shape is intentionally unchanged here; A13 owns converting those
+    durable dict fields. New typed code should call :func:`routing_head_snapshot_from_launch`.
+    """
+    snapshot = run.to_json() if isinstance(run, RoutingHeadSnapshot) else dict(run)
+    return _enrich_routing_head_snapshot(snapshot, dict(lifecycle_run or {})).to_json()
+
+
+def _enrich_routing_head_snapshot(
+    snapshot: dict[str, Any], lifecycle: dict[str, Any]
+) -> RoutingHeadSnapshot:
     session_id, session_id_reason = _session_identity(lifecycle)
     # A launcher that already captured an adapter-specific identity has better information than a
-    # recovery snapshot.  Do not replace it with a later unavailable provider-source observation.
+    # recovery snapshot. Do not replace it with a later unavailable provider-source observation.
     if snapshot.get("session_id"):
         session_id = str(snapshot["session_id"])
         session_id_reason = str(snapshot.get("session_id_reason") or "")
@@ -214,7 +234,7 @@ def launched_head_run_snapshot(
     else:
         snapshot.setdefault("prompt_path", "")
         snapshot.setdefault("prompt_version", "")
-    return HeadRun.from_json(snapshot).to_json()
+    return RoutingHeadSnapshot.from_json(snapshot)
 
 
 def _session_identity(lifecycle_run: dict[str, Any]) -> tuple[str | None, str]:
@@ -257,7 +277,7 @@ def _prompt_identity(lifecycle_run: dict[str, Any]) -> tuple[str, str]:
     return path, version
 
 
-def run_key(run: HeadRun | dict[str, Any] | None) -> str:
+def run_key(run: RoutingHeadSnapshot | dict[str, Any] | None) -> str:
     """Short digest of one launch configuration.
 
     A round can bring the same role up more than once, and the relaunched head is not necessarily
@@ -265,7 +285,7 @@ def run_key(run: HeadRun | dict[str, Any] | None) -> str:
     "a different configuration now serves this round", so the journal stays idempotent on the former
     and still appends an event for the latter.
     """
-    payload = run.to_json() if isinstance(run, HeadRun) else dict(run or {})
+    payload = run.to_json() if isinstance(run, RoutingHeadSnapshot) else dict(run or {})
     # The durable lifecycle run id is the primary bring-up identity. It is present before Claude
     # writes a JSONL/session id, so two fresh panes cannot collapse into one crash retry. Once a
     # run later binds its provider session, keep that same key: it is new evidence, not a third
@@ -283,7 +303,7 @@ def routing_payload(
     attempt: int,
     attempt_id: str,
     phase: str,
-    heads: Iterable[HeadRun | dict[str, Any]],
+    heads: Iterable[RoutingHeadSnapshot | dict[str, Any]],
     outcome: str = "",
 ) -> dict[str, Any]:
     if phase not in PHASES:
@@ -293,7 +313,9 @@ def routing_payload(
         "attempt_id": attempt_id,
         "phase": phase,
         "outcome": outcome,
-        "heads": [head.to_json() if isinstance(head, HeadRun) else dict(head) for head in heads],
+        "heads": [
+            head.to_json() if isinstance(head, RoutingHeadSnapshot) else dict(head) for head in heads
+        ],
     }
 
 
@@ -303,15 +325,15 @@ class AttemptRecord:
 
     attempt: int
     attempt_id: str = ""
-    worker: HeadRun | None = None
-    reviewer: HeadRun | None = None
+    worker: RoutingHeadSnapshot | None = None
+    reviewer: RoutingHeadSnapshot | None = None
     outcome: str = ""
     events: list[str] = field(default_factory=list)
     # Every bring-up of the round in journal order, not just the head that served it last: a round
     # whose reviewer was relaunched onto a repinned profile keeps both records, and `reviewer` is
     # the one the verdict came from.
-    worker_runs: list[HeadRun] = field(default_factory=list)
-    reviewer_runs: list[HeadRun] = field(default_factory=list)
+    worker_runs: list[RoutingHeadSnapshot] = field(default_factory=list)
+    reviewer_runs: list[RoutingHeadSnapshot] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -356,7 +378,7 @@ def attempts(events: Iterable[dict[str, Any]], reference: str = "") -> list[Atte
         for head in payload.get("heads") or []:
             if not isinstance(head, dict):
                 continue
-            run = HeadRun.from_json(head)
+            run = RoutingHeadSnapshot.from_json(head)
             if run.role == WORKER:
                 record.worker = run
                 if phase == "worker":
