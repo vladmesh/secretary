@@ -2,7 +2,7 @@
 
 Audit date: 2026-09-15  
 Baseline: `main` at `419bce6decdee15dd54d7d3e7f13d662763dbe56`  
-Progress updated: 2026-09-15
+Progress updated: 2026-09-16
 
 ## Scope
 
@@ -45,8 +45,9 @@ Most technical debt is caused by data crossing between those generations through
 - ✅ **A04 completed in PR #436:** introduced typed `BoardBackend(StrEnum)` and `BoardCapability(StrEnum)` vocabularies, kept the old public constants as string-compatible enum-member aliases, typed the backend parser/cache and capability set, and added `secretary.board.backend` to the incremental mypy gate without changing the environment/storage/serialized string contract.
 - ✅ **A05 completed in PR #438:** introduced canonical `PauseMode(StrEnum)` plus typed `PauseState`, `AutoResumeStatus`, and `LegacyPauseMirror` document contracts around the dispatcher pause state. The `soft`/`hard` boundary aliases, persisted JSON keys/values, corrupt-file freeze behavior, and auto-resume semantics remain unchanged; `secretary.dispatcher_pause` is now part of the incremental mypy gate.
 - ✅ **A06 completed in PR #437:** added canonical `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s to the normalized board model. `Issue` now stores typed optional vocabulary values while accepting the existing string spellings at construction boundaries; persisted/CLI/Kanboard/PostgreSQL values remain unchanged. The staged Kanboard `pending/pending` recovery shape normalizes to absent typed metadata instead of expanding the durable vocabulary.
+- ✅ **A16 completed in PR #440:** made `SECRETARY_CARD_BACKEND` mandatory for live backend selection. Missing, empty, and unknown selectors now fail closed; explicit `kanboard` remains the rollback path, the test suite pins its backend explicitly, and status represents the absence of a product default as `null`.
 
-PR #434, PR #435, PR #436, PR #437, and PR #438 all passed the full CI workflow and were merged into `main` on 2026-09-15. PR #438 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate before merge.
+PR #434, PR #435, PR #436, PR #437, PR #438, and PR #440 all passed the full CI workflow and were merged into `main`. PR #438 and PR #440 each passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate before merge.
 
 ## Findings
 
@@ -67,7 +68,7 @@ PR #434, PR #435, PR #436, PR #437, and PR #438 all passed the full CI workflow 
 | A13 | Break up `DispatcherRecord`'s nested `dict[str, Any]` state | **4** |
 | A14 | Remove the giant `dispatcher.py` compatibility façade | **4** |
 | A15 | Continue the flat-root-to-feature-package migration and split god modules | **4** |
-| A16 | Make the active board backend explicit instead of silently defaulting to Kanboard | **2** |
+| A16 | ✅ Make the active board backend explicit instead of silently defaulting to Kanboard — **completed in #440** | **2** |
 | A17 | Retire Kanboard from the live write path after the PostgreSQL cutover window | **5** |
 | A18 | Move/remove one-shot Kanboard import/cutover machinery after cutover | **3** |
 | A19 | Finish migration out of the legacy `triggered_agents` namespace | **5** |
@@ -274,15 +275,13 @@ Several modules are large enough that they have become architecture boundaries b
 
 Also move the implementation out of `cutover/__init__.py`; package `__init__` should expose a small API, not contain a 100 KB implementation.
 
-### A16. Make the active board backend explicit — complexity 2
+### A16. Make the active board backend explicit — complexity 2 — completed
 
-The documentation says production now serves the live board from PostgreSQL, but `board.backend.parse_card_backend()` still treats an absent/empty `SECRETARY_CARD_BACKEND` as `kanboard`.
+At audit time, production served the live board from PostgreSQL, but `board.backend.parse_card_backend()` still treated an absent/empty `SECRETARY_CARD_BACKEND` as `kanboard`. That migration default made configuration loss capable of silently selecting the legacy writer.
 
-That default was useful during migration, but after cutover it is a dangerous failure mode: losing one environment variable can silently select the legacy writer instead of failing closed.
+**Implemented in PR #440:** confirmed the installed web, dispatcher, and role launch paths all receive the instance `runtime.env` selector, then removed the implicit backend default. Missing, empty, and unknown selectors now refuse; explicit `postgres` and `kanboard` remain supported, so rollback is still an explicit configuration choice. The test suite now pins `kanboard` rather than relying on absence, and the status schema records that there is no product default.
 
-**Fix:** after confirming every installed service receives `SECRETARY_CARD_BACKEND`, change absence to a configuration error (or at minimum make PostgreSQL the product default). Keep an explicit `kanboard` value for rollback while the rollback window exists.
-
-This is intentionally separate from deleting Kanboard itself.
+This remains intentionally separate from deleting Kanboard itself.
 
 ### A17. Retire Kanboard from the live write path — complexity 5
 
@@ -341,9 +340,9 @@ This is likely the single biggest long-term simplification after the board-store
 
 ### Phase 1 — low-risk cleanup and guardrails
 
-~~A01~~, ~~A02~~, ~~A03~~, ~~A04~~, ~~A05~~, ~~A06~~, A16.
+~~A01~~, ~~A02~~, ~~A03~~, ~~A04~~, ~~A05~~, ~~A06~~, ~~A16~~.
 
-A01 and A02 are complete via PR #434; A03 is complete via PR #435; A04 is complete via PR #436; A05 is complete via PR #438; A06 is complete via PR #437. The only remaining Phase 1 item is A16, which should wait for explicit confirmation that every installed service supplies the backend setting before changing the fallback behavior.
+Phase 1 is complete: A01/A02 via PR #434, A03 via #435, A04 via #436, A05 via #438, A06 via #437, and A16 via #440.
 
 ### Phase 2 — collapse string/dict protocols
 
