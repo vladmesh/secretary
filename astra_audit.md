@@ -1,7 +1,8 @@
 # Astra audit
 
 Audit date: 2026-09-15  
-Baseline: `main` at `419bce6decdee15dd54d7d3e7f13d662763dbe56`
+Baseline: `main` at `419bce6decdee15dd54d7d3e7f13d662763dbe56`  
+Progress updated: 2026-09-15
 
 ## Scope
 
@@ -36,12 +37,19 @@ The main problem is that the migration is only partly complete. The repository c
 
 Most technical debt is caused by data crossing between those generations through dictionaries, string vocabularies, compatibility re-exports, and private helper imports. The best cleanup strategy is therefore **not** a rewrite. Continue moving one bounded domain at a time to the typed layer and delete the compatibility seam immediately after the last caller is migrated.
 
+## Progress
+
+- ✅ **A01 completed in PR #434:** removed the dead `secretary._env` compatibility shim, its compatibility-only architecture assertion, and `_env.py` from `LEGACY_FLAT_MODULES`.
+- ✅ **A02 completed in PR #434:** aligned the declared/tooling Python contract with the runtime by raising `requires-python` from `>=3.11` to `>=3.12` and Ruff's target from `py311` to `py312`. We intentionally did **not** add a redundant 3.11 CI run; the product now explicitly supports the Python version its CI and runtime already use.
+
+PR #434 passed the full CI workflow and was merged into `main` on 2026-09-15.
+
 ## Findings
 
 | ID | Finding | Complexity |
 |---|---|---:|
-| A01 | Remove the dead private `_env.py` compatibility shim | **1** |
-| A02 | Test the declared minimum Python version in CI | **2** |
+| A01 | ✅ Remove the dead private `_env.py` compatibility shim — **completed in #434** | **1** |
+| A02 | ✅ Align declared Python support with the actual 3.12 runtime/CI — **completed in #434** | **1** |
 | A03 | Add a real static type checker, initially on typed packages only | **2** |
 | A04 | Replace board-backend string literals with `StrEnum` | **2** |
 | A05 | Type pause mode and pause-state documents | **2** |
@@ -65,26 +73,28 @@ Most technical debt is caused by data crossing between those generations through
 
 ## Detailed findings
 
-### A01. Remove the dead private `_env.py` compatibility shim — complexity 1
+### A01. Remove the dead private `_env.py` compatibility shim — complexity 1 — completed
 
-`src/secretary/_env.py` is now only:
+At audit time, `src/secretary/_env.py` was only:
 
 ```python
 from secretary.infra.env import positive_int
 __all__ = ["positive_int"]
 ```
 
-`tests/test_architecture.py` explicitly keeps the old import alive and asserts that it is the same implementation. I found no production caller that needs the private `_env` path.
+`tests/test_architecture.py` explicitly kept the old import alive and asserted that it was the same implementation. I found no production caller that needed the private `_env` path.
 
-**Fix:** remove `secretary/_env.py`, remove it from `LEGACY_FLAT_MODULES`, delete the compatibility assertion, and import `secretary.infra.env` directly in the architecture test.
+**Implemented in PR #434:** removed `secretary/_env.py`, removed it from `LEGACY_FLAT_MODULES`, and deleted the compatibility-only architecture assertion/imports. Full CI passed before merge.
 
-This is the clearest example of compatibility code that has already finished its migration and should now be deleted rather than preserved indefinitely.
+This compatibility seam is now gone rather than being preserved indefinitely.
 
-### A02. Test the declared minimum Python version in CI — complexity 2
+### A02. Align declared Python support with the actual runtime — complexity 1 — completed
 
-`pyproject.toml` declares `requires-python = ">=3.11"`, but GitHub Actions installs only Python 3.12. That means accidental use of a 3.12-only API can merge while the package still claims 3.11 support.
+At audit time, `pyproject.toml` declared `requires-python = ">=3.11"`, while GitHub Actions ran only Python 3.12. That left the package claiming a compatibility level the project did not actually test.
 
-**Fix:** run at least the unit/component suites on 3.11 and keep the full integration matrix on the primary CI version if runtime cost matters. Alternatively, drop 3.11 from `requires-python` if it is intentionally unsupported.
+The original audit offered two valid fixes: add 3.11 coverage to CI, or stop declaring 3.11 support if it is intentionally unsupported. For this application, the second option is simpler and avoids paying a permanent second-version CI/compatibility cost for a Python version the controlled runtime does not need.
+
+**Implemented in PR #434:** raised `requires-python` to `>=3.12` and Ruff's `target-version` to `py312`. CI remains on Python 3.12, so package metadata, lint semantics, CI, and the intended runtime now agree.
 
 ### A03. Add a real static type checker — complexity 2
 
@@ -327,9 +337,9 @@ This is likely the single biggest long-term simplification after the board-store
 
 ### Phase 1 — low-risk cleanup and guardrails
 
-A01, A02, A03, A04, A05, A06, A16.
+~~A01~~, ~~A02~~, A03, A04, A05, A06, A16.
 
-These improve safety immediately and make later migrations easier without changing major architecture.
+A01 and A02 are complete via PR #434. The remaining items improve safety immediately and make later migrations easier without changing major architecture.
 
 ### Phase 2 — collapse string/dict protocols
 
@@ -359,4 +369,4 @@ The repository already has the right target architecture written down. The next 
 - let `tests/test_architecture.py` keep ratcheting the old layout smaller;
 - treat `triggered_agents`, Kanboard and Orca-legacy as migrations with explicit end conditions, not permanent second implementations.
 
-The highest-value near-term sequence is: **A01 → A03 → A07/A08 → A09 → A13**, while A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
+With A01 and A02 complete, the highest-value near-term sequence is: **A03 → A07/A08 → A09 → A13**, while A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
