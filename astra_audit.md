@@ -43,8 +43,9 @@ Most technical debt is caused by data crossing between those generations through
 - ✅ **A02 completed in PR #434:** aligned the declared/tooling Python contract with the runtime by raising `requires-python` from `>=3.11` to `>=3.12` and Ruff's target from `py311` to `py312`. We intentionally did **not** add a redundant 3.11 CI run; the product now explicitly supports the Python version its CI and runtime already use.
 - ✅ **A03 completed in PR #435:** added pinned `mypy==1.18.2`, a dedicated `typecheck` dependency/CI job, and an intentionally narrow first gate over already-typed leaves (`secretary.board.models`, `secretary.board.host`, `secretary.dispatch.runtime_provenance`, and `secretary.po.models`). Imported legacy modules remain outside the enforced error surface so the gate can expand incrementally instead of turning into a repository-wide migration.
 - ✅ **A04 completed in PR #436:** introduced typed `BoardBackend(StrEnum)` and `BoardCapability(StrEnum)` vocabularies, kept the old public constants as string-compatible enum-member aliases, typed the backend parser/cache and capability set, and added `secretary.board.backend` to the incremental mypy gate without changing the environment/storage/serialized string contract.
+- ✅ **A06 completed in PR #437:** added canonical `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s to the normalized board model. `Issue` now stores typed optional vocabulary values while accepting the existing string spellings at construction boundaries; persisted/CLI/Kanboard/PostgreSQL values remain unchanged. The staged Kanboard `pending/pending` recovery shape normalizes to absent typed metadata instead of expanding the durable vocabulary.
 
-PR #434, PR #435, and PR #436 all passed the full CI workflow and were merged into `main` on 2026-09-15.
+PR #434, PR #435, PR #436, and PR #437 all passed the full CI workflow and were merged into `main` on 2026-09-15. PR #437 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate before merge.
 
 ## Findings
 
@@ -55,7 +56,7 @@ PR #434, PR #435, and PR #436 all passed the full CI workflow and were merged in
 | A03 | ✅ Add a real static type checker, initially on typed packages only — **completed in #435** | **2** |
 | A04 | ✅ Replace board-backend string literals with `StrEnum` — **completed in #436** | **2** |
 | A05 | Type pause mode and pause-state documents | **2** |
-| A06 | Type Product/Issue kind, priority and close-reason vocabularies | **2** |
+| A06 | ✅ Type Product/Issue kind, priority and close-reason vocabularies — **completed in #437** | **2** |
 | A07 | Centralize the role vocabulary in one `Role(StrEnum)` | **3** |
 | A08 | Type task routing metadata (`task_type`, complexity, family preference, phases, decisions) | **3** |
 | A09 | Stop importing private task/sprint normalizers across feature boundaries | **3** |
@@ -133,19 +134,21 @@ The environment values, backend selection behavior, identity strings, storage sh
 
 This removes a cluster of repeated `str(state.get(...))`, magic keys, and invalid combinations while preserving the same on-disk JSON shape.
 
-### A06. Type Product/Issue vocabularies — complexity 2
+### A06. Type Product/Issue vocabularies — complexity 2 — completed
 
-`product_issues.py` still defines:
+At audit time, `product_issues.py` defined:
 
 - `ISSUE_KINDS = {"bug", "feature", "question", "improvement"}`;
 - `ISSUE_PRIORITIES = {"P0", "P1", "P2", "P3"}`;
 - `ISSUE_CLOSE_REASONS = {"resolved", "invalid", "duplicate", "wont_do"}`.
 
-Meanwhile `board.models.Issue` is already a typed normalized value, but `priority`, `issue_kind`, and `close_reason` are plain strings.
+Meanwhile `board.models.Issue` was already a typed normalized value, but `priority`, `issue_kind`, and `close_reason` were plain strings.
 
-**Fix:** add `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s in the normalized board model and let adapters parse/serialize them.
+**Implemented in PR #437:** added `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s in `secretary.board.models` and exported them from `secretary.board`. The normalized `Issue` now stores those types (or `None` when metadata is absent) while its construction boundary accepts the existing string spellings and converts them immediately. Unknown vocabulary values are rejected rather than flowing deeper into the normalized domain model.
 
-This is a contained migration because the vocabulary already has database `CHECK` constraints and validation logic.
+The existing string wire/storage contract is unchanged: `StrEnum` remains string-compatible, so CLI inputs, Kanboard metadata and PostgreSQL values keep the same spellings. The special staged Kanboard create state that historically materialized `priority="pending"` and `issue_kind="pending"` is accepted only as a paired recovery sentinel and normalizes to absent typed metadata; `pending` is not added to either durable enum. Focused tests cover string compatibility, absent metadata, staged recovery and invalid values.
+
+The legacy validation sets in `product_issues.py` remain as compatibility/boundary validation surfaces for now; the normalized board domain contract is the enum-typed `Issue`. Full CI passed before merge.
 
 ### A07. Centralize roles in one `Role(StrEnum)` — complexity 3
 
@@ -337,9 +340,9 @@ This is likely the single biggest long-term simplification after the board-store
 
 ### Phase 1 — low-risk cleanup and guardrails
 
-~~A01~~, ~~A02~~, ~~A03~~, ~~A04~~, A05, A06, A16.
+~~A01~~, ~~A02~~, ~~A03~~, ~~A04~~, A05, ~~A06~~, A16.
 
-A01 and A02 are complete via PR #434; A03 is complete via PR #435; A04 is complete via PR #436. The remaining items improve safety immediately and make later migrations easier without changing major architecture, except A16 which should wait for explicit confirmation that every installed service supplies the backend setting.
+A01 and A02 are complete via PR #434; A03 is complete via PR #435; A04 is complete via PR #436; A06 is complete via PR #437. The remaining items improve safety immediately and make later migrations easier without changing major architecture, except A16 which should wait for explicit confirmation that every installed service supplies the backend setting.
 
 ### Phase 2 — collapse string/dict protocols
 
@@ -369,4 +372,4 @@ The repository already has the right target architecture written down. The next 
 - let `tests/test_architecture.py` keep ratcheting the old layout smaller;
 - treat `triggered_agents`, Kanboard and Orca-legacy as migrations with explicit end conditions, not permanent second implementations.
 
-With A01–A04 complete, the highest-value near-term sequence is: **A06 → A07/A08 → A09 → A13**. A05 is an independent low-risk typing cleanup that can be taken at any point in that sequence; A16 should be gated on production configuration confirmation. A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
+With A01–A04 and A06 complete, the highest-value near-term sequence is: **A07/A08 → A09 → A13**. A05 is an independent low-risk typing cleanup that can be taken at any point in that sequence; A16 should be gated on production configuration confirmation. A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
