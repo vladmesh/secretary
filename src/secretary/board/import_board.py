@@ -11,11 +11,11 @@ module, not an acceptable rounding.
 :func:`secretary.tasks.all_project_cards`, `getTaskMetadata`, `getAllComments`), and there is no
 `createTask`, `updateTask`, `saveTaskMetadata`, `createComment` or `removeTask` anywhere below.
 
-**The normalizers are the readers' own.**  ``_STATE_BY_COLUMN``, ``_KNOWN_METADATA``,
-``_enum_or_default``, ``_split_heads`` and the sprint side's ``_budget``, ``_resume``,
-``_source_audit`` and ``_json_list`` are imported from :mod:`secretary.tasks` and
-:mod:`secretary.sprints` rather than restated here, so the importer and the reader cannot come
-to disagree about what a metadata bag means.  What this module adds is only the part that has no
+**Legacy task normalization has one compatibility codec.**  The task column/metadata
+vocabularies and pure wire-format parsers come from :mod:`secretary.board.legacy_codec`; the task
+reader and restore path use the same functions.  Sprint-specific ``_budget``, ``_resume``,
+``_source_audit`` and ``_json_list`` remain in :mod:`secretary.sprints` until that larger model is
+migrated.  What this module adds is only the part that has no
 reader today: the §8.1 marker rule, which is deliberately *stricter* than
 ``tasks._normalize_comment``.
 
@@ -62,6 +62,17 @@ from typing import Any
 import yaml
 
 from secretary.board.backend import card_transport_key, record_key, sprint_reference_number
+from secretary.board.legacy_codec import (
+    TASK_KNOWN_METADATA as _KNOWN_METADATA,
+    TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+    enum_or_default as _enum_or_default,
+    enum_or_none as _enum_or_none,
+    nonnegative_int as _nonnegative_int,
+    null_if_empty as _null_if_empty,
+    positive_int as _positive_int,
+    split_heads as _split_heads,
+    text as _text,
+)
 from secretary.board.models import EntityKind, Event
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
@@ -100,19 +111,10 @@ from secretary.sprints import (
 from secretary.tasks import (
     _COMPLEXITIES,
     _FAMILY_PREFERENCES,
-    _KNOWN_METADATA,
     _ROLES,
-    _STATE_BY_COLUMN,
     _TASK_TYPES,
     KanboardClient,
-    _enum_or_default,
-    _enum_or_none,
-    _nonnegative_int,
-    _null_if_empty,
-    _positive_int,
-    _split_heads,
     _task_metadata,
-    _text,
     all_project_cards,
 )
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
