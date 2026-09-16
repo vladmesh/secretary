@@ -6,10 +6,11 @@ import contextlib
 import fcntl
 import hashlib
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from secretary.board.attempt_usage import AttemptUsagePayload
 from secretary.board.models import Event, EventKind
 
 if TYPE_CHECKING:
@@ -26,6 +27,12 @@ class AttemptUsageOccurrence:
     request_id: str
     event: Event
     pending: bool
+    _payload: AttemptUsagePayload | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def payload(self) -> AttemptUsagePayload:
+        """The closed usage data normalized once by the canon, or on compatibility construction."""
+        return self._payload or AttemptUsagePayload.from_data(self.event.data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,12 +179,12 @@ class BoardEventCanon:
         """Project committed and staged ``attempt.usage`` records into one canonical view.
 
         The audit supplies both sets under its lock so publication cannot make an occurrence vanish
-        between two reads. Every usage-shaped record crosses the typed boundary here. Request and
-        event ids each own one immutable payload; an exact committed-plus-pending duplicate is one
+        between two reads. Every usage-shaped record crosses the typed payload boundary here. Request
+        and event ids each own one immutable payload; an exact committed-plus-pending copy is one
         occurrence whose export is already visible, while conflicting ownership fails closed.
         """
         records = self.audit._occurrence_projection_records()
-        by_request: dict[str, tuple[Event, bool]] = {}
+        by_request: dict[str, tuple[Event, AttemptUsagePayload, bool]] = {}
         request_claims: dict[str, tuple[dict[str, Any], bool]] = {}
         event_claims: dict[str, tuple[str, bool]] = {}
         phase_owners: dict[tuple[str, str, int, int, str], tuple[str, str]] = {}
@@ -215,35 +222,41 @@ class BoardEventCanon:
             if not usage_shaped:
                 continue
             event = self._typed(record)
+            payload = AttemptUsagePayload.from_data(event.data)
             if ref and event.ref != ref:
                 continue
             if not isinstance(request_id, str) or not request_id:
                 raise ValueError("attempt usage occurrence has no request id")
             phase = (
                 event.ref,
-                str(event.data["role"]),
-                int(event.data["attempt"]),
-                int(event.data["report_generation"]),
-                str(event.data["phase"]),
+                payload.role.value,
+                payload.attempt,
+                payload.report_generation,
+                payload.phase.value,
             )
-            owner = (str(event.data["attempt_id"]), request_id)
+            owner = (payload.attempt_id, request_id)
             previous_owner = phase_owners.get(phase)
             if previous_owner is not None and previous_owner != owner:
                 raise ValueError(f"attempt usage phase {phase!r} has conflicting occurrence owners")
             phase_owners[phase] = owner
             existing = by_request.get(request_id)
             if existing is None:
-                by_request[request_id] = (event, pending)
+                by_request[request_id] = (event, payload, pending)
                 order.append(request_id)
                 continue
-            previous, was_pending = existing
-            if previous != event:
+            previous, previous_payload, was_pending = existing
+            if previous != event or previous_payload != payload:
                 raise ValueError(f"attempt usage request id {request_id!r} changed after validation")
             # A committed copy makes the occurrence exported even if an exact stale pending copy
             # remains. Conversely, duplicate pending reads remain pending.
-            by_request[request_id] = (event, was_pending and pending)
+            by_request[request_id] = (event, payload, was_pending and pending)
         return tuple(
-            AttemptUsageOccurrence(request_id, by_request[request_id][0], by_request[request_id][1])
+            AttemptUsageOccurrence(
+                request_id,
+                by_request[request_id][0],
+                by_request[request_id][2],
+                by_request[request_id][1],
+            )
             for request_id in order
         )
 
