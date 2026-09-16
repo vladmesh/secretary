@@ -1,8 +1,8 @@
 """Typed payloads for the three control-plane Card marker events.
 
-The durable board-event wire format remains a dictionary.  This module owns the
-closed marker schemas so callers can normalize once at the host boundary and
-serialize only when an event is staged.
+The durable board-event wire format remains a dictionary. This module owns the
+closed marker schemas so callers normalize once at the host boundary and only
+project back to the released dictionary shape when an event is staged.
 """
 
 from __future__ import annotations
@@ -10,12 +10,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, TypeAlias
 
+WireItems: TypeAlias = tuple[tuple[str, object], ...]
+
 
 @dataclass(frozen=True, slots=True)
 class ReportPayload:
     status: str
     body: str
     classification: str | None = None
+    wire_items: WireItems = ()
 
     def __post_init__(self) -> None:
         if self.status not in {"done", "blocked"}:
@@ -33,18 +36,19 @@ class ReportPayload:
         return f"report:{self.status}"
 
     def to_event_data(self) -> dict[str, object]:
-        return {
-            "marker": self.marker,
-            "body": self.body,
-            "status": self.status,
-            "classification": self.classification,
-        }
+        if self.wire_items:
+            return dict(self.wire_items)
+        data: dict[str, object] = {"marker": self.marker, "body": self.body, "status": self.status}
+        if self.classification is not None:
+            data["classification"] = self.classification
+        return data
 
 
 @dataclass(frozen=True, slots=True)
 class VerdictPayload:
     status: str
     body: str
+    wire_items: WireItems = ()
 
     def __post_init__(self) -> None:
         if self.status not in {"green", "red"}:
@@ -57,6 +61,8 @@ class VerdictPayload:
         return f"review:{self.status}"
 
     def to_event_data(self) -> dict[str, object]:
+        if self.wire_items:
+            return dict(self.wire_items)
         return {"marker": self.marker, "body": self.body, "status": self.status}
 
 
@@ -65,6 +71,7 @@ class DecisionPayload:
     decision: str
     body: str
     protocol_prerequisites: tuple[str, ...] = ()
+    wire_items: WireItems = ()
 
     def __post_init__(self) -> None:
         if self.decision not in {"release", "rework", "reslice"}:
@@ -81,6 +88,8 @@ class DecisionPayload:
         return f"decision:{self.decision}"
 
     def to_event_data(self) -> dict[str, object]:
+        if self.wire_items:
+            return dict(self.wire_items)
         return {
             "marker": self.marker,
             "body": self.body,
@@ -93,41 +102,43 @@ MarkerPayload: TypeAlias = ReportPayload | VerdictPayload | DecisionPayload
 
 
 def marker_payload_from_data(kind: str, reason: str, data: Mapping[str, Any]) -> MarkerPayload:
-    """Normalize the closed marker schema while tolerating unrelated event evidence.
+    """Normalize one released marker dictionary without changing its wire projection.
 
-    Event dictionaries may additionally carry request/recovery evidence such as
-    ``request_related_refs``, ``marker_occurrence`` or ``assessment_visit``.
-    Those keys remain owned by the event/adapter layer and are intentionally not
-    part of these domain payloads.
+    The event may carry additional immutable evidence such as digests,
+    ``assessment_visit`` or adapter recovery fields. Those remain byte-for-byte
+    equivalent at the dictionary boundary while the closed marker vocabulary is
+    represented by a typed value internally.
     """
     body = data.get("body")
     if not isinstance(body, str) or not body.strip():
         raise ValueError("control-plane marker events require a non-empty body")
     if reason != body:
         raise ValueError("control-plane marker event reason must match its body")
+    wire_items: WireItems = tuple((str(key), value) for key, value in data.items())
 
     if kind == "card.reported":
         status = data.get("status")
         classification = data.get("classification")
         if not isinstance(status, str):
             raise ValueError("Card report event has an unsupported marker payload")
-        payload = ReportPayload(status, body, classification if isinstance(classification, str) else None)
+        if classification is not None and not isinstance(classification, str):
+            raise ValueError("Card report classification must be a string or null")
+        payload: MarkerPayload = ReportPayload(status, body, classification, wire_items)
     elif kind == "card.verdict":
         status = data.get("status")
         if not isinstance(status, str):
             raise ValueError("Card verdict event has an unsupported marker payload")
-        payload = VerdictPayload(status, body)
+        payload = VerdictPayload(status, body, wire_items)
     elif kind == "card.decided":
         decision = data.get("decision")
         prerequisites = data.get("protocol_prerequisites", [])
         if not isinstance(decision, str) or not isinstance(prerequisites, list):
             raise ValueError("Card decision event has an unsupported marker payload")
-        payload = DecisionPayload(decision, body, tuple(prerequisites))
+        payload = DecisionPayload(decision, body, tuple(prerequisites), wire_items)
     else:
         raise ValueError("event is not a Card marker occurrence")
 
-    marker = data.get("marker")
-    if marker != payload.marker:
+    if data.get("marker") != payload.marker:
         raise ValueError("Card marker event has an unsupported marker payload")
     return payload
 
