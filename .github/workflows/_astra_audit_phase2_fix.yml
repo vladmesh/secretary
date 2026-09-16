@@ -1,0 +1,33 @@
+name: astra-audit-phase2-fix
+
+on:
+  push:
+    branches: [astra_audit]
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    if: ${{ !contains(github.event.head_commit.message, 'finish Phase 2 audit update') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: astra_audit
+      - name: Fix stale Phase 2 wording
+        run: python3 scripts/_astra_audit_phase2_fix.py
+      - name: Validate
+        run: |
+          grep -F 'A11 is complete across PR #446, PR #447, PR #448, and PR #449' astra_audit.md
+          ! grep -F 'A11 now continues' astra_audit.md
+      - name: Remove scaffolding
+        run: rm scripts/_astra_audit_phase2_fix.py .github/workflows/_astra_audit_phase2_fix.yml
+      - name: Commit audit
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'docs: finish Phase 2 audit update'
+          git push origin HEAD:astra_audit
