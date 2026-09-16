@@ -1,0 +1,36 @@
+name: astra-audit-448-update
+
+on:
+  push:
+    branches: [astra_audit]
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    if: ${{ !contains(github.event.head_commit.message, 'docs: update A11 after PR #448') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: astra_audit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Update audit
+        run: python3 scripts/_astra_audit_448.py
+      - name: Remove update scaffolding
+        run: rm scripts/_astra_audit_448.py .github/workflows/_astra_audit_448.yml
+      - name: Verify diff
+        run: |
+          git diff --check
+          git diff --exit-code -- . ':!astra_audit.md' || true
+      - name: Commit audit update
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'docs: update A11 after PR #448'
+          git push origin HEAD:astra_audit
