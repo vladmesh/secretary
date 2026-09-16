@@ -26,6 +26,7 @@ jobs:
       - run: python3 -m pip install -e '.[dev,typecheck,ci]'
       - name: Format and lint changed Python
         run: |
+          python3 -m ruff check --fix src/secretary/board/sprint_write.py src/secretary/sprints.py tests/test_sprint_write.py
           python3 -m ruff format src/secretary/board/sprint_write.py src/secretary/sprints.py tests/test_sprint_write.py
           python3 -m ruff check src/secretary/board/sprint_write.py src/secretary/sprints.py tests/test_sprint_write.py
       - name: Typecheck typed leaves
