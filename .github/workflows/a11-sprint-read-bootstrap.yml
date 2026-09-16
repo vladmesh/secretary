@@ -1,0 +1,43 @@
+name: A09-A11 sprint read bootstrap
+
+on:
+  push:
+    branches:
+      - astra-a09-a11-sprint-read-model
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: astra-a09-a11-sprint-read-model
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply typed Sprint read refactor
+        run: python3 tools/a11_sprint_read_bootstrap.py
+      - name: Format and lint changed Python
+        run: |
+          python3 -m pip install --disable-pip-version-check -q ruff==0.16.4
+          python3 -m ruff format src/secretary/board/sprint_read.py src/secretary/sprints.py src/secretary/board/import_board.py tests/test_sprint_read.py
+          python3 -m ruff check --fix src/secretary/board/sprint_read.py src/secretary/sprints.py src/secretary/board/import_board.py tests/test_sprint_read.py
+      - name: Focused smoke checks
+        env:
+          PYTHONPATH: src
+        run: |
+          python3 -m unittest tests.test_sprint_read
+          python3 -m py_compile src/secretary/board/sprint_read.py src/secretary/sprints.py src/secretary/board/import_board.py
+          git diff --check
+      - name: Remove bootstrap machinery and commit result
+        run: |
+          git rm tools/a11_sprint_read_bootstrap.py .github/workflows/a11-sprint-read-bootstrap.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'refactor: add typed sprint read boundary'
+          git push origin HEAD:astra-a09-a11-sprint-read-model
