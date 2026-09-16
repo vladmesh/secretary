@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 
 from secretary.board.attempt_usage import AttemptUsagePayload, AttemptUsagePhase, TokenAccount
 from secretary.board.events import AttemptUsageOccurrence
 from secretary.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from secretary.board.roles import Role
-from datetime import UTC, datetime
 
 
 class AttemptUsagePayloadTests(unittest.TestCase):
