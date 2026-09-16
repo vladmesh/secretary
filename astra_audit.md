@@ -47,11 +47,12 @@ Most technical debt is caused by data crossing between those generations through
 - ✅ **A06 completed in PR #437:** added canonical `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s to the normalized board model. `Issue` now stores typed optional vocabulary values while accepting the existing string spellings at construction boundaries; persisted/CLI/Kanboard/PostgreSQL values remain unchanged. The staged Kanboard `pending/pending` recovery shape normalizes to absent typed metadata instead of expanding the durable vocabulary.
 - ✅ **A07 completed across PR #443 and PR #444:** #443 introduced the canonical product-side `Role(StrEnum)`, typed role subsets, and `Role`-keyed card transitions; #444 made `Actor.role` carry `Role`, normalized TaskWriter role strings at the boundary, removed the duplicate task-side role registries, derived CLI/importer role choices from the canonical vocabulary, and replaced the temporary drift ratchet with boundary tests. Persisted/event/CLI spellings remain string-compatible. The separate `triggered_agents.runtime.role_env` registry remains intentionally owned by the later A19 namespace migration rather than by A07.
 - ✅ **A08 completed in PR #445:** introduced canonical `TaskType`, `TaskComplexity`, `FamilyPreference`, `RoutingPhase`, `BlockClassification`, and `TaskDecision` `StrEnum`s plus immutable typed `TaskRouting` / `TaskMetadata` values. Task reading, create/report/decision/routing validation, CLI choices, restore, and the board importer now consume the canonical vocabulary while projecting the same strings at Kanboard/PostgreSQL/CLI/document boundaries. The A09 private codec aliases remain only as compatibility surfaces, and `secretary.board.task_routing` is now in the incremental mypy gate.
-- 🟡 **A09 partially completed in PR #442:** centralized the task-side Kanboard wire-format constants and pure normalizers in `secretary.board.legacy_codec`. `tasks.py`, restore, and the board importer now share the same parser objects, and restore's duplicate `_enum_or_default` is gone. The sprint-specific `_budget`, `_resume`, `_source_audit`, and `_json_list` imports remain as the deliberate A09 tail and should move together with the sprint-model work rather than through a riskier mechanical extraction.
+- ✅ **A09 completed across PR #442 and PR #446:** #442 centralized the task-side Kanboard wire-format constants and pure normalizers in `secretary.board.legacy_codec`; #446 added the typed sprint-read compatibility boundary and moved `board/import_board.py` off the remaining private sprint helpers. Historical private aliases remain only as same-module/backward-compatibility adapters, not cross-feature dependencies.
 - ✅ **A10 completed in PR #441:** renamed the routing-journal domain value to canonical `RoutingHeadSnapshot`, kept the runtime lifecycle value as `HeadRun`, and added a typed launch boundary without changing routing-event JSON or persisted dispatcher state. Historical routing names and the dict adapter remain compatibility surfaces until the adjacent package/state migrations remove them.
+- 🟡 **A11 partially completed in PR #446:** added `secretary.board.sprint_read` with immutable typed Sprint state/budget/resume/source-audit/read-metadata values; `SprintReader` now parses those compound legacy fields once and renders the released dict document only at its public boundary, and Sprint status sets derive from `SprintState`. The remaining A11 work is guard-index/admission/write-path domain dictionaries plus the broader internal `SprintReader`/writer flow that still passes public dict-shaped sprint documents around.
 - ✅ **A16 completed in PR #440:** made `SECRETARY_CARD_BACKEND` mandatory for live backend selection. Missing, empty, and unknown selectors now fail closed; explicit `kanboard` remains the rollback path, the test suite pins its backend explicitly, and status represents the absence of a product default as `null`.
 
-PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, PR #443, PR #444, and PR #445 all passed their full pull-request CI workflow and were merged into `main`. PR #443 passed typecheck and all seven test shards on exact head SHA `6ddbfb3ea8ee5d49b68468f0f8a205533f69e11c`; PR #444 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `1d92ab9533ec3b2abe66003303c34d82c46ba7eb`; PR #445 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `840fc38266d118d570f357036d2406f81526ae3e` before squash-merge.
+PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, PR #443, PR #444, PR #445, and PR #446 all passed their full pull-request CI workflow and were merged into `main`. PR #443 passed typecheck and all seven test shards on exact head SHA `6ddbfb3ea8ee5d49b68468f0f8a205533f69e11c`; PR #444 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `1d92ab9533ec3b2abe66003303c34d82c46ba7eb`; PR #445 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `840fc38266d118d570f357036d2406f81526ae3e` before squash-merge. PR #446 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `5b26fbd8768963153f44cc42d6a70760b3d16f0b` before squash-merge.
 
 ## Findings
 
@@ -65,9 +66,9 @@ PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, PR #443,
 | A06 | ✅ Type Product/Issue kind, priority and close-reason vocabularies — **completed in #437** | **2** |
 | A07 | ✅ Centralize the product role vocabulary in one `Role(StrEnum)` — **completed across #443 and #444; legacy runtime registry belongs to A19** | **3** |
 | A08 | ✅ Type task routing metadata (`task_type`, complexity, family preference, phases, decisions) — **completed in #445** | **3** |
-| A09 | 🟡 Stop importing private task/sprint normalizers across feature boundaries — **task-side completed in #442; sprint-side remains** | **3** |
+| A09 | ✅ Stop importing private task/sprint normalizers across feature boundaries — **completed across #442 and #446** | **3** |
 | A10 | ✅ Rename/consolidate the two different `HeadRun` concepts — **completed in #441** | **3** |
-| A11 | Migrate legacy sprint dicts/status strings onto the normalized sprint model | **3** |
+| A11 | 🟡 Migrate legacy sprint dicts/status strings onto the normalized sprint model — **typed read boundary landed in #446; guard/admission/write-path dicts remain** | **3** |
 | A12 | Replace closed event payload dictionaries with typed payload objects | **4** |
 | A13 | Break up `DispatcherRecord`'s nested `dict[str, Any]` state | **4** |
 | A14 | Remove the giant `dispatcher.py` compatibility façade | **4** |
@@ -183,7 +184,7 @@ At audit time, `tasks.py` manually maintained `_TASK_TYPES`, `_COMPLEXITIES`, `_
 
 The external contract is intentionally unchanged: persisted Kanboard/PostgreSQL values, CLI spellings, public task documents, SQL CHECK vocabularies, and routing-event strings are the same. Historical `_enum_or_default` / `_enum_or_none` private aliases remain where A09 compatibility tests require them, rather than broadening A08 into an unrelated compatibility cleanup. `secretary.board.task_routing` was added to the incremental mypy gate, focused tests pin the enum/default/document behavior and absence of the duplicate task-side registries, and the full PR CI passed on exact head SHA `840fc38266d118d570f357036d2406f81526ae3e` before squash-merge.
 
-### A09. Stop cross-package imports of private normalizers — complexity 3 — partially completed
+### A09. Stop cross-package imports of private normalizers — complexity 3 — completed
 
 At audit time, `board/import_board.py` imported private implementation details from both `secretary.tasks` and `secretary.sprints`, including task-side `_STATE_BY_COLUMN`, `_KNOWN_METADATA`, `_enum_or_default`, `_positive_int`, `_split_heads` and sprint-side `_budget`, `_resume`, `_source_audit`, and `_json_list`.
 
@@ -191,9 +192,9 @@ That avoided literal duplication, but made migration semantics depend on private
 
 **Implemented in PR #442 (task-side slice):** added the explicit compatibility module `secretary.board.legacy_codec` for the task column/metadata vocabularies and pure legacy task parsers. `tasks.py`, `restore.py`, and `board/import_board.py` now consume the same canonical functions; the historical private names in `tasks.py` remain compatibility aliases, so callers were not forced through an unrelated broad migration. The duplicate restore `_enum_or_default` implementation was removed. Focused tests pin the released normalization behavior and prove reader/restore/importer bind to the same codec. Full CI passed before merge: typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate.
 
-**Remaining A09 tail:** the importer still consumes sprint-specific `_budget`, `_resume`, `_source_audit`, and `_json_list` from `secretary.sprints`. Those helpers are coupled to the larger sprint read model, so move them only when A11 introduces the typed sprint compatibility boundary (or into a dedicated sprint legacy codec as part of that work), preserving the exact old wire semantics.
+**Completed in PR #446 (sprint-side tail):** added `secretary.board.sprint_read` as the explicit typed compatibility boundary for Sprint state, budget, resume, source-audit, and legacy JSON-list metadata. `board/import_board.py` now consumes that boundary instead of importing `_budget`, `_resume`, `_source_audit`, or `_json_list` from `secretary.sprints`. The old private helpers remain thin compatibility adapters for historical same-package/test callers, so the released wire semantics are unchanged while the cross-feature private dependency is gone.
 
-After Kanboard retirement, the compatibility codec can be removed together with the importer/cutover path.
+A09 is therefore complete. After Kanboard retirement, the remaining compatibility codecs/adapters can be removed together with the importer/cutover path under A18 rather than being treated as unfinished A09 work.
 
 ### A10. Rename/consolidate the two `HeadRun` concepts — complexity 3 — completed
 
@@ -210,13 +211,13 @@ For compatibility, the historical `routing_journal.HeadRun` and `head_run_from_p
 
 Full CI passed before merge: typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate.
 
-### A11. Migrate legacy sprint dictionaries to the normalized sprint model — complexity 3
+### A11. Migrate legacy sprint dictionaries to the normalized sprint model — complexity 3 — partially completed
 
 `board.models` already has `Sprint` and `SprintState`, yet `sprints.py` still works mainly with `dict[str, Any]` and string sets such as `SPRINT_STATUSES = {"open", "closed", "stopped"}`. Guard indexes, budget documents, resumes, and readers pass ad-hoc dict shapes around.
 
-**Fix:** introduce typed read models for the data not represented by the minimal `board.models.Sprint` yet (`SprintBudget`, `SprintResume`, `SprintReservationSet`, etc.) and make `SprintReader` return typed values internally. Keep dict rendering at the CLI/checkpoint boundary.
+**Implemented in PR #446 (first slice):** introduced `secretary.board.sprint_read` with immutable `SprintBudget`, `SprintResume`, `SprintSourceAudit`, and `SprintReadMetadata` values plus canonical `SprintState` parsing. `SprintReader` now converts the compound legacy metadata once through that boundary and projects the existing public dict shape afterwards. The string status set is derived from `SprintState`, and the same typed boundary is reused by the one-shot importer. Persisted metadata, SQL/Kanboard storage, CLI/web/checkpoint documents, and write semantics are unchanged.
 
-This can be done operation by operation without changing storage.
+**Remaining A11 tail:** move the guard-index/admission/write-path closed shapes and the remaining internal sprint flow off `dict[str, Any]`. In particular, reservation sets/admission candidates, guard-index records, and writer inputs/results should become typed values before rendering back to the established public/storage dictionaries. Keep doing this operation by operation; do not combine it with a storage migration or Kanboard retirement.
 
 ### A12. Replace closed event payload dicts with typed payload objects — complexity 4
 
@@ -350,9 +351,9 @@ Phase 1 is complete: A01/A02 via PR #434, A03 via #435, A04 via #436, A05 via #4
 
 ### Phase 2 — collapse string/dict protocols
 
-~~A07~~, A08, A09 (sprint-side remainder), ~~A10~~, A11.
+~~A07~~, ~~A08~~, ~~A09~~, ~~A10~~, A11.
 
-A10 is complete via PR #441. A07 is complete across PR #443 and PR #444: product board roles now have one canonical typed vocabulary from the normalized Actor through TaskWriter, CLI choices, transitions, and importer boundaries; the separate legacy runtime registry stays with A19. A09's task/restore/importer slice is complete via PR #442; its remaining sprint-side private-normalizer seam should be finished together with A11. The goal remains one typed vocabulary per concept and one parser at each legacy boundary.
+A10 is complete via PR #441. A07 is complete across PR #443 and PR #444: product board roles now have one canonical typed vocabulary from the normalized Actor through TaskWriter, CLI choices, transitions, and importer boundaries; the separate legacy runtime registry stays with A19. A08 is complete via PR #445. A09 is complete across PR #442 and PR #446: both task and sprint cross-feature private-normalizer imports are gone. PR #446 also landed the first A11 typed read-model slice; A11 now continues with guard/admission/write-path dictionaries. The goal remains one typed vocabulary per concept and one parser at each legacy boundary.
 
 ### Phase 3 — dispatcher typing and package boundaries
 
@@ -376,4 +377,4 @@ The repository already has the right target architecture written down. The next 
 - let `tests/test_architecture.py` keep ratcheting the old layout smaller;
 - treat `triggered_agents`, Kanboard and Orca-legacy as migrations with explicit end conditions, not permanent second implementations.
 
-With A01–A06, A10 and A16 complete and A07 partially landed, the highest-value near-term sequence is: **A07 tail/A08 → A09+A11 → A13**. A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
+With A01–A10 and A16 complete, and the first A11 slice landed, the highest-value near-term sequence is: **A11 tail → A12/A13**, keeping each migration bounded to one closed domain shape at a time. A17/A19/A20 should be planned as explicit deprecation projects rather than mixed into ordinary refactors.
