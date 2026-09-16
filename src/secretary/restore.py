@@ -28,6 +28,11 @@ from secretary.backup_policy import (
 )
 from secretary.backup_verify import _verify_plain_tar
 from secretary.board.backend import CARD, SPRINT, board_client, entity_number
+from secretary.board.legacy_codec import (
+    TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+    enum_or_default as _enum_or_default,
+    positive_int as _positive_int,
+)
 from secretary.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
 from secretary.config import DataDirError, instance_data_dir, validate_instance
 from secretary.data import init_layout
@@ -45,13 +50,11 @@ from secretary.sprint_observer import (
     parse_observer,
 )
 from secretary.tasks import (
-    _STATE_BY_COLUMN,
     KanboardClient,
     TaskAudit,
     TaskError,
     TaskReader,
     TaskWriter,
-    _positive_int,
     all_project_cards,
 )
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
@@ -1049,8 +1052,6 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _enum_or_default(value: str, allowed: set[str], default: str) -> str:
-    return value if value in allowed else default
 
 
 def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:

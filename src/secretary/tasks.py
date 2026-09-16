@@ -23,6 +23,17 @@ from secretary.board.backend import entity_id, entity_number
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
+from secretary.board.legacy_codec import (
+    TASK_KNOWN_METADATA as _KNOWN_METADATA,
+    TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+    enum_or_default as _enum_or_default,
+    enum_or_none as _enum_or_none,
+    nonnegative_int as _nonnegative_int,
+    null_if_empty as _null_if_empty,
+    positive_int as _positive_int,
+    split_heads as _split_heads,
+    text as _text,
+)
 from secretary.board.models import (
     Actor,
     CardState,
@@ -143,39 +154,6 @@ def _done_retention_request_id(task_id: int, date_moved: int) -> str:
     return "done-retention-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
-_STATE_BY_COLUMN = {
-    "Issues": "issues",
-    "Ready": "ready",
-    "In progress": "in_progress",
-    "Validate": "validate",
-    "Assessment": "assessment",
-    "Blocked": "blocked",
-    "Done": "done",
-}
-_KNOWN_METADATA = {
-    "task_type",
-    "project",
-    "blocked_by",
-    "claim",
-    "slug",
-    "base_branch",
-    "seed_ref",
-    "supersedes",
-    "issues",
-    "head",
-    "resolved_head",
-    "review_head",
-    "resolved_review_head",
-    "retry_same",
-    "retry_switch",
-    "retry_heads",
-    "complexity",
-    "family_preference",
-    "routing_reason",
-    "quota_snapshot_at",
-    "codex_launch_mode",
-    "sprint_ref",
-}
 _TASK_TYPES = {"code", "research"}
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
 _FAMILY_PREFERENCES = {"auto", "claude", "codex"}
@@ -4736,8 +4714,6 @@ class TaskWriter:
             raise TaskError("live_work", "archive refuses a card with live dispatcher work", 3)
 
 
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else "" if value is None else str(value)
 
 
 def _target_column_id(columns: dict[int, str], target: str) -> int | None:
@@ -4788,38 +4764,16 @@ def _revision(task: dict[str, Any]) -> str:
     return "updated_at:" + str(task.get("audit", {}).get("updated_at") or "unknown")
 
 
-def _null_if_empty(value: Any) -> str | None:
-    text = _text(value)
-    return text or None
 
 
-def _positive_int(value: Any) -> int | None:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
 
 
-def _nonnegative_int(value: Any) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
 
 
-def _split_heads(value: Any) -> list[str]:
-    return [head for head in _text(value).split(",") if head]
 
 
-def _enum_or_default(value: Any, allowed: set[str], default: str) -> str:
-    candidate = _text(value)
-    return candidate if candidate in allowed else default
 
 
-def _enum_or_none(value: Any, allowed: set[str]) -> str | None:
-    candidate = _text(value)
-    return candidate if candidate in allowed else None
 
 
 def _matching_swimlane(swimlanes: dict[int, str], project: str) -> int | None:

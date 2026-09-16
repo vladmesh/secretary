@@ -6351,3 +6351,43 @@ class AuditCommittedIndexTests(unittest.TestCase):
                 self.assertIsNone(self.audit.committed_event(f"missing-{index}"))
 
         self.assertEqual(parsed, [])
+
+
+class LegacyTaskCodecTests(unittest.TestCase):
+    def test_reader_restore_and_importer_share_legacy_task_codec(self) -> None:
+        import importlib
+
+        from secretary.board import legacy_codec
+
+        importer = importlib.import_module("secretary.board.import_board")
+        restore = importlib.import_module("secretary.restore")
+
+        self.assertIs(tasks._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
+        self.assertIs(tasks._KNOWN_METADATA, legacy_codec.TASK_KNOWN_METADATA)
+        self.assertIs(tasks._text, legacy_codec.text)
+        self.assertIs(tasks._positive_int, legacy_codec.positive_int)
+        self.assertIs(tasks._nonnegative_int, legacy_codec.nonnegative_int)
+        self.assertIs(tasks._null_if_empty, legacy_codec.null_if_empty)
+        self.assertIs(tasks._split_heads, legacy_codec.split_heads)
+        self.assertIs(tasks._enum_or_default, legacy_codec.enum_or_default)
+        self.assertIs(tasks._enum_or_none, legacy_codec.enum_or_none)
+        self.assertIs(restore._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
+        self.assertIs(restore._positive_int, legacy_codec.positive_int)
+        self.assertIs(restore._enum_or_default, legacy_codec.enum_or_default)
+        self.assertIs(importer._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
+        self.assertIs(importer._KNOWN_METADATA, legacy_codec.TASK_KNOWN_METADATA)
+        self.assertIs(importer._enum_or_default, legacy_codec.enum_or_default)
+        self.assertIs(importer._split_heads, legacy_codec.split_heads)
+
+    def test_legacy_task_codec_preserves_released_normalization(self) -> None:
+        from secretary.board import legacy_codec
+
+        self.assertEqual(legacy_codec.text(None), "")
+        self.assertEqual(legacy_codec.text(17), "17")
+        self.assertEqual(legacy_codec.positive_int("3"), 3)
+        self.assertIsNone(legacy_codec.positive_int("0"))
+        self.assertEqual(legacy_codec.nonnegative_int("-3"), 0)
+        self.assertEqual(legacy_codec.split_heads("a,,b"), ["a", "b"])
+        self.assertEqual(legacy_codec.enum_or_default("x", {"x"}, "d"), "x")
+        self.assertEqual(legacy_codec.enum_or_default("y", {"x"}, "d"), "d")
+        self.assertIsNone(legacy_codec.enum_or_none("y", {"x"}))
