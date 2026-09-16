@@ -1,0 +1,202 @@
+name: astra-a07-role-migration-worker
+
+on:
+  push:
+    branches:
+      - astra-a07-role-boundaries
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: astra-a07-role-boundaries
+      - name: Apply A07 product role migration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def read(path: str) -> str:
+              return Path(path).read_text(encoding="utf-8")
+
+          def write(path: str, text: str) -> None:
+              Path(path).write_text(text, encoding="utf-8")
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          # Actor is the normalized board-protocol identity. Accept strings at the boundary,
+          # but carry the canonical Role inside the domain value.
+          path = "src/secretary/board/models.py"
+          text = read(path)
+          text = replace_once(
+              text,
+              "from secretary.board.terminal_taxonomy import (\n    BLOCKED_REASONS,\n    TERMINAL_DISPOSITIONS,\n    read_terminal_taxonomy,\n)\n\nEntityRef: TypeAlias = str\n",
+              "from secretary.board.terminal_taxonomy import (\n    BLOCKED_REASONS,\n    TERMINAL_DISPOSITIONS,\n    read_terminal_taxonomy,\n)\nfrom secretary.board.roles import Role\n\nEntityRef: TypeAlias = str\n",
+              "models role import",
+          )
+          text = replace_once(
+              text,
+              '''@dataclass(frozen=True, slots=True)\nclass Actor:\n    """The protocol identity that made a board mutation."""\n\n    role: str\n    id: str\n    head_run_ref: str | None = None\n\n    def __post_init__(self) -> None:\n        _non_empty(self.role, "actor role")\n        _non_empty(self.id, "actor id")\n        if self.head_run_ref is not None:\n            _non_empty(self.head_run_ref, "actor head-run ref")\n''',
+              '''@dataclass(frozen=True, slots=True, init=False)\nclass Actor:\n    """The protocol identity that made a board mutation."""\n\n    role: Role\n    id: str\n    head_run_ref: str | None = None\n\n    def __init__(self, role: Role | str, id: str, head_run_ref: str | None = None) -> None:\n        try:\n            normalized_role = Role(role)\n        except (TypeError, ValueError) as exc:\n            raise ValueError(f"invalid actor role: {role!r}") from exc\n        object.__setattr__(self, "role", normalized_role)\n        object.__setattr__(self, "id", id)\n        object.__setattr__(self, "head_run_ref", head_run_ref)\n        self.__post_init__()\n\n    def __post_init__(self) -> None:\n        if not isinstance(self.role, Role):\n            raise ValueError("actor role must be a Role")\n        _non_empty(self.id, "actor id")\n        if self.head_run_ref is not None:\n            _non_empty(self.head_run_ref, "actor head-run ref")\n''',
+              "Actor type",
+          )
+          write(path, text)
+
+          path = "src/secretary/board/roles.py"
+          text = read(path)
+          text = replace_once(
+              text,
+              "COMMENT_ROLES = BOARD_ROLES\n",
+              "COMMENT_ROLES: frozenset[Role] = BOARD_ROLES\n",
+              "comment role annotation",
+          )
+          write(path, text)
+
+          # TaskWriter parses raw role strings once, then carries Role internally. The old
+          # task-local role registries disappear instead of remaining as synchronized copies.
+          path = "src/secretary/tasks.py"
+          text = read(path)
+          text = replace_once(
+              text,
+              '''from secretary.board.models import (\n    Actor,\n    CardState,\n    EntityKind,\n    Event,\n    EventKind,\n    RelatedRefs,\n)\nfrom secretary.board.protocol_artifacts import (\n''',
+              '''from secretary.board.models import (\n    Actor,\n    CardState,\n    EntityKind,\n    Event,\n    EventKind,\n    RelatedRefs,\n)\nfrom secretary.board.roles import (\n    BOARD_ROLES,\n    COMMENT_ROLES,\n    CREATE_ROLES,\n    EDIT_ROLES,\n    PROPOSAL_CREATE_ROLES,\n    Role,\n)\nfrom secretary.board.protocol_artifacts import (\n''',
+              "tasks role imports",
+          )
+          text = replace_once(
+              text,
+              '''_ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"}\n_COMMENT_ROLES = _ROLES\n_CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}\n# Agent roles that may not open an execution card: their only create is a proposal in the\n# board's first column, which a PO later triages into Ready.\n_PROPOSAL_CREATE_ROLES = {"worker", "reviewer", "retro"}\n_EDIT_ROLES = {"po", "dispatcher", "observer"}\n''',
+              '''# Agent roles that may not open an execution card are represented by\n# PROPOSAL_CREATE_ROLES in the canonical board-role vocabulary.\n''',
+              "legacy task role sets",
+          )
+          for old, new in (
+              ("_COMMENT_ROLES", "COMMENT_ROLES"),
+              ("_PROPOSAL_CREATE_ROLES", "PROPOSAL_CREATE_ROLES"),
+              ("_CREATE_ROLES", "CREATE_ROLES"),
+              ("_EDIT_ROLES", "EDIT_ROLES"),
+              ("_ROLES", "BOARD_ROLES"),
+          ):
+              text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(old)}(?![A-Za-z0-9_])", new, text)
+          text = replace_once(
+              text,
+              '_DECISION_BOUND_ROLES = {"dispatcher"}\n',
+              '_DECISION_BOUND_ROLES: frozenset[Role] = frozenset({Role.DISPATCHER})\n',
+              "decision-bound roles",
+          )
+          text = replace_once(
+              text,
+              '''    @staticmethod\n    def _role(role: str, allowed: set[str]) -> None:\n        if role not in allowed:\n            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)\n''',
+              '''    @staticmethod\n    def _role(role: Role | str, allowed: frozenset[Role]) -> Role:\n        try:\n            normalized_role = Role(role)\n        except (TypeError, ValueError):\n            raise TaskError("role_forbidden", "role is not permitted for this operation", 3) from None\n        if normalized_role not in allowed:\n            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)\n        return normalized_role\n''',
+              "TaskWriter role boundary",
+          )
+          text, normalized_calls = re.subn(
+              r"(?m)^(\s*)self\._role\(role, ([A-Za-z_][A-Za-z0-9_]*)\)$",
+              r"\1role = self._role(role, \2)",
+              text,
+          )
+          if normalized_calls < 4:
+              raise SystemExit(f"expected several TaskWriter role boundaries, found {normalized_calls}")
+          for forbidden in ("_ROLES", "_COMMENT_ROLES", "_CREATE_ROLES", "_PROPOSAL_CREATE_ROLES", "_EDIT_ROLES"):
+              if re.search(rf"(?<![A-Za-z0-9_]){re.escape(forbidden)}(?![A-Za-z0-9_])", text):
+                  raise SystemExit(f"legacy role name remains in tasks.py: {forbidden}")
+          write(path, text)
+
+          # The importer consumes raw marker strings, but derives the allowed marker tokens from
+          # the canonical Role vocabulary instead of importing a private task constant.
+          path = "src/secretary/board/import_board.py"
+          text = read(path)
+          text = replace_once(
+              text,
+              "from secretary.board.models import EntityKind, Event\n",
+              "from secretary.board.models import EntityKind, Event\nfrom secretary.board.roles import BOARD_ROLES\n",
+              "importer role import",
+          )
+          text = replace_once(text, "    _ROLES,\n", "", "importer private role import")
+          text = replace_once(
+              text,
+              "MARKER_ROLES = frozenset(_ROLES)\n",
+              "MARKER_ROLES = frozenset(role.value for role in BOARD_ROLES)\n",
+              "marker roles",
+          )
+          write(path, text)
+
+          # Argparse exposes exactly the same strings as before, but its choices are now projected
+          # from the canonical Role subsets rather than restating them in the CLI module.
+          path = "src/secretary/task_commands.py"
+          text = read(path)
+          text = replace_once(
+              text,
+              "from secretary.board.backend import card_client\n",
+              "from secretary.board.backend import card_client\nfrom secretary.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role\n",
+              "task commands role import",
+          )
+          text = replace_once(
+              text,
+              "from triggered_agents.runtime.head import CODEX_LAUNCH_MODES\n\n\ndef _add_instance_arg(parser) -> None:\n",
+              '''from triggered_agents.runtime.head import CODEX_LAUNCH_MODES\n\n\ndef _role_choices(roles: frozenset[Role]) -> tuple[str, ...]:\n    """Project a canonical role subset onto argparse's string boundary."""\n    return tuple(role.value for role in Role if role in roles)\n\n\ndef _add_instance_arg(parser) -> None:\n''',
+              "role choices helper",
+          )
+          text = replace_once(
+              text,
+              'repair_apply.add_argument("--role", required=True, choices=("po",))',
+              'repair_apply.add_argument("--role", required=True, choices=(Role.PO.value,))',
+              "repair role choices",
+          )
+          text = replace_once(
+              text,
+              '        "--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro", "observer")\n',
+              '        "--role", required=True, choices=_role_choices(CREATE_ROLES)\n',
+              "create role choices",
+          )
+          text = replace_once(
+              text,
+              '            choices=("po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"),\n',
+              '            choices=_role_choices(BOARD_ROLES),\n',
+              "general task role choices",
+          )
+          text = replace_once(
+              text,
+              '    task_edit.add_argument("--role", required=True, choices=("po", "dispatcher", "observer"))\n',
+              '    task_edit.add_argument("--role", required=True, choices=_role_choices(EDIT_ROLES))\n',
+              "edit role choices",
+          )
+          text = replace_once(
+              text,
+              '    task_claim.add_argument("--role", required=True, choices=("dispatcher",))\n',
+              '    task_claim.add_argument("--role", required=True, choices=(Role.DISPATCHER.value,))\n',
+              "claim role choices",
+          )
+          write(path, text)
+
+          # Replace the temporary drift ratchet from #443 with tests for the finished boundary.
+          Path("tests/test_board_roles.py").write_text(
+              '''from __future__ import annotations\n\nimport unittest\n\nimport secretary.tasks as task_protocol\nfrom secretary.board import Role as ExportedRole\nfrom secretary.board.card_transitions import (\n    CARD_TRANSITIONS,\n    CardTransitionForbidden,\n    card_transition,\n)\nfrom secretary.board.models import Actor, CardState\nfrom secretary.board.roles import (\n    BOARD_ROLES,\n    CREATE_ROLES,\n    EDIT_ROLES,\n    PROPOSAL_CREATE_ROLES,\n    Role,\n)\nfrom secretary.task_commands import _role_choices\nfrom secretary.tasks import TaskError, TaskWriter\n\n\nclass RoleVocabularyTests(unittest.TestCase):\n    def test_role_is_public_string_compatible_closed_vocabulary(self) -> None:\n        self.assertIs(ExportedRole, Role)\n        self.assertIs(Role("worker"), Role.WORKER)\n        self.assertEqual(str(Role.WORKER), "worker")\n        self.assertEqual(\n            {role.value for role in BOARD_ROLES},\n            {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"},\n        )\n\n    def test_actor_normalizes_strings_to_the_canonical_role(self) -> None:\n        actor = Actor("worker", "worker-1", "head-run:1")\n        self.assertIs(actor.role, Role.WORKER)\n        self.assertEqual(actor.role, "worker")\n        with self.assertRaises(ValueError):\n            Actor("dispatchre", "bad")\n\n    def test_task_writer_parses_roles_at_its_boundary(self) -> None:\n        self.assertIs(TaskWriter._role("worker", BOARD_ROLES), Role.WORKER)\n        self.assertIs(TaskWriter._role(Role.PO, CREATE_ROLES), Role.PO)\n        with self.assertRaises(TaskError):\n            TaskWriter._role("dispatcher", CREATE_ROLES)\n        with self.assertRaises(TaskError):\n            TaskWriter._role("dispatchre", BOARD_ROLES)\n\n    def test_task_module_no_longer_owns_duplicate_role_registries(self) -> None:\n        for name in (\n            "_ROLES",\n            "_COMMENT_ROLES",\n            "_CREATE_ROLES",\n            "_PROPOSAL_CREATE_ROLES",\n            "_EDIT_ROLES",\n        ):\n            self.assertFalse(hasattr(task_protocol, name), name)\n\n    def test_cli_role_choices_are_projected_from_canonical_subsets(self) -> None:\n        self.assertEqual(set(_role_choices(BOARD_ROLES)), {role.value for role in BOARD_ROLES})\n        self.assertEqual(set(_role_choices(CREATE_ROLES)), {role.value for role in CREATE_ROLES})\n        self.assertEqual(set(_role_choices(EDIT_ROLES)), {role.value for role in EDIT_ROLES})\n        self.assertEqual(\n            {role.value for role in PROPOSAL_CREATE_ROLES},\n            {"worker", "reviewer", "retro"},\n        )\n\n    def test_card_transition_registry_uses_the_canonical_role_type(self) -> None:\n        self.assertEqual(set(CARD_TRANSITIONS), BOARD_ROLES)\n        by_enum = card_transition(Role.DISPATCHER, CardState.READY, CardState.IN_PROGRESS)\n        by_string = card_transition("dispatcher", "ready", "in_progress")\n        self.assertEqual(by_enum, by_string)\n\n    def test_unknown_role_is_refused_at_the_transition_boundary(self) -> None:\n        with self.assertRaises(CardTransitionForbidden):\n            card_transition("dispatchre", CardState.READY, CardState.IN_PROGRESS)\n\n\nif __name__ == "__main__":\n    unittest.main()\n''',
+              encoding="utf-8",
+          )
+          PY
+
+          python3 -m compileall -q \
+            src/secretary/board/models.py \
+            src/secretary/board/roles.py \
+            src/secretary/tasks.py \
+            src/secretary/board/import_board.py \
+            src/secretary/task_commands.py \
+            tests/test_board_roles.py
+          git diff --check
+          rm -f .github/workflows/astra-a07-worker.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: finish product role migration"
+          git push origin HEAD:astra-a07-role-boundaries
