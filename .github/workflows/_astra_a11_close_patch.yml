@@ -1,0 +1,52 @@
+name: astra-a11-close-domain-patch
+
+on:
+  push:
+    branches: [astra-a11-close-domain]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'type sprint close domain') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: astra-a11-close-domain
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply bounded close refactor
+        run: python3 scripts/_astra_a11_close_patch.py
+      - name: Remove patch scaffolding
+        run: rm scripts/_astra_a11_close_patch.py .github/workflows/_astra_a11_close_patch.yml
+      - run: python3 -m pip install --upgrade pip
+      - run: python3 -m pip install -e '.[dev,typecheck,ci]'
+      - name: Format and lint changed Python
+        run: |
+          python3 -m ruff format src/secretary/board/sprint_close.py src/secretary/sprint_close.py src/secretary/sprints.py tests/test_sprint_close_model.py
+          python3 -m ruff check src/secretary/board/sprint_close.py src/secretary/sprint_close.py src/secretary/sprints.py tests/test_sprint_close_model.py
+      - name: Typecheck typed leaves
+        run: python3 -m mypy
+      - name: Focused Sprint close tests
+        run: >-
+          python3 -m unittest
+          tests.test_sprint_close_model
+          tests.test_sprint_write
+          tests.test_sprint_read
+          tests.test_sprint_admission
+          tests.test_sprints
+          tests.test_sprint_restore
+          tests.test_sprint_executors
+          tests.test_web_sprint_protocol
+          tests.test_web_sprint_transport
+      - name: Commit final tree
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'refactor: type sprint close domain'
+          git push origin HEAD:astra-a11-close-domain
