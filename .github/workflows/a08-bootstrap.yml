@@ -28,7 +28,9 @@ jobs:
           fi
       - name: Apply A08 source refactor
         if: steps.applied.outputs.skip != 'true'
-        run: python3 scripts/a08_bootstrap.py
+        run: |
+          python3 scripts/a08_relax.py
+          python3 scripts/a08_bootstrap.py
       - name: Install checks
         if: steps.applied.outputs.skip != 'true'
         run: |
