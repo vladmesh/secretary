@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from secretary.board.backend import card_client
+from secretary.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
 from secretary.cli_output import print_json
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
@@ -20,6 +21,11 @@ from secretary.tasks import (
     task_audit_for,
 )
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
+
+
+def _role_choices(roles: frozenset[Role]) -> tuple[str, ...]:
+    """Project a canonical role subset onto argparse's string boundary."""
+    return tuple(role.value for role in Role if role in roles)
 
 
 def _add_instance_arg(parser) -> None:
@@ -94,7 +100,7 @@ def add_task_subcommands(subparsers) -> None:
         "repair-references-apply", help="apply an exact previewed duplicate-reference repair"
     )
     _add_data_dir_args(repair_apply)
-    repair_apply.add_argument("--role", required=True, choices=("po",))
+    repair_apply.add_argument("--role", required=True, choices=(Role.PO.value,))
     repair_apply.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     repair_apply.add_argument("--plan-id", required=True)
     repair_apply.add_argument("--task-id", action="append", required=True, type=int)
@@ -103,7 +109,7 @@ def add_task_subcommands(subparsers) -> None:
     repair_apply.set_defaults(handler=run_task_repair_references_apply)
     task_create = task_subcommands.add_parser("create")
     task_create.add_argument(
-        "--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro", "observer")
+        "--role", required=True, choices=_role_choices(CREATE_ROLES)
     )
     task_create.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_create)
@@ -163,7 +169,7 @@ def add_task_subcommands(subparsers) -> None:
         command.add_argument(
             "--role",
             required=True,
-            choices=("po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"),
+            choices=_role_choices(BOARD_ROLES),
         )
         command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
         _add_data_dir_args(command)
@@ -205,7 +211,7 @@ def add_task_subcommands(subparsers) -> None:
         command.set_defaults(handler=handler)
     task_edit = task_subcommands.add_parser("edit")
     task_edit.add_argument("--ref", required=True)
-    task_edit.add_argument("--role", required=True, choices=("po", "dispatcher", "observer"))
+    task_edit.add_argument("--role", required=True, choices=_role_choices(EDIT_ROLES))
     task_edit.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_edit)
     task_edit.add_argument("--request-id")
@@ -218,7 +224,7 @@ def add_task_subcommands(subparsers) -> None:
     task_edit.set_defaults(handler=run_task_edit)
     task_claim = task_subcommands.add_parser("claim")
     task_claim.add_argument("--ref", required=True)
-    task_claim.add_argument("--role", required=True, choices=("dispatcher",))
+    task_claim.add_argument("--role", required=True, choices=(Role.DISPATCHER.value,))
     task_claim.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_claim)
     task_claim.add_argument("--request-id")

@@ -17,6 +17,7 @@ from secretary.board.terminal_taxonomy import (
     TERMINAL_DISPOSITIONS,
     read_terminal_taxonomy,
 )
+from secretary.board.roles import Role
 
 EntityRef: TypeAlias = str
 
@@ -283,16 +284,27 @@ class Card:
 BoardEntity: TypeAlias = Product | Issue | Sprint | Card
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class Actor:
     """The protocol identity that made a board mutation."""
 
-    role: str
+    role: Role
     id: str
     head_run_ref: str | None = None
 
+    def __init__(self, role: Role | str, id: str, head_run_ref: str | None = None) -> None:
+        try:
+            normalized_role = Role(role)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid actor role: {role!r}") from exc
+        object.__setattr__(self, "role", normalized_role)
+        object.__setattr__(self, "id", id)
+        object.__setattr__(self, "head_run_ref", head_run_ref)
+        self.__post_init__()
+
     def __post_init__(self) -> None:
-        _non_empty(self.role, "actor role")
+        if not isinstance(self.role, Role):
+            raise ValueError("actor role must be a Role")
         _non_empty(self.id, "actor id")
         if self.head_run_ref is not None:
             _non_empty(self.head_run_ref, "actor head-run ref")
