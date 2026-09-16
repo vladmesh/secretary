@@ -45,12 +45,12 @@ Most technical debt is caused by data crossing between those generations through
 - ✅ **A04 completed in PR #436:** introduced typed `BoardBackend(StrEnum)` and `BoardCapability(StrEnum)` vocabularies, kept the old public constants as string-compatible enum-member aliases, typed the backend parser/cache and capability set, and added `secretary.board.backend` to the incremental mypy gate without changing the environment/storage/serialized string contract.
 - ✅ **A05 completed in PR #438:** introduced canonical `PauseMode(StrEnum)` plus typed `PauseState`, `AutoResumeStatus`, and `LegacyPauseMirror` document contracts around the dispatcher pause state. The `soft`/`hard` boundary aliases, persisted JSON keys/values, corrupt-file freeze behavior, and auto-resume semantics remain unchanged; `secretary.dispatcher_pause` is now part of the incremental mypy gate.
 - ✅ **A06 completed in PR #437:** added canonical `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s to the normalized board model. `Issue` now stores typed optional vocabulary values while accepting the existing string spellings at construction boundaries; persisted/CLI/Kanboard/PostgreSQL values remain unchanged. The staged Kanboard `pending/pending` recovery shape normalizes to absent typed metadata instead of expanding the durable vocabulary.
-- 🟡 **A07 partially completed in PR #443:** introduced canonical product-side `Role(StrEnum)` plus typed create/proposal-create/edit role subsets, made `CARD_TRANSITIONS` use `Role` keys while preserving string-compatible callers, exported `Role` from `secretary.board`, added the role and transition leaves to the incremental mypy gate, and added a ratchet proving the legacy `tasks.py` role sets still match the canonical product vocabulary. `Actor.role`, task/CLI boundaries, and the legacy runtime role registry remain as the deliberate A07 tail; `triggered_agents.runtime.role_env` should move only with the A19 namespace migration rather than gaining a new back-import into product code.
+- ✅ **A07 completed across PR #443 and PR #444:** #443 introduced the canonical product-side `Role(StrEnum)`, typed role subsets, and `Role`-keyed card transitions; #444 made `Actor.role` carry `Role`, normalized TaskWriter role strings at the boundary, removed the duplicate task-side role registries, derived CLI/importer role choices from the canonical vocabulary, and replaced the temporary drift ratchet with boundary tests. Persisted/event/CLI spellings remain string-compatible. The separate `triggered_agents.runtime.role_env` registry remains intentionally owned by the later A19 namespace migration rather than by A07.
 - 🟡 **A09 partially completed in PR #442:** centralized the task-side Kanboard wire-format constants and pure normalizers in `secretary.board.legacy_codec`. `tasks.py`, restore, and the board importer now share the same parser objects, and restore's duplicate `_enum_or_default` is gone. The sprint-specific `_budget`, `_resume`, `_source_audit`, and `_json_list` imports remain as the deliberate A09 tail and should move together with the sprint-model work rather than through a riskier mechanical extraction.
 - ✅ **A10 completed in PR #441:** renamed the routing-journal domain value to canonical `RoutingHeadSnapshot`, kept the runtime lifecycle value as `HeadRun`, and added a typed launch boundary without changing routing-event JSON or persisted dispatcher state. Historical routing names and the dict adapter remain compatibility surfaces until the adjacent package/state migrations remove them.
 - ✅ **A16 completed in PR #440:** made `SECRETARY_CARD_BACKEND` mandatory for live backend selection. Missing, empty, and unknown selectors now fail closed; explicit `kanboard` remains the rollback path, the test suite pins its backend explicitly, and status represents the absence of a product default as `null`.
 
-PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, and PR #443 all passed their full pull-request CI workflow and were merged into `main`. PR #443 passed typecheck and all seven test shards on exact head SHA `6ddbfb3ea8ee5d49b68468f0f8a205533f69e11c` before merge.
+PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, PR #443, and PR #444 all passed their full pull-request CI workflow and were merged into `main`. PR #443 passed typecheck and all seven test shards on exact head SHA `6ddbfb3ea8ee5d49b68468f0f8a205533f69e11c`; PR #444 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `1d92ab9533ec3b2abe66003303c34d82c46ba7eb` before squash-merge.
 
 ## Findings
 
@@ -62,7 +62,7 @@ PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, and PR #
 | A04 | ✅ Replace board-backend string literals with `StrEnum` — **completed in #436** | **2** |
 | A05 | ✅ Type pause mode and pause-state documents — **completed in #438** | **2** |
 | A06 | ✅ Type Product/Issue kind, priority and close-reason vocabularies — **completed in #437** | **2** |
-| A07 | 🟡 Centralize the role vocabulary in one `Role(StrEnum)` — **product-side vocabulary/transition slice completed in #443; domain/CLI/runtime tail remains** | **3** |
+| A07 | ✅ Centralize the product role vocabulary in one `Role(StrEnum)` — **completed across #443 and #444; legacy runtime registry belongs to A19** | **3** |
 | A08 | Type task routing metadata (`task_type`, complexity, family preference, phases, decisions) | **3** |
 | A09 | 🟡 Stop importing private task/sprint normalizers across feature boundaries — **task-side completed in #442; sprint-side remains** | **3** |
 | A10 | ✅ Rename/consolidate the two different `HeadRun` concepts — **completed in #441** | **3** |
@@ -155,7 +155,7 @@ The existing string wire/storage contract is unchanged: `StrEnum` remains string
 
 The legacy validation sets in `product_issues.py` remain as compatibility/boundary validation surfaces for now; the normalized board domain contract is the enum-typed `Issue`. Full CI passed before merge.
 
-### A07. Centralize roles in one `Role(StrEnum)` — complexity 3 — partially completed
+### A07. Centralize roles in one `Role(StrEnum)` — complexity 3 — completed
 
 The same role vocabulary is repeated in multiple places:
 
@@ -170,7 +170,9 @@ The duplicated sets are already drifting into multiple partially-overlapping sub
 
 **Implemented in PR #443 (product-side slice):** added canonical `secretary.board.roles.Role(StrEnum)` for the product board roles plus typed `BOARD_ROLES`, `CREATE_ROLES`, `PROPOSAL_CREATE_ROLES`, and `EDIT_ROLES` subsets. `CARD_TRANSITIONS` now uses `Role` keys, while `card_transition()` still accepts the existing string spellings and normalizes them at the boundary, so transition authority and external spellings are unchanged. `Role` is exported from `secretary.board`; `secretary.board.roles` and `secretary.board.card_transitions` are now in the incremental mypy gate. A focused unit ratchet asserts that the historical `tasks.py` role sets exactly match the new canonical product sets, so the compatibility surface cannot silently drift while the remaining migration is staged.
 
-**Remaining A07 tail:** make `board.models.Actor.role` carry `Role`, then migrate the task/sprint/CLI call sites to parse strings at their boundaries and remove the duplicated product-side sets rather than merely ratcheting them. `triggered_agents.runtime.role_env.BOARD_ROLES` deliberately remains separate for now: `triggered_agents` is a legacy namespace with a dependency-direction test preventing new imports back into `secretary`. That runtime registry should be migrated when A19 moves role/runtime ownership into the product package, not by introducing a new legacy-to-product back edge.
+**Completed in PR #444 (boundary/removal slice):** `board.models.Actor.role` now carries `Role` while accepting the released string spellings at construction boundaries. `TaskWriter` normalizes raw role strings once and uses the canonical board/create/comment/edit/proposal subsets; the duplicated task-local `_ROLES`, `_COMMENT_ROLES`, `_CREATE_ROLES`, `_PROPOSAL_CREATE_ROLES`, and `_EDIT_ROLES` registries are gone. `task_commands.py` derives argparse role choices from the canonical enum/subsets, and the board importer derives its marker-role strings from the same vocabulary instead of importing a private task constant. The temporary compatibility ratchet from #443 was replaced with tests for Actor normalization, writer authorization, CLI projection, and the absence of the duplicate registries.
+
+`triggered_agents.runtime.role_env.BOARD_ROLES` deliberately remains separate: `triggered_agents` is a legacy namespace with a dependency-direction test preventing new imports back into `secretary`. Moving that runtime-owned registry is part of A19, when role/runtime ownership itself leaves the legacy namespace; it is no longer an A07 tail.
 
 ### A08. Type task routing metadata — complexity 3
 
@@ -355,9 +357,9 @@ Phase 1 is complete: A01/A02 via PR #434, A03 via #435, A04 via #436, A05 via #4
 
 ### Phase 2 — collapse string/dict protocols
 
-A07 (remaining tail), A08, A09 (sprint-side remainder), ~~A10~~, A11.
+~~A07~~, A08, A09 (sprint-side remainder), ~~A10~~, A11.
 
-A10 is complete via PR #441. A07's product-side vocabulary/transition slice is complete via PR #443; its remaining work is to type `Actor.role`, move product task/CLI boundaries onto the enum, remove the compatibility role sets, and leave the legacy runtime registry for A19. A09's task/restore/importer slice is complete via PR #442; its remaining sprint-side private-normalizer seam should be finished together with A11. The goal remains one typed vocabulary per concept and one parser at each legacy boundary.
+A10 is complete via PR #441. A07 is complete across PR #443 and PR #444: product board roles now have one canonical typed vocabulary from the normalized Actor through TaskWriter, CLI choices, transitions, and importer boundaries; the separate legacy runtime registry stays with A19. A09's task/restore/importer slice is complete via PR #442; its remaining sprint-side private-normalizer seam should be finished together with A11. The goal remains one typed vocabulary per concept and one parser at each legacy boundary.
 
 ### Phase 3 — dispatcher typing and package boundaries
 
