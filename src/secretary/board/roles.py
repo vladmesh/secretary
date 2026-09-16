@@ -24,7 +24,7 @@ class Role(StrEnum):
 
 
 BOARD_ROLES: frozenset[Role] = frozenset(Role)
-COMMENT_ROLES = BOARD_ROLES
+COMMENT_ROLES: frozenset[Role] = BOARD_ROLES
 CREATE_ROLES: frozenset[Role] = frozenset(
     {
         Role.PO,

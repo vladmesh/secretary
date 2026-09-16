@@ -74,6 +74,7 @@ from secretary.board.legacy_codec import (
     text as _text,
 )
 from secretary.board.models import EntityKind, Event
+from secretary.board.roles import BOARD_ROLES
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
     ISSUE_KINDS,
@@ -111,7 +112,6 @@ from secretary.sprints import (
 from secretary.tasks import (
     _COMPLEXITIES,
     _FAMILY_PREFERENCES,
-    _ROLES,
     _TASK_TYPES,
     KanboardClient,
     _task_metadata,
@@ -133,7 +133,7 @@ TASK_KNOWN_METADATA = frozenset(_KNOWN_METADATA) | {META_RECORD_TYPE}
 
 #: §8.1's marker vocabulary, exactly as the document spells it.  A first line that is a complete
 #: ``[token]`` whose token is *not* here keeps the whole body and gets ``marker = NULL``.
-MARKER_ROLES = frozenset(_ROLES)
+MARKER_ROLES = frozenset(role.value for role in BOARD_ROLES)
 #: The open families: the board already carries more than one token under each, so the suffix is
 #: not enumerated.  `validate:*`, `claim:*` and `watchdog:*` joined the list on 2026-09-07, when a
 #: re-read of both boards counted 743 comments under them (§8.1).

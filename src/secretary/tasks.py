@@ -42,6 +42,14 @@ from secretary.board.models import (
     EventKind,
     RelatedRefs,
 )
+from secretary.board.roles import (
+    BOARD_ROLES,
+    COMMENT_ROLES,
+    CREATE_ROLES,
+    EDIT_ROLES,
+    PROPOSAL_CREATE_ROLES,
+    Role,
+)
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     validate_rework_prerequisites,
@@ -159,13 +167,8 @@ _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
 _FAMILY_PREFERENCES = {"auto", "claude", "codex"}
 # Retired launch modes normalize away rather than silently changing a requested shape.
 _CODEX_LAUNCH_MODES = CODEX_LAUNCH_MODES
-_ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"}
-_COMMENT_ROLES = _ROLES
-_CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}
-# Agent roles that may not open an execution card: their only create is a proposal in the
-# board's first column, which a PO later triages into Ready.
-_PROPOSAL_CREATE_ROLES = {"worker", "reviewer", "retro"}
-_EDIT_ROLES = {"po", "dispatcher", "observer"}
+# Agent roles that may not open an execution card are represented by
+# PROPOSAL_CREATE_ROLES in the canonical board-role vocabulary.
 _EDITABLE_STATES = {"ready", "blocked"}
 _READY_RESET_METADATA = {
     "claim": "",
@@ -185,7 +188,7 @@ _DECIDED_TARGETS = {"done", "in_progress"}
 # Only the PO may use these Assessment exits; the dispatcher must record a decision.
 _UNDECIDED_EXITS = {"ready", "validate", "issues"}
 # Dispatcher Assessment moves require decisions; human escape-hatch moves do not.
-_DECISION_BOUND_ROLES = {"dispatcher"}
+_DECISION_BOUND_ROLES: frozenset[Role] = frozenset({Role.DISPATCHER})
 # States in which a card holds a workspace, a suspended worker or a running head. `assessment`
 # is one of them: the reviewer is gone, but the worker and its checkout are retained for a
 # rework decision, so a second writer in the same project is as wrong there as in Validate.
@@ -1783,7 +1786,7 @@ class TaskWriter:
         steward_report: bool,
     ) -> dict[str, Any]:
         # Restore bypasses new-work admission only; all other guards still apply.
-        self._role(role, _CREATE_ROLES)
+        role = self._role(role, CREATE_ROLES)
         project = project.strip()
         task_type = task_type.strip()
         title = title.strip() if restoring else self._redact_for_board(title.strip())
@@ -1827,7 +1830,7 @@ class TaskWriter:
                 "a steward report requires research, a slug, no explicit reference and no sprint",
                 2,
             )
-        if role in _PROPOSAL_CREATE_ROLES:
+        if role in PROPOSAL_CREATE_ROLES:
             if target != "issues":
                 raise TaskError("role_forbidden", f"{role} may create only proposals in Issues", 3)
         elif target == "issues":
@@ -2178,7 +2181,7 @@ class TaskWriter:
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        self._role(role, _COMMENT_ROLES)
+        role = self._role(role, COMMENT_ROLES)
         body = self._redact_for_board(body)
         payload = {"marker": role, "body_sha256": _digest(body)}
         return self._write(
@@ -2884,7 +2887,7 @@ class TaskWriter:
         outcome_owed: dict[str, Any] | None = None,
         terminal_taxonomy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self._role(role, _ROLES)
+        role = self._role(role, BOARD_ROLES)
         reason = self._redact_for_board(reason)
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
@@ -3282,7 +3285,7 @@ class TaskWriter:
         Validate) are not editable: the running head works from a TASK.md snapshot, so a mid-flight
         revision must go through preempt/requeue, not a silent spec swap.
         """
-        self._role(role, _EDIT_ROLES)
+        role = self._role(role, EDIT_ROLES)
         title = self._redact_for_board(title) if title is not None else None
         description = self._redact_for_board(description) if description is not None else None
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
@@ -4677,9 +4680,14 @@ class TaskWriter:
         )
 
     @staticmethod
-    def _role(role: str, allowed: set[str]) -> None:
-        if role not in allowed:
+    def _role(role: Role | str, allowed: frozenset[Role]) -> Role:
+        try:
+            normalized_role = Role(role)
+        except (TypeError, ValueError):
+            raise TaskError("role_forbidden", "role is not permitted for this operation", 3) from None
+        if normalized_role not in allowed:
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+        return normalized_role
 
     @staticmethod
     def _check_archivable(task: dict[str, Any]) -> None:
