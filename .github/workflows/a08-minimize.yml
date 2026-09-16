@@ -24,6 +24,13 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install -e '.[dev,typecheck]'
+      - name: Normalize A08 leaves
+        run: |
+          python3 -m ruff check --fix \
+            src/secretary/board/task_routing.py \
+            src/secretary/board/legacy_codec.py \
+            src/secretary/board/__init__.py \
+            tests/test_task_routing.py
       - name: Check A08
         run: |
           python3 -m mypy
