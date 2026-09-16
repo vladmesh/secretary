@@ -11,13 +11,12 @@ module, not an acceptable rounding.
 :func:`secretary.tasks.all_project_cards`, `getTaskMetadata`, `getAllComments`), and there is no
 `createTask`, `updateTask`, `saveTaskMetadata`, `createComment` or `removeTask` anywhere below.
 
-**Legacy task normalization has one compatibility codec.**  The task column/metadata
-vocabularies and pure wire-format parsers come from :mod:`secretary.board.legacy_codec`; the task
-reader and restore path use the same functions.  Sprint-specific ``_budget``, ``_resume``,
-``_source_audit`` and ``_json_list`` remain in :mod:`secretary.sprints` until that larger model is
-migrated.  What this module adds is only the part that has no
-reader today: the §8.1 marker rule, which is deliberately *stricter* than
-``tasks._normalize_comment``.
+**Legacy normalization has explicit compatibility boundaries.**  Task column/metadata
+vocabularies and pure wire-format parsers come from :mod:`secretary.board.legacy_codec`; Sprint
+compound metadata is parsed by :mod:`secretary.board.sprint_read`.  The live readers and this
+one-shot importer therefore share public normalization rules instead of importing private feature
+helpers.  What this module adds is only the part that has no reader today: the §8.1 marker rule,
+which is deliberately *stricter* than ``tasks._normalize_comment``.
 
 **One run, on an empty database.**  §8's mapping generates identity keys for comments, resumes
 and budget events, and the board carries no stable column for any of them, so a second run has no
@@ -64,17 +63,44 @@ import yaml
 from secretary.board.backend import card_transport_key, record_key, sprint_reference_number
 from secretary.board.legacy_codec import (
     TASK_KNOWN_METADATA as _KNOWN_METADATA,
+)
+from secretary.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+)
+from secretary.board.legacy_codec import (
     enum_or_default as _enum_or_default,
+)
+from secretary.board.legacy_codec import (
     enum_or_none as _enum_or_none,
+)
+from secretary.board.legacy_codec import (
     nonnegative_int as _nonnegative_int,
+)
+from secretary.board.legacy_codec import (
     null_if_empty as _null_if_empty,
+)
+from secretary.board.legacy_codec import (
     positive_int as _positive_int,
+)
+from secretary.board.legacy_codec import (
     split_heads as _split_heads,
+)
+from secretary.board.legacy_codec import (
     text as _text,
 )
 from secretary.board.models import EntityKind, Event
 from secretary.board.roles import BOARD_ROLES
+from secretary.board.sprint_read import (
+    BUDGET_RECORDED_EVENT_TYPES,
+    BUDGET_UNCHARGED_EVENT_TYPES,
+    BUDGET_UNCHARGED_FIELD,
+    RESUME_FIELDS,
+    SPRINT_STATE_VALUES,
+    sprint_budget_document,
+    sprint_resume_document,
+    sprint_source_audit_document,
+    sprint_string_list,
+)
 from secretary.board.task_routing import (
     FAMILY_PREFERENCE_VALUES,
     TASK_COMPLEXITY_VALUES,
@@ -101,19 +127,7 @@ from secretary.sprint_observer import (
     parse_observer,
     stored_executors,
 )
-from secretary.sprints import (
-    BUDGET_RECORDED_EVENT_TYPES,
-    BUDGET_UNCHARGED_EVENT_TYPES,
-    BUDGET_UNCHARGED_FIELD,
-    RESUME_FIELDS,
-    SPRINT_BOARD_NAME,
-    SPRINT_REFERENCE_PREFIX,
-    SPRINT_STATUSES,
-    _budget,
-    _json_list,
-    _resume,
-    _source_audit,
-)
+from secretary.sprints import SPRINT_BOARD_NAME, SPRINT_REFERENCE_PREFIX
 from secretary.tasks import (
     KanboardClient,
     _task_metadata,
@@ -1032,9 +1046,9 @@ def _plan_registry(
         if project := _text(row.meta.get("project")):
             referenced.add(project)
     for row in source.sprints:
-        referenced.update(_json_list(row.meta.get("sprint_reservations")))
+        referenced.update(sprint_string_list(row.meta.get("sprint_reservations")))
     for row in product_rows:
-        referenced.update(_json_list(row.meta.get(META_PRODUCT_PROJECTS)))
+        referenced.update(sprint_string_list(row.meta.get(META_PRODUCT_PROJECTS)))
 
     for project_id in sorted(set(registry) | referenced):
         entry = registry.get(project_id)
@@ -1074,7 +1088,7 @@ def _plan_registry(
     not_a_path: list[str] = []
     sprint_paths: set[str] = set()
     for row in source.sprints:
-        for path in _json_list(row.meta.get("sprint_repositories")):
+        for path in sprint_string_list(row.meta.get("sprint_repositories")):
             sprint_paths.add(path)
             if not path.startswith("/"):
                 not_a_path.append(path)
@@ -1180,7 +1194,7 @@ def _plan_products(
             "created_at": created,
             "updated_at": _required_when(row.raw.get("date_modification"), created),
         }
-        for project_id in _json_list(row.meta.get(META_PRODUCT_PROJECTS)):
+        for project_id in sprint_string_list(row.meta.get(META_PRODUCT_PROJECTS)):
             if project_id not in known_projects:
                 report.link_not_imported(
                     kind="product_projects",
@@ -1373,7 +1387,7 @@ def _plan_sprints(
                 }
             )
         status = row.meta.get("sprint_status")
-        if status not in SPRINT_STATUSES:
+        if status not in SPRINT_STATE_VALUES:
             status = "open"
         created = _required_when(row.raw.get("date_creation"), datetime.fromtimestamp(0, tz=UTC))
         updated = _required_when(row.raw.get("date_modification"), created)
@@ -1399,7 +1413,7 @@ def _plan_sprints(
                 target=row.meta[OBSERVER_FIELD][:60],
                 reason="the value is not one of the four tagged observer forms; the column stays NULL",
             )
-        source_audit = _source_audit(row.meta.get("sprint_source_audit"))
+        source_audit = sprint_source_audit_document(row.meta.get("sprint_source_audit"))
         if reference != row.ref:
             source_audit = {**(source_audit or {}), SOURCE_AUDIT_ORIGINAL_REF: row.ref}
         sprints[reference] = {
@@ -1422,7 +1436,7 @@ def _plan_sprints(
             "updated_at": updated,
             "closed_at": closed_at,
         }
-        for path in _json_list(row.meta.get("sprint_repositories")):
+        for path in sprint_string_list(row.meta.get("sprint_repositories")):
             if path not in repository_paths:  # pragma: no cover - _plan_registry created them all
                 report.link_not_imported(
                     kind="sprint_repositories",
@@ -1432,7 +1446,7 @@ def _plan_sprints(
                 )
                 continue
             rows["sprint_repositories"].append({"sprint_ref": reference, "path": path})
-        for value in _json_list(row.meta.get("sprint_issues")):
+        for value in sprint_string_list(row.meta.get("sprint_issues")):
             issue_id = value.removeprefix("issue:")
             if issue_id not in issues:
                 report.link_not_imported(
@@ -1444,7 +1458,7 @@ def _plan_sprints(
                 continue
             rows["sprint_issues"].append({"sprint_ref": reference, "issue_id": issue_id})
         reserved = status == "open"
-        for project_id in _json_list(row.meta.get("sprint_reservations")):
+        for project_id in sprint_string_list(row.meta.get("sprint_reservations")):
             if project_id not in known_projects:  # pragma: no cover - _plan_registry created them
                 report.link_not_imported(
                     kind="sprint_projects",
@@ -1473,7 +1487,7 @@ def _plan_sprints(
                     "released_at": None if reserved else closed_at,
                 }
             )
-        resume = _resume(row.meta.get("sprint_resume"))
+        resume = sprint_resume_document(row.meta.get("sprint_resume"))
         if resume is not None:
             recorded = _timestamp(resume.get("recorded_at")) or updated
             rows["sprint_resumes"].append(
@@ -1842,7 +1856,7 @@ def _plan_budget(
         reference = assigned[row.task_id]
         if reference not in sprints:
             continue
-        budget = _budget(
+        budget = sprint_budget_document(
             row.meta.get("sprint_budget"), thresholds, row.meta.get(BUDGET_UNCHARGED_FIELD)
         )
         counts = {**budget["by_type"], **budget["uncharged"]}
@@ -2676,13 +2690,13 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
     expected_sprint_issues = {
         (ref, value.removeprefix("issue:"))
         for ref, row in inventory.sprints.items()
-        for value in _json_list(row.meta.get("sprint_issues"))
+        for value in sprint_string_list(row.meta.get("sprint_issues"))
         if ref in stored_sprints and value in stored_issues
     }
     expected_sprint_repositories = {
         (ref, path)
         for ref, row in inventory.sprints.items()
-        for path in _json_list(row.meta.get("sprint_repositories"))
+        for path in sprint_string_list(row.meta.get("sprint_repositories"))
         if ref in stored_sprints
     }
     expected_dependencies = {
@@ -2744,7 +2758,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
             {
                 (ref.removeprefix("product:"), project)
                 for ref, row in inventory.products.items()
-                for project in _json_list(row.meta.get(META_PRODUCT_PROJECTS))
+                for project in sprint_string_list(row.meta.get(META_PRODUCT_PROJECTS))
                 if ref in stored_products
                 and ("product_projects", ref, project)
                 not in {
@@ -2824,7 +2838,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
                     row.meta.get("sprint_goal", ""),
                     row.meta.get("sprint_definition_of_done", ""),
                     row.meta.get("sprint_status")
-                    if row.meta.get("sprint_status") in SPRINT_STATUSES
+                    if row.meta.get("sprint_status") in SPRINT_STATE_VALUES
                     else "open",
                 )
                 for ref, row in inventory.sprints.items()
@@ -2981,7 +2995,7 @@ def _counter_totals(source: BoardSource, stored_sprints: dict[str, Any]) -> Coun
         reference = assigned[row.task_id]
         if reference not in stored_sprints:
             continue
-        budget = _budget(row.meta.get("sprint_budget"), None, row.meta.get(BUDGET_UNCHARGED_FIELD))
+        budget = sprint_budget_document(row.meta.get("sprint_budget"), None, row.meta.get(BUDGET_UNCHARGED_FIELD))
         counts = {**budget["by_type"], **budget["uncharged"]}
         for event_type in BUDGET_RECORDED_EVENT_TYPES:
             wanted = int(counts.get(event_type, 0))

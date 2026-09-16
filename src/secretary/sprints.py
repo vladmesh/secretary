@@ -20,6 +20,23 @@ from secretary.board.backend import (
     entity_number,
     sprint_reference_number,
 )
+from secretary.board.models import SprintState
+from secretary.board.sprint_read import (
+    BUDGET_EVENT_TYPES,
+    BUDGET_RECORDED_EVENT_TYPES,
+    BUDGET_UNCHARGED_EVENT_TYPES,
+    BUDGET_UNCHARGED_FIELD,
+    BUDGET_UNCHARGED_INFRASTRUCTURE,
+    RESUME_FIELDS,
+    SprintBudget,
+    SprintReadMetadata,
+    SprintResume,
+    SprintSourceAudit,
+    sprint_string_list,
+)
+from secretary.board.sprint_read import (
+    budget_thresholds as _read_budget_thresholds,
+)
 from secretary.sprint_observer import (
     EXECUTOR_FIELDS,
     KIND_HEAD,
@@ -68,36 +85,10 @@ SPRINT_METADATA = {
     "sprint_observer",
     *EXECUTOR_FIELDS.values(),
 }
-SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
-# Charged restart types contribute to total and thresholds.
-BUDGET_EVENT_TYPES = (
-    "red_review",
-    "blocked",
-    "red_ci",
-    "preempt",
-    "recreated_task",
-    "hotfix",
-)
-# Infrastructure bring-up failures are visible but never spend restart budget.
-BUDGET_UNCHARGED_INFRASTRUCTURE = "infrastructure_blocked"
-BUDGET_UNCHARGED_EVENT_TYPES = (BUDGET_UNCHARGED_INFRASTRUCTURE,)
-BUDGET_RECORDED_EVENT_TYPES = BUDGET_EVENT_TYPES + BUDGET_UNCHARGED_EVENT_TYPES
-# Uncharged counts stay outside computed sprint_budget metadata.
-BUDGET_UNCHARGED_FIELD = "sprint_budget_uncharged"
-DEFAULT_BUDGET_SIGNAL = 3
-DEFAULT_BUDGET_HARD = 6
 DEFAULT_OPEN_SPRINT_LIMIT = 1
 MAX_OPEN_SPRINT_LIMIT = 2
 # Observer freshness is based on card transitions, not status-read time.
 RESUME_FRESHNESS_GRACE_SECONDS = 5 * 60
-RESUME_FIELDS = (
-    "selected_step",
-    "selected_why",
-    "rejected_alternatives",
-    "current_task",
-    "dod_state",
-    "next_safe_step",
-)
 _GUARD_INDEX = "sprints/active-repositories.json"
 # Version 1 indexes are rebuilt: guards key by project, not repository path.
 _GUARD_INDEX_VERSION = 2
@@ -109,9 +100,9 @@ SPRINT_CLOSED = "closed"
 #: is its own step: the committed event under the derived request id is the only proof the document
 #: was written, and a retry of the close reads it rather than the repository.
 SPRINT_CLOSEOUT = "closeout_written"
-SPRINT_STATUSES = {"open", "closed", "stopped"}
+SPRINT_STATUSES = {state.value for state in SprintState}
 # Terminal sprint states reject semantic writes, so their resume freshness is stable.
-SPRINT_TERMINAL_STATUSES = {"closed", "stopped"}
+SPRINT_TERMINAL_STATUSES = {SprintState.CLOSED.value, SprintState.STOPPED.value}
 # A compensated refused create holds nothing and needs no pending repair.
 _ADMISSION_REFUSALS = {"sprint_conflict", "resource_conflict"}
 
@@ -254,13 +245,10 @@ def _write_guard_index(data_dir: str | Path, projects: dict[str, list[str]]) -> 
 
 def budget_thresholds(config: dict[str, Any] | None = None) -> dict[str, int]:
     """Read installation budget limits, retaining safe defaults for old installations."""
-    raw = (config or {}).get("sprint_budget") if isinstance(config, dict) else {}
-    raw = raw if isinstance(raw, dict) else {}
-    signal = _positive_int(raw.get("signal")) or DEFAULT_BUDGET_SIGNAL
-    hard = _positive_int(raw.get("hard")) or DEFAULT_BUDGET_HARD
-    if hard < signal:
-        raise TaskError("validation", "sprint budget hard threshold must not be below signal threshold", 2)
-    return {"signal": signal, "hard": hard}
+    try:
+        return _read_budget_thresholds(config)
+    except ValueError as exc:
+        raise TaskError("validation", str(exc), 2) from None
 
 
 def open_sprint_limit(config: dict[str, Any] | None = None) -> int:
@@ -647,8 +635,9 @@ class SprintReader:
         include_resume_freshness: bool = True,
     ) -> dict[str, Any]:
         task_id = _task_id(raw)
-        repositories = _json_list(meta.get("sprint_repositories"))
-        budget = _budget(meta.get("sprint_budget"), self.thresholds, meta.get(BUDGET_UNCHARGED_FIELD))
+        read = SprintReadMetadata.from_legacy(meta, thresholds=self.thresholds, now=_now)
+        repositories = list(read.repositories)
+        budget = read.budget.to_document()
         result: dict[str, Any] = {
             "id": entity_id("sprint", getattr(self.client, "backend_kind", KANBOARD), task_id),
             "ref": _text(raw.get("reference")),
@@ -660,7 +649,7 @@ class SprintReader:
             # Always both roles, always a state: "the owner pinned nobody" is an answer this
             # reader gives, never a key it leaves out for the caller to interpret.
             "executors": stored_executors(meta),
-            "status": meta.get("sprint_status") if meta.get("sprint_status") in SPRINT_STATUSES else "open",
+            "status": read.state.value,
             "budget": budget,
             "current_task": meta.get("sprint_current_task") or None,
             "audit": {
@@ -678,12 +667,12 @@ class SprintReader:
                 # A restored sprint sits on a fresh Kanboard row, so its own dates
                 # describe the recovery, not the sprint. The dates it was restored
                 # from stay readable here.
-                "source": _source_audit(meta.get("sprint_source_audit")),
+                "source": read.source_audit.to_document() if read.source_audit is not None else None,
             },
         }
         if comments is not None:
             result["comments"] = comments
-        resume = _resume(meta.get("sprint_resume"))
+        resume = read.resume.to_document() if read.resume is not None else None
         result["resume"] = resume
         if include_resume_freshness:
             result["resume_freshness"] = self._resume_freshness(result, resume)
@@ -861,6 +850,7 @@ class SprintReader:
 
 def _sql_atomic(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
     """Put one complete Sprint protocol operation in the SQL client's transaction."""
+
     @functools.wraps(method)
     def wrapped(self: SprintWriter, *args: Any, **kwargs: Any) -> dict[str, Any]:
         if getattr(self.client, "backend_kind", "kanboard") != "postgres":
@@ -881,9 +871,7 @@ def _sql_atomic(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str
                 except TaskError:
                     pass
             if exc.code == "audit_pending":
-                raise TaskError(
-                    "backend_error", "PostgreSQL Sprint transaction rolled back", 1
-                ) from None
+                raise TaskError("backend_error", "PostgreSQL Sprint transaction rolled back", 1) from None
             raise
         except Exception as exc:  # noqa: BLE001 - the rollback is the public fact.
             if isinstance(request_id, str):
@@ -891,9 +879,7 @@ def _sql_atomic(method: Callable[..., dict[str, Any]]) -> Callable[..., dict[str
                     self.transactions.drop(request_id)
                 except TaskError:
                     pass
-            raise TaskError(
-                "backend_error", f"PostgreSQL Sprint transaction rolled back: {exc}", 1
-            ) from None
+            raise TaskError("backend_error", f"PostgreSQL Sprint transaction rolled back: {exc}", 1) from None
 
     return wrapped
 
@@ -1048,12 +1034,8 @@ class SprintWriter:
                     ) from None
             return self._create_under_admission(request_id, intent)
 
-    def _create_under_admission(
-        self, request_id: str, intent: dict[str, Any]
-    ) -> dict[str, Any]:
-        document, committed = self.transactions.existing(
-            request_id, kind=SPRINT_CREATED, intent=intent
-        )
+    def _create_under_admission(self, request_id: str, intent: dict[str, Any]) -> dict[str, Any]:
+        document, committed = self.transactions.existing(request_id, kind=SPRINT_CREATED, intent=intent)
         if committed is not None:
             return self._committed_result(SPRINT_CREATED, committed)
         if document is None:
@@ -1385,12 +1367,12 @@ class SprintWriter:
         task_id = _positive_int(row.get("id"))
         if task_id is None:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
-        event.update({
-            "ref": created_ref,
-            "task_id": entity_id(
-                "sprint", getattr(self.client, "backend_kind", KANBOARD), task_id
-            ),
-        })
+        event.update(
+            {
+                "ref": created_ref,
+                "task_id": entity_id("sprint", getattr(self.client, "backend_kind", KANBOARD), task_id),
+            }
+        )
         event["backend"]["task_id"] = task_id
         progress["task_id"] = task_id
         self.transactions.save(document)
@@ -2096,9 +2078,7 @@ class SprintWriter:
                     intent=intent,
                 )
                 if committed is not None:
-                    self._check_completed_close(
-                        committed, decisions, reason=reason, closeout=closeout
-                    )
+                    self._check_completed_close(committed, decisions, reason=reason, closeout=closeout)
                     return self._close_result(committed)
                 if document is not None:
                     self._check_staged_decisions(document, decisions)
@@ -3420,11 +3400,8 @@ def _observer(meta: dict[str, str]) -> dict[str, Any]:
 
 
 def _json_list(value: str | None) -> list[str]:
-    try:
-        raw = json.loads(value or "[]")
-    except ValueError:
-        return []
-    return _unique_strings(raw) if isinstance(raw, list) else []
+    """Released private compatibility alias around the typed Sprint read boundary."""
+    return sprint_string_list(value)
 
 
 def _budget(
@@ -3432,48 +3409,8 @@ def _budget(
     thresholds: dict[str, int] | None = None,
     uncharged: Any = None,
 ) -> dict[str, Any]:
-    """The normalized budget: charged counts that move the thresholds, uncharged counts beside them.
-
-    `uncharged` is the separately stored quantity; where it is not given, an already normalized
-    budget passed as `value` carries its own. Both families default to zero for every type, so a
-    sprint stored before a type existed reads as zero rather than as an error.
-    """
-    source = value if isinstance(value, dict) else {}
-    if isinstance(value, str):
-        try:
-            source = json.loads(value)
-        except ValueError:
-            source = {}
-    by_type = source.get("by_type") if isinstance(source, dict) else {}
-    counts = {event_type: _budget_count(by_type, event_type) for event_type in BUDGET_EVENT_TYPES}
-    if uncharged is None:
-        uncharged = source.get("uncharged") if isinstance(source, dict) else {}
-    if isinstance(uncharged, str):
-        try:
-            uncharged = json.loads(uncharged)
-        except ValueError:
-            uncharged = {}
-    spare = {event_type: _budget_count(uncharged, event_type) for event_type in BUDGET_UNCHARGED_EVENT_TYPES}
-    limits = thresholds or budget_thresholds()
-    # Deliberately only the charged counts: an uncharged outcome is visible, and moves nothing.
-    total = sum(counts.values())
-    return {
-        "total": total,
-        "by_type": counts,
-        "uncharged": spare,
-        "thresholds": limits,
-        "signal_reached": total >= limits["signal"],
-        "hard_reached": total >= limits["hard"],
-    }
-
-
-def _budget_count(counts: Any, event_type: str) -> int:
-    if not isinstance(counts, dict):
-        return 0
-    try:
-        return max(0, int(counts.get(event_type, 0)))
-    except (TypeError, ValueError):
-        return 0
+    """Released private compatibility projection of :class:`SprintBudget`."""
+    return SprintBudget.from_legacy(value, thresholds=thresholds, uncharged=uncharged).to_document()
 
 
 def _budget_json(budget: dict[str, Any]) -> str:
@@ -3484,40 +3421,18 @@ def _budget_json(budget: dict[str, Any]) -> str:
 
 
 def _source_audit(value: Any) -> dict[str, str] | None:
-    """The audit metadata a restored sprint was recreated from, when it has one."""
-    source = value
-    if isinstance(value, str):
-        try:
-            source = json.loads(value or "null")
-        except ValueError:
-            return None
-    if not isinstance(source, dict):
-        return None
-    result = {field: _text(source.get(field)) for field in SOURCE_AUDIT_FIELDS}
-    return result if any(result.values()) else None
+    """Released private compatibility projection of :class:`SprintSourceAudit`."""
+    source = SprintSourceAudit.from_legacy(value)
+    return source.to_document() if source is not None else None
 
 
 def _resume(value: Any, *, required: bool = False) -> dict[str, Any] | None:
-    source = value
-    if isinstance(value, str):
-        try:
-            source = json.loads(value)
-        except ValueError:
-            source = None
-    if not isinstance(source, dict):
-        if required:
-            raise TaskError("validation", "resume entry must be a JSON object", 2)
+    try:
+        resume = SprintResume.from_legacy(value, required=required, now=_now)
+    except ValueError as exc:
+        raise TaskError("validation", str(exc), 2) from None
+    if resume is None:
         return None
-    missing = [
-        field
-        for field in RESUME_FIELDS
-        if not isinstance(source.get(field), str) or not source[field].strip()
-    ]
-    if missing:
-        if required:
-            raise TaskError("validation", "resume entry is missing required fields: " + ", ".join(missing), 2)
-        return None
-    recorded_at = _text(source.get("recorded_at")) or _now()
-    if required and _timestamp(recorded_at) is None:
+    if required and _timestamp(resume.recorded_at) is None:
         raise TaskError("validation", "resume recorded_at must include a timezone", 2)
-    return {**{field: source[field].strip() for field in RESUME_FIELDS}, "recorded_at": recorded_at}
+    return resume.to_document()

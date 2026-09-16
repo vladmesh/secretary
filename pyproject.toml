@@ -61,6 +61,7 @@ files = [
     "src/secretary/board/roles.py",
     "src/secretary/board/card_transitions.py",
     "src/secretary/board/task_routing.py",
+    "src/secretary/board/sprint_read.py",
     "src/secretary/board/host.py",
     "src/secretary/board/backend.py",
     "src/secretary/dispatch/runtime_provenance.py",
