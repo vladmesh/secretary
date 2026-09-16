@@ -289,13 +289,16 @@ class AttemptOutcomePayload:
         try:
             refs_raw = data["source_event_ids"]
             completeness_raw = data["usage_completeness"]
-            lineage_raw = data.get("lineage_required")
             if not isinstance(refs_raw, Mapping):
                 raise ValueError("attempt outcome source_event_ids are incomplete")
             if not isinstance(completeness_raw, Mapping):
                 raise ValueError("attempt outcome usage completeness is incomplete")
-            if version == 2 and not isinstance(lineage_raw, Mapping):
-                raise ValueError("attempt outcome lineage requiredness is incomplete")
+            lineage_required: AttemptOutcomeLineageRequired | None = None
+            if version == 2:
+                lineage_raw = data.get("lineage_required")
+                if not isinstance(lineage_raw, Mapping):
+                    raise ValueError("attempt outcome lineage requiredness is incomplete")
+                lineage_required = AttemptOutcomeLineageRequired.from_data(lineage_raw)
             return cls(
                 version=version,
                 attempt_id=data["attempt_id"],
@@ -309,11 +312,7 @@ class AttemptOutcomePayload:
                 blocked_reason=data["blocked_reason"],
                 source_event_ids=AttemptOutcomeSourceEventIds.from_data(refs_raw),
                 usage_completeness=AttemptOutcomeUsageCompleteness.from_data(completeness_raw),
-                lineage_required=(
-                    None
-                    if version == 1
-                    else AttemptOutcomeLineageRequired.from_data(lineage_raw)
-                ),
+                lineage_required=lineage_required,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid attempt outcome payload: {exc}") from None
