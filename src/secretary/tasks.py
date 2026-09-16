@@ -14,7 +14,7 @@ import threading
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -2239,7 +2239,7 @@ class TaskWriter:
         are countable. Its payload is staged as one typed Card occurrence which renders the
         `classification:` line, deliberately not card metadata that could disagree with the event.
         """
-        self._role(role, {"worker"})
+        role = self._role(role, {Role.WORKER})
         body = self._redact_for_board(body)
         if kind not in {"done", "blocked"} or not body.strip():
             raise TaskError("validation", "reports require a non-empty body", 2)
@@ -2311,7 +2311,7 @@ class TaskWriter:
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        self._role(role, {"reviewer"})
+        role = self._role(role, {Role.REVIEWER})
         body = self._redact_for_board(body)
         if kind not in {"green", "red"} or not body.strip():
             raise TaskError("validation", "verdicts require a non-empty body", 2)
@@ -2357,7 +2357,7 @@ class TaskWriter:
         launched its head for, carried in the head's environment, so the binding rather than the actor
         id distinguishes one sprint's observer from another's.
         """
-        self._role(role, {"observer"})
+        role = self._role(role, {Role.OBSERVER})
         body = self._redact_for_board(body)
         if kind not in _DECISIONS:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
@@ -2505,7 +2505,7 @@ class TaskWriter:
         mutation. The event still goes through the normal pending/commit path, which makes it idempotent
         per request id and carries it into the recovery checkpoint.
         """
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         phase = _text(payload.get("phase"))
         if phase not in _ROUTING_PHASES:
             known = ", ".join(sorted(_ROUTING_PHASES))
@@ -2540,7 +2540,7 @@ class TaskWriter:
         this record and never reconstructs a worker, reviewer, or Assessment
         identity from card history.
         """
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         _validate_outcome_round_context(data)
         if not request_id.strip():
             raise TaskError("validation", "outcome round context needs the request id it owns", 2)
@@ -2583,7 +2583,7 @@ class TaskWriter:
         ``finish_attempt_usage`` completes later — nothing is recomputed from a session file that has
         moved on. A stage that fails is an audit failure, and the caller has to treat it as one.
         """
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         if not request_id.strip():
             raise TaskError("validation", "an attempt usage event needs the request id it owns", 2)
         canon = self.board_host.canon
@@ -2649,7 +2649,7 @@ class TaskWriter:
         nowhere the tick would otherwise look. A record that cannot be published is left exactly
         where it is and stays owed.
         """
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         canon = self.board_host.canon
         if canon is None:
             return 0
@@ -2681,7 +2681,7 @@ class TaskWriter:
         to call it only after the lifecycle owner has confirmed the terminal
         move; a retry can only append the exact staged object.
         """
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         if not request_id.strip():
             raise TaskError("validation", "an attempt outcome needs the request id it owns", 2)
         canon = self.board_host.canon
@@ -2745,7 +2745,7 @@ class TaskWriter:
 
     def finish_attempt_outcomes(self, *, role: str, reference: str = "") -> int:
         """Append staged outcomes only; it never derives or changes lifecycle facts."""
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         canon = self.board_host.canon
         if canon is None:
             return 0
@@ -2774,7 +2774,7 @@ class TaskWriter:
         cap: int = 3,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        self._role(role, {"dispatcher"})
+        role = self._role(role, {Role.DISPATCHER})
         worker = worker.strip()
         if not worker:
             raise TaskError("validation", "claim requires a non-empty worker id", 2)
@@ -3767,7 +3767,7 @@ class TaskWriter:
     def archive(
         self, *, role: str, actor: str, reference: str, reason: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        self._role(role, {"po"})
+        role = self._role(role, {Role.PO})
         reason = self._redact_for_board(reason)
         if not reason.strip():
             raise TaskError("validation", "archive requires a non-empty reason", 2)
@@ -4680,7 +4680,7 @@ class TaskWriter:
         )
 
     @staticmethod
-    def _role(role: Role | str, allowed: frozenset[Role]) -> Role:
+    def _role(role: Role | str, allowed: Collection[Role]) -> Role:
         try:
             normalized_role = Role(role)
         except (TypeError, ValueError):
