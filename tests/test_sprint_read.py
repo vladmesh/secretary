@@ -89,6 +89,13 @@ class SprintReadModelTests(unittest.TestCase):
         self.assertIsNone(read.resume)
         self.assertIsNone(read.source_audit)
 
+    def test_empty_budget_threshold_override_keeps_legacy_defaults(self) -> None:
+        read = SprintReadMetadata.from_legacy({}, thresholds={})
+
+        self.assertEqual(read.budget.thresholds, {"signal": 3, "hard": 6})
+        self.assertFalse(read.budget.signal_reached)
+        self.assertFalse(read.budget.hard_reached)
+
     def test_required_resume_reports_the_same_missing_field_contract(self) -> None:
         with self.assertRaisesRegex(ValueError, "resume entry is missing required fields"):
             SprintResume.from_legacy({"selected_step": "x"}, required=True)

@@ -124,7 +124,7 @@ class SprintBudget:
         spare = {
             event_type: _budget_count(spare_source, event_type) for event_type in BUDGET_UNCHARGED_EVENT_TYPES
         }
-        limits = dict(thresholds) if thresholds is not None else budget_thresholds()
+        limits = dict(thresholds) if thresholds else budget_thresholds()
         total = sum(counts.values())
         return cls(
             total=total,
