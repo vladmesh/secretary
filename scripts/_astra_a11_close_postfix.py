@@ -1,6 +1,22 @@
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
+
+typed = root / "src/secretary/board/sprint_close.py"
+typed_text = typed.read_text(encoding="utf-8")
+marker = 'CloseSection = Literal["issues", "cards"]\n\n\n'
+if marker not in typed_text:
+    raise RuntimeError("typed close section marker missing")
+typed_text = typed_text.replace(
+    marker,
+    marker
+    + 'class SprintCloseDocumentError(ValueError):\n'
+    + '    """A durable Sprint-close document does not match its closed domain shape."""\n\n\n',
+    1,
+)
+typed_text = typed_text.replace("raise ValueError(", "raise SprintCloseDocumentError(")
+typed.write_text(typed_text, encoding="utf-8")
+
 close = root / "src/secretary/sprint_close.py"
 text = close.read_text(encoding="utf-8")
 old = 'return "\n".join(lines).rstrip() + "\n"'
