@@ -42,8 +42,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from secretary.board.attempt_usage import AttemptUsagePayload, AttemptUsagePhase, TokenAccount
 from secretary.board.events import AttemptUsageOccurrence
 from secretary.board.models import TOKEN_DIMENSIONS, AttemptUsageOutcome, EventKind
+from secretary.board.roles import Role
 
 CODEX_ADAPTER = "codex"
 CLAUDE_ADAPTER = "claude"
@@ -107,6 +109,10 @@ class TokenTotals:
             return None
         return cls(**values)
 
+    @classmethod
+    def from_account(cls, account: TokenAccount) -> TokenTotals:
+        return cls(**account.to_data())
+
 
 @dataclass(frozen=True)
 class SessionUsage:
@@ -131,7 +137,7 @@ class UsageCollection:
     records: int = 0
     skipped_records: int = 0
     # What the phase owns: the session total at its terminal boundary minus the boundary the
-    # previous phase on this session left behind.
+    # previous phase on this session already made durable.
     tokens: TokenTotals = field(default_factory=TokenTotals)
     # The session total this phase ends at, which is the next phase's starting boundary.
     session_totals: TokenTotals = field(default_factory=TokenTotals)
@@ -174,21 +180,23 @@ def causal_predecessor(
     """
     if not session_id:
         return None
-    phase_order = {"worker": 0, "review": 1}
-    current = (attempt, report_generation, phase_order[phase])
+    current_phase = AttemptUsagePhase(phase)
+    current_role = Role(role)
+    phase_order = {AttemptUsagePhase.WORKER: 0, AttemptUsagePhase.REVIEW: 1}
+    current = (attempt, report_generation, phase_order[current_phase])
     predecessors: list[tuple[tuple[int, int, int], AttemptUsageOccurrence]] = []
     for occurrence in occurrences:
-        data = occurrence.event.data
-        if data["role"] != role or data["phase"] != phase:
+        payload = occurrence.payload
+        if payload.role is not current_role or payload.phase is not current_phase:
             continue
         order = (
-            int(data["attempt"]),
-            int(data["report_generation"]),
-            phase_order[str(data["phase"])],
+            payload.attempt,
+            payload.report_generation,
+            phase_order[payload.phase],
         )
-        if order == current and data["attempt_id"] != attempt_id:
+        if order == current and payload.attempt_id != attempt_id:
             raise ValueError("current attempt usage phase belongs to a conflicting attempt id")
-        if order < current and data["adapter"] == adapter and data["session_id"] == session_id:
+        if order < current and payload.adapter == adapter and payload.session_id == session_id:
             predecessors.append((order, occurrence))
     if not predecessors:
         return None
@@ -207,14 +215,13 @@ def predecessor_boundary(predecessor: AttemptUsageOccurrence | None) -> TokenTot
     """
     if predecessor is None:
         return None
-    boundary = TokenTotals.from_json(predecessor.event.data.get("session_totals"))
-    if boundary is None:
-        identity = predecessor.event.data
+    payload = predecessor.payload
+    if payload.session_totals.empty:
         raise ValueError(
             "causal attempt usage predecessor has no readable session-total boundary "
-            f"(attempt {identity['attempt']}, generation {identity['report_generation']})"
+            f"(attempt {payload.attempt}, generation {payload.report_generation})"
         )
-    return boundary
+    return TokenTotals.from_account(payload.session_totals)
 
 
 @dataclass(frozen=True)
@@ -572,39 +579,35 @@ def attempt_usage_data(
     launch_id: str,
     collection: UsageCollection,
 ) -> dict[str, Any]:
-    """The complete, self-contained ``attempt.usage`` payload for one finished phase."""
-    return {
-        "attempt": int(attempt),
-        "attempt_id": attempt_id,
-        "phase": phase,
-        "role": role,
-        "report_generation": int(report_generation),
-        "head": head,
-        "adapter": adapter,
-        "model": model,
-        "model_source": model_source,
-        "session_id": session_id or None,
-        "session_id_reason": session_id_reason,
-        "launch_id": launch_id,
-        "outcome": AttemptUsageOutcome(collection.outcome).value,
-        "detail": collection.detail,
-        "source_kind": collection.source_kind,
-        "records": int(collection.records),
-        "skipped_records": int(collection.skipped_records),
-        "tokens": collection.tokens.to_json(),
-        "session_totals": collection.session_totals.to_json(),
-        "phase_baseline": collection.baseline.to_json(),
-    }
+    """Project one typed ``attempt.usage`` payload onto the released event-data dictionary."""
+    payload = AttemptUsagePayload(
+        attempt=int(attempt),
+        attempt_id=attempt_id,
+        phase=AttemptUsagePhase(phase),
+        role=Role(role),
+        report_generation=int(report_generation),
+        head=head,
+        adapter=adapter,
+        model=model,
+        model_source=model_source,
+        session_id=session_id or None,
+        session_id_reason=session_id_reason,
+        launch_id=launch_id,
+        outcome=AttemptUsageOutcome(collection.outcome),
+        detail=collection.detail,
+        source_kind=collection.source_kind,
+        records=int(collection.records),
+        skipped_records=int(collection.skipped_records),
+        tokens=TokenAccount.from_data(collection.tokens.to_json()),
+        session_totals=TokenAccount.from_data(collection.session_totals.to_json()),
+        phase_baseline=TokenAccount.from_data(collection.baseline.to_json()),
+    )
+    return payload.to_data()
 
 
 def attempt_usage_reason(data: Mapping[str, Any]) -> str:
-    """One line of prose for the journal's ``reason`` field, derived from the payload."""
-    line = (
-        f"attempt.usage: {data.get('role')} phase of attempt {data.get('attempt')} "
-        f"(round {data.get('report_generation')}) on {data.get('adapter')}: {data.get('outcome')}"
-    )
-    detail = str(data.get("detail") or "")
-    return f"{line} — {detail}" if detail else line
+    """One line of prose for the journal's ``reason`` field, derived from the typed payload."""
+    return AttemptUsagePayload.from_data(data).reason()
 
 
 def _codex_snapshot(record: Any) -> tuple[dict[str, Any] | None, bool]:

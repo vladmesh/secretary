@@ -59,6 +59,7 @@ mypy_path = "src"
 files = [
     "src/secretary/board/models.py",
     "src/secretary/board/roles.py",
+    "src/secretary/board/attempt_usage.py",
     "src/secretary/board/card_transitions.py",
     "src/secretary/board/task_routing.py",
     "src/secretary/board/sprint_read.py",
