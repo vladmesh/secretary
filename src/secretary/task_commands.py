@@ -115,7 +115,9 @@ def add_task_subcommands(subparsers) -> None:
     repair_apply.add_argument("--reason-file", required=True)
     repair_apply.set_defaults(handler=run_task_repair_references_apply)
     task_create = task_subcommands.add_parser("create")
-    task_create.add_argument("--role", required=True, choices=_role_choices(CREATE_ROLES))
+    task_create.add_argument(
+        "--role", required=True, choices=_role_choices(CREATE_ROLES)
+    )
     task_create.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_create)
     task_create.add_argument("--request-id")
@@ -125,11 +127,7 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--description", default="")
     task_create.add_argument("--body-file")
     task_create.add_argument("--ref", default="")
-    task_create.add_argument(
-        "--state",
-        choices=(CardState.ISSUES.value, CardState.READY.value),
-        default=CardState.READY.value,
-    )
+    task_create.add_argument("--state", choices=(CardState.ISSUES.value, CardState.READY.value), default=CardState.READY.value)
     task_create.add_argument("--blocked-by", default="")
     task_create.add_argument("--head", default="")
     task_create.add_argument("--review-head", default="")
@@ -148,15 +146,9 @@ def add_task_subcommands(subparsers) -> None:
         "--supersedes", default="", help="reference of the predecessor card a --seed-ref inherits from"
     )
     task_create.add_argument(
-        "--complexity",
-        choices=tuple(value.value for value in TaskComplexity),
-        default=TaskComplexity.STANDARD.value,
+        "--complexity", choices=tuple(value.value for value in TaskComplexity), default=TaskComplexity.STANDARD.value
     )
-    task_create.add_argument(
-        "--family-preference",
-        choices=tuple(value.value for value in FamilyPreference),
-        default=FamilyPreference.AUTO.value,
-    )
+    task_create.add_argument("--family-preference", choices=tuple(value.value for value in FamilyPreference), default=FamilyPreference.AUTO.value)
     # No `choices`: `--codex-mode exec` names a launch shape the product removed, and it is
     # answered with that sentence in `_validate_codex_mode_for_create` rather than with argparse's
     # "invalid choice" over a flag whose only remaining value is the default anyway.
@@ -194,17 +186,11 @@ def add_task_subcommands(subparsers) -> None:
             command.add_argument("--kind", required=True, choices=("done", "blocked"))
             # Required with `--kind blocked`, refused with `--kind done`; the writer holds both
             # rules so the protocol is the same from a script as from the CLI.
-            command.add_argument(
-                "--classification",
-                default="",
-                choices=("", *(value.value for value in BlockClassification)),
-            )
+            command.add_argument("--classification", default="", choices=("", *(value.value for value in BlockClassification)))
         if name == "verdict":
             command.add_argument("--kind", required=True, choices=("green", "red"))
         if name == "decide":
-            command.add_argument(
-                "--kind", required=True, choices=tuple(value.value for value in TaskDecision)
-            )
+            command.add_argument("--kind", required=True, choices=tuple(value.value for value in TaskDecision))
             command.add_argument("--reason-file")
             command.add_argument(
                 "--protocol-prerequisite",
@@ -225,9 +211,7 @@ def add_task_subcommands(subparsers) -> None:
             command.add_argument("--reason-file")
             # A card leaves Assessment on a decision somebody recorded with `task decide`, and
             # the move has to name it: the writer checks it against the card's audit.
-            command.add_argument(
-                "--decision", default="", choices=("", *(value.value for value in TaskDecision))
-            )
+            command.add_argument("--decision", default="", choices=("", *(value.value for value in TaskDecision)))
             _add_sprint_override_args(command)
         if name == "archive":
             command.add_argument("--reason-file")

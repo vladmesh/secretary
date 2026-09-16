@@ -25,29 +25,13 @@ from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon, Bo
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
 from secretary.board.legacy_codec import (
     TASK_KNOWN_METADATA as _KNOWN_METADATA,
-)
-from secretary.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
-)
-from secretary.board.legacy_codec import (
     enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
-)
-from secretary.board.legacy_codec import (
     enum_or_none as _enum_or_none,  # noqa: F401 - released private compatibility alias
-)
-from secretary.board.legacy_codec import (
     nonnegative_int as _nonnegative_int,
-)
-from secretary.board.legacy_codec import (
     null_if_empty as _null_if_empty,
-)
-from secretary.board.legacy_codec import (
     positive_int as _positive_int,
-)
-from secretary.board.legacy_codec import (
     split_heads as _split_heads,
-)
-from secretary.board.legacy_codec import (
     text as _text,
 )
 from secretary.board.models import (
@@ -57,10 +41,6 @@ from secretary.board.models import (
     Event,
     EventKind,
     RelatedRefs,
-)
-from secretary.board.protocol_artifacts import (
-    ArtifactOwnershipViolation,
-    validate_rework_prerequisites,
 )
 from secretary.board.roles import (
     BOARD_ROLES,
@@ -89,6 +69,10 @@ from secretary.board.task_routing import (
     TaskDecision,
     TaskMetadata,
     TaskType,
+)
+from secretary.board.protocol_artifacts import (
+    ArtifactOwnershipViolation,
+    validate_rework_prerequisites,
 )
 from secretary.board.transitions import BoardProtocolError
 from secretary.board_transport import (
@@ -1837,9 +1821,7 @@ class TaskWriter:
             family_preference_value = FamilyPreference(family_preference)
         except ValueError:
             raise TaskError(
-                "validation",
-                "family preference must be one of: " + ", ".join(sorted(FAMILY_PREFERENCE_VALUES)),
-                2,
+                "validation", "family preference must be one of: " + ", ".join(sorted(FAMILY_PREFERENCE_VALUES)), 2
             ) from None
         family_preference = family_preference_value.value
         if codex_launch_mode and codex_launch_mode not in _CODEX_LAUNCH_MODES:
@@ -2019,18 +2001,14 @@ class TaskWriter:
                     request_id=request_id,
                 )
             except _CommittedWriteError:
-                raise TaskError(
-                    "audit_pending", "backend write committed; audit repair is required", 4
-                ) from None
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
             except Exception:
                 self.audit.discard(request_id)
                 raise
             try:
                 task = self.reader.show(created_ref)
             except Exception:  # noqa: BLE001 - any post-create read failure is an ambiguous commit.
-                raise TaskError(
-                    "audit_pending", "backend write committed; audit repair is required", 4
-                ) from None
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
             event["task_id"] = task["id"]
             event["ref"] = created_ref
             event["backend"]["revision"] = _revision(task)
@@ -2038,9 +2016,7 @@ class TaskWriter:
             try:
                 event_id = self.audit.append(request_id, event)
             except OSError:
-                raise TaskError(
-                    "audit_pending", "backend write committed; audit repair is required", 4
-                ) from None
+                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
             return {"action": "created", "task": task, "event_id": event_id, "replayed": False}
 
     def create_steward_report(
@@ -4736,6 +4712,8 @@ class TaskWriter:
             raise TaskError("live_work", "archive refuses a card with live dispatcher work", 3)
 
 
+
+
 def _target_column_id(columns: dict[int, str], target: str) -> int | None:
     return next(
         (identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None
@@ -4782,6 +4760,18 @@ def _now() -> str:
 
 def _revision(task: dict[str, Any]) -> str:
     return "updated_at:" + str(task.get("audit", {}).get("updated_at") or "unknown")
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def _matching_swimlane(swimlanes: dict[int, str], project: str) -> int | None:

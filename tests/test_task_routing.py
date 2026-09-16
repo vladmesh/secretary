@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-import secretary.tasks as tasks
+from secretary import tasks
 from secretary.board.models import CardState
 from secretary.board.task_routing import (
     ACTIVE_STATES,
