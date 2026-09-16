@@ -64,6 +64,7 @@ files = [
     "src/secretary/board/sprint_read.py",
     "src/secretary/board/sprint_admission.py",
     "src/secretary/board/sprint_write.py",
+    "src/secretary/board/sprint_close.py",
     "src/secretary/board/host.py",
     "src/secretary/board/backend.py",
     "src/secretary/dispatch/runtime_provenance.py",

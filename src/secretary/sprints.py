@@ -7,7 +7,7 @@ import functools
 import hashlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +23,14 @@ from secretary.board.backend import (
 from secretary.board.models import SprintState
 from secretary.board.roles import Role
 from secretary.board.sprint_admission import SprintAdmission, SprintReservationIndex
+from secretary.board.sprint_close import (
+    SprintCloseConflict,
+    SprintCloseDecisions,
+    SprintCloseIntent,
+    SprintCloseoutPlan,
+    SprintCloseSnapshot,
+    SprintCloseTargets,
+)
 from secretary.board.sprint_read import (
     BUDGET_EVENT_TYPES,
     BUDGET_RECORDED_EVENT_TYPES,
@@ -2040,68 +2048,52 @@ class SprintWriter:
         role: str,
         actor: str,
         reference: str,
-        decisions: dict[str, list[dict[str, str]]] | None = None,
+        decisions: SprintCloseDecisions | Mapping[str, Any] | None = None,
         request_id: str | None = None,
         reason: str = "",
         closeout: str = "",
     ) -> dict[str, Any]:
-        """Close a sprint on decisions its caller states, not on decisions inferred here.
-
-        What became of every declared issue and every card still in a working state are both stated by
-        the caller and checked before the transaction opens; a close short of a decision writes nothing
-        and names what is missing.
-
-        `reason` is why the owner is closing this sprint, and `closeout` is the account of what became
-        of the work that this close writes into `state/knowledge` as a step of its own terminal phase.
-        Neither is inferred: the closeout's prose is the closing PO's, and what this writer owns is the
-        document's path, its link to this sprint and the fact that it is written exactly once. A close
-        made with no closeout writes none -- the operation
-        (:meth:`secretary.webproto.sprint_ops.SprintOperationLayer.sprint_close`) is where a closing
-        PO is required to state one, so that the many callers that merely need a closed sprint are not
-        made to invent an account of one.
-
-        Neither field makes a close a completed Definition of Done. See
-        :data:`secretary.sprint_close.CLOSE_NOT_DONE`.
-
-        The whole close runs under the admission gate every opening of a sprint takes, and that is the
-        invariant it exists for: between the moment this sprint is published `closed` and the moment its
-        last disposition is written, no `sprint create` may be admitted on the projects this sprint
-        reserved. A successor admitted in that window would re-reserve the project and its guard would
-        refuse a disposition of the already-closed sprint. Every path through the close holds the gate,
-        and it is taken outside the sprint's reference lock: admission first, then anything narrower.
-        """
+        """Close a sprint on explicit typed decisions while preserving the durable JSON contract."""
         self._role(role, {"po"})
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
-        intent = {"role": role, "actor": actor, "reference": reference}
+        try:
+            offered = SprintCloseDecisions.from_document(decisions) if decisions is not None else None
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        intent = SprintCloseIntent(Role(role), actor, reference)
+        intent_document = intent.to_document()
         with sprint_admission_lock(self.data_dir), self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 document, committed = self.transactions.existing(
                     request_id,
                     kind=SPRINT_CLOSED,
-                    intent=intent,
+                    intent=intent_document,
                 )
                 if committed is not None:
-                    self._check_completed_close(committed, decisions, reason=reason, closeout=closeout)
+                    self._check_completed_close(committed, offered, reason=reason, closeout=closeout)
                     return self._close_result(committed)
                 if document is not None:
-                    self._check_staged_decisions(document, decisions)
+                    self._check_staged_decisions(document, offered)
                     self._check_staged_closeout(document, reason=reason, closeout=closeout)
                 if document is None:
                     from secretary.sprint_close import plan_close_decisions
 
-                    sprint = self.reader.show(reference, include_cards=False)
+                    sprint_document = self.reader.show(reference, include_cards=False)
+                    sprint = SprintCloseSnapshot.from_document(sprint_document)
                     targets = self._close_targets(sprint)
-                    declared = [str(issue) for issue in sprint.get("issues") or []]
                     plan = plan_close_decisions(
-                        decisions,
-                        declared_issues=declared,
-                        remaining=list(targets["remaining"]),
-                        states=dict(targets["remaining_states"]),
-                        issue_states=self._declared_issue_states(declared),
+                        offered,
+                        declared_issues=sprint.issues,
+                        remaining=targets.remaining,
+                        states=targets.remaining_state_map,
+                        issue_states=self._declared_issue_states(list(sprint.issues)),
                     )
                     self._check_close_decisions_are_writable(plan)
+                    closeout_plan = self._plan_closeout(
+                        sprint, plan, actor=actor, reason=reason, closeout=closeout
+                    )
                     event = self._event(
                         SPRINT_CLOSED,
                         role,
@@ -2109,26 +2101,24 @@ class SprintWriter:
                         reference,
                         request_id,
                         {
-                            "intent": intent,
+                            "intent": intent_document,
                             "reason": str(reason or ""),
-                            "closeout": self._plan_closeout(
-                                sprint, plan, actor=actor, reason=reason, closeout=closeout
-                            ),
-                            "targets": targets,
+                            "closeout": closeout_plan.to_document() if closeout_plan else None,
+                            "targets": targets.to_document(),
                             "archived_tasks": [],
-                            "remaining_tasks": list(targets["remaining"]),
-                            "decisions": plan,
+                            "remaining_tasks": list(targets.remaining),
+                            "decisions": plan.to_document(),
                             "closed_issues": [],
                             "moved_tasks": [],
                             "disposed_tasks": [],
                             "conflicts": [],
                         },
-                        sprint,
+                        sprint_document,
                     )
                     document, committed = self.transactions.begin(
                         request_id,
                         kind=SPRINT_CLOSED,
-                        intent=intent,
+                        intent=intent_document,
                         event=event,
                     )
                     if committed is not None:
@@ -2137,14 +2127,14 @@ class SprintWriter:
                         raise TaskError("audit_pending", "sprint close transaction claim is unavailable", 4)
                 if getattr(self.client, "backend_kind", "kanboard") == "postgres":
                     close_payload = document["event"].get("payload", {})
-                    close_plan = close_payload.get("decisions") or {}
-                    closeout_plan = close_payload.get("closeout") or {}
+                    close_plan = SprintCloseDecisions.from_document(close_payload.get("decisions"))
+                    closeout_plan = SprintCloseoutPlan.from_document(close_payload.get("closeout"))
                     self.client.sprints.save_close(
                         reference,
                         request_id,
-                        close_plan,
+                        close_plan.to_document(),
                         reason=str(close_payload.get("reason") or ""),
-                        closeout_document=str(closeout_plan.get("document") or "") or None,
+                        closeout_document=closeout_plan.document if closeout_plan else None,
                     )
                 return self._run_close(document)
             finally:
@@ -2210,122 +2200,131 @@ class SprintWriter:
         actual: str,
         message: str,
     ) -> None:
-        """Stop on somebody else's change, recoverably, naming what has to be decided again.
-
-        The close neither invents a verdict nor treats the other writer's as its own: it records the
-        conflict where the retry of this request id will find it, and refuses.
-        """
-        conflicts = payload.setdefault("conflicts", [])
-        if isinstance(conflicts, list) and not any(
-            isinstance(item, dict) and item.get("ref") == reference for item in conflicts
-        ):
-            conflicts.append(
-                {"section": section, "ref": reference, "verdict": verdict, "actual": actual},
+        """Stop on somebody else's change, recording a typed recoverable conflict."""
+        try:
+            conflict = SprintCloseConflict.from_document(
+                {"section": section, "ref": reference, "verdict": verdict, "actual": actual}
             )
-            self.transactions.save(document)
+        except ValueError as exc:
+            raise TaskError("audit_pending", str(exc), 4) from None
+        conflicts = payload.setdefault("conflicts", [])
+        if isinstance(conflicts, list):
+            existing = []
+            for item in conflicts:
+                if isinstance(item, Mapping):
+                    try:
+                        existing.append(SprintCloseConflict.from_document(item))
+                    except ValueError:
+                        raise TaskError(
+                            "audit_pending", "sprint close transaction has invalid conflicts", 4
+                        ) from None
+            if not any(item.ref == reference for item in existing):
+                conflicts.append(conflict.to_document())
+                self.transactions.save(document)
         raise TaskError("close_conflict", message, 3)
 
-    def _close_targets(self, sprint: dict[str, Any]) -> dict[str, Any]:
-        """Freeze this close's task set before any archival write.
-
-        A sprint that predates reservations is retained for recovery only: closing it can change its
-        status but must not retrospectively archive arbitrary cards. The record-type filter stays — a
-        Product or an Issue is not executable work — and the states of cards that are not done travel
-        with the set, because the refusal has to name them.
-        """
-        if "reservations" not in sprint:
-            return {"archive": [], "remaining": [], "remaining_states": {}}
-        cards = TaskReader(self.client).list(sprint=str(sprint["ref"]))
-        tasks = [card for card in cards if card.get("record_type") not in {"product", "issue"}]
-        return {
-            "archive": sorted(str(card["ref"]) for card in tasks if card.get("state") == "done"),
-            "remaining": sorted(str(card["ref"]) for card in tasks if card.get("state") != "done"),
-            "remaining_states": {
-                str(card["ref"]): str(card.get("state") or "unknown")
-                for card in tasks
-                if card.get("state") != "done"
-            },
-        }
+    def _close_targets(self, sprint: SprintCloseSnapshot) -> SprintCloseTargets:
+        """Freeze this close's task set before any archival write."""
+        if not sprint.has_reservations:
+            return SprintCloseTargets()
+        cards = TaskReader(self.client).list(sprint=sprint.ref)
+        return SprintCloseTargets.from_cards(cards)
 
     def _check_staged_decisions(
         self,
         document: dict[str, Any],
-        decisions: dict[str, list[dict[str, str]]] | None,
+        decisions: SprintCloseDecisions | None,
     ) -> None:
-        """A retry of a staged close carries the decisions that close was staged with.
-
-        A second delivery under the same request id that states something else is refused rather than
-        silently answered with the first one's verdicts; a retry that repeats no decisions at all is
-        the ordinary recovery call. The one amendment a retry may carry is the answer to a conflict
-        this close stopped on, for exactly the refs it recorded.
-        """
+        """A retry may repeat the staged plan, or amend exactly a recorded conflict."""
         if decisions is None:
             return
         payload = (document.get("event") or {}).get("payload") or {}
-        staged = payload.get("decisions")
-        if not isinstance(staged, dict):
+        try:
+            staged = SprintCloseDecisions.from_document(payload.get("decisions"))
+        except ValueError:
             return
-        sections = ("issues", "cards")
-        offered = {
-            section: sorted(decisions.get(section) or [], key=lambda entry: entry.get("ref", ""))
-            for section in sections
-        }
-        current = {section: list(staged.get(section) or []) for section in sections}
+        offered = SprintCloseDecisions(
+            issues=tuple(sorted(decisions.issues, key=lambda entry: entry.ref)),
+            cards=tuple(sorted(decisions.cards, key=lambda entry: entry.ref)),
+        )
+        current = SprintCloseDecisions(
+            issues=tuple(sorted(staged.issues, key=lambda entry: entry.ref)),
+            cards=tuple(sorted(staged.cards, key=lambda entry: entry.ref)),
+        )
         if offered == current:
             return
         from secretary.sprint_close import ALREADY_CLOSED, ALREADY_MOVED
 
         confirmation = {"issues": ALREADY_CLOSED, "cards": ALREADY_MOVED}
-        conflicts = {
-            str(item.get("ref")): item for item in (payload.get("conflicts") or []) if isinstance(item, dict)
-        }
-        amended: list[dict[str, Any]] = []
-        for section in sections:
-            if len(offered[section]) != len(current[section]):
+        conflicts: dict[str, SprintCloseConflict] = {}
+        for item in payload.get("conflicts") or []:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                conflict = SprintCloseConflict.from_document(item)
+            except ValueError:
+                continue
+            conflicts[conflict.ref] = conflict
+        amended: list[SprintCloseConflict] = []
+        for section, current_entries, offered_entries in (
+            ("issues", current.issues, offered.issues),
+            ("cards", current.cards, offered.cards),
+        ):
+            if len(offered_entries) != len(current_entries):
                 self._refuse_restated_decisions()
-            for was, now in zip(current[section], offered[section]):
+            for was, now in zip(current_entries, offered_entries):
                 if was == now:
                     continue
-                conflict = conflicts.get(str(now.get("ref")))
+                conflict = conflicts.get(now.ref)
                 if (
                     conflict is None
-                    or was.get("ref") != now.get("ref")
-                    or conflict.get("section") != section
-                    or now.get("verdict") != confirmation[section]
-                    or now.get("actual") != conflict.get("actual")
+                    or was.ref != now.ref
+                    or conflict.section != section
+                    or now.verdict != confirmation[section]
+                    or now.actual != conflict.actual
                 ):
                     self._refuse_restated_decisions()
                 amended.append(conflict)
         if not amended:
             self._refuse_restated_decisions()
-        staged.update(offered)
-        payload["conflicts"] = [item for item in (payload.get("conflicts") or []) if item not in amended]
+        payload["decisions"] = offered.to_document()
+        payload["conflicts"] = [
+            item
+            for item in (payload.get("conflicts") or [])
+            if not (
+                isinstance(item, Mapping)
+                and any(
+                    item.get("ref") == conflict.ref and item.get("section") == conflict.section
+                    for conflict in amended
+                )
+            )
+        ]
         self.transactions.save(document)
 
     def _check_completed_close(
         self,
         committed: dict[str, Any],
-        decisions: dict[str, list[dict[str, str]]] | None,
+        decisions: SprintCloseDecisions | None,
         *,
         reason: str,
         closeout: str,
     ) -> None:
-        """A repeat of a *finished* close carries what that close was made with, or it is refused.
-
-        The same rule the staged retry is held to, at the other end of the transaction: a request id
-        is the key of one close, and a repeat naming other decisions, another reason or another
-        account of the outcome is a new close and never a second answer about this one. Repeating the
-        id with nothing is the ordinary idempotent repeat and is answered from the record.
-        """
+        """A repeat of a finished close carries the same canonical typed plan, or is refused."""
         payload = committed.get("payload") if isinstance(committed.get("payload"), dict) else {}
-        staged = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
+        try:
+            staged = SprintCloseDecisions.from_document(payload.get("decisions"))
+        except ValueError as exc:
+            raise TaskError("audit_pending", "committed sprint close has invalid decisions", 4) from exc
         if decisions is not None:
-            sections = ("issues", "cards")
-            offered = {
-                section: sorted(decisions.get(section) or [], key=lambda entry: entry.get("ref", ""))
-                for section in sections
-            }
-            if offered != {section: list(staged.get(section) or []) for section in sections}:
+            offered = SprintCloseDecisions(
+                issues=tuple(sorted(decisions.issues, key=lambda entry: entry.ref)),
+                cards=tuple(sorted(decisions.cards, key=lambda entry: entry.ref)),
+            )
+            current = SprintCloseDecisions(
+                issues=tuple(sorted(staged.issues, key=lambda entry: entry.ref)),
+                cards=tuple(sorted(staged.cards, key=lambda entry: entry.ref)),
+            )
+            if offered != current:
                 self._refuse_restated_decisions()
         self._check_staged_closeout({"event": committed}, reason=reason, closeout=closeout)
 
@@ -2338,52 +2337,33 @@ class SprintWriter:
 
     def _plan_closeout(
         self,
-        sprint: dict[str, Any],
-        plan: dict[str, list[dict[str, str]]],
+        sprint: SprintCloseSnapshot,
+        plan: SprintCloseDecisions,
         *,
         actor: str,
         reason: str,
         closeout: str,
-    ) -> dict[str, Any] | None:
-        """Freeze the closeout this close will write, before the transaction opens.
-
-        Frozen and not composed per attempt: the document's path carries the day the close was
-        staged, so a retry tomorrow writes the same document rather than a second one beside it, and
-        the text is the one the decisions were staged with. What the caller supplies is the account
-        of what became of the work; what this composes around it is what only the close knows -- the
-        sprint, the reason it was closed, and every verdict and disposition of the plan.
-
-        A close made with no closeout writes none. Requiring one belongs to the operation, where a
-        closing PO is the caller; requiring it here would make every caller that merely needs a
-        closed sprint invent an account of one.
-        """
+    ) -> SprintCloseoutPlan | None:
+        """Freeze the closeout this close will write, before the transaction opens."""
         if not str(closeout or "").strip():
             return None
         from secretary.sprint_close import closeout_document, closeout_path
 
-        reference = str(sprint["ref"])
-        document = closeout_path(reference, day=_now()[:10])
+        document = closeout_path(sprint.ref, day=_now()[:10])
         text = closeout_document(
-            reference=reference,
-            goal=str(sprint.get("goal") or ""),
+            reference=sprint.ref,
+            goal=sprint.goal,
             actor=actor,
             reason=str(reason or ""),
             body=str(closeout),
             decisions=plan,
         )
         self._check_closeout_is_writable(document, text, actor=actor)
-        return {
-            "document": document,
-            "text": text,
-            # The digest of the body the caller supplied, and what a retry is compared against. The
-            # composed text is not that comparison: the body sits inside it, so a *substring* of the
-            # staged prose -- an edited, shortened closeout -- would pass a containment test and the
-            # caller would be told the close succeeded with prose no document ever carried. The
-            # digest is the shape `SprintWriter.comment` already uses for the same question.
-            "body_sha256": _digest(str(closeout)),
-            "written": False,
-            "commit": "",
-        }
+        return SprintCloseoutPlan(
+            document=document,
+            text=text,
+            body_sha256=_digest(str(closeout)),
+        )
 
     def _check_closeout_is_writable(self, document: str, text: str, *, actor: str) -> None:
         """Refuse a closeout this installation cannot write, before anything is written.
@@ -2412,28 +2392,17 @@ class SprintWriter:
         return instance.parent if instance.is_file() else instance
 
     def _check_staged_closeout(self, document: dict[str, Any], *, reason: str, closeout: str) -> None:
-        """A retry of a staged close carries the closeout that close was staged with.
-
-        The ordinary recovery call states neither -- it repeats the request id and nothing else --
-        and it is the retry this exists for. What is refused is a repeat that reuses the id over a
-        *different* account of what became of the work, exactly as a repeat over different decisions
-        is refused: a request id is the key of one close, not a way to rewrite the record of one.
-        """
+        """A retry of a staged close carries the same closeout body and reason."""
         payload = (document.get("event") or {}).get("payload") or {}
-        # A close staged by a release that had neither field is retried, not refused: it carries no
-        # reason and no closeout to compare against, and it finishes as the close it was begun as.
         if "closeout" not in payload and "reason" not in payload:
             return
-        staged = payload.get("closeout")
+        staged = SprintCloseoutPlan.from_document(payload.get("closeout"))
         body = str(closeout or "").strip()
         if str(reason or "") and str(reason) != str(payload.get("reason") or ""):
             self._refuse_restated_closeout()
         if not body:
             return
-        # Exactly, and never by containment: the supplied body against the digest of the body this
-        # close was staged with. A staged plan carrying no digest cannot answer the question, and
-        # the safe answer to "is this the same closeout" that nothing can establish is no.
-        if not isinstance(staged, dict) or staged.get("body_sha256") != _digest(str(closeout)):
+        if staged is None or staged.body_sha256 != _digest(str(closeout)):
             self._refuse_restated_closeout()
 
     def _refuse_restated_closeout(self) -> None:
@@ -2443,35 +2412,28 @@ class SprintWriter:
             2,
         )
 
-    def _check_close_decisions_are_writable(self, plan: dict[str, list[dict[str, str]]]) -> None:
-        """Refuse a plan this installation cannot perform, before the transaction opens.
-
-        Closing an issue writes durable Product/Issue records addressed through the installation
-        directory, and archiving a card whose head is still running is refused by the archive itself.
-        Asked here, either refusal names the card and leaves the sprint open; asked halfway through the
-        close, it would be a transaction to repair.
-        """
+    def _check_close_decisions_are_writable(self, plan: SprintCloseDecisions) -> None:
+        """Refuse a plan this installation cannot perform, before the transaction opens."""
         from secretary.sprint_close import ALREADY_CLOSED, KEEP_OPEN
 
-        # A verdict that writes nothing to the issue needs nothing of the installation either.
-        closing = [entry for entry in plan["issues"] if entry["verdict"] not in {KEEP_OPEN, ALREADY_CLOSED}]
+        closing = [entry for entry in plan.issues if entry.verdict not in {KEEP_OPEN, ALREADY_CLOSED}]
         if closing and self.instance is None:
             raise TaskError(
                 "validation",
                 "closing an issue with the sprint needs the instance directory; pass --instance",
                 2,
             )
-        if not plan["cards"]:
+        if not plan.cards:
             return
         writer = TaskWriter(self.client, data_dir=self.data_dir)
         live = []
-        for entry in plan["cards"]:
+        for entry in plan.cards:
             try:
-                writer._check_dispatcher_archivable(entry["ref"])
+                writer._check_dispatcher_archivable(entry.ref)
             except TaskError as exc:
                 if exc.code != "live_work":
                     raise
-                live.append(entry["ref"])
+                live.append(entry.ref)
         if live:
             raise TaskError(
                 "live_work",
@@ -2487,25 +2449,20 @@ class SprintWriter:
         payload = event.get("payload")
         if not isinstance(payload, dict):
             raise TaskError("audit_pending", "sprint close transaction has no payload", 4)
-        targets = payload.get("targets")
-        if not isinstance(targets, dict):
-            raise TaskError("audit_pending", "sprint close transaction has no task targets", 4)
-        archive = targets.get("archive")
-        if not isinstance(archive, list) or not all(isinstance(ref, str) for ref in archive):
-            raise TaskError("audit_pending", "sprint close transaction has invalid archival targets", 4)
+        try:
+            targets = SprintCloseTargets.from_document(payload.get("targets"))
+            decisions = SprintCloseDecisions.from_document(payload.get("decisions"))
+        except ValueError as exc:
+            raise TaskError("audit_pending", f"sprint close transaction is invalid: {exc}", 4) from None
+        archive = list(targets.archive)
         archived = payload.setdefault("archived_tasks", [])
         if not isinstance(archived, list) or not all(isinstance(ref, str) for ref in archived):
             raise TaskError("audit_pending", "sprint close transaction has invalid archival progress", 4)
-        decisions = payload.get("decisions")
-        if decisions is not None and not isinstance(decisions, dict):
-            raise TaskError("audit_pending", "sprint close transaction has invalid decisions", 4)
         try:
-            self._close_declared_issues(document, event, payload, decisions or {})
+            self._close_declared_issues(document, event, payload, decisions)
             writer = TaskWriter(self.client, data_dir=self.data_dir) if archive else None
             for task_ref in archive:
                 step_request_id = _close_archive_request_id(str(document["request_id"]), task_ref)
-                # The payload says what this close has recorded; the step's own request id says
-                # what it has performed, and only the second one may end a step.
                 if self._close_step_status(step_request_id) != "done":
                     assert writer is not None
                     writer.archive(
@@ -2519,8 +2476,7 @@ class SprintWriter:
                 if task_ref not in archived:
                     archived.append(task_ref)
                     self.transactions.save(document)
-            # Publish closed last so unfinished closes retain project reservations.
-            self._dispose_remaining_cards(document, event, payload, decisions or {})
+            self._dispose_remaining_cards(document, event, payload, decisions, targets)
             self._write_closeout(document, event, payload)
             sprint = self.reader.show(str(event["ref"]), include_cards=False)
             typed_request_id = str(document["request_id"]) + ":typed-close"
@@ -2545,8 +2501,6 @@ class SprintWriter:
             if getattr(self.client, "backend_kind", "kanboard") == "postgres":
                 raise
             if exc.code == "close_conflict":
-                # Recoverable by construction: the conflict is on the record, and the retry of
-                # this request id may answer exactly it. Saying so is the point of the refusal.
                 raise
             if exc.code in {
                 "validation",
@@ -2561,7 +2515,7 @@ class SprintWriter:
             raise TaskError(
                 "audit_pending", "sprint close is pending repair; retry with the same request id", 4
             ) from None
-        except (OSError, KeyError, TypeError):
+        except (OSError, KeyError, TypeError, ValueError):
             raise TaskError(
                 "audit_pending", "sprint close is pending repair; retry with the same request id", 4
             ) from None
@@ -2573,29 +2527,18 @@ class SprintWriter:
         document: dict[str, Any],
         event: dict[str, Any],
         payload: dict[str, Any],
-        decisions: dict[str, Any],
+        decisions: SprintCloseDecisions,
     ) -> None:
-        """Perform the closing verdicts, one issue at a time, through the close's progress.
-
-        An issue left open, or confirmed `already_closed`, is performed by doing nothing to it: its
-        basis is already in this close's payload. Whether a closing verdict still has work is answered
-        by the step's own derived request id and never by the issue looking closed — an issue closed
-        with no committed step of ours is somebody else's close, and this close stops on it.
-        """
+        """Perform the typed closing verdicts, one issue at a time."""
         from secretary.sprint_close import ALREADY_CLOSED, KEEP_OPEN
 
-        verdicts = decisions.get("issues")
-        if not isinstance(verdicts, list):
-            return
         closed = payload.setdefault("closed_issues", [])
         if not isinstance(closed, list):
             raise TaskError("audit_pending", "sprint close transaction has invalid issue progress", 4)
         pending = [
             entry
-            for entry in verdicts
-            if isinstance(entry, dict)
-            and entry.get("verdict") not in {KEEP_OPEN, ALREADY_CLOSED}
-            and entry.get("ref") not in closed
+            for entry in decisions.issues
+            if entry.verdict not in {KEEP_OPEN, ALREADY_CLOSED} and entry.ref not in closed
         ]
         if not pending:
             return
@@ -2606,11 +2549,10 @@ class SprintWriter:
                 2,
             )
         store = self._issue_store()
-        # Persist the close plan before its first issue write.
         document.setdefault("progress", {})["issues_started"] = True
         self.transactions.save(document)
         for entry in pending:
-            reference = str(entry["ref"])
+            reference = entry.ref
             step_request_id = _close_step_request_id(str(document["request_id"]), "issue", reference)
             status = self._close_step_status(step_request_id)
             if status != "done":
@@ -2622,19 +2564,17 @@ class SprintWriter:
                         payload,
                         section="issues",
                         reference=reference,
-                        verdict=str(entry["verdict"]),
+                        verdict=entry.verdict,
                         actual=carried,
                         message=(
                             f"issue {reference} was closed as {carried} by somebody else, and this "
-                            f"close states {entry['verdict']}; retry with that decision amended to "
+                            f"close states {entry.verdict}; retry with that decision amended to "
                             f"already_closed naming {carried}"
                         ),
                     )
-                # A pending step is this close's own half-written one, and driving the same
-                # derived request id again is what finishes it.
                 store.close_issue(
                     reference=reference,
-                    reason=str(entry["verdict"]),
+                    reason=entry.verdict,
                     actor=str(document["intent"]["actor"]),
                     request_id=step_request_id,
                 )
@@ -2647,44 +2587,30 @@ class SprintWriter:
         document: dict[str, Any],
         event: dict[str, Any],
         payload: dict[str, Any],
-        decisions: dict[str, Any],
+        decisions: SprintCloseDecisions,
+        targets: SprintCloseTargets,
     ) -> None:
-        """Take every card that was not done into the recorded end its disposition names.
-
-        Each disposition is two backend writes — the board state, then the archival — and each is a
-        step under its own derived request id. A `drop` passes through Ready deliberately: it is the
-        released edge that releases a retained worker, and a card still holding a claim cannot be
-        archived at all.
-
-        Whether a card needs the move is answered by the state this close froze into its plan, not by
-        the board now; whether the move has happened is answered by the step's own request id.
-        """
+        """Take every remaining card into the recorded end its typed disposition names."""
         from secretary.sprint_close import ALREADY_MOVED, DISPOSITION_TARGETS
 
-        dispositions = decisions.get("cards")
-        if not isinstance(dispositions, list) or not dispositions:
+        if not decisions.cards:
             return
         moved = payload.setdefault("moved_tasks", [])
         disposed = payload.setdefault("disposed_tasks", [])
         if not isinstance(moved, list) or not isinstance(disposed, list):
             raise TaskError("audit_pending", "sprint close transaction has invalid disposition progress", 4)
-        planned = (payload.get("targets") or {}).get("remaining_states") or {}
+        planned = targets.remaining_state_map
         writer = TaskWriter(self.client, data_dir=self.data_dir)
         reader = TaskReader(self.client)
         actor = str(document["intent"]["actor"])
-        for entry in dispositions:
-            if not isinstance(entry, dict):
-                raise TaskError("audit_pending", "sprint close transaction has invalid dispositions", 4)
-            reference = str(entry["ref"])
-            verdict = str(entry["verdict"])
-            reason = str(entry["reason"])
-            # A confirmed card is where it needs to be already, and it was said so explicitly.
+        for entry in decisions.cards:
+            reference = entry.ref
+            verdict = entry.verdict
+            reason = entry.reason
             target = "" if verdict == ALREADY_MOVED else DISPOSITION_TARGETS[verdict]
             if target and str(planned.get(reference) or "") != target:
                 move_request_id = _close_step_request_id(
-                    str(document["request_id"]),
-                    "dispose-move",
-                    reference,
+                    str(document["request_id"]), "dispose-move", reference
                 )
                 status = self._close_step_status(move_request_id)
                 if status != "done":
@@ -2717,9 +2643,7 @@ class SprintWriter:
                 moved.append(reference)
                 self.transactions.save(document)
             archive_request_id = _close_step_request_id(
-                str(document["request_id"]),
-                "dispose-archive",
-                reference,
+                str(document["request_id"]), "dispose-archive", reference
             )
             if self._close_step_status(archive_request_id) != "done":
                 writer.archive(
@@ -2737,23 +2661,9 @@ class SprintWriter:
     def _write_closeout(
         self, document: dict[str, Any], event: dict[str, Any], payload: dict[str, Any]
     ) -> None:
-        """Write this close's knowledge closeout, once, as a step of its terminal phase.
-
-        A step exactly like the issue verdicts and the dispositions beside it: it runs under its own
-        request id derived from the close's, that id's committed event is the only proof it happened,
-        and a retry of the close drives the same id rather than writing a second document. The write
-        itself is :func:`secretary.knowledge_write.write_knowledge_document` -- the one writer of
-        `state/knowledge` -- and this adds no second one.
-
-        It runs before the status is published, so the order the close already holds is unchanged: an
-        interrupted close still leaves the sprint open and still holds its reservations, and a sprint
-        that reads `closed` has its closeout written.
-
-        The document says what became of the work. It does not say the Definition of Done was
-        reached: :data:`secretary.sprint_close.CLOSE_NOT_DONE` is written into it.
-        """
-        plan = payload.get("closeout")
-        if not isinstance(plan, dict) or not plan.get("document"):
+        """Write this close's typed knowledge-closeout plan exactly once."""
+        plan = SprintCloseoutPlan.from_document(payload.get("closeout"))
+        if plan is None:
             return
         reference = str(event["ref"])
         step_request_id = _close_step_request_id(str(document["request_id"]), "closeout", reference)
@@ -2762,9 +2672,7 @@ class SprintWriter:
         from secretary.knowledge_write import KnowledgeError, write_knowledge_document
 
         actor = str(document["intent"]["actor"])
-        self._check_closeout_is_writable(str(plan["document"]), str(plan["text"]), actor=actor)
-        # Durable before the write, as the marker is before the first issue write: from here on a
-        # refusal is `audit_pending` with the staged plan retained, never a discarded close.
+        self._check_closeout_is_writable(plan.document, plan.text, actor=actor)
         document.setdefault("progress", {})["closeout_started"] = True
         self.transactions.save(document)
         step = self._event(
@@ -2773,53 +2681,45 @@ class SprintWriter:
             actor,
             reference,
             step_request_id,
-            {
-                "close_request_id": str(document["request_id"]),
-                "document": str(plan["document"]),
-                "commit": "",
-            },
+            {"close_request_id": str(document["request_id"]), "document": plan.document, "commit": ""},
             self.reader.show(reference, include_cards=False),
         )
         self.audit.stage(step_request_id, step)
         try:
             written = write_knowledge_document(
-                self._instance_dir(),
-                document=str(plan["document"]),
-                actor=actor,
-                text=str(plan["text"]),
+                self._instance_dir(), document=plan.document, actor=actor, text=plan.text
             )
         except KnowledgeError as exc:
             raise TaskError("backend_error", f"sprint close could not write its closeout: {exc}", 1) from None
         step["payload"]["commit"] = written.commit
-        # Whether *this* attempt added the document to the history. A retry of a close whose write
-        # landed and whose journal write did not finds the same content on disk and commits nothing.
         step["payload"]["changed"] = bool(written.changed)
         self.audit.stage(step_request_id, step)
         self.audit.append(step_request_id, step)
         self._require_close_step_settled(step_request_id)
-        plan["written"] = True
-        plan["commit"] = written.commit
+        payload["closeout"] = plan.mark_written(written.commit).to_document()
         self.transactions.save(document)
 
     def _close_result(self, event: dict[str, Any]) -> dict[str, Any]:
         from secretary.sprint_close import CLOSE_NOT_DONE
 
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        decisions = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
+        try:
+            decisions = SprintCloseDecisions.from_document(payload.get("decisions"))
+        except ValueError as exc:
+            raise TaskError("audit_pending", "sprint close has invalid decisions", 4) from exc
+        closeout_plan = SprintCloseoutPlan.from_document(payload.get("closeout"))
         return {
             "action": SPRINT_CLOSED,
             "sprint": self.reader.show(str(event["ref"])),
             "event_id": str(event["event_id"]),
             "archived_tasks": list(payload.get("archived_tasks") or []),
             "remaining_tasks": list(payload.get("remaining_tasks") or []),
-            "issue_decisions": list(decisions.get("issues") or []),
+            "issue_decisions": [entry.to_document() for entry in decisions.issues],
             "closed_issues": list(payload.get("closed_issues") or []),
-            "card_dispositions": list(decisions.get("cards") or []),
+            "card_dispositions": [entry.to_document() for entry in decisions.cards],
             "disposed_tasks": list(payload.get("disposed_tasks") or []),
             "reason": str(payload.get("reason") or ""),
-            "closeout": _closeout_result(payload.get("closeout")),
-            # Said on the answer and not only in the documentation: a caller reading this result is
-            # exactly the reader who might otherwise take `closed` for `done`.
+            "closeout": closeout_plan.to_result() if closeout_plan else None,
             "definition_of_done": {"satisfied": False, "reason": CLOSE_NOT_DONE},
         }
 
@@ -3235,19 +3135,9 @@ def _close_progressed(document: dict[str, Any], payload: dict[str, Any]) -> bool
 
 
 def _closeout_result(plan: Any) -> dict[str, Any] | None:
-    """What a close answers with about its closeout: where it is, and that it was written once.
-
-    `None` is a close made with no closeout at all, and it is never spelled the same way as a
-    closeout that was written: "this close wrote no document" and "this document is the record of
-    this close" are different facts about the sprint.
-    """
-    if not isinstance(plan, dict) or not plan.get("document"):
-        return None
-    return {
-        "document": str(plan.get("document") or ""),
-        "commit": str(plan.get("commit") or ""),
-        "written": bool(plan.get("written")),
-    }
+    """Released compatibility helper backed by the typed closeout boundary."""
+    typed = SprintCloseoutPlan.from_document(plan)
+    return typed.to_result() if typed is not None else None
 
 
 def _close_step_request_id(request_id: str, step: str, reference: str) -> str:

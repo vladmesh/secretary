@@ -1,47 +1,23 @@
-"""The decisions a sprint close carries, and the one file they arrive in.
-
-A close used to be silent about two things it was in fact deciding: the issues the sprint
-declared, and the cards it left behind in a working state.  Neither is derivable.  A sprint
-can close with its Definition of Done only partly reached, so "the sprint closed" is not
-"the issue is done", and a card left in Ready under a closed contract is not a disposition
-either.  Both are stated by the closing operator, in prose, before anything is written.
-
-The verdicts arrive as one file rather than as a row of flags: the reasons are prose, and
-prose is written before the command runs, not typed into a shell.
-"""
+"""The decisions a sprint close carries, and the one file they arrive in."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import yaml
 
+from secretary.board.sprint_close import SprintCloseDecision, SprintCloseDecisions
 from secretary.product_issues import ISSUE_CLOSE_REASONS
 from secretary.tasks import TaskError
 
-# The verdict that leaves an issue open. The four closing verdicts are the released close
-# reasons and this card does not add to them.
 KEEP_OPEN = "open"
-# The confirmations. Neither is a new way to close anything: each one states that somebody
-# else already did it, names the fact it is confirming, and is checked against reality before
-# the close writes anything. They exist because the alternative to confirming a conflict is
-# either a silent agreement with somebody else's verdict or a step nobody can resolve.
 ALREADY_CLOSED = "already_closed"
 ALREADY_MOVED = "already_moved"
 ISSUE_VERDICTS = tuple(sorted(ISSUE_CLOSE_REASONS)) + (KEEP_OPEN, ALREADY_CLOSED)
-# What a disposition says about a card that is not done: the work landed, or it will not be
-# done under this contract. Both end with the card archived; they differ in the state the
-# board records before that.
 CARD_DISPOSITIONS = ("done", "drop", ALREADY_MOVED)
-# Where a disposition sends the card before the close archives it. `drop` goes through Ready
-# and not through Blocked because Ready is the released edge that releases a retained worker,
-# and archiving a card that still holds a claim is refused.
 DISPOSITION_TARGETS = {"done": "done", "drop": "ready"}
-# The states a card somebody else moved may be confirmed in: the ends a disposition of this
-# close would have taken it to, and no others, so a confirmation cannot archive a card that is
-# still in a working state.
 CONFIRMABLE_CARD_STATES = tuple(sorted(set(DISPOSITION_TARGETS.values())))
-# Which fact each confirmation has to name in its `actual` field.
 CONFIRMATIONS = {
     "issue": (ALREADY_CLOSED, tuple(sorted(ISSUE_CLOSE_REASONS))),
     "card": (ALREADY_MOVED, CONFIRMABLE_CARD_STATES),
@@ -55,12 +31,8 @@ _SHAPE = (
 )
 
 
-def parse_close_decisions(text: str) -> dict[str, list[dict[str, str]]]:
-    """Read the decisions file into its normalized shape, or refuse it.
-
-    Every refusal here is a `validation` refusal raised before the close is entered, so a
-    malformed file never reaches a backend write.
-    """
+def _parse_close_decisions_typed(text: str) -> SprintCloseDecisions:
+    """Read the decisions file into its normalized typed shape, or refuse it."""
     try:
         document = yaml.safe_load(text)
     except yaml.YAMLError:
@@ -77,19 +49,18 @@ def parse_close_decisions(text: str) -> dict[str, list[dict[str, str]]]:
             "sprint close decisions file has unknown section(s): " + ", ".join(map(str, unknown)),
             2,
         )
-    return {
-        "issues": _entries(document.get("issues"), "issue", ISSUE_VERDICTS),
-        "cards": _entries(document.get("cards"), "card", CARD_DISPOSITIONS),
-    }
+    return SprintCloseDecisions(
+        issues=_entries(document.get("issues"), "issue", ISSUE_VERDICTS),
+        cards=_entries(document.get("cards"), "card", CARD_DISPOSITIONS),
+    )
 
 
-def _check_names(mapping: dict[Any, Any], what: str) -> None:
-    """A key that is not a name is a refusal, and it is one before anything sorts the keys.
+def parse_close_decisions(text: str) -> dict[str, list[dict[str, str]]]:
+    """Released parser API: validate with typed values, project the historical dict."""
+    return _parse_close_decisions_typed(text).to_document()
 
-    YAML types its scalars, so `1: x` is an integer key sitting next to string ones.  Naming
-    the offending keys is the documented `validation` refusal; sorting them together first
-    would be a `TypeError` out of the parser instead, which is not an answer at all.
-    """
+
+def _check_names(mapping: Mapping[Any, Any], what: str) -> None:
     unnamed = [key for key in mapping if not isinstance(key, str)]
     if unnamed:
         raise TaskError(
@@ -99,13 +70,13 @@ def _check_names(mapping: dict[Any, Any], what: str) -> None:
         )
 
 
-def _entries(raw: Any, kind: str, verdicts: tuple[str, ...]) -> list[dict[str, str]]:
+def _entries(raw: Any, kind: str, verdicts: tuple[str, ...]) -> tuple[SprintCloseDecision, ...]:
     if raw is None:
-        return []
+        return ()
     if not isinstance(raw, list):
         raise TaskError("validation", _SHAPE, 2)
     seen: set[str] = set()
-    entries: list[dict[str, str]] = []
+    entries: list[SprintCloseDecision] = []
     for entry in raw:
         if not isinstance(entry, dict):
             raise TaskError("validation", _SHAPE, 2)
@@ -155,40 +126,34 @@ def _entries(raw: Any, kind: str, verdicts: tuple[str, ...]) -> list[dict[str, s
                 "decision carries",
                 2,
             )
-        decided = {"ref": reference, "verdict": verdict, "reason": reason.strip()}
-        if verdict == confirmation:
-            decided["actual"] = str(actual)
-        entries.append(decided)
-    return entries
+        entries.append(
+            SprintCloseDecision(
+                ref=reference,
+                verdict=verdict,
+                reason=reason.strip(),
+                actual=str(actual) if verdict == confirmation else None,
+            )
+        )
+    return tuple(entries)
 
 
 def plan_close_decisions(
-    decisions: dict[str, list[dict[str, str]]] | None,
+    decisions: SprintCloseDecisions | Mapping[str, Any] | None,
     *,
-    declared_issues: list[str],
-    remaining: list[str],
-    states: dict[str, str],
-    issue_states: dict[str, dict[str, Any]] | None = None,
-) -> dict[str, list[dict[str, str]]]:
-    """Match the decisions against what this sprint actually declared and holds.
-
-    Returns the plan the close stages in its payload: one decision per declared issue and one
-    disposition per card that is not done, each with the prose that justifies it.  A missing,
-    unknown or contradictory decision is a `validation` refusal, and this runs before the
-    transaction is opened, so a refused close writes nothing at all.
-
-    A decision is also matched against the issue it decides.  A closing verdict for an issue
-    somebody else has already closed is not this sprint's verdict — the issue carries their
-    reason, not the stated one — so it is refused here, before the transaction, and the closer
-    either confirms what happened with `already_closed` naming that reason or writes a
-    different decision.  The same holds the other way: `already_closed` for an issue that is
-    open, or naming a reason the issue does not carry, is refused too.
-    """
-    parsed = decisions or {"issues": [], "cards": []}
-    issues = list(parsed.get("issues") or [])
-    cards = list(parsed.get("cards") or [])
+    declared_issues: Sequence[str],
+    remaining: Sequence[str],
+    states: Mapping[str, str],
+    issue_states: Mapping[str, Mapping[str, Any]] | None = None,
+) -> SprintCloseDecisions:
+    """Match typed decisions against what this sprint actually declared and holds."""
+    try:
+        parsed = SprintCloseDecisions.from_document(decisions)
+    except ValueError as exc:
+        raise TaskError("validation", str(exc), 2) from None
+    issues = list(parsed.issues)
+    cards = list(parsed.cards)
     declared = list(declared_issues)
-    unknown_issues = sorted({entry["ref"] for entry in issues} - set(declared))
+    unknown_issues = sorted({entry.ref for entry in issues} - set(declared))
     if unknown_issues:
         raise TaskError(
             "validation",
@@ -196,9 +161,7 @@ def plan_close_decisions(
             + ", ".join(unknown_issues),
             2,
         )
-    missing_issues = [
-        reference for reference in declared if reference not in {entry["ref"] for entry in issues}
-    ]
+    missing_issues = [reference for reference in declared if reference not in {entry.ref for entry in issues}]
     if missing_issues:
         raise TaskError(
             "validation",
@@ -206,7 +169,7 @@ def plan_close_decisions(
             + ", ".join(missing_issues),
             2,
         )
-    unknown_cards = sorted({entry["ref"] for entry in cards} - set(remaining))
+    unknown_cards = sorted({entry.ref for entry in cards} - set(remaining))
     if unknown_cards:
         raise TaskError(
             "validation",
@@ -214,7 +177,7 @@ def plan_close_decisions(
             + ", ".join(unknown_cards),
             2,
         )
-    undisposed = [reference for reference in remaining if reference not in {entry["ref"] for entry in cards}]
+    undisposed = [reference for reference in remaining if reference not in {entry.ref for entry in cards}]
     if undisposed:
         raise TaskError(
             "validation",
@@ -224,40 +187,39 @@ def plan_close_decisions(
         )
     _check_issue_decisions_match_reality(issues, issue_states or {})
     _check_card_confirmations_match_reality(cards, states)
-    return {
-        "issues": sorted(issues, key=lambda entry: entry["ref"]),
-        "cards": sorted(cards, key=lambda entry: entry["ref"]),
-    }
+    return SprintCloseDecisions(
+        issues=tuple(sorted(issues, key=lambda entry: entry.ref)),
+        cards=tuple(sorted(cards, key=lambda entry: entry.ref)),
+    )
 
 
 def _check_issue_decisions_match_reality(
-    issues: list[dict[str, str]],
-    issue_states: dict[str, dict[str, Any]],
+    issues: Sequence[SprintCloseDecision],
+    issue_states: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    """Refuse a decision the issue itself contradicts, before the transaction is opened."""
     conflicting: list[str] = []
     for entry in issues:
-        state = issue_states.get(entry["ref"])
-        if not isinstance(state, dict):
+        state = issue_states.get(entry.ref)
+        if not isinstance(state, Mapping):
             continue
         closed = bool(state.get("closed"))
         carried = str(state.get("close_reason") or "")
-        if entry["verdict"] == ALREADY_CLOSED:
+        if entry.verdict == ALREADY_CLOSED:
             if not closed:
                 raise TaskError(
                     "validation",
-                    f"issue {entry['ref']} is open, so there is nothing to confirm; decide it "
+                    f"issue {entry.ref} is open, so there is nothing to confirm; decide it "
                     "with a closing verdict or leave it open",
                     2,
                 )
-            if entry["actual"] != carried:
+            if entry.actual != carried:
                 raise TaskError(
                     "validation",
-                    f"issue {entry['ref']} is closed as {carried or 'unknown'}, not as {entry['actual']}",
+                    f"issue {entry.ref} is closed as {carried or 'unknown'}, not as {entry.actual}",
                     2,
                 )
         elif closed:
-            conflicting.append(f"{entry['ref']} ({carried or 'unknown'})")
+            conflicting.append(f"{entry.ref} ({carried or 'unknown'})")
     if conflicting:
         raise TaskError(
             "validation",
@@ -268,46 +230,30 @@ def _check_issue_decisions_match_reality(
 
 
 def _check_card_confirmations_match_reality(
-    cards: list[dict[str, str]],
-    states: dict[str, str],
+    cards: Sequence[SprintCloseDecision],
+    states: Mapping[str, str],
 ) -> None:
-    """A card confirmation names the state the card actually carries, or it is refused."""
     for entry in cards:
-        if entry["verdict"] != ALREADY_MOVED:
+        if entry.verdict != ALREADY_MOVED:
             continue
-        carried = states.get(entry["ref"], "unknown")
-        if entry["actual"] != carried:
+        carried = states.get(entry.ref, "unknown")
+        if entry.actual != carried:
             raise TaskError(
                 "validation",
-                f"card {entry['ref']} is in {carried}, not in {entry['actual']}",
+                f"card {entry.ref} is in {carried}, not in {entry.actual}",
                 2,
             )
 
 
-#: What a close is, said in one sentence wherever a close is answered, written down or documented.
-#:
-#: A close states what became of the work.  It is *not* a statement that the Definition of Done was
-#: reached, and the two are separate facts on purpose: a sprint may close with its contract only
-#: partly satisfied, and the file above is where the closing PO says which part.  A reader who takes
-#: `closed` for `done` reads a deferred finding as a delivered one, so the sentence is carried on the
-#: result document, in the closeout the close writes, and in `docs/PROTOCOLS.md` -- never left to be
-#: inferred from a status.
 CLOSE_NOT_DONE = (
     "Closing a sprint states what became of its work. It is not a statement that the sprint's "
     "Definition of Done was reached: a closed sprint is not a satisfied contract, and what was and "
     "was not achieved is what the decisions and the closeout below say."
 )
-
-#: Where under `state/knowledge` a sprint's closeout is kept.
 CLOSEOUT_DIRECTORY = "closeouts"
 
 
 def closeout_path(reference: str, *, day: str) -> str:
-    """The document one sprint's closeout is written to, derived and never invented per call.
-
-    Frozen into the close's staged plan the moment the transaction opens, so a retry the next day
-    writes the same document rather than a second one beside it.
-    """
     slug = "".join(character if character.isalnum() else "-" for character in reference).strip("-")
     return f"{CLOSEOUT_DIRECTORY}/{day}-{slug}.md"
 
@@ -319,17 +265,9 @@ def closeout_document(
     actor: str,
     reason: str,
     body: str,
-    decisions: dict[str, list[dict[str, str]]] | None,
+    decisions: SprintCloseDecisions | Mapping[str, Any] | None,
 ) -> str:
-    """The closeout as it is written: the caller's prose, under what only the close knows.
-
-    The operation does not invent what the sprint achieved -- `body` is the closing PO's own
-    account, and it is carried verbatim.  What is added around it is what the close, and only the
-    close, is in a position to state: which sprint this is, who closed it and why, the verdict on
-    every declared issue, the disposition of every card that was not done, and the one sentence that
-    keeps the whole document from being read as a satisfied contract.
-    """
-    plan = decisions or {}
+    plan = SprintCloseDecisions.from_document(decisions)
     lines = [
         f"# Sprint closeout: {reference}",
         "",
@@ -347,24 +285,18 @@ def closeout_document(
         "## Declared issues",
         "",
     ]
-    lines.extend(_closeout_entries(plan.get("issues"), "This sprint declared no issue."))
+    lines.extend(_closeout_entries(plan.issues, "This sprint declared no issue."))
     lines.extend(["", "## Cards that were not done", ""])
-    lines.extend(
-        _closeout_entries(plan.get("cards"), "No card was left in a working state at the close.")
-    )
+    lines.extend(_closeout_entries(plan.cards, "No card was left in a working state at the close."))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _closeout_entries(entries: Any, empty: str) -> list[str]:
-    rows = [entry for entry in (entries or []) if isinstance(entry, dict)]
-    if not rows:
+def _closeout_entries(entries: Sequence[SprintCloseDecision], empty: str) -> list[str]:
+    if not entries:
         return [empty]
     return [
-        "- {ref} — {verdict}{actual}: {reason}".format(
-            ref=entry.get("ref", ""),
-            verdict=entry.get("verdict", ""),
-            actual=f" ({entry['actual']})" if entry.get("actual") else "",
-            reason=entry.get("reason", ""),
-        )
-        for entry in rows
+        f"- {entry.ref} — {entry.verdict}"
+        + (f" ({entry.actual})" if entry.actual else "")
+        + f": {entry.reason}"
+        for entry in entries
     ]
