@@ -21,18 +21,23 @@ from secretary.board.backend import (
     sprint_reference_number,
 )
 from secretary.board.models import SprintState
+from secretary.board.sprint_admission import SprintAdmission, SprintReservationIndex
 from secretary.board.sprint_read import (
     BUDGET_EVENT_TYPES,
     BUDGET_RECORDED_EVENT_TYPES,
-    BUDGET_UNCHARGED_EVENT_TYPES,
     BUDGET_UNCHARGED_FIELD,
-    BUDGET_UNCHARGED_INFRASTRUCTURE,
     RESUME_FIELDS,
     SprintBudget,
     SprintReadMetadata,
     SprintResume,
     SprintSourceAudit,
     sprint_string_list,
+)
+from secretary.board.sprint_read import (
+    BUDGET_UNCHARGED_EVENT_TYPES as BUDGET_UNCHARGED_EVENT_TYPES,
+)
+from secretary.board.sprint_read import (
+    BUDGET_UNCHARGED_INFRASTRUCTURE as BUDGET_UNCHARGED_INFRASTRUCTURE,
 )
 from secretary.board.sprint_read import (
     budget_thresholds as _read_budget_thresholds,
@@ -109,25 +114,17 @@ _ADMISSION_REFUSALS = {"sprint_conflict", "resource_conflict"}
 
 def active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]:
     """Return the local index of projects reserved by open sprints."""
-    return _read_guard_index(Path(data_dir) / _GUARD_INDEX) or {}
+    index = _read_guard_index(Path(data_dir) / _GUARD_INDEX)
+    return index.to_projects_document() if index is not None else {}
 
 
-def _read_guard_index(path: Path) -> dict[str, list[str]] | None:
-    """Return the index, or None when it is absent, unreadable or of an older version."""
+def _read_guard_index(path: Path) -> SprintReservationIndex | None:
+    """Return the typed index, or None when it is absent, unreadable or of an older version."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(raw, dict) or raw.get("version") != _GUARD_INDEX_VERSION:
-        return None
-    projects = raw.get("projects")
-    if not isinstance(projects, dict):
-        return None
-    return {
-        str(project): sorted({str(ref) for ref in refs if str(ref)})
-        for project, refs in projects.items()
-        if isinstance(refs, list) and str(project)
-    }
+    return SprintReservationIndex.from_document(raw, version=_GUARD_INDEX_VERSION)
 
 
 def sprint_guard_index_initialized(data_dir: str | Path) -> bool:
@@ -150,7 +147,7 @@ def require_active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]
             f"the reserved-project index {_GUARD_INDEX} is missing, unreadable or of another version",
             1,
         )
-    return index
+    return index.to_projects_document()
 
 
 def refresh_active_sprint_projects(data_dir: str | Path, reader: Any) -> None:
@@ -160,43 +157,24 @@ def refresh_active_sprint_projects(data_dir: str | Path, reader: Any) -> None:
 
 
 def _replace_active_sprint_projects(data_dir: str | Path, sprints: list[dict[str, Any]]) -> None:
-    projects: dict[str, list[str]] = {}
-    for sprint in sprints:
-        if sprint.get("status") != "open":
-            continue
-        reference = str(sprint.get("ref") or "")
-        if not reference:
-            continue
-        for project in sprint.get("reservations") or []:
-            name = str(project).strip()
-            if name:
-                projects[name] = sorted(set(projects.get(name, []) + [reference]))
-    _write_guard_index(data_dir, projects)
+    admissions = [SprintAdmission.from_document(sprint) for sprint in sprints]
+    _write_guard_index(data_dir, SprintReservationIndex.from_sprints(admissions))
 
 
 def update_active_sprint_projects(data_dir: str | Path, sprint: dict[str, Any]) -> None:
     """Update one sprint's entries in the local reserved-project index."""
     with _sprint_guard_index_lock(data_dir):
         path = Path(data_dir) / _GUARD_INDEX
-        projects = _read_guard_index(path)
-        if projects is None and path.exists():
+        index = _read_guard_index(path)
+        if index is None and path.exists():
             # Rebuild stale index key spaces from the board.
             path.unlink()
             return
-        projects = projects or {}
-        reference = str(sprint.get("ref") or "")
-        for project in list(projects):
-            refs = [ref for ref in projects[project] if ref != reference]
-            if refs:
-                projects[project] = refs
-            else:
-                projects.pop(project)
-        if reference and sprint.get("status") == "open":
-            for project in sprint.get("reservations") or []:
-                name = str(project).strip()
-                if name:
-                    projects[name] = sorted(set(projects.get(name, []) + [reference]))
-        _write_guard_index(data_dir, projects)
+        admission = SprintAdmission.from_document(sprint)
+        index = (index or SprintReservationIndex()).without_sprint(admission.ref)
+        if admission.is_open:
+            index = index.with_sprint(admission)
+        _write_guard_index(data_dir, index)
 
 
 @contextmanager
@@ -228,13 +206,13 @@ def _exclusive_lock(path: Path):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _write_guard_index(data_dir: str | Path, projects: dict[str, list[str]]) -> None:
+def _write_guard_index(data_dir: str | Path, index: SprintReservationIndex) -> None:
     path = Path(data_dir) / _GUARD_INDEX
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(
-            {"version": _GUARD_INDEX_VERSION, "projects": projects},
+            index.to_document(version=_GUARD_INDEX_VERSION),
             sort_keys=True,
             separators=(",", ":"),
         ),
@@ -300,17 +278,23 @@ def open_sprint_admission_error(rows: list[dict[str, Any]], *, limit: int) -> st
     A whole set is judged by admitting it one row at a time, in reference order, against the rows
     already accepted: an export must not be a way to arrive at a pair `create` would have refused.
     """
-    admitted: list[dict[str, Any]] = []
-    for row in sorted(rows, key=lambda row: str(row.get("ref") or "")):
+    admissions = [SprintAdmission.from_document(row) for row in rows]
+    admitted: list[SprintAdmission] = []
+    for row in sorted(admissions, key=lambda row: row.ref):
         try:
             _refuse_open_sprint(row, admitted, limit=limit)
         except TaskError as exc:
-            return f"{row.get('ref') or '?'}: {exc.message}"
+            return f"{row.ref or '?'}: {exc.message}"
         admitted.append(row)
     return None
 
 
-def _refuse_open_sprint(candidate: dict[str, Any], others: list[dict[str, Any]], *, limit: int) -> None:
+def _refuse_open_sprint(
+    candidate: SprintAdmission,
+    others: list[SprintAdmission],
+    *,
+    limit: int,
+) -> None:
     """Refuse a sprint this installation has no room, or no disjoint room, for.
 
     Every collision the caller can act on is reported before the generic count refusal, because a
@@ -318,18 +302,15 @@ def _refuse_open_sprint(candidate: dict[str, Any], others: list[dict[str, Any]],
     none of them.
     """
     saturated = len(others) >= limit
-    _refuse_shared_reservations(
-        [str(project) for project in candidate.get("reservations") or []],
-        others,
-    )
+    _refuse_shared_reservations(candidate.reservations, others)
     if limit > DEFAULT_OPEN_SPRINT_LIMIT:
         _refuse_shared_resources(candidate, others)
     if saturated:
         raise _open_sprint_count_error(others, limit)
 
 
-def _open_sprint_count_error(others: list[dict[str, Any]], limit: int) -> TaskError:
-    refs = ", ".join(sorted(str(sprint["ref"]) for sprint in others))
+def _open_sprint_count_error(others: list[SprintAdmission], limit: int) -> TaskError:
+    refs = ", ".join(sorted(sprint.ref for sprint in others))
     if limit == DEFAULT_OPEN_SPRINT_LIMIT:
         return TaskError(
             "sprint_conflict",
@@ -344,12 +325,12 @@ def _open_sprint_count_error(others: list[dict[str, Any]], limit: int) -> TaskEr
     )
 
 
-def _refuse_shared_reservations(reservations: list[str], others: list[dict[str, Any]]) -> None:
+def _refuse_shared_reservations(reservations: tuple[str, ...], others: list[SprintAdmission]) -> None:
     """Refuse a project another open sprint already reserves, naming both."""
     held: dict[str, str] = {}
     for sprint in others:
-        for project in sprint.get("reservations") or []:
-            held.setdefault(str(project), str(sprint["ref"]))
+        for project in sprint.reservations:
+            held.setdefault(project, sprint.ref)
     clashes = [(project, held[project]) for project in reservations if project in held]
     if clashes:
         raise TaskError(
@@ -360,7 +341,7 @@ def _refuse_shared_reservations(reservations: list[str], others: list[dict[str, 
         )
 
 
-def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, Any]]) -> None:
+def _refuse_shared_resources(candidate: SprintAdmission, others: list[SprintAdmission]) -> None:
     """The invariants that make a second open sprint safe, above the reservations.
 
     Two open sprints may only exist while nothing they work on is shared: a different product, no
@@ -371,18 +352,18 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
     The candidate's own roots are judged before any pairwise comparison and whether or not another
     sprint is open.
     """
-    product = str(candidate.get("product") or "").strip()
-    ordered = sorted(others, key=lambda row: str(row["ref"]))
+    product = candidate.product
+    ordered = sorted(others, key=lambda row: row.ref)
     # Judge both sides so disjointness does not depend on iteration order.
     if ordered and not product:
         raise TaskError(
             "resource_conflict",
             "this sprint declares no product, so it cannot be proven disjoint from "
-            f"open sprint {ordered[0]['ref']!s}",
+            f"open sprint {ordered[0].ref!s}",
             2,
         )
     roots = _scanned_roots(
-        candidate.get("repositories") or [],
+        candidate.repositories,
         refusal=lambda text, why: TaskError(
             "resource_conflict",
             f"this sprint declares repository root {text!r}, which {why}, so it cannot be "
@@ -391,8 +372,8 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
         ),
     )
     for sprint in ordered:
-        reference = str(sprint["ref"])
-        other_product = str(sprint.get("product") or "").strip()
+        reference = sprint.ref
+        other_product = sprint.product
         if not other_product:
             raise TaskError(
                 "resource_conflict",
@@ -408,7 +389,7 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
                 2,
             )
         held_roots = _scanned_roots(
-            sprint.get("repositories") or [],
+            sprint.repositories,
             # `reference` is bound here rather than closed over: the callee calls this back
             # inside the same iteration, but a refusal that named the wrong sprint would be a
             # silent lie, and the binding costs nothing.
@@ -1673,7 +1654,11 @@ class SprintWriter:
                 or (excluding_id is not None and _sprint_number(sprint) == excluding_id)
             )
         ]
-        _refuse_open_sprint(candidate, others, limit=self._open_sprint_limit())
+        _refuse_open_sprint(
+            SprintAdmission.from_document(candidate),
+            [SprintAdmission.from_document(sprint) for sprint in others],
+            limit=self._open_sprint_limit(),
+        )
 
     @_sql_atomic
     def comment(
