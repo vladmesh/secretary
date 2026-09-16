@@ -26,8 +26,8 @@ from secretary.board.host import MarkerComment, MutationResult, TransitionReques
 from secretary.board.legacy_codec import (
     TASK_KNOWN_METADATA as _KNOWN_METADATA,
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
-    enum_or_default as _enum_or_default,
-    enum_or_none as _enum_or_none,
+    enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
+    enum_or_none as _enum_or_none,  # noqa: F401 - released private compatibility alias
     nonnegative_int as _nonnegative_int,
     null_if_empty as _null_if_empty,
     positive_int as _positive_int,
@@ -49,6 +49,26 @@ from secretary.board.roles import (
     EDIT_ROLES,
     PROPOSAL_CREATE_ROLES,
     Role,
+)
+from secretary.board.task_routing import (
+    ACTIVE_STATES,
+    BLOCK_CLASSIFICATION_VALUES,
+    DECIDED_TARGETS,
+    DECISION_TARGETS,
+    DECISION_VALUES,
+    EDITABLE_STATES,
+    FAMILY_PREFERENCE_VALUES,
+    ROUTING_PHASE_VALUES,
+    TASK_COMPLEXITY_VALUES,
+    TASK_TYPE_VALUES,
+    UNDECIDED_EXITS,
+    BlockClassification,
+    FamilyPreference,
+    RoutingPhase,
+    TaskComplexity,
+    TaskDecision,
+    TaskMetadata,
+    TaskType,
 )
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
@@ -162,14 +182,10 @@ def _done_retention_request_id(task_id: int, date_moved: int) -> str:
     return "done-retention-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
-_TASK_TYPES = {"code", "research"}
-_COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
-_FAMILY_PREFERENCES = {"auto", "claude", "codex"}
 # Retired launch modes normalize away rather than silently changing a requested shape.
 _CODEX_LAUNCH_MODES = CODEX_LAUNCH_MODES
 # Agent roles that may not open an execution card are represented by
 # PROPOSAL_CREATE_ROLES in the canonical board-role vocabulary.
-_EDITABLE_STATES = {"ready", "blocked"}
 _READY_RESET_METADATA = {
     "claim": "",
     "resolved_head": "",
@@ -178,21 +194,8 @@ _READY_RESET_METADATA = {
     "retry_switch": "",
     "retry_heads": "",
 }
-_ROUTING_PHASES = {"worker", "review", "verdict"}
-# Worker blocker classification is evidence for, not the observer's final verdict.
-_BLOCK_CLASSIFICATIONS = ("external_fact", "wrong_task_definition")
-# Persist a parked-card decision before effects; blocked remains the failure escape hatch.
-_DECISION_TARGETS = {"release": "done", "rework": "in_progress", "reslice": "blocked"}
-_DECISIONS = set(_DECISION_TARGETS)
-_DECIDED_TARGETS = {"done", "in_progress"}
-# Only the PO may use these Assessment exits; the dispatcher must record a decision.
-_UNDECIDED_EXITS = {"ready", "validate", "issues"}
 # Dispatcher Assessment moves require decisions; human escape-hatch moves do not.
 _DECISION_BOUND_ROLES: frozenset[Role] = frozenset({Role.DISPATCHER})
-# States in which a card holds a workspace, a suspended worker or a running head. `assessment`
-# is one of them: the reviewer is gone, but the worker and its checkout are retained for a
-# rework decision, so a second writer in the same project is as wrong there as in Validate.
-ACTIVE_STATES = frozenset({"in_progress", "validate", "assessment"})
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 # A Product or an Issue is not an execution task: it never takes a claim or a task transition,
 # whatever column it currently sits in.
@@ -963,38 +966,7 @@ class TaskReader:
             "state": _STATE_BY_COLUMN[column],
             "closed": _nonnegative_int(card.get("is_active", card.get("status", 1))) == 0,
             "position": _nonnegative_int(card.get("position")),
-            "project": _text(meta.get("project")),
-            "type": _text(meta.get("task_type")),
-            "blocked_by": _null_if_empty(meta.get("blocked_by")),
-            "claim": {"worker": _null_if_empty(meta.get("claim")), "claimed_at": None},
-            "routing": {
-                "complexity": _enum_or_default(meta.get("complexity"), _COMPLEXITIES, "standard"),
-                "family_preference": _enum_or_default(
-                    meta.get("family_preference"), _FAMILY_PREFERENCES, "auto"
-                ),
-                "head_override": _null_if_empty(meta.get("head")),
-                "review_head_override": _null_if_empty(meta.get("review_head")),
-                "resolved_worker_family": None,
-                "resolved_worker_head": _null_if_empty(meta.get("resolved_head")),
-                "resolved_review_family": None,
-                "resolved_review_head": _null_if_empty(meta.get("resolved_review_head")),
-                "routing_reason": _null_if_empty(meta.get("routing_reason")),
-                "quota_snapshot_at": _null_if_empty(meta.get("quota_snapshot_at")),
-                "codex_launch_mode": _enum_or_none(meta.get("codex_launch_mode"), _CODEX_LAUNCH_MODES),
-            },
-            "workspace": {
-                "slug": _null_if_empty(meta.get("slug")),
-                "base_branch": _null_if_empty(meta.get("base_branch")),
-                "seed_ref": _null_if_empty(meta.get("seed_ref")),
-                "supersedes": _null_if_empty(meta.get("supersedes")),
-            },
-            "retry": {
-                "same": _nonnegative_int(meta.get("retry_same")),
-                "switched": _nonnegative_int(meta.get("retry_switch")),
-                "heads": _split_heads(meta.get("retry_heads")),
-            },
-            "sprint": _null_if_empty(meta.get("sprint_ref")),
-            "record_type": _null_if_empty(meta.get("record_type")),
+            **TaskMetadata.from_legacy(meta, codex_modes=_CODEX_LAUNCH_MODES).to_document_fields(),
             "audit": {
                 "created_at": _rfc3339(card.get("date_creation")),
                 "updated_at": _rfc3339(card.get("date_modification")),
@@ -1714,8 +1686,8 @@ class TaskWriter:
         base_branch: str = "",
         seed_ref: str = "",
         supersedes: str = "",
-        complexity: str = "standard",
-        family_preference: str = "auto",
+        complexity: str = TaskComplexity.STANDARD.value,
+        family_preference: str = FamilyPreference.AUTO.value,
         codex_launch_mode: str = "",
         sprint: str = "",
         priority: str = "",
@@ -1773,8 +1745,8 @@ class TaskWriter:
         base_branch: str = "",
         seed_ref: str = "",
         supersedes: str = "",
-        complexity: str = "standard",
-        family_preference: str = "auto",
+        complexity: str = TaskComplexity.STANDARD.value,
+        family_preference: str = FamilyPreference.AUTO.value,
         codex_launch_mode: str = "",
         sprint: str = "",
         priority: str = "",
@@ -1800,8 +1772,8 @@ class TaskWriter:
         base_branch = base_branch.strip()
         seed_ref = seed_ref.strip()
         supersedes = supersedes.strip()
-        complexity = complexity.strip() or "standard"
-        family_preference = family_preference.strip() or "auto"
+        complexity = complexity.strip() or TaskComplexity.STANDARD.value
+        family_preference = family_preference.strip() or FamilyPreference.AUTO.value
         codex_launch_mode = codex_launch_mode.strip()
         sprint = sprint.strip()
         priority = priority.strip()
@@ -1813,9 +1785,12 @@ class TaskWriter:
         )
         if not project:
             raise TaskError("validation", "create requires a non-empty project", 2)
-        if task_type not in _TASK_TYPES:
-            known = ", ".join(sorted(_TASK_TYPES))
-            raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2)
+        try:
+            task_type_value = TaskType(task_type)
+        except ValueError:
+            known = ", ".join(sorted(TASK_TYPE_VALUES))
+            raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2) from None
+        task_type = task_type_value.value
         if not title:
             raise TaskError("validation", "create requires a non-empty title", 2)
         if target not in {"ready", "issues", "in_progress"}:
@@ -1824,7 +1799,7 @@ class TaskWriter:
             raise TaskError("transition_forbidden", "only a steward report may be created In progress", 3)
         if steward_report and (role != "steward" or target != "in_progress"):
             raise TaskError("role_forbidden", "steward report creation requires steward In progress", 3)
-        if steward_report and (task_type != "research" or not slug or reference or sprint):
+        if steward_report and (task_type != TaskType.RESEARCH.value or not slug or reference or sprint):
             raise TaskError(
                 "validation",
                 "a steward report requires research, a slug, no explicit reference and no sprint",
@@ -1835,12 +1810,20 @@ class TaskWriter:
                 raise TaskError("role_forbidden", f"{role} may create only proposals in Issues", 3)
         elif target == "issues":
             raise TaskError("transition_forbidden", "execution tasks cannot be created in Issues", 3)
-        if complexity not in _COMPLEXITIES:
-            raise TaskError("validation", "complexity must be one of: " + ", ".join(sorted(_COMPLEXITIES)), 2)
-        if family_preference not in _FAMILY_PREFERENCES:
+        try:
+            complexity_value = TaskComplexity(complexity)
+        except ValueError:
             raise TaskError(
-                "validation", "family preference must be one of: " + ", ".join(sorted(_FAMILY_PREFERENCES)), 2
-            )
+                "validation", "complexity must be one of: " + ", ".join(sorted(TASK_COMPLEXITY_VALUES)), 2
+            ) from None
+        complexity = complexity_value.value
+        try:
+            family_preference_value = FamilyPreference(family_preference)
+        except ValueError:
+            raise TaskError(
+                "validation", "family preference must be one of: " + ", ".join(sorted(FAMILY_PREFERENCE_VALUES)), 2
+            ) from None
+        family_preference = family_preference_value.value
         if codex_launch_mode and codex_launch_mode not in _CODEX_LAUNCH_MODES:
             # Refuse unknown launch modes before any board call.
             known = ", ".join(sorted(_CODEX_LAUNCH_MODES))
@@ -2057,7 +2040,7 @@ class TaskWriter:
             role="steward",
             actor=actor,
             project=project,
-            task_type="research",
+            task_type=TaskType.RESEARCH.value,
             title=title,
             description=description,
             target="in_progress",
@@ -2244,14 +2227,15 @@ class TaskWriter:
         if kind not in {"done", "blocked"} or not body.strip():
             raise TaskError("validation", "reports require a non-empty body", 2)
         classification = classification.strip()
-        if kind == "blocked" and classification not in _BLOCK_CLASSIFICATIONS:
+        if kind == "blocked" and classification not in BLOCK_CLASSIFICATION_VALUES:
             raise TaskError(
                 "validation",
-                "blocked reports require --classification, one of " + ", ".join(_BLOCK_CLASSIFICATIONS),
+                "blocked reports require --classification, one of " + ", ".join(BLOCK_CLASSIFICATION_VALUES),
                 2,
             )
         if kind == "done" and classification:
             raise TaskError("validation", "a done report carries no classification", 2)
+        classification_value = BlockClassification(classification) if classification else None
         request_id = request_id or str(uuid.uuid4())
         # Resolve immutable ownership before either fresh admission or a card
         # read.  A replay must stay a pure replay, including when its worker
@@ -2303,7 +2287,7 @@ class TaskWriter:
                 "body": body,
                 "body_sha256": _digest(body),
                 **specification_data,
-                "classification": classification or None,
+                "classification": classification_value.value if classification_value is not None else None,
             },
             fresh_admission=None,
         )
@@ -2359,8 +2343,10 @@ class TaskWriter:
         """
         role = self._role(role, {Role.OBSERVER})
         body = self._redact_for_board(body)
-        if kind not in _DECISIONS:
-            raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
+        if kind not in DECISION_VALUES:
+            raise TaskError("validation", f"decision must be one of {', '.join(sorted(DECISION_VALUES))}", 2)
+        decision_kind = TaskDecision(kind)
+        kind = decision_kind.value
         if not body.strip():
             raise TaskError("validation", "a decision requires a non-empty reason", 2)
         declared_prerequisites = tuple(protocol_prerequisites)
@@ -2459,7 +2445,7 @@ class TaskWriter:
                     "event_id": str(existing.get("event_id") or existing.get("request_id") or ""),
                     "replayed": True,
                 }
-            if kind == "rework":
+            if decision_kind is TaskDecision.REWORK:
                 try:
                     validate_rework_prerequisites(
                         declared_prerequisites,
@@ -2507,9 +2493,12 @@ class TaskWriter:
         """
         role = self._role(role, {Role.DISPATCHER})
         phase = _text(payload.get("phase"))
-        if phase not in _ROUTING_PHASES:
-            known = ", ".join(sorted(_ROUTING_PHASES))
+        if phase not in ROUTING_PHASE_VALUES:
+            known = ", ".join(sorted(ROUTING_PHASE_VALUES))
             raise TaskError("validation", f"unknown routing phase {phase!r} (known: {known})", 2)
+        routing_phase = RoutingPhase(phase)
+        normalized_payload = dict(payload)
+        normalized_payload["phase"] = routing_phase.value
         heads = payload.get("heads")
         if not isinstance(heads, list) or not heads:
             raise TaskError("validation", "routing requires at least one head record", 2)
@@ -2519,9 +2508,9 @@ class TaskWriter:
             actor,
             reference,
             request_id,
-            dict(payload),
+            normalized_payload,
             lambda task: None,
-            identity=dict(payload),
+            identity=normalized_payload,
         )
 
     def outcome_round_context(
@@ -3226,20 +3215,21 @@ class TaskWriter:
         and the dispatcher's own failure paths reach it without anyone deciding, and a card that cannot
         be blocked is a card nothing can rescue. The observer has no exit from Assessment at all.
         """
-        if decision and decision not in _DECISIONS:
-            raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
-        if decision and source != "assessment":
+        if decision and decision not in DECISION_VALUES:
+            raise TaskError("validation", f"decision must be one of {', '.join(sorted(DECISION_VALUES))}", 2)
+        decision_kind = TaskDecision(decision) if decision else None
+        if decision_kind is not None and source != "assessment":
             raise TaskError("validation", "a decision is only carried by a move out of Assessment", 2)
-        if decision and _DECISION_TARGETS[decision] != target:
+        if decision_kind is not None and DECISION_TARGETS[decision_kind].value != target:
             raise TaskError(
                 "decision_mismatch",
-                f"a {decision} decision moves the card to {_DECISION_TARGETS[decision]}, not {target}",
+                f"a {decision} decision moves the card to {DECISION_TARGETS[decision_kind].value}, not {target}",
                 3,
             )
         if (
             source == "assessment"
-            and target in _DECIDED_TARGETS
-            and not decision
+            and target in DECIDED_TARGETS
+            and decision_kind is None
             and role in _DECISION_BOUND_ROLES
         ):
             raise TaskError(
@@ -3248,14 +3238,14 @@ class TaskWriter:
                 "`task decide` and pass it as --decision",
                 3,
             )
-        if source == "assessment" and target in _UNDECIDED_EXITS and role in _DECISION_BOUND_ROLES:
+        if source == "assessment" and target in UNDECIDED_EXITS and role in _DECISION_BOUND_ROLES:
             raise TaskError(
                 "decision_required",
                 f"{role} may not move a parked card to {target}: that leaves Assessment with "
                 "nothing decided. Decide the card, or have the PO move it",
                 3,
             )
-        if decision and not self._decision_recorded(task["ref"], decision):
+        if decision_kind is not None and not self._decision_recorded(task["ref"], decision_kind.value):
             raise TaskError(
                 "decision_required",
                 f"no {decision} decision is recorded on this card since it entered Assessment",
@@ -3335,7 +3325,7 @@ class TaskWriter:
         }
 
         def mutation(task: dict[str, Any]) -> Any:
-            if task["state"] not in _EDITABLE_STATES:
+            if task["state"] not in EDITABLE_STATES:
                 raise TaskError("edit_forbidden", "edit requires a Ready or Blocked card", 3)
             number = _task_number(task)
             update: dict[str, Any] = {}

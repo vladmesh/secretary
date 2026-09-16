@@ -75,6 +75,11 @@ from secretary.board.legacy_codec import (
 )
 from secretary.board.models import EntityKind, Event
 from secretary.board.roles import BOARD_ROLES
+from secretary.board.task_routing import (
+    FAMILY_PREFERENCE_VALUES,
+    TASK_COMPLEXITY_VALUES,
+    TASK_TYPE_VALUES,
+)
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
     ISSUE_KINDS,
@@ -110,9 +115,6 @@ from secretary.sprints import (
     _source_audit,
 )
 from secretary.tasks import (
-    _COMPLEXITIES,
-    _FAMILY_PREFERENCES,
-    _TASK_TYPES,
     KanboardClient,
     _task_metadata,
     all_project_cards,
@@ -1600,8 +1602,8 @@ def _plan_tasks(
             refusal = "the reference does not end in -<number>, so UNIQUE (project_id, task_number) has no value"
         elif project_id is not None and project_id not in known_projects:  # pragma: no cover
             refusal = f"project {project_id!r} has no projects row"
-        elif task_type is not None and task_type not in _TASK_TYPES:
-            refusal = f"task_type {task_type!r} is outside the CHECK vocabulary {sorted(_TASK_TYPES)}"
+        elif task_type is not None and task_type not in TASK_TYPE_VALUES:
+            refusal = f"task_type {task_type!r} is outside the CHECK vocabulary {sorted(TASK_TYPE_VALUES)}"
         elif column not in _STATE_BY_COLUMN:
             refusal = f"the row sits in column {column!r}, which _STATE_BY_COLUMN does not map to a state"
         elif not _text(row.raw.get("title")):
@@ -1649,8 +1651,8 @@ def _plan_tasks(
         # spelling must stay queryable rather than disappear.  The three enum columns are the only
         # places a *known* key can lose its stored value, so each of them keeps the raw string.
         for key, allowed in (
-            ("complexity", _COMPLEXITIES),
-            ("family_preference", _FAMILY_PREFERENCES),
+            ("complexity", TASK_COMPLEXITY_VALUES),
+            ("family_preference", FAMILY_PREFERENCE_VALUES),
             ("codex_launch_mode", CODEX_LAUNCH_MODES),
         ):
             raw_value = _null_if_empty(row.meta.get(key))
@@ -1681,9 +1683,9 @@ def _plan_tasks(
             "slug": _null_if_empty(row.meta.get("slug")),
             "base_branch": _null_if_empty(row.meta.get("base_branch")),
             "seed_ref": _null_if_empty(row.meta.get("seed_ref")),
-            "complexity": _enum_or_default(row.meta.get("complexity"), _COMPLEXITIES, "standard"),
+            "complexity": _enum_or_default(row.meta.get("complexity"), TASK_COMPLEXITY_VALUES, "standard"),
             "family_preference": _enum_or_default(
-                row.meta.get("family_preference"), _FAMILY_PREFERENCES, "auto"
+                row.meta.get("family_preference"), FAMILY_PREFERENCE_VALUES, "auto"
             ),
             "head_override": _null_if_empty(row.meta.get("head")),
             "review_head_override": _null_if_empty(row.meta.get("review_head")),

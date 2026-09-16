@@ -30,10 +30,11 @@ from secretary.backup_verify import _verify_plain_tar
 from secretary.board.backend import CARD, SPRINT, board_client, entity_number
 from secretary.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
-    enum_or_default as _enum_or_default,
+    enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
     positive_int as _positive_int,
 )
 from secretary.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
+from secretary.board.task_routing import TaskMetadata
 from secretary.config import DataDirError, instance_data_dir, validate_instance
 from secretary.data import init_layout
 from secretary.product_issues import (
@@ -1031,9 +1032,18 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
     fields = card["fields"]
     metadata = card["metadata"]
     value = lambda name: str(metadata.get(name, fields.get(name, "")) or "")
+    typed = TaskMetadata.from_legacy(
+        {
+            "task_type": value("task_type"),
+            "complexity": value("complexity"),
+            "family_preference": value("family_preference"),
+            "codex_launch_mode": value("codex_launch_mode"),
+        },
+        codex_modes=CODEX_LAUNCH_MODES,
+    )
     return {
         "project": value("project"),
-        "task_type": value("task_type"),
+        "task_type": typed.task_type_text,
         "blocked_by": value("blocked_by"),
         "head": value("head"),
         "review_head": value("review_head"),
@@ -1041,14 +1051,10 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
         "base_branch": value("base_branch"),
         "seed_ref": value("seed_ref"),
         "supersedes": value("supersedes"),
-        "complexity": _enum_or_default(
-            value("complexity"), {"cheap", "standard", "hard", "frontier"}, "standard"
-        ),
-        "family_preference": _enum_or_default(
-            value("family_preference"), {"auto", "claude", "codex"}, "auto"
-        ),
+        "complexity": typed.routing.complexity.value,
+        "family_preference": typed.routing.family_preference.value,
         # Legacy `exec` reads as no mode; live modes round-trip unchanged.
-        "codex_launch_mode": _enum_or_default(value("codex_launch_mode"), {"", *CODEX_LAUNCH_MODES}, ""),
+        "codex_launch_mode": typed.routing.codex_launch_mode or "",
     }
 
 

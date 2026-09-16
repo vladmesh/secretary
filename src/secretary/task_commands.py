@@ -9,12 +9,19 @@ from collections.abc import Callable
 from pathlib import Path
 
 from secretary.board.backend import card_client
+from secretary.board.models import CardState
 from secretary.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
+from secretary.board.task_routing import (
+    BlockClassification,
+    FamilyPreference,
+    TaskComplexity,
+    TaskDecision,
+    TaskType,
+)
 from secretary.cli_output import print_json
 from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import (
-    _BLOCK_CLASSIFICATIONS,
     TaskError,
     TaskReader,
     TaskWriter,
@@ -81,7 +88,7 @@ def add_task_subcommands(subparsers) -> None:
     task_list.add_argument(
         "--state",
         action="append",
-        choices=("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"),
+        choices=tuple(state.value for state in CardState),
     )
     task_list.add_argument("--project")
     task_list.add_argument("--sprint")
@@ -115,12 +122,12 @@ def add_task_subcommands(subparsers) -> None:
     _add_data_dir_args(task_create)
     task_create.add_argument("--request-id")
     task_create.add_argument("--project", required=True)
-    task_create.add_argument("--type", required=True, choices=("code", "research"))
+    task_create.add_argument("--type", required=True, choices=tuple(kind.value for kind in TaskType))
     task_create.add_argument("--title", required=True)
     task_create.add_argument("--description", default="")
     task_create.add_argument("--body-file")
     task_create.add_argument("--ref", default="")
-    task_create.add_argument("--state", choices=("issues", "ready"), default="ready")
+    task_create.add_argument("--state", choices=(CardState.ISSUES.value, CardState.READY.value), default=CardState.READY.value)
     task_create.add_argument("--blocked-by", default="")
     task_create.add_argument("--head", default="")
     task_create.add_argument("--review-head", default="")
@@ -139,9 +146,9 @@ def add_task_subcommands(subparsers) -> None:
         "--supersedes", default="", help="reference of the predecessor card a --seed-ref inherits from"
     )
     task_create.add_argument(
-        "--complexity", choices=("cheap", "standard", "hard", "frontier"), default="standard"
+        "--complexity", choices=tuple(value.value for value in TaskComplexity), default=TaskComplexity.STANDARD.value
     )
-    task_create.add_argument("--family-preference", choices=("auto", "claude", "codex"), default="auto")
+    task_create.add_argument("--family-preference", choices=tuple(value.value for value in FamilyPreference), default=FamilyPreference.AUTO.value)
     # No `choices`: `--codex-mode exec` names a launch shape the product removed, and it is
     # answered with that sentence in `_validate_codex_mode_for_create` rather than with argparse's
     # "invalid choice" over a flag whose only remaining value is the default anyway.
@@ -179,11 +186,11 @@ def add_task_subcommands(subparsers) -> None:
             command.add_argument("--kind", required=True, choices=("done", "blocked"))
             # Required with `--kind blocked`, refused with `--kind done`; the writer holds both
             # rules so the protocol is the same from a script as from the CLI.
-            command.add_argument("--classification", default="", choices=("", *_BLOCK_CLASSIFICATIONS))
+            command.add_argument("--classification", default="", choices=("", *(value.value for value in BlockClassification)))
         if name == "verdict":
             command.add_argument("--kind", required=True, choices=("green", "red"))
         if name == "decide":
-            command.add_argument("--kind", required=True, choices=("release", "rework", "reslice"))
+            command.add_argument("--kind", required=True, choices=tuple(value.value for value in TaskDecision))
             command.add_argument("--reason-file")
             command.add_argument(
                 "--protocol-prerequisite",
@@ -199,12 +206,12 @@ def add_task_subcommands(subparsers) -> None:
                 "--target",
                 dest="to",
                 required=True,
-                choices=("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"),
+                choices=tuple(state.value for state in CardState),
             )
             command.add_argument("--reason-file")
             # A card leaves Assessment on a decision somebody recorded with `task decide`, and
             # the move has to name it: the writer checks it against the card's audit.
-            command.add_argument("--decision", default="", choices=("", "release", "rework", "reslice"))
+            command.add_argument("--decision", default="", choices=("", *(value.value for value in TaskDecision)))
             _add_sprint_override_args(command)
         if name == "archive":
             command.add_argument("--reason-file")

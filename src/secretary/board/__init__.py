@@ -48,6 +48,16 @@ from secretary.board.models import (
     SprintState,
 )
 from secretary.board.roles import Role
+from secretary.board.task_routing import (
+    BlockClassification,
+    FamilyPreference,
+    RoutingPhase,
+    TaskComplexity,
+    TaskDecision,
+    TaskMetadata,
+    TaskRouting,
+    TaskType,
+)
 from secretary.board.transitions import (
     TRANSITIONS,
     BoardProtocolError,
@@ -72,6 +82,7 @@ __all__ = [
     "AnalyticsOutcomeConflict",
     "AttemptOutcomeOccurrence",
     "AttemptUsageOccurrence",
+    "BlockClassification",
     "BoardEntity",
     "BoardEventCanon",
     "BoardEventPending",
@@ -86,6 +97,7 @@ __all__ = [
     "Event",
     "EventKind",
     "FakeBoardHost",
+    "FamilyPreference",
     "InvalidTransition",
     "Issue",
     "IssueCloseReason",
@@ -101,9 +113,15 @@ __all__ = [
     "RelatedRefs",
     "Replace",
     "Role",
+    "RoutingPhase",
     "Sprint",
     "SprintState",
     "SprintSupplement",
+    "TaskComplexity",
+    "TaskDecision",
+    "TaskMetadata",
+    "TaskRouting",
+    "TaskType",
     "TransitionRequest",
     "card_transition",
     "transition",

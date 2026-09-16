@@ -655,9 +655,9 @@ an Alembic revision shipped with the code that emits the new value.
 | `issues.close_reason` | `resolved`, `invalid`, `duplicate`, `wont_do` | `product_issues.ISSUE_CLOSE_REASONS` |
 | `sprints.status` | `open`, `closed`, `stopped` | `SprintState` |
 | `tasks.state` | the seven card states | `CardState` |
-| `tasks.task_type` | `code`, `research`, or NULL | `tasks._TASK_TYPES` |
-| `tasks.complexity` | `cheap`, `standard`, `hard`, `frontier` | `tasks._COMPLEXITIES` |
-| `tasks.family_preference` | `auto`, `claude`, `codex` | `tasks._FAMILY_PREFERENCES` |
+| `tasks.task_type` | `code`, `research`, or NULL | `board.task_routing.TaskType` |
+| `tasks.complexity` | `cheap`, `standard`, `hard`, `frontier` | `board.task_routing.TaskComplexity` |
+| `tasks.family_preference` | `auto`, `claude`, `codex` | `board.task_routing.FamilyPreference` |
 | `tasks.codex_launch_mode` | `tui` | `tasks._CODEX_LAUNCH_MODES` ← `head/command.py:CODEX_LAUNCH_MODES` |
 | `sprint_budget_events.event_type` | six charged types + `infrastructure_blocked` | `sprints.BUDGET_RECORDED_EVENT_TYPES` |
 | `sprint_decisions.verdict` | per subject kind | `sprint_close.ISSUE_VERDICTS`, `CARD_DISPOSITIONS` |
