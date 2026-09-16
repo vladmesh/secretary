@@ -1,0 +1,45 @@
+name: A09 compatibility fix
+
+on:
+  push:
+    branches:
+      - astra-a09-a11-sprint-read-model
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: astra-a09-a11-sprint-read-model
+      - name: Restore legacy sprint facade exports
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/secretary/sprints.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''    BUDGET_EVENT_TYPES,\n    BUDGET_RECORDED_EVENT_TYPES,\n    BUDGET_UNCHARGED_FIELD,\n'''
+          new = '''    BUDGET_EVENT_TYPES,\n    BUDGET_RECORDED_EVENT_TYPES,\n    BUDGET_UNCHARGED_EVENT_TYPES,\n    BUDGET_UNCHARGED_FIELD,\n    BUDGET_UNCHARGED_INFRASTRUCTURE,\n'''
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('expected sprint_read import block not found')
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          git diff --check
+          git diff -- src/secretary/sprints.py
+      - name: Commit compatibility fix
+        run: |
+          if git diff --quiet -- src/secretary/sprints.py; then
+            echo 'No compatibility change needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/secretary/sprints.py
+          git commit -m 'fix: preserve sprint budget compatibility exports'
+          git push origin HEAD:astra-a09-a11-sprint-read-model
