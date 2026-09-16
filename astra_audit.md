@@ -46,11 +46,12 @@ Most technical debt is caused by data crossing between those generations through
 - ✅ **A05 completed in PR #438:** introduced canonical `PauseMode(StrEnum)` plus typed `PauseState`, `AutoResumeStatus`, and `LegacyPauseMirror` document contracts around the dispatcher pause state. The `soft`/`hard` boundary aliases, persisted JSON keys/values, corrupt-file freeze behavior, and auto-resume semantics remain unchanged; `secretary.dispatcher_pause` is now part of the incremental mypy gate.
 - ✅ **A06 completed in PR #437:** added canonical `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s to the normalized board model. `Issue` now stores typed optional vocabulary values while accepting the existing string spellings at construction boundaries; persisted/CLI/Kanboard/PostgreSQL values remain unchanged. The staged Kanboard `pending/pending` recovery shape normalizes to absent typed metadata instead of expanding the durable vocabulary.
 - ✅ **A07 completed across PR #443 and PR #444:** #443 introduced the canonical product-side `Role(StrEnum)`, typed role subsets, and `Role`-keyed card transitions; #444 made `Actor.role` carry `Role`, normalized TaskWriter role strings at the boundary, removed the duplicate task-side role registries, derived CLI/importer role choices from the canonical vocabulary, and replaced the temporary drift ratchet with boundary tests. Persisted/event/CLI spellings remain string-compatible. The separate `triggered_agents.runtime.role_env` registry remains intentionally owned by the later A19 namespace migration rather than by A07.
+- ✅ **A08 completed in PR #445:** introduced canonical `TaskType`, `TaskComplexity`, `FamilyPreference`, `RoutingPhase`, `BlockClassification`, and `TaskDecision` `StrEnum`s plus immutable typed `TaskRouting` / `TaskMetadata` values. Task reading, create/report/decision/routing validation, CLI choices, restore, and the board importer now consume the canonical vocabulary while projecting the same strings at Kanboard/PostgreSQL/CLI/document boundaries. The A09 private codec aliases remain only as compatibility surfaces, and `secretary.board.task_routing` is now in the incremental mypy gate.
 - 🟡 **A09 partially completed in PR #442:** centralized the task-side Kanboard wire-format constants and pure normalizers in `secretary.board.legacy_codec`. `tasks.py`, restore, and the board importer now share the same parser objects, and restore's duplicate `_enum_or_default` is gone. The sprint-specific `_budget`, `_resume`, `_source_audit`, and `_json_list` imports remain as the deliberate A09 tail and should move together with the sprint-model work rather than through a riskier mechanical extraction.
 - ✅ **A10 completed in PR #441:** renamed the routing-journal domain value to canonical `RoutingHeadSnapshot`, kept the runtime lifecycle value as `HeadRun`, and added a typed launch boundary without changing routing-event JSON or persisted dispatcher state. Historical routing names and the dict adapter remain compatibility surfaces until the adjacent package/state migrations remove them.
 - ✅ **A16 completed in PR #440:** made `SECRETARY_CARD_BACKEND` mandatory for live backend selection. Missing, empty, and unknown selectors now fail closed; explicit `kanboard` remains the rollback path, the test suite pins its backend explicitly, and status represents the absence of a product default as `null`.
 
-PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, PR #443, and PR #444 all passed their full pull-request CI workflow and were merged into `main`. PR #443 passed typecheck and all seven test shards on exact head SHA `6ddbfb3ea8ee5d49b68468f0f8a205533f69e11c`; PR #444 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `1d92ab9533ec3b2abe66003303c34d82c46ba7eb` before squash-merge.
+PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, PR #443, PR #444, and PR #445 all passed their full pull-request CI workflow and were merged into `main`. PR #443 passed typecheck and all seven test shards on exact head SHA `6ddbfb3ea8ee5d49b68468f0f8a205533f69e11c`; PR #444 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `1d92ab9533ec3b2abe66003303c34d82c46ba7eb`; PR #445 passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate on head SHA `840fc38266d118d570f357036d2406f81526ae3e` before squash-merge.
 
 ## Findings
 
@@ -63,7 +64,7 @@ PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, PR #442, PR #443,
 | A05 | ✅ Type pause mode and pause-state documents — **completed in #438** | **2** |
 | A06 | ✅ Type Product/Issue kind, priority and close-reason vocabularies — **completed in #437** | **2** |
 | A07 | ✅ Centralize the product role vocabulary in one `Role(StrEnum)` — **completed across #443 and #444; legacy runtime registry belongs to A19** | **3** |
-| A08 | Type task routing metadata (`task_type`, complexity, family preference, phases, decisions) | **3** |
+| A08 | ✅ Type task routing metadata (`task_type`, complexity, family preference, phases, decisions) — **completed in #445** | **3** |
 | A09 | 🟡 Stop importing private task/sprint normalizers across feature boundaries — **task-side completed in #442; sprint-side remains** | **3** |
 | A10 | ✅ Rename/consolidate the two different `HeadRun` concepts — **completed in #441** | **3** |
 | A11 | Migrate legacy sprint dicts/status strings onto the normalized sprint model | **3** |
@@ -174,21 +175,13 @@ The duplicated sets are already drifting into multiple partially-overlapping sub
 
 `triggered_agents.runtime.role_env.BOARD_ROLES` deliberately remains separate: `triggered_agents` is a legacy namespace with a dependency-direction test preventing new imports back into `secretary`. Moving that runtime-owned registry is part of A19, when role/runtime ownership itself leaves the legacy namespace; it is no longer an A07 tail.
 
-### A08. Type task routing metadata — complexity 3
+### A08. Type task routing metadata — complexity 3 — completed
 
-`tasks.py` contains many manually maintained string vocabularies:
+At audit time, `tasks.py` manually maintained `_TASK_TYPES`, `_COMPLEXITIES`, `_FAMILY_PREFERENCES`, `_ROUTING_PHASES`, `_BLOCK_CLASSIFICATIONS`, `_DECISIONS` / `_DECISION_TARGETS`, and editable/active state sets. The same concepts were normalized independently across task reads/writes, restore, the importer, CLI choices, and routing/decision paths. PR #442 had already centralized the low-level legacy fallback parser, but the domain vocabulary itself was still represented as strings.
 
-- `_TASK_TYPES`;
-- `_COMPLEXITIES`;
-- `_FAMILY_PREFERENCES`;
-- `_ROUTING_PHASES`;
-- `_BLOCK_CLASSIFICATIONS`;
-- `_DECISIONS` / `_DECISION_TARGETS`;
-- editable/active state sets.
+**Implemented in PR #445:** added `secretary.board.task_routing` as the canonical typed boundary, with `TaskType`, `TaskComplexity`, `FamilyPreference`, `RoutingPhase`, `BlockClassification`, and `TaskDecision` `StrEnum`s, typed `CardState` sets/decision targets, and frozen `TaskRouting` / `TaskMetadata` values. `TaskReader` now converts legacy metadata into those values once; task create/report/decision/routing validation and CLI choices consume the same vocabularies; restore uses the same typed compatibility boundary; and the board importer no longer imports the three private routing registries from the large `tasks.py` façade.
 
-The same concepts are normalized in `restore.py`, SQL adapters, the importer, dispatcher routing, and JSON documents. At audit time `_enum_or_default` was duplicated in `tasks.py` and `restore.py`; PR #442 centralized that low-level fallback parser, but the routing vocabularies themselves are still untyped.
-
-**Remaining fix:** define small `StrEnum`s and a typed `TaskRouting` / `TaskMetadata` value. Convert Kanboard metadata strings at the adapter boundary. The shared legacy fallback parser is already centralized by #442; this item now owns the typed domain vocabulary/value migration.
+The external contract is intentionally unchanged: persisted Kanboard/PostgreSQL values, CLI spellings, public task documents, SQL CHECK vocabularies, and routing-event strings are the same. Historical `_enum_or_default` / `_enum_or_none` private aliases remain where A09 compatibility tests require them, rather than broadening A08 into an unrelated compatibility cleanup. `secretary.board.task_routing` was added to the incremental mypy gate, focused tests pin the enum/default/document behavior and absence of the duplicate task-side registries, and the full PR CI passed on exact head SHA `840fc38266d118d570f357036d2406f81526ae3e` before squash-merge.
 
 ### A09. Stop cross-package imports of private normalizers — complexity 3 — partially completed
 
