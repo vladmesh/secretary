@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from secretary.board.attempt_outcome import (
+    AttemptOutcomeCompleteness,
+    AttemptOutcomePayload,
+    AttemptOutcomeUsageCompleteness,
+)
 from secretary.board.models import EntityKind, Event, EventKind
 from secretary.checkpoint import AnalyticsCheckpoint, verify_analytics_checkpoint
 
@@ -192,8 +197,8 @@ def _outcome_rows(
         outcome = recorded.event
         if outcome.kind is not EventKind.ATTEMPT_OUTCOME:
             continue
-        data = outcome.data
-        key = (outcome.ref, str(data["attempt_id"]), int(data["report_generation"]))
+        payload = AttemptOutcomePayload.from_data(outcome.data)
+        key = payload.natural_key(outcome.ref)
         existing = natural_keys.get(key)
         if existing is not None:
             _fail(
@@ -202,7 +207,7 @@ def _outcome_rows(
                 f"outcome key {key!r} conflicts with record {existing.number}",
             )
         natural_keys[key] = recorded
-        sprint_ref = data["sprint_ref"]
+        sprint_ref = payload.sprint_ref
         if sprint_ref is not None and sprint_ref not in sprints:
             _fail("analytics_dangling_sprint_ref", recorded, f"outcome sprint {sprint_ref!r} is absent")
         # Event.from_record already establishes the event's Card subject. Keep
@@ -210,41 +215,44 @@ def _outcome_rows(
         # projection join into a live-card lookup.
         if outcome.ref not in cards:
             _fail("analytics_dangling_card_ref", recorded, f"outcome card {outcome.ref!r} is absent")
-        refs = data["source_event_ids"]
-        _validate_non_usage_sources(recorded, refs, events)
-        worker = _usage_source(recorded, "worker", refs["worker_usage"], events)
-        review = _usage_source(recorded, "reviewer", refs["review_usage"], events)
-        lineage = _lineage_completeness(data)
+        refs = payload.source_event_ids
+        _validate_non_usage_sources(recorded, payload, events)
+        worker = _usage_source(recorded, payload, "worker", refs.worker_usage, events)
+        review = _usage_source(recorded, payload, "reviewer", refs.review_usage, events)
+        lineage = _lineage_completeness(payload)
         rows.append(
             {
                 "projection_version": ANALYTICS_PROJECTION_VERSION,
                 "checkpoint_id": checkpoint.checkpoint_id,
                 "card_ref": outcome.ref,
-                "attempt_id": data["attempt_id"],
-                "attempt": data["attempt"],
-                "report_generation": data["report_generation"],
+                "attempt_id": payload.attempt_id,
+                "attempt": payload.attempt,
+                "report_generation": payload.report_generation,
                 "sprint_ref": sprint_ref,
-                "specification_revision": data["specification_revision"],
-                "terminal_state": data["terminal_state"],
-                "verdict": data["verdict"],
-                "disposition": data["disposition"],
-                "blocked_reason": data["blocked_reason"],
-                "source_event_ids": dict(refs),
-                "usage_completeness": dict(data["usage_completeness"]),
+                "specification_revision": payload.specification_revision,
+                "terminal_state": payload.terminal_state.value,
+                "verdict": payload.verdict.value,
+                "disposition": payload.disposition,
+                "blocked_reason": payload.blocked_reason,
+                "source_event_ids": refs.to_data(),
+                "usage_completeness": payload.usage_completeness.to_data(),
                 "lineage_completeness": lineage,
                 "worker_usage": worker,
                 "review_usage": review,
             }
         )
-        _validate_usage_completeness(recorded, data["usage_completeness"], worker, review)
+        _validate_usage_completeness(recorded, payload.usage_completeness, worker, review)
     return rows
 
 
 def _validate_non_usage_sources(
-    outcome: _RecordedEvent, refs: dict[str, Any], events: dict[str, _RecordedEvent]
+    outcome: _RecordedEvent,
+    payload: AttemptOutcomePayload,
+    events: dict[str, _RecordedEvent],
 ) -> None:
+    refs = payload.source_event_ids
     for name, expected_kind in _NON_USAGE_SOURCE_KINDS.items():
-        event_id = refs[name]
+        event_id = getattr(refs, name)
         if event_id is None:
             continue
         source = events.get(event_id)
@@ -258,14 +266,14 @@ def _validate_non_usage_sources(
                 outcome,
                 f"{name} does not name this card's {expected_kind.value}",
             )
-        if outcome.event.data["version"] >= 2:
-            if source.event.data.get("specification_revision") != outcome.event.data["specification_revision"]:
+        if payload.version >= 2:
+            if source.event.data.get("specification_revision") != payload.specification_revision:
                 _fail(
                     "analytics_incompatible_lineage_specification",
                     outcome,
                     f"{name} does not bind this outcome specification revision",
                 )
-    effect_id = refs["effect"]
+    effect_id = refs.effect
     if effect_id is None:
         return
     effect = events.get(effect_id)
@@ -279,10 +287,14 @@ def _validate_non_usage_sources(
         _fail(
             "analytics_incompatible_source_event_ref", outcome, "effect does not name this card's transition"
         )
-    if outcome.event.data["version"] >= 2:
+    if payload.version >= 2:
         owed = effect.event.data.get("attempt_outcome_owed")
-        key = ("attempt_id", "attempt", "report_generation")
-        if not isinstance(owed, dict) or any(owed.get(name) != outcome.event.data[name] for name in key):
+        expected = {
+            "attempt_id": payload.attempt_id,
+            "attempt": payload.attempt,
+            "report_generation": payload.report_generation,
+        }
+        if not isinstance(owed, dict) or any(owed.get(name) != value for name, value in expected.items()):
             _fail(
                 "analytics_incompatible_lineage_effect",
                 outcome,
@@ -292,6 +304,7 @@ def _validate_non_usage_sources(
 
 def _usage_source(
     outcome: _RecordedEvent,
+    payload: AttemptOutcomePayload,
     role: str,
     event_id: str | None,
     events: dict[str, _RecordedEvent],
@@ -310,9 +323,9 @@ def _usage_source(
     expected_phase = "worker" if role == "worker" else "review"
     same_round = (
         event.ref == outcome.event.ref
-        and data.get("attempt_id") == outcome.event.data["attempt_id"]
-        and data.get("attempt") == outcome.event.data["attempt"]
-        and data.get("report_generation") == outcome.event.data["report_generation"]
+        and data.get("attempt_id") == payload.attempt_id
+        and data.get("attempt") == payload.attempt
+        and data.get("report_generation") == payload.report_generation
     )
     if (
         event.kind is not EventKind.ATTEMPT_USAGE
@@ -331,37 +344,32 @@ def _usage_source(
 
 def _validate_usage_completeness(
     outcome: _RecordedEvent,
-    completeness: dict[str, Any],
+    completeness: AttemptOutcomeUsageCompleteness,
     worker: dict[str, Any] | None,
     review: dict[str, Any] | None,
 ) -> None:
     for role, usage in (("worker", worker), ("review", review)):
-        state = completeness[role]
-        if state in {"missing", "legacy"}:
+        state = getattr(completeness, role)
+        if state in {AttemptOutcomeCompleteness.MISSING, AttemptOutcomeCompleteness.LEGACY}:
             continue
         if usage is None:  # Defensive: typed outcome validation should make this unreachable.
-            _fail("analytics_incompatible_usage_join", outcome, f"{role} {state} usage has no event")
-        collected = usage["outcome"] == "collected"
-        if (state == "collected") != collected:
             _fail(
                 "analytics_incompatible_usage_join",
                 outcome,
-                f"{role} completeness {state!r} disagrees with usage outcome {usage['outcome']!r}",
+                f"{role} {state.value} usage has no event",
+            )
+        collected = usage["outcome"] == "collected"
+        if (state is AttemptOutcomeCompleteness.COLLECTED) != collected:
+            _fail(
+                "analytics_incompatible_usage_join",
+                outcome,
+                f"{role} completeness {state.value!r} disagrees with usage outcome {usage['outcome']!r}",
             )
 
 
-def _lineage_completeness(data: dict[str, Any]) -> dict[str, Any]:
+def _lineage_completeness(payload: AttemptOutcomePayload) -> dict[str, Any]:
     """Expose v2 forward-lineage gaps independently from provider usage."""
-    if data["version"] == 1:
-        return {"complete": True, "missing": []}
-    required = data["lineage_required"]
-    refs = data["source_event_ids"]
-    missing = [
-        name
-        for name, required_now in required.items()
-        if required_now
-        and (data["specification_revision"] if name == "specification_revision" else refs[name]) is None
-    ]
+    missing = list(payload.lineage_missing())
     return {"complete": not missing, "missing": missing}
 
 
