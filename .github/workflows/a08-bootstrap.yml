@@ -1,0 +1,76 @@
+name: a08-bootstrap
+
+on:
+  push:
+    branches: [refactor/a08-task-routing]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/a08-task-routing
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Skip an already applied bootstrap
+        id: applied
+        run: |
+          if [ -f .a08-bootstrap-applied ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Apply A08 source refactor
+        if: steps.applied.outputs.skip != 'true'
+        run: python3 scripts/a08_bootstrap.py
+      - name: Install checks
+        if: steps.applied.outputs.skip != 'true'
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -e '.[dev,typecheck]'
+      - name: Normalize changed Python
+        if: steps.applied.outputs.skip != 'true'
+        run: |
+          python3 -m ruff check --fix --select I001 \
+            src/secretary/board/task_routing.py \
+            src/secretary/board/legacy_codec.py \
+            src/secretary/board/__init__.py \
+            src/secretary/tasks.py \
+            src/secretary/task_commands.py \
+            src/secretary/board/import_board.py \
+            src/secretary/restore.py \
+            tests/test_task_routing.py
+          python3 -m ruff format \
+            src/secretary/board/task_routing.py \
+            src/secretary/board/legacy_codec.py \
+            src/secretary/board/__init__.py \
+            src/secretary/tasks.py \
+            src/secretary/task_commands.py \
+            src/secretary/board/import_board.py \
+            src/secretary/restore.py \
+            tests/test_task_routing.py
+      - name: Check A08
+        if: steps.applied.outputs.skip != 'true'
+        run: |
+          python3 -m mypy
+          python3 -m unittest \
+            tests.test_task_routing \
+            tests.test_task_commands \
+            tests.test_tasks \
+            tests.test_board_import_mapping
+          git diff --check
+      - name: Commit A08
+        if: steps.applied.outputs.skip != 'true'
+        run: |
+          touch .a08-bootstrap-applied
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'refactor: type task routing metadata [a08-bootstrap]'
+          git push origin HEAD:refactor/a08-task-routing
