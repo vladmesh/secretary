@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from secretary.board.attempt_outcome import AttemptOutcomePayload
 from secretary.board.attempt_usage import AttemptUsagePayload
 from secretary.board.models import Event, EventKind
 
@@ -42,6 +43,12 @@ class AttemptOutcomeOccurrence:
     request_id: str
     event: Event
     pending: bool
+    _payload: AttemptOutcomePayload | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def payload(self) -> AttemptOutcomePayload:
+        """The closed outcome data normalized once by the canon, or on compatibility construction."""
+        return self._payload or AttemptOutcomePayload.from_data(self.event.data)
 
 
 @contextlib.contextmanager
@@ -261,39 +268,54 @@ class BoardEventCanon:
         )
 
     def attempt_outcome_occurrences(self, *, ref: str = "") -> Sequence[AttemptOutcomeOccurrence]:
-        """Return the one staged-or-committed outcome for each v1 natural key.
+        """Return the one staged-or-committed outcome for each released natural key.
 
         Unlike a request-id retry, the ledger identity is independent of the
-        writer request: `(card_ref, attempt_id, report_generation)`.  A second
+        writer request: `(card_ref, attempt_id, report_generation)`. A second
         owner is therefore an analytics diagnostic, even if it chose another
-        request id.  No lifecycle operation is performed here.
+        request id. Every occurrence crosses the typed payload boundary once.
         """
         records = self.audit._occurrence_projection_records()
-        by_key: dict[tuple[str, str, int], tuple[str, Event, bool]] = {}
+        by_key: dict[
+            tuple[str, str, int], tuple[str, Event, AttemptOutcomePayload, bool]
+        ] = {}
         order: list[tuple[str, str, int]] = []
         for record, pending in records:
             if record.get("kind") != EventKind.ATTEMPT_OUTCOME.value:
                 continue
             event = self._typed(record)
+            payload = AttemptOutcomePayload.from_data(event.data)
             if ref and event.ref != ref:
                 continue
             request_id = record.get("request_id")
             if not isinstance(request_id, str) or not request_id:
                 raise AnalyticsOutcomeConflict("attempt outcome occurrence has no request id")
-            key = (event.ref, str(event.data["attempt_id"]), int(event.data["report_generation"]))
+            key = payload.natural_key(event.ref)
             previous = by_key.get(key)
             if previous is None:
-                by_key[key] = (request_id, event, pending)
+                by_key[key] = (request_id, event, payload, pending)
                 order.append(key)
                 continue
-            previous_request, previous_event, previous_pending = previous
-            if previous_request != request_id or previous_event != event:
+            previous_request, previous_event, previous_payload, previous_pending = previous
+            if (
+                previous_request != request_id
+                or previous_event != event
+                or previous_payload != payload
+            ):
                 raise AnalyticsOutcomeConflict(
                     f"attempt outcome natural key {key!r} has conflicting payloads"
                 )
-            by_key[key] = (request_id, previous_event, previous_pending and pending)
+            by_key[key] = (
+                request_id,
+                previous_event,
+                previous_payload,
+                previous_pending and pending,
+            )
         return tuple(
-            AttemptOutcomeOccurrence(by_key[key][0], by_key[key][1], by_key[key][2]) for key in order
+            AttemptOutcomeOccurrence(
+                by_key[key][0], by_key[key][1], by_key[key][3], by_key[key][2]
+            )
+            for key in order
         )
 
     def attempt_outcome_effects(self) -> Sequence[Event]:
@@ -310,9 +332,8 @@ class BoardEventCanon:
             if pending or record.get("kind") != EventKind.ATTEMPT_OUTCOME.value:
                 continue
             event = self._typed(record)
-            committed_keys.add(
-                (event.ref, str(event.data["attempt_id"]), int(event.data["report_generation"]))
-            )
+            payload = AttemptOutcomePayload.from_data(event.data)
+            committed_keys.add(payload.natural_key(event.ref))
 
         effects: list[Event] = []
         seen: set[str] = set()
