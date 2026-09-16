@@ -30,7 +30,7 @@ jobs:
         env:
           PYTHONPATH: src
         run: |
-          python3 -m unittest tests.test_sprint_read
+          python3 tests/test_sprint_read.py
           python3 -m py_compile src/secretary/board/sprint_read.py src/secretary/sprints.py src/secretary/board/import_board.py
           git diff --check
       - name: Remove bootstrap machinery and commit result
