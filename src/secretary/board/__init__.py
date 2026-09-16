@@ -47,6 +47,7 @@ from secretary.board.models import (
     Sprint,
     SprintState,
 )
+from secretary.board.roles import Role
 from secretary.board.transitions import (
     TRANSITIONS,
     BoardProtocolError,
@@ -99,6 +100,7 @@ __all__ = [
     "ProductState",
     "RelatedRefs",
     "Replace",
+    "Role",
     "Sprint",
     "SprintState",
     "SprintSupplement",

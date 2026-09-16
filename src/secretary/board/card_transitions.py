@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TypeAlias
 
 from secretary.board.models import CardState, EntityKind
+from secretary.board.roles import Role
 from secretary.board.transitions import BoardProtocolError, Transition, transition_for
 
 CardTransitionKey: TypeAlias = tuple[CardState, CardState]
@@ -22,11 +23,11 @@ _CARD_STATES = tuple(CardState)
 
 # This is the compatibility contract observed from TaskWriter's former matrix.  It is the one
 # role authority registry; lifecycle declarations remain in ``board.transitions``.
-CARD_TRANSITIONS: dict[str, frozenset[CardTransitionKey]] = {
-    "po": frozenset(
+CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
+    Role.PO: frozenset(
         (source, target) for source in _CARD_STATES for target in _CARD_STATES if source != target
     ),
-    "dispatcher": frozenset(
+    Role.DISPATCHER: frozenset(
         {
             # Claim is a dispatcher-owned Ready-to-In progress lifecycle edge.  It
             # used to bypass this registry through TaskWriter's raw Kanboard move.
@@ -43,16 +44,16 @@ CARD_TRANSITIONS: dict[str, frozenset[CardTransitionKey]] = {
             (CardState.ASSESSMENT, CardState.BLOCKED),
         }
     ),
-    "observer": frozenset(
+    Role.OBSERVER: frozenset(
         (source, target)
         for source in _CARD_STATES
         for target in _CARD_STATES
         if source != target and source is not CardState.ASSESSMENT
     ),
-    "worker": frozenset(),
-    "reviewer": frozenset(),
-    "retro": frozenset(),
-    "steward": frozenset(
+    Role.WORKER: frozenset(),
+    Role.REVIEWER: frozenset(),
+    Role.RETRO: frozenset(),
+    Role.STEWARD: frozenset(
         {
             (CardState.BLOCKED, CardState.READY),
             (CardState.BLOCKED, CardState.DONE),
@@ -66,14 +67,15 @@ CARD_TRANSITIONS: dict[str, frozenset[CardTransitionKey]] = {
 }
 
 
-def card_transition(role: str, source: CardState | str, target: CardState | str) -> Transition:
+def card_transition(role: Role | str, source: CardState | str, target: CardState | str) -> Transition:
     """Return the declared lifecycle transition when ``role`` owns the Card edge."""
     try:
+        normalized_role = Role(role)
         source_state = CardState(source)
         target_state = CardState(target)
     except ValueError as exc:
         raise CardTransitionForbidden(f"{role} cannot transition a Card from {source} to {target}") from exc
-    if (source_state, target_state) not in CARD_TRANSITIONS.get(role, frozenset()):
+    if (source_state, target_state) not in CARD_TRANSITIONS.get(normalized_role, frozenset()):
         raise CardTransitionForbidden(
             f"{role} cannot transition a Card from {source_state.value} to {target_state.value}"
         )
