@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply-and-check:
-    if: ${{ github.event.head_commit.message != 'refactor: type sprint admission resources' }}
+    if: ${{ !contains(github.event.head_commit.message, 'type sprint admission resources') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
