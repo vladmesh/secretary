@@ -12,6 +12,7 @@ replacements = {
     '"    def _check_close_decisions_are_writable(\\n"': '"    def _check_close_decisions_are_writable"',
     '"\\n    def _run_close(\\n"': '"\\n    def _run_close"',
     '"    def _run_close(\\n"': '"    def _run_close"',
+    '"\\n    def _close_result(\\n"': '"\\n    def _close_result"',
     '"    def _close_result(\\n"': '"    def _close_result"',
 }
 for old, new in replacements.items():
