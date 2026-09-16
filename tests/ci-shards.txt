@@ -13,6 +13,7 @@ integration-recovery tests/test_backup.py
 integration-recovery tests/test_bulk_card_restore.py
 integration-recovery tests/test_bulk_comment_restore.py
 integration-board tests/test_board.py
+unit tests/test_board_roles.py
 integration-board tests/test_board_batch_transport.py
 integration-board tests/test_board_boot_race.py
 integration-board tests/test_board_transport.py

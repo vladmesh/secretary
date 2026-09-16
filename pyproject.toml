@@ -58,6 +58,8 @@ mypy_path = "src"
 # their existing debt is not promoted into this first gate; the checked set grows deliberately.
 files = [
     "src/secretary/board/models.py",
+    "src/secretary/board/roles.py",
+    "src/secretary/board/card_transitions.py",
     "src/secretary/board/host.py",
     "src/secretary/board/backend.py",
     "src/secretary/dispatch/runtime_provenance.py",
