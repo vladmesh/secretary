@@ -1,0 +1,43 @@
+name: A11 typed sprint admission patch
+
+on:
+  push:
+    branches:
+      - astra-a11-sprint-admission-index
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-check:
+    if: ${{ github.event.head_commit.message != 'refactor: type sprint admission resources' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install focused tooling
+        run: python -m pip install -e '.[dev,typecheck]'
+      - name: Apply typed admission patch
+        run: python .github/a11_apply.py
+      - name: Format and lint
+        run: |
+          python -m ruff format src/secretary/board/sprint_admission.py src/secretary/sprints.py tests/test_sprint_admission.py
+          python -m ruff check src/secretary/board/sprint_admission.py src/secretary/sprints.py tests/test_sprint_admission.py
+          git diff --check
+      - name: Typecheck
+        run: python -m mypy
+      - name: Focused tests
+        run: |
+          python -m unittest discover -s tests -p 'test_sprint_admission.py'
+          python -m unittest discover -s tests -p 'test_sprints.py'
+      - name: Commit checked tree
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add pyproject.toml src/secretary/board/sprint_admission.py src/secretary/sprints.py tests/test_sprint_admission.py
+          git commit -m 'refactor: type sprint admission resources'
+          git push origin HEAD:astra-a11-sprint-admission-index
