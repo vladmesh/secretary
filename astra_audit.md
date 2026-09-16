@@ -45,10 +45,11 @@ Most technical debt is caused by data crossing between those generations through
 - ✅ **A04 completed in PR #436:** introduced typed `BoardBackend(StrEnum)` and `BoardCapability(StrEnum)` vocabularies, kept the old public constants as string-compatible enum-member aliases, typed the backend parser/cache and capability set, and added `secretary.board.backend` to the incremental mypy gate without changing the environment/storage/serialized string contract.
 - ✅ **A05 completed in PR #438:** introduced canonical `PauseMode(StrEnum)` plus typed `PauseState`, `AutoResumeStatus`, and `LegacyPauseMirror` document contracts around the dispatcher pause state. The `soft`/`hard` boundary aliases, persisted JSON keys/values, corrupt-file freeze behavior, and auto-resume semantics remain unchanged; `secretary.dispatcher_pause` is now part of the incremental mypy gate.
 - ✅ **A06 completed in PR #437:** added canonical `IssueKind`, `IssuePriority`, and `IssueCloseReason` `StrEnum`s to the normalized board model. `Issue` now stores typed optional vocabulary values while accepting the existing string spellings at construction boundaries; persisted/CLI/Kanboard/PostgreSQL values remain unchanged. The staged Kanboard `pending/pending` recovery shape normalizes to absent typed metadata instead of expanding the durable vocabulary.
+- 🟡 **A09 partially completed in PR #442:** centralized the task-side Kanboard wire-format constants and pure normalizers in `secretary.board.legacy_codec`. `tasks.py`, restore, and the board importer now share the same parser objects, and restore's duplicate `_enum_or_default` is gone. The sprint-specific `_budget`, `_resume`, `_source_audit`, and `_json_list` imports remain as the deliberate A09 tail and should move together with the sprint-model work rather than through a riskier mechanical extraction.
 - ✅ **A10 completed in PR #441:** renamed the routing-journal domain value to canonical `RoutingHeadSnapshot`, kept the runtime lifecycle value as `HeadRun`, and added a typed launch boundary without changing routing-event JSON or persisted dispatcher state. Historical routing names and the dict adapter remain compatibility surfaces until the adjacent package/state migrations remove them.
 - ✅ **A16 completed in PR #440:** made `SECRETARY_CARD_BACKEND` mandatory for live backend selection. Missing, empty, and unknown selectors now fail closed; explicit `kanboard` remains the rollback path, the test suite pins its backend explicitly, and status represents the absence of a product default as `null`.
 
-PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, and PR #441 all passed the full CI workflow and were merged into `main`. PR #438, PR #440, and PR #441 each passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate before merge.
+PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, PR #441, and PR #442 all passed the full CI workflow and were merged into `main`. PR #438, PR #440, PR #441, and PR #442 each passed typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate before merge.
 
 ## Findings
 
@@ -62,7 +63,7 @@ PR #434, PR #435, PR #436, PR #437, PR #438, PR #440, and PR #441 all passed the
 | A06 | ✅ Type Product/Issue kind, priority and close-reason vocabularies — **completed in #437** | **2** |
 | A07 | Centralize the role vocabulary in one `Role(StrEnum)` | **3** |
 | A08 | Type task routing metadata (`task_type`, complexity, family preference, phases, decisions) | **3** |
-| A09 | Stop importing private task/sprint normalizers across feature boundaries | **3** |
+| A09 | 🟡 Stop importing private task/sprint normalizers across feature boundaries — **task-side completed in #442; sprint-side remains** | **3** |
 | A10 | ✅ Rename/consolidate the two different `HeadRun` concepts — **completed in #441** | **3** |
 | A11 | Migrate legacy sprint dicts/status strings onto the normalized sprint model | **3** |
 | A12 | Replace closed event payload dictionaries with typed payload objects | **4** |
@@ -182,19 +183,21 @@ This is a high-value cleanup because it removes both duplication and an entire c
 - `_DECISIONS` / `_DECISION_TARGETS`;
 - editable/active state sets.
 
-The same concepts are normalized in `restore.py`, SQL adapters, the importer, dispatcher routing, and JSON documents. `_enum_or_default` is duplicated in `tasks.py` and `restore.py`.
+The same concepts are normalized in `restore.py`, SQL adapters, the importer, dispatcher routing, and JSON documents. At audit time `_enum_or_default` was duplicated in `tasks.py` and `restore.py`; PR #442 centralized that low-level fallback parser, but the routing vocabularies themselves are still untyped.
 
-**Fix:** define small `StrEnum`s and a typed `TaskRouting` / `TaskMetadata` value. Convert Kanboard metadata strings at the adapter boundary. Restoration should use the same parser, not a second `_enum_or_default` implementation.
+**Remaining fix:** define small `StrEnum`s and a typed `TaskRouting` / `TaskMetadata` value. Convert Kanboard metadata strings at the adapter boundary. The shared legacy fallback parser is already centralized by #442; this item now owns the typed domain vocabulary/value migration.
 
-### A09. Stop cross-package imports of private normalizers — complexity 3
+### A09. Stop cross-package imports of private normalizers — complexity 3 — partially completed
 
-`board/import_board.py` explicitly imports private implementation details from `secretary.tasks` and `secretary.sprints`, including `_STATE_BY_COLUMN`, `_KNOWN_METADATA`, `_enum_or_default`, `_positive_int`, `_split_heads`, `_budget`, `_resume`, `_source_audit`, and `_json_list`.
+At audit time, `board/import_board.py` imported private implementation details from both `secretary.tasks` and `secretary.sprints`, including task-side `_STATE_BY_COLUMN`, `_KNOWN_METADATA`, `_enum_or_default`, `_positive_int`, `_split_heads` and sprint-side `_budget`, `_resume`, `_source_audit`, and `_json_list`.
 
-This avoids literal code duplication, but replaces it with **semantic coupling to private internals**. Refactoring a reader now risks silently changing migration semantics.
+That avoided literal duplication, but made migration semantics depend on private reader internals.
 
-**Fix:** extract the shared legacy wire-format parsers into an explicit module such as `secretary.board.legacy_codec` / `secretary.tasks.legacy_codec`, with public typed return values. Readers, restore, and the importer should all depend on that stable compatibility codec.
+**Implemented in PR #442 (task-side slice):** added the explicit compatibility module `secretary.board.legacy_codec` for the task column/metadata vocabularies and pure legacy task parsers. `tasks.py`, `restore.py`, and `board/import_board.py` now consume the same canonical functions; the historical private names in `tasks.py` remain compatibility aliases, so callers were not forced through an unrelated broad migration. The duplicate restore `_enum_or_default` implementation was removed. Focused tests pin the released normalization behavior and prove reader/restore/importer bind to the same codec. Full CI passed before merge: typecheck, all seven test shards, and the aggregate exact-SHA evidence/coverage gate.
 
-After Kanboard retirement, that whole codec can be removed together.
+**Remaining A09 tail:** the importer still consumes sprint-specific `_budget`, `_resume`, `_source_audit`, and `_json_list` from `secretary.sprints`. Those helpers are coupled to the larger sprint read model, so move them only when A11 introduces the typed sprint compatibility boundary (or into a dedicated sprint legacy codec as part of that work), preserving the exact old wire semantics.
+
+After Kanboard retirement, the compatibility codec can be removed together with the importer/cutover path.
 
 ### A10. Rename/consolidate the two `HeadRun` concepts — complexity 3 — completed
 
@@ -351,9 +354,9 @@ Phase 1 is complete: A01/A02 via PR #434, A03 via #435, A04 via #436, A05 via #4
 
 ### Phase 2 — collapse string/dict protocols
 
-A07, A08, A09, ~~A10~~, A11.
+A07, A08, A09 (sprint-side remainder), ~~A10~~, A11.
 
-A10 is complete via PR #441. The remaining Phase 2 work is A07, A08, A09, and A11; the goal remains one typed vocabulary per concept and one parser at each legacy boundary.
+A10 is complete via PR #441. A09's task/restore/importer slice is complete via PR #442; its remaining sprint-side private-normalizer seam should be finished together with A11. The other remaining Phase 2 work is A07 and A08. The goal remains one typed vocabulary per concept and one parser at each legacy boundary.
 
 ### Phase 3 — dispatcher typing and package boundaries
 
