@@ -24,6 +24,7 @@ jobs:
       - name: Apply typed admission patch
         run: |
           python .github/a11_apply.py
+          python .github/a11_fix.py
           python - <<'PY'
           from pathlib import Path
           path = Path('src/secretary/sprints.py')
