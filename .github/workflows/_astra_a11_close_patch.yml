@@ -18,10 +18,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Relax patch markers
+        run: python3 scripts/_astra_a11_close_patch_fix.py
       - name: Apply bounded close refactor
         run: python3 scripts/_astra_a11_close_patch.py
       - name: Remove patch scaffolding
-        run: rm scripts/_astra_a11_close_patch.py .github/workflows/_astra_a11_close_patch.yml
+        run: rm scripts/_astra_a11_close_patch.py scripts/_astra_a11_close_patch_fix.py .github/workflows/_astra_a11_close_patch.yml
       - run: python3 -m pip install --upgrade pip
       - run: python3 -m pip install -e '.[dev,typecheck,ci]'
       - name: Format and lint changed Python
