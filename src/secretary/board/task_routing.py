@@ -87,6 +87,8 @@ def _family_preference(value: Any) -> FamilyPreference:
 
 @dataclass(frozen=True, slots=True)
 class TaskRouting:
+    """Typed routing fields projected from one task's legacy metadata."""
+
     complexity: TaskComplexity = TaskComplexity.STANDARD
     family_preference: FamilyPreference = FamilyPreference.AUTO
     head_override: str | None = None
@@ -134,6 +136,8 @@ class TaskRouting:
 
 @dataclass(frozen=True, slots=True)
 class TaskMetadata:
+    """Typed task metadata rendered back to the released public document shape."""
+
     project: str
     task_type: TaskType | None
     task_type_raw: str
