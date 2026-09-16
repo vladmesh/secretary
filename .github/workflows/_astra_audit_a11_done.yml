@@ -1,0 +1,35 @@
+name: astra-audit-a11-done
+
+on:
+  push:
+    branches: [astra_audit]
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    if: ${{ !contains(github.event.head_commit.message, 'mark A11 complete after PR 449') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: astra_audit
+      - name: Update audit
+        run: python3 scripts/_astra_audit_a11_done.py
+      - name: Validate audit update
+        run: |
+          grep -F '✅ **A11 completed across PR #446, PR #447, PR #448, and PR #449:**' astra_audit.md
+          grep -F 'Phase 2 is complete:' astra_audit.md
+          grep -F '6178c4a25d040f97f207a211bddd6beef801723c' astra_audit.md
+          ! grep -F 'Remaining A11 tail' astra_audit.md
+      - name: Remove update scaffolding
+        run: rm scripts/_astra_audit_a11_done.py .github/workflows/_astra_audit_a11_done.yml
+      - name: Commit audit
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'docs: mark A11 complete after PR 449'
+          git push origin HEAD:astra_audit
