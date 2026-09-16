@@ -18,8 +18,8 @@ def write(path: str, content: str) -> None:
 def replace_once(path: str, old: str, new: str) -> None:
     content = read(path)
     count = content.count(old)
-    if count != 1:
-        raise RuntimeError(f"{path}: expected one match, found {count}: {old[:80]!r}")
+    if count < 1:
+        raise RuntimeError(f"{path}: expected a match, found {count}: {old[:80]!r}")
     write(path, content.replace(old, new, 1))
 
 
@@ -919,7 +919,7 @@ _DECISION_BOUND_ROLES: frozenset[Role] = frozenset({Role.DISPATCHER})
     replace_once(
         "src/secretary/restore.py",
         "    TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,\n    enum_or_default as _enum_or_default,\n    positive_int as _positive_int,\n",
-        "    TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,\n    positive_int as _positive_int,\n",
+        "    TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,\n    enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias\n    positive_int as _positive_int,\n",
     )
     replace_once(
         "src/secretary/restore.py",

@@ -64,17 +64,38 @@ import yaml
 from secretary.board.backend import card_transport_key, record_key, sprint_reference_number
 from secretary.board.legacy_codec import (
     TASK_KNOWN_METADATA as _KNOWN_METADATA,
+)
+from secretary.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+)
+from secretary.board.legacy_codec import (
     enum_or_default as _enum_or_default,
+)
+from secretary.board.legacy_codec import (
     enum_or_none as _enum_or_none,
+)
+from secretary.board.legacy_codec import (
     nonnegative_int as _nonnegative_int,
+)
+from secretary.board.legacy_codec import (
     null_if_empty as _null_if_empty,
+)
+from secretary.board.legacy_codec import (
     positive_int as _positive_int,
+)
+from secretary.board.legacy_codec import (
     split_heads as _split_heads,
+)
+from secretary.board.legacy_codec import (
     text as _text,
 )
 from secretary.board.models import EntityKind, Event
 from secretary.board.roles import BOARD_ROLES
+from secretary.board.task_routing import (
+    FAMILY_PREFERENCE_VALUES,
+    TASK_COMPLEXITY_VALUES,
+    TASK_TYPE_VALUES,
+)
 from secretary.product_issues import (
     ISSUE_CLOSE_REASONS,
     ISSUE_KINDS,
@@ -110,9 +131,6 @@ from secretary.sprints import (
     _source_audit,
 )
 from secretary.tasks import (
-    _COMPLEXITIES,
-    _FAMILY_PREFERENCES,
-    _TASK_TYPES,
     KanboardClient,
     _task_metadata,
     all_project_cards,
@@ -250,7 +268,9 @@ class BoardSource:
     source_fence: dict[str, Any] = field(default_factory=dict)
 
 
-def _board_rows(client: KanboardClient, board_name: str) -> tuple[list[SourceRow], dict[int, str], dict[int, str]]:
+def _board_rows(
+    client: KanboardClient, board_name: str
+) -> tuple[list[SourceRow], dict[int, str], dict[int, str]]:
     board = client.call("getProjectByName", name=board_name)
     board_id = _positive_int(board.get("id")) if isinstance(board, dict) else None
     if board_id is None:
@@ -353,15 +373,11 @@ def read_audit_records(data_dir: Path | None) -> tuple[list[dict[str, Any]], dic
                         f"audit journal {path} line {number} is malformed JSON: {exc}"
                     ) from None
                 if not isinstance(record, dict):
-                    raise BoardImportError(
-                        f"audit journal {path} line {number} is not a JSON object"
-                    )
+                    raise BoardImportError(f"audit journal {path} line {number} is not a JSON object")
                 for key, owners in (("event_id", event_ids), ("request_id", request_ids)):
                     value = record.get(key)
                     if not isinstance(value, str) or not value.strip():
-                        raise BoardImportError(
-                            f"audit journal {path} line {number} has no non-empty {key}"
-                        )
+                        raise BoardImportError(f"audit journal {path} line {number} has no non-empty {key}")
                     if value in owners:
                         raise BoardImportError(
                             f"audit journal {path} line {number} duplicates {key} {value!r} "
@@ -392,10 +408,12 @@ def read_audit_records(data_dir: Path | None) -> tuple[list[dict[str, Any]], dic
         "sha256": digest.hexdigest(),
     }
     descriptor = (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns)
-    if (
-        (initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns) != descriptor
-        or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != descriptor
-    ):
+    if (initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns) != descriptor or (
+        current.st_dev,
+        current.st_ino,
+        current.st_size,
+        current.st_mtime_ns,
+    ) != descriptor:
         raise BoardImportError(
             "the audit journal moved while it was being read; source consistency fence refused the run"
         )
@@ -456,9 +474,7 @@ def _read_source_once(instance_path: Path, data_path: Path | None) -> BoardSourc
         pipeline_columns=columns,
         pipeline_swimlanes=swimlanes,
         registry=tuple(read_registry(instance_path)),
-        budget_records=tuple(
-            record for record in audit_records if record.get("kind") == "budget_recorded"
-        ),
+        budget_records=tuple(record for record in audit_records if record.get("kind") == "budget_recorded"),
         transaction_documents=tuple(read_transaction_documents(data_path)),
         audit_records=tuple(audit_records),
         source_fence={"journal": journal_identity},
@@ -614,14 +630,10 @@ class ImportReport:
         own silence written down.  It is reported by name because a NULL in a column that usually
         carries a value is exactly what a reader would otherwise have to guess about.
         """
-        self.fields_the_board_never_named.append(
-            {"field": field_name, "ref": ref, "reason": reason}
-        )
+        self.fields_the_board_never_named.append({"field": field_name, "ref": ref, "reason": reason})
 
     def link_not_imported(self, *, kind: str, subject: str, target: str, reason: str) -> None:
-        self.links_not_imported.append(
-            {"kind": kind, "subject": subject, "target": target, "reason": reason}
-        )
+        self.links_not_imported.append({"kind": kind, "subject": subject, "target": target, "reason": reason})
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -687,16 +699,11 @@ def render(report: ImportReport) -> str:
     lines += ["", f"discrepancies: {report.discrepancy_count}"]
     if report.records_not_imported:
         lines += ["", f"records that did not land in the model ({len(report.records_not_imported)}):"]
-        lines += [
-            f"  {item['kind']} {item['ref']}: {item['reason']}" for item in report.records_not_imported
-        ]
+        lines += [f"  {item['kind']} {item['ref']}: {item['reason']}" for item in report.records_not_imported]
     if report.disambiguated_references:
         lines += [
             "",
-            (
-                "references disambiguated at import (§9, option 1): "
-                f"{len(report.disambiguated_references)}"
-            ),
+            (f"references disambiguated at import (§9, option 1): {len(report.disambiguated_references)}"),
         ]
         lines += [
             f"  {item['kind']} {item['original_ref']} (kanboard task {item['kanboard_task']}) "
@@ -733,8 +740,7 @@ def render(report: ImportReport) -> str:
         # extensions bag since 0002, and a key named without its table reads as a duplicate.
         lines += ["", "metadata keys carried into an extensions bag (§8.2), per key and table:"]
         lines += [
-            f"  {item['where']}.{item['key']}: {item['rows']} row(s)"
-            for item in report.extensions_keys
+            f"  {item['where']}.{item['key']}: {item['rows']} row(s)" for item in report.extensions_keys
         ]
     mismatch = report.project_repository_mismatch
     if mismatch:
@@ -759,8 +765,14 @@ def render(report: ImportReport) -> str:
     if report.audit:
         lines += ["", "audit journal:"]
         for name in (
-            "lines", "records", "generic_records", "typed_records", "request_rows",
-            "board_event_rows", "budget_linked_requests", "refusals",
+            "lines",
+            "records",
+            "generic_records",
+            "typed_records",
+            "request_rows",
+            "board_event_rows",
+            "budget_linked_requests",
+            "refusals",
         ):
             lines.append(f"  {name.replace('_', ' ')}: {report.audit.get(name, 0)}")
     if report.sprints_without_recoverable_decisions:
@@ -962,9 +974,7 @@ def plan(source: BoardSource, *, thresholds: dict[str, int] | None = None) -> Im
     product_rows = [row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == PRODUCT_TYPE]
     issue_rows = [row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == ISSUE_TYPE]
     card_rows = [
-        row
-        for row in source.pipeline
-        if row.meta.get(META_RECORD_TYPE) not in (PRODUCT_TYPE, ISSUE_TYPE)
+        row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) not in (PRODUCT_TYPE, ISSUE_TYPE)
     ]
 
     report.source = {
@@ -1097,9 +1107,7 @@ def _plan_registry(
     }
 
 
-def one_row_per_ref(
-    board_rows: list[SourceRow], *, kind: str, report: ImportReport
-) -> list[SourceRow]:
+def one_row_per_ref(board_rows: list[SourceRow], *, kind: str, report: ImportReport) -> list[SourceRow]:
     """The rows of one board, one per reference, and a report line for every row that merged.
 
     Kanboard lets two rows carry one reference.  For a card, a Product and an Issue that is one
@@ -1113,9 +1121,7 @@ def one_row_per_ref(
     for row in sorted(board_rows, key=lambda item: (item.ref, item.archived, item.task_id)):
         key = board_identifier(row, kind)
         if chosen[key] is not row:
-            report.board_rows_merged(
-                kind=kind, ref=row.ref, kept=chosen[key].task_id, dropped=row.task_id
-            )
+            report.board_rows_merged(kind=kind, ref=row.ref, kept=chosen[key].task_id, dropped=row.task_id)
     return [chosen[key] for key in sorted(chosen)]
 
 
@@ -1222,11 +1228,15 @@ def _plan_issues(
         closed = row.archived
         refusal = None
         if product_id not in products:
-            refusal = f"issue_product {product_id!r} names no imported product (issues.product_id is NOT NULL)"
+            refusal = (
+                f"issue_product {product_id!r} names no imported product (issues.product_id is NOT NULL)"
+            )
         elif kind not in ISSUE_KINDS:
             refusal = f"issue_kind {kind!r} is outside the CHECK vocabulary {sorted(ISSUE_KINDS)}"
         elif priority not in ISSUE_PRIORITIES:
-            refusal = f"issue_priority {priority!r} is outside the CHECK vocabulary {sorted(ISSUE_PRIORITIES)}"
+            refusal = (
+                f"issue_priority {priority!r} is outside the CHECK vocabulary {sorted(ISSUE_PRIORITIES)}"
+            )
         elif reason is not None and reason not in ISSUE_CLOSE_REASONS:
             refusal = f"issue_closed_reason {reason!r} is outside the CHECK vocabulary"
         elif closed != (reason is not None):
@@ -1321,9 +1331,7 @@ def sprint_references(rows: tuple[SourceRow, ...]) -> dict[int, str]:
             ordinal = 2
             while candidate in taken:
                 candidate = (
-                    reference
-                    + DISAMBIGUATION_SUFFIX.format(kanboard_task=row.task_id)
-                    + f"-{ordinal}"
+                    reference + DISAMBIGUATION_SUFFIX.format(kanboard_task=row.task_id) + f"-{ordinal}"
                 )
                 ordinal += 1
             reference = candidate
@@ -1552,9 +1560,7 @@ def _timestamp(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def _extensions_of(
-    kanboard: dict[str, Any], *, silent: tuple[str, ...] = ()
-) -> dict[str, Any]:
+def _extensions_of(kanboard: dict[str, Any], *, silent: tuple[str, ...] = ()) -> dict[str, Any]:
     """`tasks.extensions` (J3), in its two namespaced halves.
 
     ``kanboard`` is §8.2's provenance bag — the metadata keys the model does not name.  ``silent``
@@ -1597,19 +1603,19 @@ def _plan_tasks(
         if not ref:
             refusal = "the row carries no reference, and tasks.task_ref is the primary key"
         elif task_number is None:
-            refusal = "the reference does not end in -<number>, so UNIQUE (project_id, task_number) has no value"
+            refusal = (
+                "the reference does not end in -<number>, so UNIQUE (project_id, task_number) has no value"
+            )
         elif project_id is not None and project_id not in known_projects:  # pragma: no cover
             refusal = f"project {project_id!r} has no projects row"
-        elif task_type is not None and task_type not in _TASK_TYPES:
-            refusal = f"task_type {task_type!r} is outside the CHECK vocabulary {sorted(_TASK_TYPES)}"
+        elif task_type is not None and task_type not in TASK_TYPE_VALUES:
+            refusal = f"task_type {task_type!r} is outside the CHECK vocabulary {sorted(TASK_TYPE_VALUES)}"
         elif column not in _STATE_BY_COLUMN:
             refusal = f"the row sits in column {column!r}, which _STATE_BY_COLUMN does not map to a state"
         elif not _text(row.raw.get("title")):
             refusal = "tasks.title carries CHECK (title <> '')"
         if refusal is not None:
-            report.record_not_imported(
-                kind="card", ref=ref or f"card@kanboard-{row.task_id}", reason=refusal
-            )
+            report.record_not_imported(kind="card", ref=ref or f"card@kanboard-{row.task_id}", reason=refusal)
             continue
         if project_id is None:
             # Nullable since 0002 (§8.6): the board does not say which project this card belongs
@@ -1642,15 +1648,13 @@ def _plan_tasks(
             )
             sprint_ref = None
 
-        extensions = {
-            key: value for key, value in row.meta.items() if key not in TASK_KNOWN_METADATA
-        }
+        extensions = {key: value for key, value in row.meta.items() if key not in TASK_KNOWN_METADATA}
         # §3.12: a value a closed vocabulary rejects is normalized away on read, and the retired
         # spelling must stay queryable rather than disappear.  The three enum columns are the only
         # places a *known* key can lose its stored value, so each of them keeps the raw string.
         for key, allowed in (
-            ("complexity", _COMPLEXITIES),
-            ("family_preference", _FAMILY_PREFERENCES),
+            ("complexity", TASK_COMPLEXITY_VALUES),
+            ("family_preference", FAMILY_PREFERENCE_VALUES),
             ("codex_launch_mode", CODEX_LAUNCH_MODES),
         ):
             raw_value = _null_if_empty(row.meta.get(key))
@@ -1681,9 +1685,9 @@ def _plan_tasks(
             "slug": _null_if_empty(row.meta.get("slug")),
             "base_branch": _null_if_empty(row.meta.get("base_branch")),
             "seed_ref": _null_if_empty(row.meta.get("seed_ref")),
-            "complexity": _enum_or_default(row.meta.get("complexity"), _COMPLEXITIES, "standard"),
+            "complexity": _enum_or_default(row.meta.get("complexity"), TASK_COMPLEXITY_VALUES, "standard"),
             "family_preference": _enum_or_default(
-                row.meta.get("family_preference"), _FAMILY_PREFERENCES, "auto"
+                row.meta.get("family_preference"), FAMILY_PREFERENCE_VALUES, "auto"
             ),
             "head_override": _null_if_empty(row.meta.get("head")),
             "review_head_override": _null_if_empty(row.meta.get("review_head")),
@@ -1696,9 +1700,7 @@ def _plan_tasks(
             "codex_launch_mode": _enum_or_none(row.meta.get("codex_launch_mode"), CODEX_LAUNCH_MODES),
             "retry_same": _nonnegative_int(row.meta.get("retry_same")),
             "retry_switch": _nonnegative_int(row.meta.get("retry_switch")),
-            "extensions": _extensions_of(
-                extensions, silent=() if task_type else ("task_type",)
-            ),
+            "extensions": _extensions_of(extensions, silent=() if task_type else ("task_type",)),
             "created_at": created,
             "updated_at": _required_when(row.raw.get("date_modification"), created),
             "date_moved": _when(row.raw.get("date_moved")),
@@ -1711,12 +1713,12 @@ def _plan_tasks(
             pending_links.append(("task_supersessions", ref, supersedes))
         raw_quota = _null_if_empty(row.meta.get("quota_snapshot_at"))
         if raw_quota and tasks[ref]["quota_snapshot_at"] is None:
-                report.link_not_imported(
-                    kind="tasks.quota_snapshot_at",
-                    subject=ref,
-                    target=raw_quota,
-                    reason="the stored value is not a timestamp the timestamptz column accepts",
-                )
+            report.link_not_imported(
+                kind="tasks.quota_snapshot_at",
+                subject=ref,
+                target=raw_quota,
+                reason="the stored value is not a timestamp the timestamptz column accepts",
+            )
 
     rows["tasks"] = [tasks[key] for key in sorted(tasks)]
     unresolved_dependencies = 0
@@ -1840,9 +1842,7 @@ def _plan_budget(
         reference = assigned[row.task_id]
         if reference not in sprints:
             continue
-        budget = _budget(
-            row.meta.get("sprint_budget"), thresholds, row.meta.get(BUDGET_UNCHARGED_FIELD)
-        )
+        budget = _budget(row.meta.get("sprint_budget"), thresholds, row.meta.get(BUDGET_UNCHARGED_FIELD))
         counts = {**budget["by_type"], **budget["uncharged"]}
         for event_type in BUDGET_RECORDED_EVENT_TYPES:
             wanted = int(counts.get(event_type, 0))
@@ -1869,9 +1869,7 @@ def _plan_budget(
                     request_id = _text(record.get("request_id")) or (
                         f"import:budget:{reference}:{event_type}:{index}"
                     )
-                    occurred = (
-                        _timestamp(record.get("occurred_at")) or sprints[reference]["updated_at"]
-                    )
+                    occurred = _timestamp(record.get("occurred_at")) or sprints[reference]["updated_at"]
                     reason = f"imported from audit journal record {_text(record.get('event_id'))}"
                 else:
                     request_id = f"import:budget:{reference}:{event_type}:{index}"
@@ -1882,20 +1880,20 @@ def _plan_budget(
                     )
                     approximate += 1
                 claim = {
-                        "request_id": request_id,
-                        "operation": "sprint.budget",
-                        "intent": {
-                            "sprint": reference,
-                            "event_type": event_type,
-                            "imported_by": f"board-import:{IMPORT_VERSION}",
-                        },
-                        "status": "committed",
-                        "protocol": True,
-                        "entity_kind": "sprint",
-                        "ref": reference,
-                        "created_at": occurred,
-                        "settled_at": occurred,
-                    }
+                    "request_id": request_id,
+                    "operation": "sprint.budget",
+                    "intent": {
+                        "sprint": reference,
+                        "event_type": event_type,
+                        "imported_by": f"board-import:{IMPORT_VERSION}",
+                    },
+                    "status": "committed",
+                    "protocol": True,
+                    "entity_kind": "sprint",
+                    "ref": reference,
+                    "created_at": occurred,
+                    "settled_at": occurred,
+                }
                 if record is not None:
                     # The journal owns this installation-wide id.  The budget row only links to
                     # that frozen claim; it must neither duplicate nor overwrite it.
@@ -2004,9 +2002,7 @@ def _plan_comments(
         }
 
     def refuse(kind: str, owner_ref: str, comment: dict[str, Any], reason: str) -> None:
-        report.record_not_imported(
-            kind=kind, ref=comment_identifier(owner_ref, comment), reason=reason
-        )
+        report.record_not_imported(kind=kind, ref=comment_identifier(owner_ref, comment), reason=reason)
 
     for row in source.pipeline:
         record_type = row.meta.get(META_RECORD_TYPE)
@@ -2015,7 +2011,9 @@ def _plan_comments(
             for comment in row.comments:
                 if product_id not in products:
                     refuse(
-                        "product comment", row.ref, comment,
+                        "product comment",
+                        row.ref,
+                        comment,
                         "the Product itself was not imported, and product_comments.product_id "
                         "is a foreign key into products",
                     )
@@ -2454,16 +2452,12 @@ def board_inventory(source: BoardSource) -> BoardInventory:
     product_rows = [row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == PRODUCT_TYPE]
     issue_rows = [row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) == ISSUE_TYPE]
     card_rows = [
-        row
-        for row in source.pipeline
-        if row.meta.get(META_RECORD_TYPE) not in (PRODUCT_TYPE, ISSUE_TYPE)
+        row for row in source.pipeline if row.meta.get(META_RECORD_TYPE) not in (PRODUCT_TYPE, ISSUE_TYPE)
     ]
     assigned = sprint_references(source.sprints)
     comments: list[tuple[str, SourceRow, dict[str, Any]]] = []
     for row in source.pipeline:
-        kind = {PRODUCT_TYPE: "product", ISSUE_TYPE: "issue"}.get(
-            row.meta.get(META_RECORD_TYPE, ""), "card"
-        )
+        kind = {PRODUCT_TYPE: "product", ISSUE_TYPE: "issue"}.get(row.meta.get(META_RECORD_TYPE, ""), "card")
         # A duplicated card reference is one card seen twice and its comments merge into the
         # survivor, so a comment's owner is the reference, never the Kanboard row that carries it.
         owner = board_identifier(row, kind)
@@ -2477,9 +2471,7 @@ def board_inventory(source: BoardSource) -> BoardInventory:
         products=chosen_by_identifier(product_rows, kind="product"),
         issues=chosen_by_identifier(issue_rows, kind="issue"),
         cards=chosen_by_identifier(card_rows, kind="card"),
-        sprints={
-            assigned[row.task_id] or board_identifier(row, "sprint"): row for row in source.sprints
-        },
+        sprints={assigned[row.task_id] or board_identifier(row, "sprint"): row for row in source.sprints},
         comments=tuple(comments),
     )
 
@@ -2501,8 +2493,7 @@ def _comment_key(owner: str, marker: Any, body: Any, created: Any) -> tuple[str,
 def _stored_comments(rows: dict[str, list[dict[str, Any]]], table: str) -> Counter:
     owner_of = _COMMENT_OWNER[table]
     return Counter(
-        _comment_key(owner_of(row), row["marker"], row["body"], row["created_at"])
-        for row in rows[table]
+        _comment_key(owner_of(row), row["marker"], row["body"], row["created_at"]) for row in rows[table]
     )
 
 
@@ -2546,7 +2537,9 @@ _COMMENT_TABLE_OF_KIND = {
 }
 
 
-def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: ImportReport) -> dict[str, Any]:
+def parity(
+    source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: ImportReport
+) -> dict[str, Any]:
     """Compare the board against what was stored, on counts, identifiers, links, content and
     accounting — and refuse to call a run green while the store is missing a record.
 
@@ -2603,10 +2596,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
         _check(
             "every audit journal record is one request row",
             len(source.audit_records),
-            sum(
-                row["request_id"] in audit_request_ids
-                for row in rows["requests"]
-            ),
+            sum(row["request_id"] in audit_request_ids for row in rows["requests"]),
         ),
         _check(
             "every typed audit record is one board_events row",
@@ -2653,11 +2643,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
         _check(
             "audit request ids, literally",
             audit_request_ids,
-            {
-                row["request_id"]
-                for row in rows["requests"]
-                if row["request_id"] in audit_request_ids
-            },
+            {row["request_id"] for row in rows["requests"] if row["request_id"] in audit_request_ids},
         ),
         _check(
             "typed event ids, literally",
@@ -2745,10 +2731,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
                 for project in _json_list(row.meta.get(META_PRODUCT_PROJECTS))
                 if ref in stored_products
                 and ("product_projects", ref, project)
-                not in {
-                    (item["kind"], item["subject"], item["target"])
-                    for item in report.links_not_imported
-                }
+                not in {(item["kind"], item["subject"], item["target"]) for item in report.links_not_imported}
             },
             {(row["product_id"], row["project_id"]) for row in rows["product_projects"]},
         ),
@@ -2828,10 +2811,7 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
                 for ref, row in inventory.sprints.items()
                 if ref in stored_sprints
             },
-            {
-                (row["ref"], row["goal"], row["definition_of_done"], row["status"])
-                for row in rows["sprints"]
-            },
+            {(row["ref"], row["goal"], row["definition_of_done"], row["status"]) for row in rows["sprints"]},
         ),
         _check(
             "the budget counters equal the rows, per sprint and per type",
@@ -2870,8 +2850,17 @@ def parity(source: BoardSource, rows: dict[str, list[dict[str, Any]]], report: I
         )
     )
 
-    missing = _records_missing(inventory, rows, stored_tasks, stored_sprints, stored_issues,
-                              stored_products, owners, fallback, report)
+    missing = _records_missing(
+        inventory,
+        rows,
+        stored_tasks,
+        stored_sprints,
+        stored_issues,
+        stored_products,
+        owners,
+        fallback,
+        report,
+    )
     named = {item["ref"] for item in report.records_not_imported}
     found = {item["id"] for item in missing}
     accounting = [
@@ -2931,8 +2920,11 @@ def _records_missing(
             {
                 "kind": kind,
                 "id": identifier,
-                "reason": reasons.get(identifier, "the store holds no row for it and the report "
-                "does not say why: this is the defect §8 calls a record neither imported nor named"),
+                "reason": reasons.get(
+                    identifier,
+                    "the store holds no row for it and the report "
+                    "does not say why: this is the defect §8 calls a record neither imported nor named",
+                ),
             }
         )
 
@@ -2953,9 +2945,7 @@ def _records_missing(
         stored_counts += _stored_comments(rows, table)
     seen: Counter = Counter()
     for owner, row, comment in inventory.comments:
-        kind = {PRODUCT_TYPE: "product", ISSUE_TYPE: "issue"}.get(
-            row.meta.get(META_RECORD_TYPE, ""), "card"
-        )
+        kind = {PRODUCT_TYPE: "product", ISSUE_TYPE: "issue"}.get(row.meta.get(META_RECORD_TYPE, ""), "card")
         if owner in inventory.sprints:
             kind = "sprint"
         identifier = comment_identifier(owner, comment)

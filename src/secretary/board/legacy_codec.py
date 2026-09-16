@@ -7,6 +7,7 @@ here instead of making feature packages import private helpers from ``tasks.py``
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 
 TASK_STATE_BY_COLUMN = {
@@ -73,12 +74,12 @@ def split_heads(value: Any) -> list[str]:
     return [head for head in text(value).split(",") if head]
 
 
-def enum_or_default(value: Any, allowed: set[str], default: str) -> str:
+def enum_or_default(value: Any, allowed: Collection[str], default: str) -> str:
     candidate = text(value)
     return candidate if candidate in allowed else default
 
 
-def enum_or_none(value: Any, allowed: set[str]) -> str | None:
+def enum_or_none(value: Any, allowed: Collection[str]) -> str | None:
     candidate = text(value)
     return candidate if candidate in allowed else None
 
