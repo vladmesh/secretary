@@ -1,12 +1,12 @@
 """Reading a rendered front configuration back, and answering which routes it leaves unguarded.
 
 This is the half of the card that has to survive people. A template that happens to contain
-`basicauth` today proves nothing about a file after somebody adds a `handle` block for a new route,
-and a test that lists the protected paths by hand is a list that goes stale the first time the
-route table grows. So the question is asked the other way round: parse the configuration, and for
-every route the transport publishes -- read from `secretary.web.app.ROUTES`, the same table
+authentication today proves nothing about a file after somebody adds a `handle` block for a new
+route, and a test that lists the protected paths by hand is a list that goes stale the first time
+the route table grows. So the question is asked the other way round: parse the configuration, and
+for every route the transport publishes -- read from `secretary.web.app.ROUTES`, the same table
 `docs/PROTOCOLS.md` documents -- decide whether a request for it reaches something that answers
-before a password was checked.
+before either the password or the derived persistent session bearer was checked.
 
 The parser is small and deliberately not a general Caddyfile implementation. It understands the
 grammar this project generates and the grammar somebody would plausibly hand-edit it into: site
@@ -19,6 +19,8 @@ defaults fail towards reporting a route as unguarded rather than towards silence
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+from secretary.webfront.caddyfile import SESSION_COOKIE_NAME, session_cookie_value
 
 #: Directives that check the password. Caddy renamed the directive in 2.8 and kept the old spelling
 #: working; the archive build this installation runs is 2.6 and spells it `basicauth`.
@@ -63,6 +65,8 @@ class Site:
     directives: tuple[Directive, ...] = ()
     #: Matchers the block named, by their `@name`.
     matchers: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: Header matchers that prove possession of the bearer derived from this site's basic-auth hash.
+    auth_matchers: frozenset[str] = field(default_factory=frozenset)
 
 
 def parse(text: str) -> tuple[Site, ...]:
@@ -87,7 +91,14 @@ def parse(text: str) -> tuple[Site, ...]:
         directives, position = _block(tokens, position + 1)
         addresses = tuple(part for part in " ".join(header).replace(",", " ").split() if part)
         if addresses:
-            sites.append(Site(addresses, directives, _named_matchers(directives)))
+            sites.append(
+                Site(
+                    addresses,
+                    directives,
+                    _named_matchers(directives),
+                    _auth_matchers(directives),
+                )
+            )
     return tuple(sites)
 
 
@@ -112,8 +123,53 @@ def _named_matchers(directives: tuple[Directive, ...]) -> dict[str, tuple[str, .
     return matchers
 
 
+def _auth_matchers(directives: tuple[Directive, ...]) -> frozenset[str]:
+    """Named cookie matchers carrying the bearer derived from a basic-auth hash in this site.
+
+    Merely seeing a Cookie header is not authentication. The exact value must be the HMAC the
+    renderer derives from one of this site's bcrypt hashes; a hand edit such as
+    `*__Host-secretary_front=*` therefore fails closed instead of teaching the checker a new guard.
+    """
+    expected = {
+        f"*{SESSION_COOKIE_NAME}={session_cookie_value(password_hash)}*"
+        for password_hash in _basic_auth_hashes(directives)
+    }
+    if not expected:
+        return frozenset()
+    found: set[str] = set()
+    for directive in directives:
+        if not directive.name.startswith("@"):
+            continue
+        clauses = [directive.args] if directive.args else [
+            (inner.name, *inner.args) for inner in directive.block
+        ]
+        for clause in clauses:
+            if (
+                len(clause) >= 3
+                and clause[0] == "header"
+                and clause[1].lower() == "cookie"
+                and any(value in expected for value in clause[2:])
+            ):
+                found.add(directive.name)
+    return frozenset(found)
+
+
+def _basic_auth_hashes(directives: tuple[Directive, ...]) -> tuple[str, ...]:
+    """Every password hash named by a basic-auth block, including one nested in a handle."""
+    found: list[str] = []
+
+    def walk(items: tuple[Directive, ...]) -> None:
+        for directive in items:
+            if directive.name in GUARD_DIRECTIVES:
+                found.extend(credential.args[0] for credential in directive.block if credential.args)
+            walk(directive.block)
+
+    walk(directives)
+    return tuple(found)
+
+
 def unguarded_routes(text: str, routes) -> tuple[str, ...]:
-    """Every published route this configuration would answer without checking the password.
+    """Every published route this configuration would answer without authenticating the owner.
 
     ``routes`` is the transport's own route table: each entry carries a `method` and a `pattern`,
     and a pattern's `{placeholder}` stands for one path segment. The answer names the route and the
@@ -151,7 +207,7 @@ def upstreams(text: str) -> tuple[str, ...]:
 
 
 def _guards(site: Site, path: str) -> bool:
-    """Whether every answer this site would give for ``path`` comes after a password check."""
+    """Whether every answer this site would give for ``path`` comes after owner authentication."""
     return _walk(site, site.directives, path, guarded=False)
 
 
@@ -162,17 +218,34 @@ def _walk(site: Site, directives: tuple[Directive, ...], path: str, *, guarded: 
         matcher = directive.args[0] if directive.args and _is_matcher(directive.args[0]) else "*"
         if not _matches(site, matcher, path):
             continue
+        conditional_auth = matcher in site.auth_matchers
+        now_guarded = guarded or conditional_auth
         if directive.name in GUARD_DIRECTIVES:
             guarded = True
             continue
         if directive.name in NESTING_DIRECTIVES:
-            # `handle` is exclusive: the first one that matches decides the request, so the answer
-            # for this path is whatever happens inside it and nothing after it matters.
-            return _walk(site, directive.block, path, guarded=guarded)
+            branch_guarded = _walk(site, directive.block, path, guarded=now_guarded)
+            if conditional_auth:
+                # Possessing the exact bearer makes the matching branch authenticated, but a
+                # request without that header does not enter it. Prove the branch, then keep
+                # walking to prove the no-cookie fallback as well.
+                if not branch_guarded:
+                    return False
+                continue
+            # Path handles are exclusive: once one matches the request, what follows is irrelevant.
+            return branch_guarded
         if directive.name == "redir":
-            return guarded or _is_https_redirect(directive)
+            if conditional_auth:
+                if not (now_guarded or _is_https_redirect(directive)):
+                    return False
+                continue
+            return now_guarded or _is_https_redirect(directive)
         if directive.name in TERMINAL_DIRECTIVES:
-            return guarded
+            if conditional_auth:
+                if not now_guarded:
+                    return False
+                continue
+            return now_guarded
     # Nothing in this site answers this path: Caddy has nothing to serve, so nothing leaks.
     return True
 
