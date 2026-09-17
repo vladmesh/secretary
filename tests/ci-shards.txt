@@ -2,6 +2,7 @@
 # omissions, duplicates, unknown suite names, empty suites and stale entries before it starts a
 # test process.
 component tests/test_agent_prompt_transport.py
+unit tests/test_a12_source_bridge.py
 unit tests/test_architecture.py
 unit tests/test_card_backend_switch.py
 integration-board tests/test_audit_backend_canon.py
