@@ -194,6 +194,7 @@ class DispatcherRoutingSnapshotStateTests(unittest.TestCase):
         self.assertIsNone(record.review_run.snapshot)
         self.assertEqual(record.to_json()["review_run"], {})
 
+
 class LaunchIntentTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
