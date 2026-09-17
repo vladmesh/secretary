@@ -253,6 +253,23 @@ def _round_blocked_report_classification(audit: Any, reference: str, round_ids: 
     return classification
 
 
+def _round_done_report_body(audit: Any, reference: str, round_ids: set[str]) -> str | None:
+    """The body of this round's done report, from the event its request id names."""
+    body = None
+    for event in audit.events(reference, kind="reported"):
+        if str(event.get("request_id") or "") not in round_ids:
+            continue
+        payload = (
+            event.get("data") if event.get("record_type") == "board.protocol_event" else event.get("payload")
+        )
+        if not isinstance(payload, dict) or payload.get("marker") != "report:done":
+            continue
+        value = payload.get("body")
+        if isinstance(value, str) and value.strip():
+            body = value
+    return body
+
+
 def _last_marker_body(task: dict[str, Any], marker: str) -> str | None:
     """Text of the most recent comment carrying this marker, with the marker line stripped."""
     body = None

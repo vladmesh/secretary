@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from secretary.board.backend import CARD, SPRINT, board_client
+from secretary.board.completion_evidence import (
+    has_candidate,
+    infra_report_fields,
+    missing_completion_evidence,
+    render_infra_completion_record,
+    review_required,
+)
 from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
 from secretary.board.terminal_taxonomy import (
     TerminalTaxonomy,
@@ -124,6 +131,7 @@ from secretary.dispatcher_helpers import (
     _report_adoption_baseline,
     _review_adoption_baseline,
     _round_blocked_report_classification,
+    _round_done_report_body,
     _round_report_ids,
     _round_report_marker,
     _spent_report_generations,
@@ -1918,30 +1926,26 @@ class DispatcherRuntime:
                     "attempt_id": attempt_id,
                     "reason": "worker result is not durable",
                 }
-            current_sha = self.host.head_commit(record)
-            retry_stale_no_diff_gate = False
-            reuse_report_only_gate = False
-            if current_sha and current_sha == record.rejected_sha:
-                if record.rejected_failure_class == "infrastructure":
-                    return self._accept_stale_infrastructure_done(
-                        task,
-                        record,
-                        records,
-                        payload,
-                        attempt_id,
-                        current_sha,
-                    )
-                retry_stale_no_diff_gate = self._can_retry_stale_no_diff_research_gate(
-                    task, record, current_sha
-                )
-                reuse_report_only_gate = self._can_reuse_report_only_rework_gate(task, record, current_sha)
-                if not (retry_stale_no_diff_gate or reuse_report_only_gate):
+            if has_candidate(task):
+                current_sha = self.host.head_commit(record)
+                if current_sha and current_sha == record.rejected_sha:
+                    if record.rejected_failure_class == "infrastructure":
+                        return self._accept_stale_infrastructure_done(
+                            task,
+                            record,
+                            records,
+                            payload,
+                            attempt_id,
+                            current_sha,
+                        )
                     return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
-            # A no-diff research card gets one post-freeze chance to observe the dispatch it
-            # already owns.  Count that report before Validate so a persistent wrong-SHA result
-            # cannot reopen this exception forever: the next unchanged done report must still
-            # reach _reject_stale_done's human-escalation bound.
-            record.rejected_done_reports = 1 if retry_stale_no_diff_gate else 0
+            else:
+                # No candidate: an unchanged HEAD is not a stale result, and every done report of a
+                # new round is a fresh one. An infra report leaves its completion record here.
+                recorded = self._record_infra_completion(task, record, records, payload, attempt_id)
+                if recorded is not None:
+                    return recorded
+            record.rejected_done_reports = 0
             # The report is accepted: whatever the head owed, it has answered.
             record.worker_answer_owed_since = 0.0
             # The report is accepted from here on. Account the worker phase it closes while the
@@ -1958,13 +1962,12 @@ class DispatcherRuntime:
                 unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
                 if unconfirmed is not None:
                     return unconfirmed
-            if not reuse_report_only_gate:
-                # Fresh code state: the mechanical gate must re-run before this report reaches review.
-                record.gate_state = ""
-                record.gate_pending_since = 0.0
-                record.gate_transport_failures = 0
-                record.gate_transport_error = ""
-                self._reset_infrastructure_reruns(record)
+            # Fresh code state: the mechanical gate must re-run before this report reaches review.
+            record.gate_state = ""
+            record.gate_pending_since = 0.0
+            record.gate_transport_failures = 0
+            record.gate_transport_error = ""
+            self._reset_infrastructure_reruns(record)
             _reset_wait(record, "worker")
             _reset_wait(record, "review")
             records[ref] = record
@@ -2296,71 +2299,70 @@ class DispatcherRuntime:
             "to": "blocked",
         }
 
-    def _can_reuse_report_only_rework_gate(
+    def _record_infra_completion(
         self,
         task: dict[str, Any],
         record: DispatcherRecord,
-        current_sha: str,
-        *,
-        observer_rework: bool | None = None,
-    ) -> bool:
-        """Whether an observer-directed research report correction may keep its green gate.
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """Copy an accepted infra done report into the card's completion record.
 
-        A red review normally invalidates the gate for the next worker report. The one exception is
-        a research round that the observer reopened to correct the report alone: its non-empty
-        frozen decision proves that this is that round, and the receipt remains usable only when it
-        still validates the exact rejected candidate. No marker body or worker-local check can stand
-        in for the persisted dispatcher receipt here.
+        The report writer refuses a body without both sections, so a malformed body here got past
+        it (a replayed legacy record, a hand-written marker). It is not accepted into Validate: the
+        card is Blocked with the reason the worker would have been given.
         """
-        if observer_rework is None:
-            observer_rework = bool(record.report_decision.strip())
-        return (
-            task.get("type") == "research"
-            and observer_rework
-            and record.rejected_failure_reason == "red-review"
-            and bool(current_sha)
-            and current_sha == record.rejected_sha
-            and record.gate_state == "green"
-            and bool(_gate_attestation_for_prompt(record, current_sha))
+        if task.get("type") != "infra":
+            return None
+        ref = task["ref"]
+        round_ids = _round_report_ids(
+            record.workspace, record.attempt_id or attempt_id, ref, record.report_generation
         )
-
-    def _can_retry_stale_no_diff_research_gate(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        current_sha: str,
-    ) -> bool:
-        """Whether a stale no-diff gate may retry after the worker is frozen.
-
-        The initial no-diff poll can see another branch's workflow-dispatch run before this card's
-        own dispatch becomes visible. A fresh report is not evidence by itself: this narrow
-        persisted-dispatch match only lets the ordinary, post-retention gate poll that request.
-        Every other answer, including an old persisted receipt, takes the stale-done path.
-        """
-        return bool(
-            not record.rejected_done_reports
-            and self._is_stale_no_diff_research_gate_recovery(task, record, current_sha)
+        body = (
+            _round_done_report_body(self.audit, ref, round_ids)
+            or _last_marker_body(task, "report:done")
+            or ""
         )
-
-    def _is_stale_no_diff_research_gate_recovery(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        current_sha: str,
-    ) -> bool:
-        """Whether this record identifies the narrow stale workflow-dispatch recovery."""
-        dispatch = record.gate_workflow_dispatch
-        return bool(
-            task.get("type") == "research"
-            and _validation_ci(self.host, task) == "github"
-            and record.rejected_failure_class == "substantive"
-            and record.rejected_failure_reason == "workflow-dispatch-head-sha-mismatch"
-            and bool(current_sha)
-            and current_sha == record.rejected_sha
-            and isinstance(dispatch, dict)
-            and dispatch.get("sha") == current_sha
-            and dispatch.get("workflow") == "ci.yml"
+        fields, refusal = infra_report_fields(body)
+        if refusal:
+            unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
+            if unconfirmed is not None:
+                return unconfirmed
+            self.terminal_effect(
+                task,
+                record,
+                target="blocked",
+                reason=f"infra report rejected: {refusal}",
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id,
+                    "infra-report-rejected",
+                    ref,
+                    str(record.report_generation),
+                ),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="implementation",
+            )
+            records.pop(ref, None)
+            self.save_records(payload, records)
+            return {
+                "status": "blocked",
+                "step": "advance",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "reason": "infra report lacks its completion sections",
+            }
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=render_infra_completion_record(fields),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "completion-infra", ref, str(record.report_generation)
+            ),
         )
+        return None
 
     def _accept_stale_infrastructure_done(
         self,
@@ -2718,10 +2720,19 @@ class DispatcherRuntime:
             )
         # Mechanical gate: a fresh report clears the cheap CI/local gate before the expensive
         # reviewer is spawned. A review already in flight cleared the gate when it launched.
-        if record.state not in ("review_starting", "reviewing") and record.gate_state != "green":
+        # A research/infra card has no candidate, so it has no mechanical gate at all.
+        if (
+            has_candidate(task)
+            and record.state not in ("review_starting", "reviewing")
+            and record.gate_state != "green"
+        ):
             gated = self._run_gate(task, record, records, payload, attempt_id)
             if gated is not None:
                 return gated
+        if not review_required(task) and record.state not in ("review_starting", "reviewing"):
+            # `review: skipped`: no reviewer for any kind. The accepted report takes the path a green
+            # verdict takes, which for a code card still re-reads the gate and merges on release.
+            return self._park_green_verdict(task, record, records, payload, attempt_id, reviewed=False)
         if record.state == "review_starting":
             return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
         if record.state != "reviewing":
@@ -4308,20 +4319,14 @@ class DispatcherRuntime:
                 result,
                 phase=phase,
             )
-        current_sha = self.host.head_commit(record)
-        preserve_stale_no_diff_retry = bool(
-            result.failure_reason == "workflow-dispatch-head-sha-mismatch"
-            and self._is_stale_no_diff_research_gate_recovery(task, record, current_sha)
-        )
-        record.rejected_sha = current_sha
+        record.rejected_sha = self.host.head_commit(record)
         # `publication` is carried through instead of flattened to `substantive`: the candidate was
         # never offered to CI, and the record has to say so where a later tick reads the class.
         record.rejected_failure_class = (
             "publication" if result.failure_class == "publication" else "substantive"
         )
         record.rejected_failure_reason = result.failure_reason
-        if not preserve_stale_no_diff_retry:
-            record.rejected_done_reports = 0
+        record.rejected_done_reports = 0
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
         # A GateResult built without `fingerprint` (the review-freeze drift check) still gets a
@@ -4693,17 +4698,12 @@ class DispatcherRuntime:
         # worker an adjudication of review findings its code has already answered.
         record.report_decision = continuation.decision_body
         record.report_protocol_prerequisites = continuation.decision_protocol_prerequisites
-        current_sha = self.host.head_commit(record)
-        reuse_report_only_gate = self._can_reuse_report_only_rework_gate(
-            task, record, current_sha, observer_rework=continuation.decision == "rework"
-        )
-        if not reuse_report_only_gate:
-            record.gate_state = ""
-            record.gate_pending_since = 0.0
-            record.gate_attestation = {}
-            record.gate_transport_failures = 0
-            record.gate_transport_error = ""
-            self._reset_infrastructure_reruns(record)
+        record.gate_state = ""
+        record.gate_pending_since = 0.0
+        record.gate_attestation = {}
+        record.gate_transport_failures = 0
+        record.gate_transport_error = ""
+        self._reset_infrastructure_reruns(record)
         # The judged round ends here: a stale review pin would refuse the rework's merge.
         record.review_commit = ""
         _reset_wait(record, "review")
@@ -5737,12 +5737,81 @@ class DispatcherRuntime:
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
         attempt_id: str,
+        *,
+        reviewed: bool = True,
     ) -> dict[str, Any]:
-        """A green review verdict parks the card; it does not merge it."""
+        """A green review verdict, or an accepted report with review skipped, parks the card.
+
+        It does not merge it. A card without a candidate has no gate to re-read and nothing to merge,
+        so it goes straight to the park or, with nobody to decide, to the release.
+        """
         ref = task["ref"]
-        # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
-        self._record_verdict_routing(ref, record, "green")
-        self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
+        if reviewed:
+            # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
+            self._record_verdict_routing(ref, record, "green")
+            self.record_attempt_usage(ref, record, role=REVIEW_ROLE, attempt_id=attempt_id)
+        if has_candidate(task):
+            gated = self._merge_ready_for_park(task, record, records, payload, attempt_id)
+            if gated is not None:
+                return gated
+        parks = self._parks_for_decision(task)
+        if not parks:
+            # No observer to release it, so the green verdict merges on its own tick.
+            return self._release_effect(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="review",
+                move_reason="review:green" if reviewed else "report:done, review skipped",
+                verdict="green" if reviewed else "missing",
+            )
+        # The checkout must be quiet while the card waits, so the reviewer's pane goes here — but
+        # its commit is read first, because ending the reviewer forgets the commit it judged.
+        pinned = (record.review_commit or self.host.head_commit(record)) if has_candidate(task) else ""
+        if reviewed:
+            unconfirmed = self._end_review_pane_confirmed(
+                record,
+                records,
+                payload,
+                ref,
+                step="review",
+                attempt_id=attempt_id,
+                initiator=STOPPED_BY_REVIEW_VERDICT,
+            )
+            if unconfirmed is not None:
+                return unconfirmed
+        if not has_candidate(task):
+            waits = "there is no candidate to merge, and Done waits"
+        elif reviewed:
+            waits = "the mechanical gate is green and the merge waits"
+        else:
+            waits = "the mechanical gate is green, no reviewer runs, and the merge waits"
+        return self._begin_park(
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            verdict_outcome="green" if reviewed else "missing",
+            reviewed_commit=pinned,
+            move_reason=(
+                f"{'review:green' if reviewed else 'report:done, review skipped'}. The card is parked "
+                f"in Assessment: {waits} for a release, rework or reslice decision."
+            ),
+        )
+
+    def _merge_ready_for_park(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """Re-read the merge gate before a candidate is parked or released; None when it is green."""
+        ref = task["ref"]
         kind, result, detail = self._merge_readiness(task, record)
         if kind == "transport":
             retry = self._gate_transport_retry(
@@ -5834,55 +5903,14 @@ class DispatcherRuntime:
                 step="review",
                 outcome="merge gate result unavailable",
             )
-        parks = self._parks_for_decision(task)
-        blocked = self._accept_green_gate(
+        return self._accept_green_gate(
             task,
             record,
             records,
             payload,
             attempt_id,
             result,
-            stage="assessment" if parks else "release",
-        )
-        if blocked is not None:
-            return blocked
-        if not parks:
-            # No observer to release it, so the green verdict merges on its own tick.
-            return self._release_effect(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                step="review",
-                move_reason="review:green",
-            )
-        # The checkout must be quiet while the card waits, so the reviewer's pane goes here — but
-        # its commit is read first, because ending the reviewer forgets the commit it judged.
-        reviewed = record.review_commit or self.host.head_commit(record)
-        unconfirmed = self._end_review_pane_confirmed(
-            record,
-            records,
-            payload,
-            ref,
-            step="review",
-            attempt_id=attempt_id,
-            initiator=STOPPED_BY_REVIEW_VERDICT,
-        )
-        if unconfirmed is not None:
-            return unconfirmed
-        return self._begin_park(
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            verdict_outcome="green",
-            reviewed_commit=reviewed,
-            move_reason=(
-                "review:green. The card is parked in Assessment: the mechanical gate is green "
-                "and the merge waits for a release, rework or reslice decision."
-            ),
+            stage="assessment" if self._parks_for_decision(task) else "release",
         )
 
     def _begin_park(
@@ -6231,6 +6259,19 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """Perform a release decision: re-check the mechanical state, then merge."""
         ref = task["ref"]
+        if not has_candidate(task):
+            # Nothing to re-check or merge: the release goes to the completion evidence check.
+            return self._release_effect(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="assessment",
+                move_reason=f"Observer decision: release. {reason}".strip(),
+                decision="release",
+                verdict=_released_verdict(record),
+            )
         kind, result, detail = self._merge_readiness(task, record)
         if kind == "transport":
             # A release that could not ask the gate is not a release that was refused.
@@ -6321,6 +6362,7 @@ class DispatcherRuntime:
             step="assessment",
             move_reason=f"Observer decision: release. {reason}".strip(),
             decision="release",
+            verdict=_released_verdict(record),
         )
 
     def _release_effect(
@@ -6334,25 +6376,34 @@ class DispatcherRuntime:
         step: str,
         move_reason: str,
         decision: str = "",
+        verdict: str = "green",
     ) -> dict[str, Any]:
-        """Merge the reviewed branch, tear the round down and move the card to Done."""
+        """Merge the reviewed branch, tear the round down and move the card to Done.
+
+        This is the only way a card reaches Done, so the completion evidence check sits here: every
+        release, automatic or decided, first taken or replayed after a lost tick, goes through it.
+        """
         ref = task["ref"]
-        try:
-            self.host.complete_green(task, record)
-        except HostError as exc:
-            # A rejected merge must land the card in Blocked rather than escape the tick: an
-            # escaping error leaves the verdict standing and every later tick retries the merge.
-            return self._block_merge_path(
-                task,
-                record,
-                records,
-                payload,
-                attempt_id,
-                action="merge-blocked",
-                reason=f"merge failed: {scrub_host_output(str(exc))}",
-                step=step,
-                outcome="merge failed",
-            )
+        if has_candidate(task):
+            try:
+                self.host.complete_green(task, record)
+            except HostError as exc:
+                # A rejected merge must land the card in Blocked rather than escape the tick: an
+                # escaping error leaves the verdict standing and every later tick retries the merge.
+                return self._block_merge_path(
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    action="merge-blocked",
+                    reason=f"merge failed: {scrub_host_output(str(exc))}",
+                    step=step,
+                    outcome="merge failed",
+                )
+        blocked = self._require_completion_evidence(task, record, records, payload, attempt_id, step=step)
+        if blocked is not None:
+            return blocked
         try:
             self.host.teardown(record)
         except HostError as exc:
@@ -6379,11 +6430,50 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
             terminal_state="done",
             disposition="release",
-            verdict="green",
+            verdict=verdict,
         )
         records.pop(ref, None)
         self.save_records(payload, records)
         return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
+
+    def _require_completion_evidence(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        step: str,
+    ) -> dict[str, Any] | None:
+        """Completion evidence for kind: the one check between a release and Done.
+
+        A code card's evidence is the merge `complete_green` has just made. A research or infra card
+        is read fresh from the board, because its evidence is a marked comment written since the
+        tick's snapshot; without it the card is Blocked, naming the missing marker, and not torn down.
+        """
+        if has_candidate(task):
+            return None
+        missing = missing_completion_evidence(self.reader.show(task["ref"]))
+        if not missing:
+            return None
+        outcome = self._block_merge_path(
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            action="completion-evidence-missing",
+            reason=(
+                f"completion evidence missing: this {task.get('type')} card has no `[{missing}]` "
+                "record, so it cannot be Done. The workspace is kept; see docs/PROTOCOLS.md, "
+                '"Card kinds, live impact and the review choice".'
+            ),
+            step=step,
+            outcome="completion evidence missing",
+        )
+        outcome["missing_evidence"] = missing
+        return outcome
 
     def _review_drift(self, task: dict[str, Any], record: DispatcherRecord) -> str:
         """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes one code
@@ -7375,6 +7465,11 @@ def _retained_worker_busy_deferred(
             f"HeadRun remains owned and the pending delivery retries in {wait}s"
         ),
     }
+
+
+def _released_verdict(record: DispatcherRecord) -> str:
+    """The verdict a decided release carries: the parked one, or `missing` when no reviewer ran."""
+    return "missing" if record.worker_continuation.verdict_outcome == "missing" else "green"
 
 
 def _merge_terminal_reason(action: str) -> str:

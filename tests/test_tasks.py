@@ -5319,7 +5319,11 @@ class ReportDurabilityGateTests(unittest.TestCase):
         self.assertNotEqual(caught.exception.exit_code, 0)
         self.assertIn("code.py", caught.exception.message)
         self.assertIn("commit", caught.exception.message)
-        self.assertEqual(self.client.calls, [])
+        # The refusal depends on the card's kind (a research/infra card has no candidate to commit),
+        # so the card is read first; nothing is written.
+        self.assertEqual(
+            [method for method, _params in self.client.calls if not method.startswith("get")], []
+        )
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_exact_done_report_replays_after_the_workspace_becomes_dirty(self) -> None:
@@ -5345,6 +5349,28 @@ class ReportDurabilityGateTests(unittest.TestCase):
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["event_id"], first["event_id"])
         self.assertEqual(len(self.client.comments[12]), 1)
+
+    def test_a_research_or_infra_done_report_does_not_require_a_committed_workspace(self) -> None:
+        """No candidate is published for these kinds; report artifacts may sit uncommitted."""
+        (self.workspace / "report.md").write_text("findings\n", encoding="utf-8")
+        infra = "## What was done\nRotated the key.\n\n## How to verify\n`ssh host true`\n"
+        for kind, body in (("research", "findings"), ("infra", infra)):
+            with self.subTest(kind=kind):
+                self.client.metadata[12]["task_type"] = kind
+                self.assertEqual(self._report("done", body)["action"], "reported")
+
+    def test_an_infra_done_report_without_both_sections_is_refused(self) -> None:
+        self.client.metadata[12]["task_type"] = "infra"
+        for body in (
+            "## What was done\nRotated the key.\n",
+            "## How to verify\n`ssh host true`\n",
+            "## What was done\n\n## How to verify\n`ssh host true`\n",
+        ):
+            with self.subTest(body=body), self.assertRaises(TaskError) as caught:
+                self._report("done", body)
+            self.assertEqual(caught.exception.code, "validation")
+            self.assertIn("## How to verify", caught.exception.message)
+        self.assertEqual(self.client.comments.get(12, []), [])
 
     def test_untracked_file_is_refused(self) -> None:
         (self.workspace / "scratch.py").write_text("print(3)\n", encoding="utf-8")

@@ -20,6 +20,7 @@ import yaml
 
 from secretary import state_repo
 from secretary._fsutil import write_text_atomic
+from secretary.board.completion_evidence import has_candidate, no_candidate_report_contract
 from secretary.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     ProtocolArtifact,
@@ -1958,6 +1959,10 @@ class CommandHostRuntime:
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("worker workspace is missing")
+        if not has_candidate(task):
+            # No candidate is published for a research/infra card, and its report artifacts may sit
+            # uncommitted in the checkout until the release moves them.
+            return
         completed = self._run(
             ["git", "-C", str(workspace), "status", "--porcelain"],
             "git status",
@@ -2079,8 +2084,6 @@ class CommandHostRuntime:
         branch = _legacy_worker_branch(task["ref"])
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         if _validation_ci(self, task) == "github":
-            if self._no_diff_research_delivery_is_complete(task, record):
-                return
             self._merge_github_pr(task, record, branch, base)
             self._require_production_runtime("release-after")
             return
@@ -2102,38 +2105,6 @@ class CommandHostRuntime:
         self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
         self._require_production_runtime("release-after")
-
-    def _no_diff_research_delivery_is_complete(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
-        """Whether a dispatcher-dispatched research candidate has no delivery effect left.
-
-        A workflow-dispatch entry is written only by the no-diff research gate, and the release
-        gate has just accepted its exact-SHA receipt.  When that receipt names the same base and
-        candidate commit, GitHub has no PR to merge because there is literally nothing to land.
-        A different candidate SHA still matters even if its tree is identical: its own commit
-        cannot be delivered through a no-PR path, so make that unsupported case explicit instead
-        of pretending a GitHub PR merge can land it.
-        """
-        if task.get("type") != "research":
-            return False
-        dispatch = getattr(record, "gate_workflow_dispatch", {})
-        receipt = getattr(record, "gate_attestation", {})
-        if not isinstance(dispatch, dict) or not isinstance(receipt, dict):
-            return False
-        dispatched_sha = str(dispatch.get("sha") or "")
-        candidate_sha = str(receipt.get("validated_sha") or "")
-        base_sha = str(receipt.get("base_sha") or "")
-        if (
-            not _is_exact_sha(dispatched_sha)
-            or not _is_exact_sha(candidate_sha)
-            or not _is_exact_sha(base_sha)
-            or dispatched_sha != candidate_sha
-        ):
-            return False
-        if candidate_sha == base_sha:
-            return True
-        raise HostError(
-            "base-identical research candidate owns commits and cannot complete without a pull request"
-        )
 
     def _complete_green_instance_repo(
         self,
@@ -2436,12 +2407,6 @@ class CommandHostRuntime:
     def commit_gate_pr_authorship(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
         """Write down that the github gate wrote a known text on a known pull request."""
         record.gate_pr_authorship = dict(entry)
-        if self.commit_state is not None:
-            self.commit_state()
-
-    def commit_gate_workflow_dispatch(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
-        """Persist a no-diff research workflow request before a later tick can repeat it."""
-        record.gate_workflow_dispatch = dict(entry)
         if self.commit_state is not None:
             self.commit_state()
 
@@ -4153,11 +4118,17 @@ class CommandHostRuntime:
             "with `git commit --amend` or `git rebase -i` and report done again; nothing is",
             "rewritten or force-pushed for you.",
             "",
-            "Before reporting done, stage AND commit everything on the worker branch: run",
-            "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
-            "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
-            "so a partial `git add` that misses your fix files will bounce the card.",
-            "",
+            *(
+                [
+                    "Before reporting done, stage AND commit everything on the worker branch: run",
+                    "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
+                    "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
+                    "so a partial `git add` that misses your fix files will bounce the card.",
+                    "",
+                ]
+                if has_candidate(task)
+                else no_candidate_report_contract(str(task.get("type") or ""))
+            ),
             "Report through the secretary task protocol only:",
             (
                 f"This document is report generation {generation}. Every request id below ends in "
@@ -4174,7 +4145,9 @@ class CommandHostRuntime:
             report_commands["wrong_task_definition"],
             "",
             f"Base branch: {base}",
-            f"Worker branch: {branch}",
+            f"Worker branch: {branch}"
+            if has_candidate(task)
+            else "Worker branch: none (no branch or PR is expected)",
             "",
             # Last, after anything the card description or decision can write into, so
             # `_task_doc_decision` reads the dispatcher's own record. Written on every document,

@@ -98,8 +98,62 @@ at create and at `task edit --review-head`, unless it is the head the sprint pin
 before the choice was stored reads as `required`. The store keeps the value in `tasks.review` and
 `tasks.live_impact`, and export/restore carries both.
 
-The dispatcher does not yet act on the kind or the review choice; completion evidence per kind and
-admission outside a sprint are defined later.
+**Lifecycle by kind.** A `code` card delivers a candidate: after `report:done` the dispatcher runs
+the mechanical gate (branch, pull request, CI), then review if required, and Done means the candidate
+was merged. A `research` or `infra` card has no candidate. The worker's checkout need not be committed
+or clean, no branch is published, no pull request is opened, no CI gate or workflow runs, and an
+unchanged HEAD is never rejected as a stale result: every done report of a new round (for example
+after an observer `rework`) is a fresh one. Its path is:
+
+```text
+report:done → Validate → reviewer, only if review: required
+  → Assessment and an observer release/rework/reslice decision, if the sprint parks for decisions;
+    otherwise release at once
+  → completion evidence check → teardown of the workspace and heads → Done
+```
+
+`report:blocked` behaves as for any card.
+
+**Review choice.** `review: skipped` launches no reviewer for any kind, and `review: required` launches
+one for any kind. A `code` card with `skipped` still runs the full mechanical gate and merges on
+release; it only has no reviewer step. A release without a reviewer records the verdict as `missing`.
+
+**Completion evidence.** Every way a card reaches Done (an automatic release outside a parking
+sprint, an observer release from Assessment, and a release replayed after a lost tick) passes one
+dispatcher check. For `code` the evidence is the merge the release performs. For `research` and
+`infra` it is a marked comment on the card written by the dispatcher; a comment from any other role
+that carries the marker is not evidence. Without it the card goes to Blocked, not Done, with the
+reason `completion evidence missing` naming the absent marker, and its workspace is kept.
+
+- `infra`: the worker's done report body must carry two non-empty sections, `## What was done` and
+  `## How to verify` (a command or an observation). `task report --kind done` refuses a body that
+  lacks either. When it accepts the report, the dispatcher writes the completion record, one comment
+  per report round, visible in `task show` and carried by export/restore:
+
+  ```markdown
+  [completion:infra]
+
+  ## What was done
+
+  ...
+
+  ## How to verify
+
+  ...
+  ```
+
+- `research`: a completion link naming the card's report directory:
+
+  ```markdown
+  [completion:research]
+
+  state/knowledge/reports/<card ref>/
+  ```
+
+  The producer of this link, which moves the report into knowledge, is defined later. Until then a
+  research card cannot reach Done; its release goes to Blocked with the missing link named.
+
+Admission outside a sprint is defined later.
 
 ## Codex provider-internal fan-out policy
 
