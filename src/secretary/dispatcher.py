@@ -12,10 +12,14 @@ from typing import Any
 
 from secretary.board.backend import CARD, SPRINT, board_client
 from secretary.board.completion_evidence import (
+    RESEARCH_REPORT_DIR,
     has_candidate,
     infra_report_fields,
     missing_completion_evidence,
     render_infra_completion_record,
+    render_research_completion_link,
+    research_report_path,
+    research_report_refusal,
     review_required,
 )
 from secretary.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
@@ -355,6 +359,7 @@ from secretary.head_health import (
     resolve_head_chain,
 )
 from secretary.infra.github_credential import ProjectGitAccess
+from secretary.knowledge_write import KnowledgeError, KnowledgeValidationError, write_knowledge_directory
 from secretary.projects.contract import (
     CONTRACT_FIT,
     CONTRACT_REFUSED,
@@ -383,6 +388,7 @@ from secretary.routing_journal import (
     run_key as _run_key,
 )
 from secretary.sprints import SprintReader, budget_thresholds
+from secretary.state_repo import StateRepoError
 from secretary.tasks import (
     TaskAudit,
     TaskError,
@@ -2360,6 +2366,79 @@ class DispatcherRuntime:
             body=render_infra_completion_record(fields),
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id, "completion-infra", ref, str(record.report_generation)
+            ),
+        )
+        return None
+
+    def _transfer_research_report(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        step: str,
+    ) -> dict[str, Any] | None:
+        """Move a research card's report directory into knowledge and link it; None when done.
+
+        `<workspace>/.secretary-report/` replaces `state/knowledge/reports/<ref>/` through the knowledge
+        directory writer, then one `[completion:research]` comment keyed on the report generation is
+        written, so a replayed tick commits nothing new and writes no second link. A refused or failed
+        transfer Blocks the card with the cause named, keeps the workspace and writes no link. Any
+        other kind answers None at once.
+        """
+        if task.get("type") != "research":
+            return None
+        ref = task["ref"]
+        generation = str(record.report_generation)
+        source = Path(record.workspace) / RESEARCH_REPORT_DIR
+        refusal, message = "", ""
+        if research_report_refusal(Path(record.workspace)):
+            refusal = "report_missing"
+            message = f"the workspace holds no non-empty {RESEARCH_REPORT_DIR}/report.md"
+        else:
+            try:
+                write_knowledge_directory(
+                    Path(self.catalog.instance_dir),
+                    directory=research_report_path(ref),
+                    actor="dispatcher",
+                    source_dir=source,
+                    message=(
+                        f"knowledge: research report of {ref}, report generation {generation}\n\n"
+                        f"Principal: dispatcher\nDocument: {research_report_path(ref)}\n"
+                    ),
+                )
+            except KnowledgeValidationError as exc:
+                refusal, message = exc.reason or "refused", str(exc)
+            except (KnowledgeError, StateRepoError, OSError) as exc:
+                refusal, message = "write_failed", str(exc)
+        if refusal:
+            outcome = self._block_merge_path(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                action="research-report-transfer-refused",
+                reason=(
+                    f"research report transfer refused ({refusal}): {scrub_host_output(message)}. "
+                    f"Nothing was linked and the card cannot be Done; the workspace and its "
+                    f'`{RESEARCH_REPORT_DIR}/` are kept. See docs/PROTOCOLS.md, "Card kinds, live impact '
+                    'and the review choice".'
+                ),
+                step=step,
+                outcome="research report transfer refused",
+            )
+            outcome["transfer_refusal"] = refusal
+            return outcome
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=render_research_completion_link(ref),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "completion-research", ref, generation
             ),
         )
         return None
@@ -5754,6 +5833,13 @@ class DispatcherRuntime:
             gated = self._merge_ready_for_park(task, record, records, payload, attempt_id)
             if gated is not None:
                 return gated
+        else:
+            # Before the park or the release: the observer decides with the report in knowledge.
+            refused = self._transfer_research_report(
+                task, record, records, payload, attempt_id, step="review"
+            )
+            if refused is not None:
+                return refused
         parks = self._parks_for_decision(task)
         if not parks:
             # No observer to release it, so the green verdict merges on its own tick.
@@ -6260,7 +6346,14 @@ class DispatcherRuntime:
         """Perform a release decision: re-check the mechanical state, then merge."""
         ref = task["ref"]
         if not has_candidate(task):
-            # Nothing to re-check or merge: the release goes to the completion evidence check.
+            # Nothing to re-check or merge: the release goes to the completion evidence check. A
+            # research card parked by a red verdict reaches here without a transfer, and one parked
+            # green has already made it, which this repeats as a no-op.
+            refused = self._transfer_research_report(
+                task, record, records, payload, attempt_id, step="assessment"
+            )
+            if refused is not None:
+                return refused
             return self._release_effect(
                 task,
                 record,

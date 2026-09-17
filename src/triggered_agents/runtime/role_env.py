@@ -112,8 +112,14 @@ WORKSPACE_ENV_DIR = ".secretary-task-env/venv"
 # Everything the pipeline itself writes into a candidate checkout, excluded through the repository's
 # local ``info/exclude`` on every bring-up so a project's committed ``.gitignore`` needs no pipeline
 # entries: the reserved namespace, the dispatcher's task document and the ``secretary check broad``
-# receipt directory. The last two are root-anchored: the same names deeper in a project are its own.
-WORKSPACE_EXCLUDES = (f"{Path(WORKSPACE_ENV_DIR).parts[0]}/", "/TASK.md", "/state/checks/")
+# receipt directory, and a research card's report directory, which the dispatcher moves into knowledge.
+# The last three are root-anchored: the same names deeper in a project are its own.
+WORKSPACE_EXCLUDES = (
+    f"{Path(WORKSPACE_ENV_DIR).parts[0]}/",
+    "/TASK.md",
+    "/state/checks/",
+    "/.secretary-report/",
+)
 
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
 # are rejected before reaching this gate; they remain here as the board's declared roles.

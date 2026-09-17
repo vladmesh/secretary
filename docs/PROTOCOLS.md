@@ -150,8 +150,28 @@ reason `completion evidence missing` naming the absent marker, and its workspace
   state/knowledge/reports/<card ref>/
   ```
 
-  The producer of this link, which moves the report into knowledge, is defined later. Until then a
-  research card cannot reach Done; its release goes to Blocked with the missing link named.
+  The worker puts its report and every artifact (markdown, scripts, data, subdirectories) in one
+  declared directory of its workspace, `.secretary-report/`, with the report itself in a non-empty
+  `.secretary-report/report.md`. The directory is never committed to the project repository; bring-up
+  adds `/.secretary-report/` to the checkout's Git exclude. `task report --kind done` on a research
+  card refuses, with a `validation` error, a workspace without that file.
+
+  After the report is accepted and the review, if required, is done, and before the card parks in
+  Assessment or is released outside a parking sprint, the dispatcher copies `.secretary-report/` to
+  `state/knowledge/reports/<card ref>/` through the knowledge directory writer (`knowledge write
+  --dir`, actor `dispatcher`, one commit naming the card and the report generation), then writes one
+  `[completion:research]` comment whose request id is keyed on the report generation. The observer
+  therefore decides with the report already in knowledge, and a replayed tick commits and comments
+  nothing new. An observer release repeats the transfer, a no-op for a card parked green and the
+  transfer itself for a card parked by a red verdict. A rework round's next report replaces the
+  directory's whole contents and writes a fresh link; git keeps the earlier rounds.
+
+  If the transfer is refused or fails, the card goes to Blocked with the reason `research report
+  transfer refused (<cause>)`, where the cause is `report_missing`, `path`, `source_missing`,
+  `source_empty`, `special_file` (a symlink, a special file or a `.git` entry), `secret`, `size_cap` or
+  `write_failed` (a filesystem or git error). No link is written, nothing is committed under
+  `reports/<card ref>/`, and the workspace is kept. The completion evidence check is unchanged and
+  still the only check before Done.
 
 Admission outside a sprint is defined later.
 
@@ -3055,6 +3075,22 @@ Path segments are ASCII letters, digits, `.`, `_` and `-`; an imported non-ASCII
 `write` replaces a document wholesale and commits only `state/knowledge` under the shared writer lock (no
 manual `git commit`). A document containing a secret is rejected with code 2 and nothing reaches disk.
 Rewriting identical content reports `changed: false` and makes no commit.
+
+`write` takes exactly one of `--file` and `--dir`. With `--dir`, `--path` names a directory below
+`state/knowledge` (same segment rules, no `..`, not absolute), and under one writer lock its whole
+contents are replaced by the source directory's, so a file the source no longer has disappears, and
+only that directory's pathspec is committed, in one commit. It is how the dispatcher moves a research
+report into `state/knowledge/reports/<card ref>/`.
+
+```bash
+python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+  --path reports/secretary-1640 --dir REPORT_DIR
+```
+
+Refused with code 2 before anything is written: a missing source or one with no files; a symlink,
+special file or `.git` entry anywhere in it; a text file (UTF-8 without NUL bytes) that contains a
+secret; a total size over 20 MiB. Binary files are copied unchanged and are **not** secret-scanned.
+Empty subdirectories are not kept. If the commit fails the previous directory is put back.
 
 ## Secrets
 

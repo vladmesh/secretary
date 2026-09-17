@@ -7,7 +7,10 @@ reviewer for any kind; a code card with it still runs the gate and merges.
 
 from __future__ import annotations
 
+import subprocess
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from secretary.board.completion_evidence import (
     has_candidate,
@@ -18,16 +21,23 @@ from secretary.board.completion_evidence import (
     render_research_completion_link,
     review_required,
 )
+from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatcher_observer import render_observer_prompt
 from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
-from tests.fakes.dispatcher import FakeKanboard
+from tests.fakes.dispatcher import FakeCatalog, FakeKanboard
 from tests.integration_setup import require_disposable_board_fixture
 
 INFRA_REPORT = "## What was done\nRotated the relay key.\n\n## How to verify\n`ssh relay true` exits 0\n"
 # Host calls that would publish a branch, open a pull request, poll CI or dispatch a workflow: the
 # fake host's gate and merge seams are where the real host does each of those.
 CANDIDATE_CALLS = ("gate_check", "complete_green", "rerun_failed_ci")
+REPORT_DIR = f"state/knowledge/reports/{CARD_REF}"
+LEAKED = "token sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWX\n"
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=True).stdout
 
 
 def setUpModule() -> None:
@@ -59,14 +69,37 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.gate_calls, [])
         self.assertEqual(self.host.completed, [])
 
-    def _link_research_report(self) -> None:
-        self.writer.comment(
-            role="dispatcher",
-            actor="dispatcher",
-            reference=CARD_REF,
-            body=render_research_completion_link(CARD_REF),
-            request_id="test-research-link",
-        )
+    def _instance_repo(self) -> None:
+        """The fixture's instance directory as the git repository the knowledge writer commits into."""
+        _git(self.data_dir, "init", "--quiet", "--initial-branch", "main")
+        _git(self.data_dir, "config", "user.name", "operator")
+        _git(self.data_dir, "config", "user.email", "operator@example.invalid")
+        (self.data_dir / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+        _git(self.data_dir, "add", "instance.yaml")
+        _git(self.data_dir, "commit", "--quiet", "-m", "config")
+
+    def _write_report(self, files: dict[str, str]) -> None:
+        """The worker's `.secretary-report/`, replaced wholesale, and the report writer pointed at it."""
+        workspace = Path(self._pilot_record()["workspace"])
+        report = workspace / ".secretary-report"
+        if report.exists():
+            for path in sorted(report.rglob("*"), reverse=True):
+                path.rmdir() if path.is_dir() else path.unlink()
+        for name, text in files.items():
+            path = report / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        self.writer.workspace = workspace
+
+    def _committed_report(self) -> list[str]:
+        return sorted(_git(self.data_dir, "ls-tree", "-r", "--name-only", "HEAD", "--", REPORT_DIR).split())
+
+    def _report_commits(self) -> list[str]:
+        return _git(self.data_dir, "log", "--format=%H", "--", REPORT_DIR).split()
+
+    def _no_transfer(self):
+        """A release whose transfer produced nothing: the evidence check alone decides."""
+        return mock.patch.object(type(self.runtime), "_transfer_research_report", return_value=None)
 
     def test_infra_with_review_skipped_goes_from_ready_to_done_without_a_candidate(self) -> None:
         self._kind("infra", review="skipped")
@@ -151,29 +184,141 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._unobserved()
         self.tick()
+        self._write_report({"report.md": "findings\n"})
         self._report_done("findings written up")
         self.assertEqual(self.tick()["to"], "validate")
 
-        blocked = self.tick()
+        with self._no_transfer():
+            blocked = self.tick()
 
         self.assertEqual(blocked["reason"], "completion evidence missing")
         self.assertEqual(blocked["missing_evidence"], "completion:research")
         self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
         self._assert_no_candidate_calls()
 
-    def test_a_research_card_with_its_completion_link_reaches_done_without_a_candidate(self) -> None:
+    def test_research_with_review_skipped_goes_from_ready_to_done_with_its_report_in_knowledge(self) -> None:
+        self._instance_repo()
+        self._kind("research", review="skipped")
+        self.start_dispatcher()
+        self._unobserved()
+        self.tick()
+        self.assertIn("`.secretary-report/report.md`", self._task_document())
+        self._write_report({"report.md": "# Findings\n", "data/results.csv": "a,b\n1,2\n"})
+        self._report_done("findings written up")
+
+        self.assertEqual(self.tick()["to"], "validate")
+        done = self.tick()
+
+        self.assertEqual(done["to"], "done")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "done")
+        self._assert_no_candidate_calls()
+        self.assertEqual(self.host.reviews, [])
+        self.assertEqual(
+            self._committed_report(), [f"{REPORT_DIR}/data/results.csv", f"{REPORT_DIR}/report.md"]
+        )
+        (link,) = self._comments("[completion:research]")
+        self.assertIn(f"{REPORT_DIR}/", link.splitlines())
+        dispatcher = [
+            c for c in self.reader.show(CARD_REF)["comments"] if "[completion:research]" in c["body"]
+        ]
+        self.assertEqual([c["marker"] for c in dispatcher], ["dispatcher"])
+        self.assertIn(CARD_REF, _git(self.data_dir, "log", "-1", "--format=%B", "--", REPORT_DIR))
+
+    def test_research_in_a_parking_sprint_is_transferred_and_linked_before_the_release_decision(self) -> None:
+        self._instance_repo()
         self._kind("research")
         self.start_dispatcher()
         self.tick()
+        self._write_report({"report.md": "# Findings\n"})
         self._report_done("findings written up")
         self.assertEqual(self.tick()["to"], "validate")
+
         self.assertEqual(self.tick()["to"], "assessment")
-        self._link_research_report()
+        self.assertEqual(self._committed_report(), [f"{REPORT_DIR}/report.md"])
+        self.assertEqual(len(self._comments("[completion:research]")), 1)
         self._decide("release")
 
         self.assertEqual(self.tick()["to"], "done")
         self.assertEqual(self.reader.show(CARD_REF)["state"], "done")
         self._assert_no_candidate_calls()
+        self.assertEqual(len(self._report_commits()), 1, "the release repeats the transfer as a no-op")
+        self.assertEqual(len(self._comments("[completion:research]")), 1)
+
+    def test_a_research_rework_round_replaces_the_report_directory(self) -> None:
+        self._instance_repo()
+        self._kind("research")
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        self._write_report({"report.md": "first\n", "notes/draft.md": "to be dropped\n"})
+        self._report_done("first write-up")
+        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self._park_and_decide("rework")["action"], "review-red-reused-worker")
+        self.assertIn(f"{REPORT_DIR}/notes/draft.md", self._committed_report())
+
+        self._write_report({"report.md": "second\n"})
+        self._report_done("second write-up")
+        self.assertEqual(self.tick()["to"], "validate")
+        released = self._park_and_decide("release")
+
+        self.assertEqual(released["to"], "done")
+        self.assertEqual(self._committed_report(), [f"{REPORT_DIR}/report.md"])
+        self.assertEqual(len(self._report_commits()), 2)
+        self.assertEqual(_git(self.data_dir, "show", f"HEAD:{REPORT_DIR}/report.md"), "second\n")
+        self.assertEqual(len(self._comments("[completion:research]")), 2)
+
+    def test_a_research_done_report_without_its_report_file_is_refused(self) -> None:
+        self._kind("research")
+        self.start_dispatcher()
+        self.tick()
+        for files in ({}, {"report.md": "  \n"}, {"other.md": "findings\n"}):
+            self._write_report(files)
+            with self.subTest(files=files), self.assertRaises(TaskError) as caught:
+                self._report_done("findings written up")
+            self.assertEqual(caught.exception.code, "validation")
+            self.assertIn(".secretary-report/report.md", caught.exception.message)
+
+        self.assertEqual(self.tick()["action"], "waiting-worker-report")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+
+    def _assert_transfer_refused_blocks(self, refusal: str) -> None:
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "research report transfer refused")
+        self.assertEqual(blocked["transfer_refusal"], refusal)
+        card = self.reader.show(CARD_REF)
+        self.assertEqual(card["state"], "blocked")
+        self.assertIn(f"research report transfer refused ({refusal})", card["comments"][-1]["body"])
+        self.assertEqual(self._comments("[completion:research]"), [])
+        self.assertEqual(self._report_commits(), [])
+        self.assertFalse((self.data_dir / REPORT_DIR).exists())
+        self.assertNotIn("teardown", self.host.calls, "a refused transfer keeps the workspace")
+        self._assert_no_candidate_calls()
+
+    def test_a_report_holding_a_secret_blocks_the_card_and_commits_nothing(self) -> None:
+        self._instance_repo()
+        self._kind("research")
+        self.start_dispatcher()
+        self._unobserved()
+        self.tick()
+        self._write_report({"report.md": "findings\n", "scripts/probe.sh": LEAKED})
+        self._report_done("findings written up")
+        self.assertEqual(self.tick()["to"], "validate")
+
+        self._assert_transfer_refused_blocks("secret")
+
+    def test_a_report_over_the_size_cap_blocks_the_card_before_assessment(self) -> None:
+        self._instance_repo()
+        self._kind("research")
+        self.start_dispatcher()
+        self.tick()
+        self._write_report({"report.md": "findings\n", "data/big.csv": "x" * 64})
+        self._report_done("findings written up")
+        self.assertEqual(self.tick()["to"], "validate")
+
+        with mock.patch("secretary.knowledge_write.KNOWLEDGE_DIRECTORY_CAP_BYTES", 32):
+            self._assert_transfer_refused_blocks("size_cap")
 
     def test_a_link_written_by_anyone_but_the_dispatcher_is_not_evidence(self) -> None:
         self._kind("research")
@@ -187,16 +332,20 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             body=render_research_completion_link(CARD_REF),
             request_id="forged-link",
         )
+        self._write_report({"report.md": "findings\n"})
         self._report_done("findings written up")
         self.assertEqual(self.tick()["to"], "validate")
 
-        self.assertEqual(self.tick()["reason"], "completion evidence missing")
+        with self._no_transfer():
+            self.assertEqual(self.tick()["reason"], "completion evidence missing")
 
     def _assert_review_required_launches_a_reviewer_and_no_gate(self, kind: str) -> None:
         self._kind(kind, review="required")
         self.start_dispatcher()
         self._unobserved()
         self.tick()
+        if kind == "research":
+            self._write_report({"report.md": "findings\n"})
         self._report_done(INFRA_REPORT)
         self.assertEqual(self.tick()["to"], "validate")
 
@@ -260,6 +409,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
         self.tick()
+        self._write_report({"report.md": "first\n"})
         self._report_done("first write-up")
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
@@ -291,6 +441,32 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         records = self._comments("[completion:infra]")
         self.assertEqual(len(records), 2)
         self.assertIn("prints ok", records[-1])
+
+
+class NoCandidateReviewerDocumentTests(DispatcherRuntimeFixture, unittest.TestCase):
+    def _review_document(self, kind: str) -> str:
+        self.board.metadata[12]["task_type"] = kind
+        self.board.metadata[12]["review"] = "required"
+        host = CommandHostRuntime(FakeCatalog(), self.data_dir, mode="noop")  # type: ignore[arg-type]
+        return host._review_prompt(self.reader.show(CARD_REF), "attempt-1", 1)
+
+    def test_a_research_reviewer_is_pointed_at_the_report_directory_not_the_branch(self) -> None:
+        document = self._review_document("research")
+        self.assertNotIn("commit messages on this branch", document)
+        self.assertNotIn("inspect the diff", document)
+        self.assertIn("`.secretary-report/`", document)
+        self.assertIn(f"`state/knowledge/reports/{CARD_REF}/`", document)
+
+    def test_an_infra_reviewer_is_pointed_at_the_report_body(self) -> None:
+        document = self._review_document("infra")
+        self.assertNotIn("commit messages on this branch", document)
+        self.assertIn("`## What was done`", document)
+        self.assertIn("`## How to verify`", document)
+
+    def test_a_code_reviewer_still_reads_the_commit_messages(self) -> None:
+        document = self._review_document("code")
+        self.assertIn("Read the commit messages on this branch, not only the diff.", document)
+        self.assertNotIn(".secretary-report", document)
 
 
 class ObserverReviewChoiceWordingTests(unittest.TestCase):

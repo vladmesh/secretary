@@ -6,8 +6,11 @@ for it, so its completion is proved by a marked dispatcher comment on the card i
 
 - `infra`: the worker's `report:done` body carries `## What was done` and `## How to verify`; the
   dispatcher copies both into one `[completion:infra]` comment when it accepts the report.
-- `research`: one `[completion:research]` comment naming `state/knowledge/reports/<card ref>/`. Its
-  producer is defined later; until then a research card cannot reach Done.
+- `research`: the worker leaves its report in `.secretary-report/` of its workspace, with a non-empty
+  `report.md`. After the report is accepted and any review is done, and before the card parks in
+  Assessment or is released, the dispatcher copies that directory to
+  `state/knowledge/reports/<card ref>/` through the knowledge directory writer and writes one
+  `[completion:research]` comment naming it. A refused or failed transfer Blocks the card.
 
 Both markers are read only from comments the dispatcher wrote, so a worker or reviewer comment that
 happens to contain the marker line proves nothing.
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 from secretary.board.task_routing import TaskReview, TaskType
@@ -26,6 +30,9 @@ NO_CANDIDATE_KINDS = frozenset({TaskType.RESEARCH.value, TaskType.INFRA.value})
 INFRA_COMPLETION_MARKER = "completion:infra"
 RESEARCH_COMPLETION_MARKER = "completion:research"
 INFRA_REPORT_SECTIONS = ("What was done", "How to verify")
+# The research report directory, relative to the worker's workspace, and the file it must hold.
+RESEARCH_REPORT_DIR = ".secretary-report"
+RESEARCH_REPORT_FILE = "report.md"
 
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$")
 _DISPATCHER_LINE = "[dispatcher]"
@@ -43,6 +50,22 @@ def review_required(task: Mapping[str, Any]) -> bool:
 
 def research_report_path(reference: str) -> str:
     return f"state/knowledge/reports/{reference}/"
+
+
+def research_report_refusal(workspace: Path) -> str:
+    """Why this workspace holds no research report (`""` when `.secretary-report/report.md` is non-empty)."""
+    report = Path(workspace) / RESEARCH_REPORT_DIR / RESEARCH_REPORT_FILE
+    try:
+        empty = report.is_symlink() or not report.is_file() or not report.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        empty = True
+    if not empty:
+        return ""
+    return (
+        f"a research done report needs a non-empty `{RESEARCH_REPORT_DIR}/{RESEARCH_REPORT_FILE}` in the "
+        f"workspace ({workspace}); write the report there, with any artifacts beside it in "
+        f"`{RESEARCH_REPORT_DIR}/`, and report again"
+    )
 
 
 def _sections(body: str) -> dict[str, str]:
@@ -156,8 +179,16 @@ def no_candidate_report_contract(kind: str) -> list[str]:
             "## Report contract for a research card",
             "",
             "This card has no candidate: no branch is published, no pull request is opened and no",
-            "CI runs for it, and nothing needs to be committed. Its completion evidence is a link to",
-            f"the report directory `{research_report_path('<card ref>')}`.",
+            "CI runs for it, and nothing needs to be committed. Put the report and every artifact",
+            f"(markdown, scripts, data) in `{RESEARCH_REPORT_DIR}/` at the root of this workspace, with",
+            f"the report itself in `{RESEARCH_REPORT_DIR}/{RESEARCH_REPORT_FILE}` (non-empty); subdirectories",
+            "are fine. Do not commit that directory. A done report without the file is refused.",
+            "",
+            "After the report is accepted and any review is done, the dispatcher copies the whole",
+            f"directory to `{research_report_path('<card ref>')}` in the instance repository and links",
+            "it on the card; that link is the completion evidence. The copy is refused, and the card",
+            "Blocked, for a symlink or special file, a secret in any text file, or more than 20 MiB in",
+            "total. A rework round's next report replaces the directory.",
             "",
         ]
     return []

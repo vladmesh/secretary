@@ -65,6 +65,7 @@ from secretary.knowledge_write import (
     KnowledgeError,
     KnowledgeValidationError,
     list_knowledge_documents,
+    write_knowledge_directory,
     write_knowledge_document,
 )
 from secretary.memory_journal import verify_memory_journal
@@ -474,8 +475,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_instance(knowledge_write)
     knowledge_write.add_argument("--actor", required=True)
-    knowledge_write.add_argument("--path", required=True, help="document path relative to state/knowledge")
-    knowledge_write.add_argument("--file", required=True, help="source markdown file")
+    knowledge_write.add_argument(
+        "--path", required=True, help="document or directory path relative to state/knowledge"
+    )
+    knowledge_source = knowledge_write.add_mutually_exclusive_group(required=True)
+    knowledge_source.add_argument("--file", help="source markdown file")
+    knowledge_source.add_argument(
+        "--dir", help="source directory; replaces the whole target directory (20 MiB cap)"
+    )
     knowledge_write.add_argument("--message", help="commit subject; defaults to the document path")
     knowledge_write.set_defaults(handler=run_knowledge_write)
 
@@ -1511,13 +1518,22 @@ def run_memory_supersede(args: argparse.Namespace) -> int:
 
 def run_knowledge_write(args: argparse.Namespace) -> int:
     try:
-        result = write_knowledge_document(
-            _instance_dir(args.instance),
-            document=args.path,
-            actor=args.actor,
-            source_file=Path(args.file),
-            message=args.message,
-        )
+        if args.dir is not None:
+            result = write_knowledge_directory(
+                _instance_dir(args.instance),
+                directory=args.path,
+                actor=args.actor,
+                source_dir=Path(args.dir),
+                message=args.message,
+            )
+        else:
+            result = write_knowledge_document(
+                _instance_dir(args.instance),
+                document=args.path,
+                actor=args.actor,
+                source_file=Path(args.file),
+                message=args.message,
+            )
     except KnowledgeValidationError as exc:
         _print_json({"ok": False, "op": "write", "error": "validation", "message": str(exc)})
         return MEMORY_EXIT_VALIDATION
