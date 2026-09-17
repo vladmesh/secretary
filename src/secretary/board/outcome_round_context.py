@@ -57,7 +57,7 @@ def _string(value: object, message: str) -> str:
 class OutcomeRoundContext:
     """Immutable value for the released v1/v2 outcome-round hand-off document.
 
-    The journal dictionary is a compatibility boundary.  Domain code carries this
+    The journal dictionary is a compatibility boundary. Domain code carries this
     value; ``to_data`` is the only place that projects it back to the historical
     field set.
     """
@@ -111,19 +111,19 @@ class OutcomeRoundContext:
             raise ValueError(
                 "outcome round context specification revision must be a string or null"
             )
-        source_marker_phases = _V2_SOURCE_PHASES
-        if self.phase in source_marker_phases and not self.marker:
+        if self.phase in _V2_SOURCE_PHASES and not self.marker:
             raise ValueError("source outcome round context needs its marker")
-        if self.phase not in source_marker_phases and self.marker:
+        if self.phase not in _V2_SOURCE_PHASES and self.marker:
             raise ValueError("only source outcome round context has a marker")
 
     @classmethod
     def from_data(cls, data: Mapping[str, object]) -> Self:
         """Normalize one released wire document without accepting additive fields."""
-        version = data.get("version")
-        expected = _V2_FIELDS if version == 2 else _V1_FIELDS
-        if set(data) != expected or version not in {1, 2}:
+        version_value = data.get("version")
+        expected = _V2_FIELDS if version_value == 2 else _V1_FIELDS
+        if set(data) != expected or version_value not in {1, 2}:
             raise ValueError("outcome round context has an unsupported field set")
+        version = int(version_value)
 
         phase_value = data.get("phase")
         try:
